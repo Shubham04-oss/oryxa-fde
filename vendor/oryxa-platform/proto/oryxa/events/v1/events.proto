@@ -1,0 +1,177 @@
+// Oryxa platform event payloads: the one contract for everything this platform puts on
+// EventBridge (bus: oryxa-<env>). Conventions:
+//   Source      = "oryxa.<service>"
+//   DetailType  = "<service>.<entity>.<past-tense-verb>.v<N>"   (lowercase, kebab-case)
+//   Detail      = Envelope JSON whose `data` is the payload message below (proto3 JSON).
+// Rules: ids and references only, never message content or secrets; changes are additive;
+// a breaking change is a new message with a new .v<N> detail type.
+// Delivery is at-least-once and UNORDERED: consumers dedupe on event_id (oryxa-idempotency inbox)
+// and must never rely on arrival order; compare correlation_id/occurred_at when order matters.
+syntax = "proto3";
+
+package oryxa.events.v1;
+
+// Detail JSON shared by every event. Tenant and actor live here, never in payloads. `data` (the payload) is added by the publisher and is not modelled here.
+message Envelope {
+  string event_id = 1;        // "evt_" + UUID v7; consumers dedupe on it
+  uint32 version = 2;         // envelope schema version (1); payload version is in DetailType
+  string occurred_at = 3;     // RFC 3339 UTC, nanoseconds
+  string tenant = 4;          // WorkOS organization id
+  Actor actor = 5;
+  string correlation_id = 6;  // one id across a whole flow (e.g. a task)
+  string causation_id = 7;    // event_id of the event that caused this one, if any
+  string traceparent = 8;     // W3C trace context
+  string tracestate = 9;
+  // Set by the publisher's signer (oryxa-events signing.rs), checked by every consumer:
+  // "ed25519:<kid>:<base64url sig>" over source, detail-type and the canonical detail JSON.
+  string signed_at = 10;      // RFC 3339; consumers reject signatures older than 24h
+  string sig = 11;
+}
+
+message Actor {
+  string user = 1;                   // origin human; empty for system events
+  repeated AgentRef agent_chain = 2;
+  string system = 3;                 // e.g. "workos-directory-sync" when no human acted
+}
+
+message AgentRef {
+  string id = 1;
+  string kind = 2;  // personal | workspace
+}
+
+// ===== identity (source oryxa.identity) — the user lifecycle =====
+// Most are derived from the WorkOS Events API; chat links are ours.
+
+// identity.user.created.v1
+message UserCreated {
+  string user = 1;
+  bool email_verified = 2;
+}
+
+// identity.user.email-changed.v1 — links holding the old email hash must be invalidated.
+message UserEmailChanged {
+  string user = 1;
+  bool email_verified = 2;
+}
+
+// identity.user.deactivated.v1 — revoke sessions, disable personal agent, stop runs.
+message UserDeactivated {
+  string user = 1;
+  string reason = 2;  // directory_deprovisioned | admin | security
+}
+
+// identity.user.deleted.v1 — purge personal memory, credentials and links.
+message UserDeleted {
+  string user = 1;
+}
+
+// identity.member.joined.v1
+message MemberJoined {
+  string user = 1;
+  string role = 2;
+}
+
+// identity.member.role-changed.v1
+message MemberRoleChanged {
+  string user = 1;
+  string from_role = 2;
+  string to_role = 3;
+}
+
+// identity.member.removed.v1 — reason: left | removed | organization_deleted
+message MemberRemoved {
+  string user = 1;
+  string reason = 2;
+}
+
+// identity.group.membership-changed.v1
+message GroupMembershipChanged {
+  string user = 1;
+  string group = 2;
+  string change = 3;  // added | removed
+}
+
+// identity.organization.deleted.v1 — fan-out cleanup; services tombstone the tenant.
+message OrganizationDeleted {}
+
+// identity.chat-link.created.v1
+message ChatLinkCreated {
+  string user = 1;
+  string platform = 2;  // slack | teams
+  string chat_user = 3; // platform user key (Grid/AAD id), never an email
+}
+
+// identity.chat-link.invalidated.v1
+message ChatLinkInvalidated {
+  string user = 1;
+  string platform = 2;
+  string chat_user = 3;
+  string reason = 4;    // email_changed | user_deactivated | unlinked
+}
+
+// ===== authz (source oryxa.gateway) =====
+
+// gateway.tool-authorization.decided.v1
+message ToolAuthorizationDecided {
+  string capability = 1;
+  string effect = 2;     // read | write | external | delete
+  bool allowed = 3;
+  string reason = 4;     // allowed | not_invoker | not_acting_for_user | capability_not_on_agent | guardrail | authz_unavailable
+  string args_hash = 5;
+}
+
+// gateway.agent.delegated.v1
+message AgentDelegated {
+  AgentRef agent = 1;
+  bool allowed = 2;
+  string reason = 3;
+}
+
+// ===== integrations (source oryxa.connectors) =====
+
+// connectors.connection.status-changed.v1
+message ConnectionStatusChanged {
+  string connection_id = 1;
+  string provider = 2;
+  string scope_kind = 3;  // personal | workspace
+  string status = 4;      // connected | needs_reauth | revoked | error
+  // Additive (oryxa-platform#7). Ids and codes only.
+  string owner_user = 5;  // personal: the owner; workspace: the admin who connected it; may be empty
+  string reason = 6;      // machine code, e.g. invalid_grant | client_changed | consent; may be empty
+}
+
+// connectors.sync.finished.v1
+message SyncFinished {
+  string connection_id = 1;
+  string kind = 2;        // full | incremental | webhook
+  bool ok = 3;
+  uint64 upserted = 4;
+  uint64 deleted = 5;
+  string error = 6;
+  // Additive (oryxa-platform#7, #9 §5): the run's proxied-call usage, from the broker's per-handle
+  // counters. Keep-alive refreshes are not counted.
+  uint64 api_calls = 7;
+  uint64 bytes = 8;
+  uint64 duration_ms = 9;
+  uint64 rate_limited = 10;
+}
+
+// ===== agent lifecycle (source oryxa.sessions; emitted by the session Durable Object) =====
+
+// sessions.task.status-changed.v1
+message TaskStatusChanged {
+  string task_id = 1;
+  string status = 2;      // started | waiting | resumed | completed | failed | archived
+  string task_class = 3;  // quick | standard | heavy
+  string archive_ref = 4; // S3 key once archived
+}
+
+// ===== billing (source oryxa.billing) =====
+
+// billing.usage.recorded.v1
+message UsageRecorded {
+  string task_id = 1;
+  string task_class = 2;
+  bool billable = 3;      // failed tasks are not billable
+  string connection_id = 4; // additive (#9 §5): set when the usage came through one connection
+}

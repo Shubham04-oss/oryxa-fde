@@ -1,0 +1,17 @@
+target/
+.env
+.env.*
+*.pem
+*.key
+node_modules/
+.dev.vars
+.wrangler/
+.claude/
+
+# OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.auto.tfvars

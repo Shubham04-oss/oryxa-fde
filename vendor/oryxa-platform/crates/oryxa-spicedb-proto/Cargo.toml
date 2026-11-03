@@ -1,0 +1,18 @@
+[package]
+name = "oryxa-spicedb-proto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Generated SpiceDB v1 gRPC client (authzed/api v1.57.0, vendored in /proto)"
+
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protox.workspace = true

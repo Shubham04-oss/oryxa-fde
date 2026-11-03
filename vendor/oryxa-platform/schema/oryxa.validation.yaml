@@ -1,0 +1,91 @@
+# Run: zed validate schema/oryxa.validation.yaml
+schemaFile: "./oryxa.zed"
+relationships: |-
+  workspace:t1|ws#admin@user:t1|alice
+  workspace:t1|ws#member@user:t1|bob
+  workspace:t1|ws#member@user:t1|carol
+  team:t1|eng#workspace@workspace:t1|ws
+  team:t1|eng#member@user:t1|bob
+  agent:t1|alice_pa#owner@user:t1|alice
+  agent:t1|alice_pa#workspace@workspace:t1|ws
+  agent:t1|ws_agent#operator@team:t1|eng#member
+  agent:t1|ws_agent#workspace@workspace:t1|ws
+  capability:t1|jira_create#agent@agent:t1|ws_agent
+  capability:t1|jira_create#invoker@team:t1|eng#member
+  capability:t1|gmail_send#agent@agent:t1|alice_pa
+  capability:t1|gmail_send#approved_invoker@user:t1|alice[args_match:{"approved_args_hash":"h1"}][expiration:2099-01-01T00:00:00Z]
+  knowledge_base:t1|kb#workspace@workspace:t1|ws
+  kb_source:t1|jira#knowledge_base@knowledge_base:t1|kb
+  kb_source:t1|jira#viewer@team:t1|eng#member
+  kb_source:t1|jira#agent_reader@agent:t1|ws_agent
+  kb_source:t1|personal#knowledge_base@knowledge_base:t1|kb
+  kb_source:t1|personal#viewer@workspace:t1|ws#member
+  kb_source:t1|personal#viewer@user:t1|alice
+  kb_item:t1|ENG-1#source@kb_source:t1|jira
+  kb_item:t1|ENG-1#viewer@team:t1|eng#member
+  kb_item:t1|note1#source@kb_source:t1|personal
+  kb_item:t1|note1#owner@user:t1|bob
+  agent:t1|bob_pa#owner@user:t1|bob
+  agent:t1|bob_pa#workspace@workspace:t1|ws
+  provider_group:t1|g_design#workspace@workspace:t1|ws
+  provider_group:t1|g_design#member@user:t1|carol
+  kb_item:t1|spec#source@kb_source:t1|personal
+  kb_item:t1|spec#viewer@provider_group:t1|g_design#member
+  kb_item:t1|handbook#source@kb_source:t1|personal
+  kb_item:t1|handbook#viewer@workspace:t1|ws#member
+  kb_item:t1|ENG-2#source@kb_source:t1|jira
+  kb_item:t1|ENG-2#viewer@workspace:t1|ws#member
+  connection:t1|c_alice#workspace@workspace:t1|ws
+  connection:t1|c_alice#owner@user:t1|alice
+  connection:t1|c_alice#agent_user@agent:t1|alice_pa
+  connection:t1|c_slack#workspace@workspace:t1|ws
+  connection:t1|c_slack#owner@user:t1|alice
+  connection:t1|c_slack#agent_user@agent:t1|ws_agent
+  connection:t1|c_gone#workspace@workspace:t1|ws
+  connection:t1|c_gone#owner@user:t1|erin
+assertions:
+  assertTrue:
+    - agent:t1|alice_pa#act_for@user:t1|alice
+    - agent:t1|ws_agent#act_for@user:t1|bob
+    - capability:t1|jira_create#invoke@user:t1|bob
+    - 'capability:t1|gmail_send#invoke@user:t1|alice with {"args_hash": "h1"}'
+    - kb_item:t1|ENG-1#view@user:t1|bob
+    - kb_item:t1|note1#view@user:t1|bob
+    - kb_source:t1|jira#agent_search@agent:t1|ws_agent
+    # A provider-group member can view; workspace#member grants every member.
+    - kb_item:t1|spec#view@user:t1|carol
+    - kb_item:t1|handbook#view@user:t1|carol
+    - kb_item:t1|handbook#view@user:t1|bob
+    # An agent sees an item only through a source it was given (agent_reader).
+    - kb_item:t1|ENG-1#agent_view@agent:t1|ws_agent
+    # Connections: the owner, the owner's personal agent, granted workspace agents; admins manage.
+    - connection:t1|c_alice#use@user:t1|alice
+    - connection:t1|c_alice#use@agent:t1|alice_pa
+    - connection:t1|c_slack#use@agent:t1|ws_agent
+    - connection:t1|c_slack#manage@user:t1|alice
+  assertFalse:
+    - agent:t1|alice_pa#act_for@user:t1|bob
+    - capability:t1|jira_create#invoke@user:t1|carol
+    - 'capability:t1|gmail_send#invoke@user:t1|alice with {"args_hash": "other"}'
+    - kb_item:t1|ENG-1#view@user:t1|carol
+    - kb_item:t1|note1#view@user:t1|carol
+    - kb_item:t1|note1#view@user:t1|alice
+    # Not in the provider group (or removed from it): no access.
+    - kb_item:t1|spec#view@user:t1|bob
+    # Another tenant's user never matches, whatever the grant.
+    - kb_item:t1|handbook#view@user:t2|bob
+    # `& source->search` still gates: a workspace-wide item in a source carol cannot search.
+    - kb_item:t1|ENG-2#view@user:t1|carol
+    # No agent_reader on the source: the agent sees nothing from it, even what humans can.
+    - kb_item:t1|ENG-1#agent_view@agent:t1|alice_pa
+    - kb_item:t1|handbook#agent_view@agent:t1|ws_agent
+    # Another user's personal agent cannot use alice's connection; ungranted agents cannot either.
+    - connection:t1|c_alice#use@agent:t1|bob_pa
+    - connection:t1|c_slack#use@agent:t1|alice_pa
+    - connection:t1|c_alice#use@user:t1|bob
+    - connection:t1|c_slack#manage@user:t1|bob
+    # erin owned c_gone but left the workspace: the owner tuple alone grants nothing.
+    - connection:t1|c_gone#use@user:t1|erin
+    - connection:t1|c_gone#manage@user:t1|erin
+  assertCaveated:
+    - capability:t1|gmail_send#invoke@user:t1|alice

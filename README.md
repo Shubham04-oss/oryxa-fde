@@ -1,0 +1,22 @@
+# oryxa-fde
+
+The FDE workspace: one place where forward deployed engineers run every customer company and
+project they work on, from discovery to handoff, with a coding agent in each company's sandbox.
+
+**Working on this repo? Read [CLAUDE.md](CLAUDE.md), then [docs/plan.md](docs/plan.md) and
+[docs/adr/](docs/adr/).**
+
+It builds on the Oryxa platform base. `oryxa-core`, `oryxa-authn`, `oryxa-authz` and `oryxa-events`
+are vendored unchanged in `vendor/oryxa-platform` at the commit in `vendor/oryxa-platform/PLATFORM_REV`.
+Refresh them with `scripts/sync-platform.sh <commit>`; never edit them here.
+
+| Crate | Owns |
+| --- | --- |
+| `oryxa-fde-core` | FDE ids, `CompanyScope` and `ProjectScope` (every company-scoped call takes one), the project stage machine |
+
+```bash
+cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace   # the vendored base
+cargo deny check
+```

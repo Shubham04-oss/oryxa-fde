@@ -1,0 +1,17 @@
+[package]
+name = "oryxa-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+# The workspace builds with key-ordered maps; test canonical_json under the same conditions.
+serde_json = { workspace = true, features = ["preserve_order"] }
