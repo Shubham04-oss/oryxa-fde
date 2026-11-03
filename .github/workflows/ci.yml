@@ -10,21 +10,24 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
+  # sccache cannot cache incremental builds; debug info off keeps the cache and the disk small.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
+# Runners (docs/ci.md): heavy Rust jobs run on the oryxa-a1 self-hosted runners when the repository
+# variable A1_RUNNERS is "true", and on GitHub-hosted runners otherwise. Light jobs always run hosted.
+
 jobs:
   check:
-    # ponytail: GitHub-hosted (billed minutes on a private repo). Register the oryxa-a1 runner here to move off it.
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
     services:
       postgres:
         image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: oryxa
           POSTGRES_DB: oryxa_fde
-        ports: ["5432:5432"]
+        ports: ["5432"]  # random host port: two a1 runners may run this job at once
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
@@ -32,28 +35,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/rust-cache
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # A service container cannot take the serve-testing argument, so SpiceDB starts as a step.
       - name: Start SpiceDB
-        run: docker run -d --rm --name spicedb -p 50051:50051 authzed/spicedb:v1.56.2 serve-testing && sleep 3
+        run: |
+          name="spicedb-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker run -d --rm --name "$name" -p 127.0.0.1::50051 authzed/spicedb:v1.56.2 serve-testing
+          echo "SPICEDB_PORT=$(docker port "$name" 50051/tcp | head -1 | cut -d: -f2)" >> "$GITHUB_ENV"
+          sleep 3
       - name: Live tests (SpiceDB + Postgres; AWS/WorkOS ones run by the lead)
         env:
-          DATABASE_URL: postgres://postgres:oryxa@localhost:5432/oryxa_fde
-          SPICEDB_ENDPOINT: http://localhost:50051
+          DATABASE_URL: postgres://postgres:oryxa@localhost:${{ job.services.postgres.ports['5432'] }}/oryxa_fde
+          SPICEDB_ENDPOINT: http://localhost:${{ env.SPICEDB_PORT }}
         run: cargo test --workspace -- --ignored --skip e2e_ --test-threads=1
+      # Self-hosted runners keep containers between runs.
+      - name: Stop SpiceDB
+        if: always()
+        run: docker rm -f "spicedb-${{ github.run_id }}-${{ github.run_attempt }}" || true
 
   platform-base:
     # The vendored base must still build and pass its own unit tests at the pinned commit.
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/rust-cache
         with:
-          workspaces: vendor/oryxa-platform
+          workspaces: vendor/oryxa-platform -> target
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
   deny:
