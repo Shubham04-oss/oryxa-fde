@@ -1,0 +1,160 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "./shell.css";
+
+/* Design tokens (DESIGN.md §1). The only place a colour is written. The platform's neutral
+   palette, plus one status colour for FDE: --attention, for blocked, overdue and failing work.
+   Every grey is neutral (R=G=B). */
+:root {
+  /* Surfaces */
+  --base: #f4f4f4; /* page surround, the sidebar, the header band */
+  --canvas: #ffffff; /* the central canvas, the sign-in page, overlays */
+  --card: #f7f7f7; /* cards on the canvas */
+  --raised: #fafafa; /* fields and inner wells */
+  --hover: #ebebeb; /* hover on the base surface */
+  --selected: #e4e4e4; /* the current item on the base surface */
+  --border-quiet: #e6e6e6; /* card, field and divider borders */
+  --border-strong: #cccccc; /* hovered borders */
+  --focus: #8c8c8c; /* keyboard focus ring */
+
+  /* Text */
+  --text: #111111; /* titles, body, the primary button */
+  --text-soft: #404040; /* navigation labels and secondary emphasis */
+  --text-muted: #737373; /* metadata and hints */
+  --text-inverse: #ffffff; /* text on the primary button */
+
+  /* Status */
+  --success: #16a34a; /* granted, passing, done. Nothing else. */
+  --attention: #b45309; /* blocked, overdue, failing, denied. Nothing else. */
+  --destructive: #dc2626; /* errors and destructive actions. Nothing else. */
+
+  /* Depth: overlays only. */
+  --scrim: #00000033;
+  --shadow: 0 12px 34px #0000001f;
+
+  --radius: 0.625rem;
+
+  /* shadcn roles, mapped onto the tokens above. */
+  --background: var(--canvas);
+  --foreground: var(--text);
+  --card-foreground: var(--text);
+  --popover: var(--canvas);
+  --popover-foreground: var(--text);
+  --primary: var(--text);
+  --primary-foreground: var(--text-inverse);
+  --secondary: var(--base);
+  --secondary-foreground: var(--text);
+  --muted: var(--raised);
+  --muted-foreground: var(--text-muted);
+  --accent: var(--hover);
+  --accent-foreground: var(--text);
+  --border: var(--border-quiet);
+  --input: var(--border-quiet);
+  --ring: var(--focus);
+  color-scheme: light;
+}
+
+/* Dark: the platform's dark roles. Applies when chosen, or when the system is dark and the FDE has
+   not picked light. Same token names, so nothing else changes. */
+:root[data-theme="dark"] {
+  --base: #111111;
+  --canvas: #1e1e1e;
+  --card: #111111;
+  --raised: #242424;
+  --hover: #1d1d1d;
+  --selected: #262626;
+  --border-quiet: #353535;
+  --border-strong: #555555;
+  --focus: #d6d6d6;
+  --text: #f2f2f2;
+  --text-soft: #a8a8a8;
+  --text-muted: #999999;
+  --text-inverse: #111111;
+  --success: #22c55e;
+  --attention: #fbbf24;
+  --destructive: #f87171;
+  --scrim: #000000a0;
+  --shadow: 0 12px 34px #00000066;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --base: #111111;
+    --canvas: #1e1e1e;
+    --card: #111111;
+    --raised: #242424;
+    --hover: #1d1d1d;
+    --selected: #262626;
+    --border-quiet: #353535;
+    --border-strong: #555555;
+    --focus: #d6d6d6;
+    --text: #f2f2f2;
+    --text-soft: #a8a8a8;
+    --text-muted: #999999;
+    --text-inverse: #111111;
+    --success: #22c55e;
+    --attention: #fbbf24;
+    --destructive: #f87171;
+    --scrim: #000000a0;
+    --shadow: 0 12px 34px #00000066;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  /* The tokens shadcn has no role for, as utilities: bg-canvas, text-soft, border-strong… Never
+     one named like a size (`base`, `sm`): `text-base` would set a colour too. */
+  --color-canvas: var(--canvas);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-selected: var(--selected);
+  --color-strong: var(--border-strong);
+  --color-soft: var(--text-soft);
+  --color-success: var(--success);
+  --color-attention: var(--attention);
+  --color-scrim: var(--scrim);
+  --shadow-overlay: var(--shadow);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans antialiased;
+  }
+  body {
+    background: var(--base);
+    color: var(--text);
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
