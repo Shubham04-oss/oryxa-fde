@@ -1,0 +1,37 @@
+[package]
+name = "oryxa-fde-api"
+version = "0.1.0"
+description = "The FDE HTTP API: sign-in, permission checks, companies, projects and members"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+oryxa-authn.workspace = true
+oryxa-authz.workspace = true
+oryxa-core.workspace = true
+oryxa-events.workspace = true
+oryxa-fde-core.workspace = true
+oryxa-fde-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+workos.workspace = true
+
+[dev-dependencies]
+base64 = "0.23.1"
+http-body-util = "0.1.5"
+jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+oryxa-spicedb-proto.workspace = true
+rand = "0.8"
+rsa = "0.9"
+sqlx.workspace = true
+tonic.workspace = true
+tower = { version = "0.5.3", features = ["util"] }
