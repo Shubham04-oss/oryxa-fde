@@ -1,0 +1,25 @@
+{
+  "name": "oryxa-fde-sandbox-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "SANDBOX", "class_name": "CompanySandbox" }],
+  },
+  "containers": [
+    {
+      "class_name": "CompanySandbox",
+      "scheduling_policy": "durable_object",
+      "images": { "sandbox": { "dockerfile": "../image/Dockerfile" } },
+    },
+  ],
+  "exports": {
+    "CompanySandbox": { "type": "durable-object", "storage": "sqlite" },
+  },
+  "vars": {
+    "SANDBOX_INSTANCE": "standard-2",
+    "SANDBOX_IDLE_TIMEOUT_MS": "1800000",
+  },
+  "observability": { "enabled": true },
+}
