@@ -106,3 +106,24 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+
+  infra:
+    # OpenTofu checks with no credentials: mock providers only, nothing reaches AWS or Cloudflare.
+    runs-on: ubuntu-latest
+    env:
+      TOFU_URL: https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip
+      TOFU_SHA256: 5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install OpenTofu
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/tofu.zip" "$TOFU_URL"
+          echo "${TOFU_SHA256}  $RUNNER_TEMP/tofu.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/tofu.zip" tofu -d "$RUNNER_TEMP/tofu"
+          echo "$RUNNER_TEMP/tofu" >> "$GITHUB_PATH"
+      - run: tofu fmt -check -recursive infra
+      - run: tofu -chdir=infra/envs/dev init -backend=false -input=false -lockfile=readonly
+      - run: tofu -chdir=infra/envs/dev validate
+      # Plans the environment and each module on mock providers and asserts the security rules.
+      - run: tofu -chdir=infra/envs/dev test
+      - run: shellcheck infra/scripts/*.sh
