@@ -70,7 +70,7 @@ Production will fetch the references from AWS Secrets Manager. A malformed `DEV_
 | `SANDBOX_INSTANCE`        | var                     | `standard-2` (1 vCPU, 6 GiB, 12 GB disk)                |
 | `SANDBOX_IDLE_TIMEOUT_MS` | var                     | `1800000` (30 minutes; Cloudflare's maximum is 6 hours) |
 
-The container image is `../image/Dockerfile`. It must run `sandbox-shim`, which the `Files` API needs, and
+The container image is built from `../image/Dockerfile`, with `sandbox/` as its build context. It must run `sandbox-shim`, which the `Files` API needs, and
 trust the ephemeral CA that HTTPS interception creates at `/etc/cloudflare/certs/cloudflare-containers-ca.crt`.
 Every exec also points `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and
 `REQUESTS_CA_BUNDLE` at that CA.

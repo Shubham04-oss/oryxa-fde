@@ -11,7 +11,7 @@
     {
       "class_name": "CompanySandbox",
       "scheduling_policy": "durable_object",
-      "images": { "sandbox": { "dockerfile": "../image/Dockerfile" } },
+      "images": { "sandbox": { "dockerfile": "../image/Dockerfile", "build_context": ".." } },
     },
   ],
   "exports": {
