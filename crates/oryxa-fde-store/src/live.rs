@@ -12,6 +12,7 @@ use sqlx::Row;
 
 use super::*;
 use crate::relay::{MAX_ATTEMPTS, dispatch_once};
+use sqlx::Acquire;
 
 async fn store() -> Store {
     let url =
@@ -400,4 +401,406 @@ async fn a_row_that_keeps_failing_goes_dead_and_unblocks_its_group() {
     drain(&store, &signer, &up, &t).await;
     let published: Vec<bool> = outbox(&store, &t).await.into_iter().map(|r| r.3).collect();
     assert_eq!(published, [false, true]);
+}
+
+/// Outbox payloads of one tenant with a given detail type, oldest first.
+async fn payloads(store: &Store, t: &TenantId, detail_type: &str) -> Vec<serde_json::Value> {
+    let mut tx = store.pool().begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_relay")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let details: Vec<String> =
+        sqlx::query_scalar("select detail from outbox where tenant_id = $1 and detail_type = $2 order by seq")
+            .bind(t.as_str())
+            .bind(detail_type)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    details
+        .iter()
+        .map(|d| serde_json::from_str::<serde_json::Value>(d).unwrap()["data"].clone())
+        .collect()
+}
+
+/// A tenant with one company and one project in it.
+async fn project_world(store: &Store) -> (TenantId, ProjectScope) {
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(store, &c).await;
+    let p = c.project(ProjectId::new(new_id("prj")).unwrap());
+    let mut tx = store.project(&p).await.unwrap();
+    tx.create(&Name::new("RAG").unwrap(), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    (t, p)
+}
+
+async fn add_stakeholder(store: &Store, c: &CompanyScope) -> oryxa_fde_core::StakeholderId {
+    let id = oryxa_fde_core::StakeholderId::new(new_id("stk")).unwrap();
+    let mut tx = store.company(c).await.unwrap();
+    let v = StakeholderIn {
+        name: Name::new("Sam Sponsor").unwrap(),
+        title: Some(Name::new("VP Engineering").unwrap()),
+    };
+    tx.add_stakeholder(&id, &v, &actor("alice")).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn stage_changes_write_their_event_in_the_same_transaction() {
+    use oryxa_fde_core::{Stage, StageError};
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let changed = "fde.project.stage_changed.v1";
+
+    // Rolled back: the stage and the event both stay as they were.
+    let mut tx = store.project(&p).await.unwrap();
+    tx.change_stage(Stage::Scope, &actor("alice")).await.unwrap().unwrap();
+    drop(tx);
+    let mut tx = store.project(&p).await.unwrap();
+    assert_eq!(tx.get().await.unwrap().unwrap().stage, Stage::Discover);
+    assert!(payloads(&store, &t, changed).await.is_empty());
+
+    // Skipping ahead is refused by the stage machine.
+    assert!(matches!(
+        tx.change_stage(Stage::Build, &actor("alice")).await,
+        Err(StoreError::Stage(StageError::Skip { .. }))
+    ));
+    drop(tx);
+
+    let mut tx = store.project(&p).await.unwrap();
+    let moved = tx.change_stage(Stage::Scope, &actor("alice")).await.unwrap().unwrap();
+    assert_eq!(moved.stage, Stage::Scope);
+    tx.commit().await.unwrap();
+    let events = payloads(&store, &t, changed).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (
+            events[0]["project"].as_str(),
+            events[0]["from"].as_str(),
+            events[0]["to"].as_str()
+        ),
+        (Some(p.project.as_str()), Some("discover"), Some("scope"))
+    );
+    let rows = outbox(&store, &t).await;
+    assert_eq!(rows.last().unwrap().2, p.event_group());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transaction() {
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let signed = "fde.scope.signed_off.v1";
+    let sam = add_stakeholder(&store, &p.company).await;
+    let by = actor("alice");
+
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(matches!(
+        tx.sign_off(&sam, &by).await,
+        Err(StoreError::Rejected("empty_scope"))
+    ));
+    drop(tx);
+
+    let mut tx = store.project(&p).await.unwrap();
+    let item = ScopeItemId::new(new_id("itm")).unwrap();
+    let v = ScopeItemIn {
+        kind: ScopeKind::In,
+        description: Text::new("Answer tier-1 support tickets").unwrap(),
+    };
+    tx.add_scope_item(&item, &v, &by).await.unwrap().unwrap();
+    let crit = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
+    let c = CriterionIn {
+        description: Text::new("Answers are correct").unwrap(),
+        metric: Name::new("accuracy").unwrap(),
+        comparator: Comparator::AtLeast,
+        target: 90.0,
+        unit: Some(Name::new("%").unwrap()),
+    };
+    tx.add_criterion(&crit, &c, &by).await.unwrap().unwrap();
+    let unknown = oryxa_fde_core::StakeholderId::new("stk_nobody").unwrap();
+    assert!(matches!(
+        tx.sign_off(&unknown, &by).await,
+        Err(StoreError::Missing("stakeholder"))
+    ));
+    tx.commit().await.unwrap();
+
+    // Rolled back: no sign-off and no event.
+    let mut tx = store.project(&p).await.unwrap();
+    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    drop(tx);
+    assert!(payloads(&store, &t, signed).await.is_empty());
+
+    let mut tx = store.project(&p).await.unwrap();
+    let s = tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    assert_eq!((s.version, &s.stakeholder), (2, &sam));
+    tx.commit().await.unwrap();
+    let events = payloads(&store, &t, signed).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["version"], 2);
+
+    // The same version cannot be signed twice; a change makes the sign-off stale.
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(matches!(tx.sign_off(&sam, &by).await, Err(StoreError::Conflict)));
+    drop(tx);
+    let mut tx = store.project(&p).await.unwrap();
+    tx.remove_criterion(&crit, &by).await.unwrap();
+    let scope = tx.scope_of_work().await.unwrap().unwrap();
+    assert_eq!((scope.version, scope.sign_off.unwrap().version), (3, 2));
+    assert_eq!((scope.items.len(), scope.criteria.len()), (1, 0));
+    let log: Vec<(u32, String)> = tx
+        .scope_changes()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.version, c.action))
+        .collect();
+    assert_eq!(
+        log,
+        [
+            (1, "item_added".into()),
+            (2, "criterion_added".into()),
+            (2, "signed_off".into()),
+            (3, "criterion_removed".into())
+        ]
+    );
+    tx.commit().await.unwrap();
+
+    // A stakeholder who signed cannot be deleted.
+    let mut tx = store.company(&p.company).await.unwrap();
+    assert!(matches!(
+        tx.remove_stakeholder(&sam, &by).await,
+        Err(StoreError::Conflict)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn access_status_changes_write_their_event_in_the_same_transaction() {
+    use oryxa_fde_events::AccessStatus;
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let changed = "fde.access_request.status_changed.v1";
+    let owner = add_stakeholder(&store, &p.company).await;
+    let by = actor("alice");
+    let id = oryxa_fde_core::AccessRequestId::new(new_id("acc")).unwrap();
+    let mut v = AccessRequestIn {
+        description: Text::new("Read-only Zendesk API token").unwrap(),
+        system: None,
+        owner: Some(owner),
+        status: AccessStatus::Requested,
+    };
+
+    let mut tx = store.project(&p).await.unwrap();
+    let ghost = AccessRequestIn {
+        owner: Some(oryxa_fde_core::StakeholderId::new("stk_ghost").unwrap()),
+        ..v.clone()
+    };
+    assert!(matches!(
+        tx.add_access_request(&id, &ghost, &by).await,
+        Err(StoreError::Missing("owner"))
+    ));
+    drop(tx);
+    let mut tx = store.project(&p).await.unwrap();
+    let r = tx.add_access_request(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!(
+        (r.status, r.days_waiting, r.granted_at),
+        (AccessStatus::Requested, 0, None)
+    );
+    tx.commit().await.unwrap();
+    assert!(
+        payloads(&store, &t, changed).await.is_empty(),
+        "creating is not a status change"
+    );
+
+    // Three days later the customer grants it, in a transaction that is rolled back first.
+    sqlx::query(
+        "update access_requests set requested_at = now() - interval '3 days 1 hour' where access_request_id = $1",
+    )
+    .bind(id.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    v.status = AccessStatus::Granted;
+    let mut tx = store.project(&p).await.unwrap();
+    tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    drop(tx);
+    assert!(payloads(&store, &t, changed).await.is_empty());
+
+    let mut tx = store.project(&p).await.unwrap();
+    let r = tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!((r.status, r.days_waiting), (AccessStatus::Granted, 3));
+    assert!(r.granted_at.is_some());
+    // Same status again: no new event.
+    tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    let events = payloads(&store, &t, changed).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (
+            events[0]["access_request"].as_str(),
+            events[0]["from"].as_str(),
+            events[0]["to"].as_str()
+        ),
+        (Some(id.as_str()), Some("requested"), Some("granted"))
+    );
+
+    // Asked for again: waiting restarts counting from the original request.
+    v.status = AccessStatus::InProgress;
+    let mut tx = store.project(&p).await.unwrap();
+    let r = tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!((r.granted_at, r.days_waiting), (None, 3));
+    tx.commit().await.unwrap();
+    assert_eq!(payloads(&store, &t, changed).await.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn row_level_security_covers_every_lifecycle_table() {
+    let store = store().await;
+    let by = actor("alice");
+    // Two projects in two companies of one tenant, each with one of every record, plus a
+    // security answer in this tenant and another.
+    let (t, a) = project_world(&store).await;
+    let b = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        let p = c.project(ProjectId::new(new_id("prj")).unwrap());
+        let mut tx = store.project(&p).await.unwrap();
+        tx.create(&Name::new("B").unwrap(), &by).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        p
+    };
+    for p in [&a, &b] {
+        let stakeholder = add_stakeholder(&store, &p.company).await;
+        let mut tx = store.company(&p.company).await.unwrap();
+        let sys = oryxa_fde_core::SystemId::new(new_id("sys")).unwrap();
+        let v = SystemIn {
+            name: Name::new("Zendesk").unwrap(),
+            description: None,
+        };
+        tx.add_system(&sys, &v, &by).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.project(p).await.unwrap();
+        let item = ScopeItemIn {
+            kind: ScopeKind::Out,
+            description: Text::new("Voice support").unwrap(),
+        };
+        tx.add_scope_item(&ScopeItemId::new(new_id("itm")).unwrap(), &item, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        let crit = CriterionIn {
+            description: Text::new("Fast").unwrap(),
+            metric: Name::new("p95 latency").unwrap(),
+            comparator: Comparator::AtMost,
+            target: 2.0,
+            unit: Some(Name::new("s").unwrap()),
+        };
+        tx.add_criterion(&oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap(), &crit, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.sign_off(&stakeholder, &by).await.unwrap().unwrap();
+        let access = AccessRequestIn {
+            description: Text::new("Zendesk token").unwrap(),
+            system: Some(sys),
+            owner: Some(stakeholder),
+            status: oryxa_fde_events::AccessStatus::Requested,
+        };
+        tx.add_access_request(
+            &oryxa_fde_core::AccessRequestId::new(new_id("acc")).unwrap(),
+            &access,
+            &by,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let task = TaskIn {
+            title: Name::new("Index tickets").unwrap(),
+            status: TaskStatus::WaitingOnCustomer,
+            blocker: None,
+        };
+        tx.add_task(&oryxa_fde_core::TaskId::new(new_id("tsk")).unwrap(), &task, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        let decision = DecisionIn {
+            title: Name::new("Use Bedrock").unwrap(),
+            rationale: Text::new("Data stays in their AWS account").unwrap(),
+            decided_by: Name::new("Sam Sponsor").unwrap(),
+            decided_at: time::OffsetDateTime::now_utc(),
+        };
+        tx.record_decision(&oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap(), &decision, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let t2 = tenant();
+    for tenant in [&t, &t2] {
+        let mut tx = store.organisation(tenant).await.unwrap();
+        let v = SecurityAnswerIn {
+            question: Text::new("Do you encrypt data at rest?").unwrap(),
+            answer: Text::new("Yes, AES-256 with KMS").unwrap(),
+        };
+        tx.add_security_answer(&SecurityAnswerId::new(new_id("ans")).unwrap(), &v, &by)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    // In A's transaction an unfiltered query sees exactly A's one row in every table.
+    let mut tx = store.company(&a.company).await.unwrap();
+    for table in [
+        "stakeholders",
+        "systems",
+        "scope_items",
+        "criteria",
+        "scope_signoffs",
+        "access_requests",
+        "tasks",
+        "decisions",
+    ] {
+        let companies: Vec<String> = sqlx::query_scalar(&format!("select company_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(companies, [a.company.company.as_str()], "{table}");
+    }
+    let versions: Vec<i32> = sqlx::query_scalar("select distinct version from scope_changes")
+        .fetch_all(tx.conn())
+        .await
+        .unwrap();
+    assert!(!versions.is_empty());
+    let changes_elsewhere: i64 = sqlx::query_scalar("select count(*) from scope_changes where company_id <> $1")
+        .bind(a.company.company.as_str())
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(changes_elsewhere, 0);
+    // The org library is the tenant's, whichever company the transaction is for; never another tenant's.
+    let tenants: Vec<String> = sqlx::query_scalar("select tenant_id from security_answers")
+        .fetch_all(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(tenants, [t.as_str()]);
+    // Decisions and the scope change log are append-only for the app.
+    for sql in [
+        "update decisions set title = 'x'",
+        "delete from scope_changes",
+        "update scope_signoffs set version = 9",
+    ] {
+        let mut sp = tx.conn().begin().await.unwrap();
+        assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
+    }
+    drop(tx);
+
+    let mut org = store.organisation(&t2).await.unwrap();
+    assert_eq!(org.security_answers().await.unwrap().len(), 1);
 }
