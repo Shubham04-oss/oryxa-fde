@@ -9,6 +9,11 @@ ignore = [
     # rsa "Marvin" timing attack affects RSA private-key operations. We only verify WorkOS RS256
     # signatures (public key); rsa comes in via workos' pinned jsonwebtoken. Revisit if that changes.
     { id = "RUSTSEC-2023-0071", reason = "public-key RS256 verification only; not exploitable here" },
+    # crypto-bigint 0.5 has no fix (0.7.6 does). It comes in only through elliptic-curve 0.13 via the vendored
+    # oryxa-authn's jsonwebtoken 10.3.0 (RS256 public-key verification only; ECDSA refused) and oryxa-events'
+    # aws-config credentials-login (the `aws login` developer flow, unused on ECS). Same decision as the platform.
+    # Revisit when jsonwebtoken and aws-config move to elliptic-curve 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via elliptic-curve 0.13; public-key verification only; no 0.5 fix" },
 ]
 
 [licenses]

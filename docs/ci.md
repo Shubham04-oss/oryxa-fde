@@ -5,7 +5,7 @@
 | Job kind | Runner |
 | --- | --- |
 | Heavy Rust jobs (`check`, `platform-base`, anything that compiles the workspace) | oryxa-a1 when the repository variable `A1_RUNNERS` is `true`, GitHub-hosted otherwise |
-| Light jobs (`deny`, schema and OpenTofu validation, the web app) | Always GitHub-hosted |
+| Light jobs (`deny`, `sandbox`, schema and OpenTofu validation, the web app) | Always GitHub-hosted |
 
 Heavy jobs use this expression, so one variable moves them between a1 and GitHub-hosted:
 
@@ -24,6 +24,7 @@ run id and removed in an `if: always()` step, and nothing left behind on the run
 | Cargo registry and git deps | rust-cache, targets off | `CARGO_HOME` stays on the machine |
 | Build output | fresh each run | `target/` cleared each run (a cancelled build leaves it corrupt) |
 | pnpm store (`fde-web`) | `actions/setup-node` with `cache: pnpm` | the same |
+| npm (`sandbox/*`) | `actions/setup-node` with `cache: npm` | the same |
 | OpenTofu providers | `actions/cache` on `TF_PLUGIN_CACHE_DIR` | `TF_PLUGIN_CACHE_DIR` under `$HOME/.cache` |
 | Docker images | pulled each run | kept by the machine's Docker |
 

@@ -67,6 +67,29 @@ jobs:
           workspaces: vendor/oryxa-platform -> target
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
+  sandbox:
+    # Light: the sandbox gateway Worker and the agent harness (TypeScript), always hosted (docs/ci.md).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [sandbox/gateway, sandbox/harness]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A package that has not landed on this branch yet passes as skipped.
+      - id: present
+        run: echo "yes=$([ -f '${{ matrix.package }}/package.json' ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.yes == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+      # Lockfile-exact install; prettier and tsc, then the tests.
+      - if: steps.present.outputs.yes == 'true'
+        working-directory: ${{ matrix.package }}
+        run: npm ci --no-audit --no-fund && npm run check && npm test
+
   deny:
     runs-on: ubuntu-latest
     steps:
