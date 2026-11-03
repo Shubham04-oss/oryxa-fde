@@ -1,0 +1,45 @@
+{
+  "v": 1,
+  "run": "run_sample_1",
+  "scope": {
+    "company": {
+      "tenant": "org_sample",
+      "company": "cmp_sample"
+    },
+    "project": "prj_sample"
+  },
+  "task": "Add a /healthz endpoint to the API service, with a test.",
+  "scope_of_work": "Sample scope: a status page for the sample customer's API service.",
+  "success_criteria": [
+    {
+      "id": "crit_uptime",
+      "text": "The status page reports the API's health within 60 seconds of a change."
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec_hono",
+      "text": "The service stays on Hono; no new web framework."
+    }
+  ],
+  "conventions": [
+    "TypeScript, strict mode.",
+    "Tests next to the code under test/."
+  ],
+  "config": {
+    "model": "anthropic.claude-opus-5-5",
+    "region": "eu-west-1",
+    "max_turns": 40,
+    "approvals": [
+      {
+        "action": "deploy",
+        "tool": "Bash",
+        "pattern": "\\b(wrangler|vercel|flyctl|kubectl|tofu|terraform)\\b.*\\b(deploy|apply|publish)\\b"
+      },
+      {
+        "action": "customer_send",
+        "tool": "mcp__customer__send_message"
+      }
+    ]
+  }
+}
