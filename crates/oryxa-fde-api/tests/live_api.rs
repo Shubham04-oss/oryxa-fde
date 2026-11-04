@@ -167,6 +167,7 @@ impl World {
         }
         .unwrap();
         self.send(req).await
+    }
 
     /// Calls an MCP tool as `token`: the HTTP status and the JSON-RPC response.
     async fn tool(&self, token: Option<&str>, tool: &str, arguments: Value) -> (StatusCode, Value) {
@@ -1040,7 +1041,8 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     at.who.id, at.kind
                 ));
             }
-            if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
+            // Uploads take a raw body, which the cookie helper does not send.
+            if raw.is_none() && matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
                 let (status, _, resp) = w.with_cookie(&cookie_of(at.who), method, &path, body, true).await;
                 calls += 1;
                 if status.is_success() {
