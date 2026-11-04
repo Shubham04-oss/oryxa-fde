@@ -23,7 +23,7 @@ fn rel(resource: ObjectRef, relation: &'static str, subject: SubjectRef) -> Rela
 
 #[tokio::test]
 #[ignore = "needs a running SpiceDB (SPICEDB_ENDPOINT)"]
-async fn tool_call_and_kb_checks_against_real_spicedb() {
+async fn tool_call_and_connection_checks_against_real_spicedb() {
     let endpoint = std::env::var("SPICEDB_ENDPOINT").unwrap_or_else(|_| "http://localhost:50051".into());
     // serve-testing gives each preshared key its own empty datastore.
     let key = format!("oryxa-test-{}", std::process::id());
@@ -38,6 +38,8 @@ async fn tool_call_and_kb_checks_against_real_spicedb() {
     let t = TenantId::new("org_1").unwrap();
     let o = |kind, id| ObjectRef::new(&t, kind, id);
     let user = |id| SubjectRef::object(o("user", id));
+    // An id outside the raw charset, so it is encoded on the way in and decoded on the way out.
+    let site = "https://acme.atlassian.net";
 
     let token = db
         .write(
@@ -45,22 +47,11 @@ async fn tool_call_and_kb_checks_against_real_spicedb() {
             &[
                 Write::Touch(rel(o("workspace", "ws"), "member", user("bob"))),
                 Write::Touch(rel(
-                    o("knowledge_base", "kb"),
+                    o("connection", site),
                     "workspace",
                     SubjectRef::object(o("workspace", "ws")),
                 )),
-                Write::Touch(rel(
-                    o("kb_source", "jira"),
-                    "knowledge_base",
-                    SubjectRef::object(o("knowledge_base", "kb")),
-                )),
-                Write::Touch(rel(o("kb_source", "jira"), "viewer", user("bob"))),
-                Write::Touch(rel(
-                    o("kb_item", "https://jira/ENG-1"),
-                    "source",
-                    SubjectRef::object(o("kb_source", "jira")),
-                )),
-                Write::Touch(rel(o("kb_item", "https://jira/ENG-1"), "viewer", user("bob"))),
+                Write::Touch(rel(o("connection", site), "owner", user("bob"))),
                 Write::Touch(Relationship {
                     caveat: Some(("args_match", json!({"approved_args_hash": "h1"}))),
                     expires_at: Some(std::time::SystemTime::now() + Duration::from_secs(600)),
@@ -73,21 +64,17 @@ async fn tool_call_and_kb_checks_against_real_spicedb() {
         .unwrap();
     let fresh = Consistency::AtLeastAsFresh(token);
 
-    // KB post-check: one bulk call, results in request order.
-    let item = |doc, who| CheckItem {
-        resource: o("kb_item", doc),
-        permission: "view",
+    // One bulk call, results in request order.
+    let item = |conn, who| CheckItem {
+        resource: o("connection", conn),
+        permission: "use",
         subject: user(who),
         context: None,
     };
     let decisions = db
         .check_bulk(
             &t,
-            &[
-                item("https://jira/ENG-1", "bob"),
-                item("https://jira/ENG-1", "carol"),
-                item("missing", "bob"),
-            ],
+            &[item(site, "bob"), item(site, "carol"), item("missing", "bob")],
             &fresh,
         )
         .await
@@ -121,44 +108,40 @@ async fn tool_call_and_kb_checks_against_real_spicedb() {
         Decision::Conditional { .. }
     ));
 
+    // Lookup returns caller ids, tenant prefix stripped and decoded.
+    let manageable = db
+        .lookup_resources(&t, "connection", "manage", &user("bob"), &fresh)
+        .await
+        .unwrap();
+    assert_eq!(manageable, [site]);
+
     // Revoke, then a check at the revoke's token must deny.
     let revoked = db
         .write(
             &t,
-            &[Write::Delete(rel(
-                o("kb_item", "https://jira/ENG-1"),
-                "viewer",
-                user("bob"),
-            ))],
+            &[Write::Delete(rel(o("connection", site), "owner", user("bob")))],
             &[],
         )
         .await
         .unwrap();
     assert!(
-        !db.check(
-            &t,
-            &item("https://jira/ENG-1", "bob"),
-            &Consistency::AtLeastAsFresh(revoked)
-        )
-        .await
-        .unwrap()
-        .allowed()
+        !db.check(&t, &item(site, "bob"), &Consistency::AtLeastAsFresh(revoked))
+            .await
+            .unwrap()
+            .allowed()
     );
 
     // Precondition failure rolls back the whole write.
     let failed = db
         .write(
             &t,
-            &[Write::Touch(rel(o("kb_item", "x"), "viewer", user("bob")))],
-            &[Precondition::MustExist(rel(o("kb_item", "x"), "owner", user("nobody")))],
+            &[Write::Touch(rel(o("connection", "x"), "owner", user("bob")))],
+            &[Precondition::MustExist(rel(
+                o("connection", "x"),
+                "owner",
+                user("nobody"),
+            ))],
         )
         .await;
     assert!(failed.is_err());
-
-    // Lookup returns caller ids, tenant prefix stripped.
-    let sources = db
-        .lookup_resources(&t, "kb_source", "search", &user("bob"), &fresh)
-        .await
-        .unwrap();
-    assert_eq!(sources, ["jira"]);
 }

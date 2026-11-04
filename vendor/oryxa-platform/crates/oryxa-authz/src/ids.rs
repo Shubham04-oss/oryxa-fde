@@ -97,11 +97,11 @@ mod tests {
     #[test]
     fn ids_are_tenant_qualified_and_round_trip() {
         let t = TenantId::new("org_1").unwrap();
-        let doc = ObjectRef::new(&t, "kb_item", "doc-1");
+        let doc = ObjectRef::new(&t, "connection", "doc-1");
         assert_eq!(doc.object_id(), "org_1|doc-1");
 
         let url = "https://acme.sharepoint.com/sites/x/a b.docx";
-        let ext = ObjectRef::new(&t, "kb_item", url);
+        let ext = ObjectRef::new(&t, "connection", url);
         assert!(ext.object_id().starts_with("org_1|="));
         assert!(
             ext.object_id()
@@ -116,7 +116,7 @@ mod tests {
         // Prefix overlap must not leak across tenants.
         let org_11 = TenantId::new("org_11").unwrap();
         assert_eq!(
-            strip_tenant(&t, &ObjectRef::new(&org_11, "kb_item", "x").object_id()),
+            strip_tenant(&t, &ObjectRef::new(&org_11, "connection", "x").object_id()),
             None
         );
     }

@@ -49,8 +49,6 @@ ordered_by! {
     MemberRoleChanged => user;
     MemberRemoved => user;
     GroupMembershipChanged => user;
-    ChatLinkCreated => user;
-    ChatLinkInvalidated => user;
     ConnectionStatusChanged => connection_id;
     SyncFinished => connection_id;
     TaskStatusChanged => task_id;
@@ -91,8 +89,6 @@ events! {
     MemberRemoved => "oryxa.identity", "identity.member.removed.v1";
     GroupMembershipChanged => "oryxa.identity", "identity.group.membership-changed.v1";
     OrganizationDeleted => "oryxa.identity", "identity.organization.deleted.v1";
-    ChatLinkCreated => "oryxa.identity", "identity.chat-link.created.v1";
-    ChatLinkInvalidated => "oryxa.identity", "identity.chat-link.invalidated.v1";
     ToolAuthorizationDecided => "oryxa.gateway", "gateway.tool-authorization.decided.v1";
     AgentDelegated => "oryxa.gateway", "gateway.agent.delegated.v1";
     ConnectionStatusChanged => "oryxa.connectors", "connectors.connection.status-changed.v1";

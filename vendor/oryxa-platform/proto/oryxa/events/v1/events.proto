@@ -40,7 +40,7 @@ message AgentRef {
 }
 
 // ===== identity (source oryxa.identity) — the user lifecycle =====
-// Most are derived from the WorkOS Events API; chat links are ours.
+// Derived from the WorkOS Events API.
 
 // identity.user.created.v1
 message UserCreated {
@@ -48,7 +48,7 @@ message UserCreated {
   bool email_verified = 2;
 }
 
-// identity.user.email-changed.v1 — links holding the old email hash must be invalidated.
+// identity.user.email-changed.v1 — anything bound to the old email hash must be re-verified.
 message UserEmailChanged {
   string user = 1;
   bool email_verified = 2;
@@ -95,6 +95,8 @@ message GroupMembershipChanged {
 message OrganizationDeleted {}
 
 // identity.chat-link.created.v1
+// Deprecated (#161): chat identity linking was removed and nothing publishes this. Kept because
+// the contract is additive-only; do not reuse.
 message ChatLinkCreated {
   string user = 1;
   string platform = 2;  // slack | teams
@@ -102,6 +104,8 @@ message ChatLinkCreated {
 }
 
 // identity.chat-link.invalidated.v1
+// Deprecated (#161): chat identity linking was removed and nothing publishes this. Kept because
+// the contract is additive-only; do not reuse.
 message ChatLinkInvalidated {
   string user = 1;
   string platform = 2;

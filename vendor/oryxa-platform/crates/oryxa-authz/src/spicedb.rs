@@ -275,7 +275,7 @@ impl SpiceDb {
     }
 
     /// Ids (as given at write time) of `kind` objects on which `subject` has `permission`.
-    /// Use for small result sets (e.g. a user's KB sources); post-filter large ones with `check_bulk`.
+    /// Use for small result sets (e.g. a user's connections); post-filter large ones with `check_bulk`.
     pub async fn lookup_resources(
         &self,
         tenant: &TenantId,
@@ -435,7 +435,7 @@ mod tests {
     fn cross_tenant_objects_are_refused_locally() {
         let (a, b) = (t("org_a"), t("org_b"));
         let item = CheckItem {
-            resource: ObjectRef::new(&a, "kb_item", "doc"),
+            resource: ObjectRef::new(&a, "connection", "doc"),
             permission: "view",
             subject: SubjectRef::object(ObjectRef::new(&b, "user", "u1")),
             context: None,
