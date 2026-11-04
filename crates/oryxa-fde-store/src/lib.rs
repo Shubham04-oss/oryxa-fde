@@ -19,6 +19,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
 mod companies;
+mod documents;
 mod grants;
 mod org;
 mod projects;
@@ -32,6 +33,7 @@ mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
+pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use projects::{Assignee, Project, ProjectIn, ProjectTx};

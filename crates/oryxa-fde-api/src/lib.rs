@@ -11,9 +11,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::get;
 use oryxa_authz::SpiceDb;
+use oryxa_fde_context::{Context, MAX_DOCUMENT_BYTES};
 use oryxa_fde_store::Store;
 use utoipa::OpenApi;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -23,16 +25,20 @@ use utoipa_axum::routes;
 pub mod auth;
 mod authz;
 mod companies;
+mod documents;
 mod error;
 mod lifecycle;
 mod projects;
+pub mod reads;
 mod records;
 pub mod session;
 mod today;
 
 pub use auth::{Principal, VerifyToken};
 pub use authz::{reconcile_grants, run_reconciler};
+pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody};
+pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use session::{AuthKit, SignIn, Tokens, WorkOsAuthKit};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -40,6 +46,8 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct App {
     pub store: Store,
     pub authz: SpiceDb,
+    /// Document storage and embeddings.
+    pub context: Context,
     tokens: Box<dyn VerifyToken>,
     roles: auth::RoleCache,
     /// Browser sign-in; without it only bearer tokens are accepted.
@@ -47,19 +55,32 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(store: Store, authz: SpiceDb, tokens: impl VerifyToken) -> Arc<Self> {
-        Self::make(store, authz, tokens, None)
+    pub fn new(store: Store, authz: SpiceDb, tokens: impl VerifyToken, context: Context) -> Arc<Self> {
+        Self::make(store, authz, tokens, context, None)
     }
 
     /// With browser sign-in and the session cookie.
-    pub fn with_sign_in(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: SignIn) -> Arc<Self> {
-        Self::make(store, authz, tokens, Some(sign_in))
+    pub fn with_sign_in(
+        store: Store,
+        authz: SpiceDb,
+        tokens: impl VerifyToken,
+        context: Context,
+        sign_in: SignIn,
+    ) -> Arc<Self> {
+        Self::make(store, authz, tokens, context, Some(sign_in))
     }
 
-    fn make(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: Option<SignIn>) -> Arc<Self> {
+    fn make(
+        store: Store,
+        authz: SpiceDb,
+        tokens: impl VerifyToken,
+        context: Context,
+        sign_in: Option<SignIn>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             authz,
+            context,
             tokens: Box::new(tokens),
             roles: auth::RoleCache::default(),
             sign_in,
@@ -107,6 +128,16 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(session::login))
         .routes(routes!(session::callback))
         .routes(routes!(session::logout))
+        .routes(routes!(documents::list))
+        .routes(routes!(documents::get))
+        .routes(routes!(documents::search))
+        .routes(routes!(documents::search_in_project))
+        // Only uploads take a body this large; every other route keeps axum's 2 MB default.
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(documents::upload))
+                .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES)),
+        )
 }
 
 pub fn router(app: Arc<App>) -> Router {
@@ -161,6 +192,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         (name = "records", description = "Company stakeholders and systems; the organisation's security answers"),
         (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
         (name = "auth", description = "Browser sign-in, the session cookie and who is signed in"),
+        (name = "context", description = "A company's documents and search over them"),
     )
 )]
 struct ApiDoc;

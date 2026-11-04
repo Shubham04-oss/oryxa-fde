@@ -22,11 +22,13 @@ oryxa-authn.workspace = true
 oryxa-authz.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
+oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true
 oryxa-fde-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
@@ -41,6 +43,7 @@ workos.workspace = true
 base64 = "0.23.1"
 http-body-util = "0.1.5"
 jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+oryxa-fde-mcp = { path = "../oryxa-fde-mcp" }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 oryxa-spicedb-proto.workspace = true
 rand = "0.8"

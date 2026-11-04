@@ -22,6 +22,8 @@ oryxa-spicedb-proto = { path = "vendor/oryxa-platform/crates/oryxa-spicedb-proto
 oryxa-fde-core = { path = "crates/oryxa-fde-core" }
 oryxa-fde-events = { path = "crates/oryxa-fde-events" }
 oryxa-fde-store = { path = "crates/oryxa-fde-store" }
+oryxa-fde-context = { path = "crates/oryxa-fde-context" }
+oryxa-fde-api = { path = "crates/oryxa-fde-api" }
 
 # Same versions and features as the platform base uses.
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
@@ -39,3 +41,9 @@ utoipa-axum = "0.3"
 uuid = { version = "1.26.1", features = ["v7"] }
 workos = "3.4"
 proptest = { version = "1", default-features = false, features = ["std"] }
+# AWS clients, on the same runtime and TLS stack as the platform's EventBridge publisher.
+aws-config = { version = "1.8.13", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+sha2 = "0.10"

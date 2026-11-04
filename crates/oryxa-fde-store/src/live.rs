@@ -1247,3 +1247,73 @@ async fn company_summaries_carry_the_callers_role_and_projects() {
     assert_eq!(by_id[a.company.as_str()], (None, 1));
     assert_eq!(by_id[b.company.as_str()], (Some(Role::Engineer), 0));
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn row_level_security_covers_documents_and_chunks() {
+    let store = store().await;
+    let by = actor("alice");
+    let t = tenant();
+    let (a, b) = (scope(&t, &new_id("cmp")), scope(&t, &new_id("cmp")));
+    let other_tenant = scope(&tenant(), &new_id("cmp"));
+    for s in [&a, &b, &other_tenant] {
+        create_company(&store, s).await;
+        let id = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+        let v = DocumentIn {
+            name: Name::new("runbook.md").unwrap(),
+            content_type: ContentType::Markdown,
+            size_bytes: 5,
+            sha256: "00".repeat(32),
+            blob_key: format!("{}/{}/documents/{id}", s.tenant, s.company),
+        };
+        let chunk = ChunkIn {
+            index: 0,
+            content: Text::new("Refunds over 500 need approval").unwrap(),
+            embedding: vec![0.5; 1024],
+        };
+        let mut tx = store.company(s).await.unwrap();
+        tx.add_document(&id, &v, &by).await.unwrap().unwrap();
+        tx.lock_document(&id).await.unwrap().unwrap();
+        tx.record_chunks(&id, "fake", std::slice::from_ref(&chunk))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        // Settled once: writing chunks again is refused before anything is written.
+        let mut tx = store.company(s).await.unwrap();
+        tx.lock_document(&id).await.unwrap().unwrap();
+        assert!(matches!(
+            tx.record_chunks(&id, "fake", &[chunk]).await,
+            Err(StoreError::Rejected("document_not_pending"))
+        ));
+    }
+
+    // No WHERE clause: A's transaction sees A's document and chunk only.
+    let mut tx = store.company(&a).await.unwrap();
+    for table in ["documents", "document_chunks"] {
+        let companies: Vec<String> = sqlx::query_scalar(&format!("select company_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(companies, [a.company.as_str()], "{table}");
+    }
+    // Writing a document for another company is refused by the policy.
+    let mut sp = tx.conn().begin().await.unwrap();
+    let r = sqlx::query(
+        "insert into documents (tenant_id, company_id, document_id, name, content_type, size_bytes, sha256, blob_key,
+             uploaded_by) values ($1, $2, 'doc_x', 'x', 'text/plain', 1, 'x', 'x', 'u')",
+    )
+    .bind(b.tenant.as_str())
+    .bind(b.company.as_str())
+    .execute(&mut *sp)
+    .await;
+    assert!(r.is_err());
+    drop(sp);
+    // Chunks are append-only for the app.
+    let mut sp = tx.conn().begin().await.unwrap();
+    assert!(
+        sqlx::query("delete from document_chunks")
+            .execute(&mut *sp)
+            .await
+            .is_err()
+    );
+}

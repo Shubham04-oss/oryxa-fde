@@ -1,7 +1,8 @@
 //! oryxa-fde-api on ECS Fargate: the HTTP API, the outbox relay and the grant reconciler.
 //! Configuration comes from the environment; ECS injects the secrets (SpiceDB key, WorkOS key,
 //! event signing key) from Secrets Manager. The only third-party host it calls is WorkOS, for the
-//! JWKS of `WORKOS_ISSUER`.
+//! JWKS of `WORKOS_ISSUER`. Uploads go to S3 (`DOCUMENTS_BUCKET`); search queries are embedded on
+//! Bedrock (`EMBEDDING_*`).
 //!
 //! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
 //! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie.
@@ -17,6 +18,7 @@ use oryxa_events::{EventBusPublisher, Signer};
 use std::sync::Arc;
 
 use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, router, run_reconciler};
+use oryxa_fde_context::Context;
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
 use workos::helpers::JwksHelper;
@@ -56,7 +58,8 @@ async fn main() -> Result<(), Error> {
     let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
     tokio::spawn(relay::run(store.clone(), signer, publisher));
 
-    let app = App::with_sign_in(store, authz, tokens, sign_in);
+    let context = Context::from_env().await?;
+    let app = App::with_sign_in(store, authz, tokens, context, sign_in);
     tokio::spawn(run_reconciler(app.clone()));
 
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
