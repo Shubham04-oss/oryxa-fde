@@ -34,6 +34,7 @@ mod records;
 pub mod relay;
 mod runs;
 mod scope;
+mod share;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod updates;
@@ -66,6 +67,8 @@ pub use updates::{
 };
 
 pub use threads::{Comment, PromoteIn, Subject, Thread};
+
+pub use share::{Redeemed, ShareLink};
 pub use views::{CompanySummary, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
 

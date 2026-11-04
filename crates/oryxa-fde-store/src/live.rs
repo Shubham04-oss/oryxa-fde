@@ -2859,3 +2859,103 @@ async fn a_meeting_note_names_people_of_its_company_only() {
     assert!(tx.remove_meeting_note(&id, &by).await.unwrap());
     assert!(tx.meeting_notes().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_guest_grant_is_pending_only_while_its_link_is_live() {
+    let store = store().await;
+    let admin = admin().await;
+    let by = actor("alice");
+    let (t, p) = project_world(&store).await;
+    let b = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        add_project(&store, &c, "B").await
+    };
+    let guest = UserId::new("guest_1").unwrap();
+    let link = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
+    let later = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    let mut tx = store.project(&p).await.unwrap();
+    tx.create_share_link(&link, &"ab".repeat(32), later, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    // The wrong secret is refused; the right one makes a guest whose grant is pending.
+    assert_eq!(
+        tx.redeem_share_link(&link, &"cd".repeat(32), &guest, &by)
+            .await
+            .unwrap(),
+        Redeemed::Refused
+    );
+    let Redeemed::Guest(row) = tx
+        .redeem_share_link(&link, &"ab".repeat(32), &guest, &by)
+        .await
+        .unwrap()
+    else {
+        panic!("not redeemed");
+    };
+    assert!(tx.live_guest(&guest).await.unwrap());
+    tx.commit().await.unwrap();
+    // Another company's link with the same id is not this one.
+    let mut other = store.project(&b).await.unwrap();
+    assert_eq!(
+        other
+            .redeem_share_link(&link, &"ab".repeat(32), &guest, &by)
+            .await
+            .unwrap(),
+        Redeemed::Refused
+    );
+    drop(other);
+
+    let pending = store.pending_grants(&t, 10).await.unwrap();
+    let expected = Grant::Guest(p.clone(), guest.clone(), link.clone());
+    assert!(pending.grants().contains(&expected), "{:?}", pending.grants());
+    drop(pending);
+    assert_eq!(
+        store.lock_grant(&row).await.unwrap().map(|g| g.grant().clone()),
+        Some(expected.clone())
+    );
+
+    // Expired, it justifies nothing: not pending, not lockable, not live.
+    sqlx::query("update share_links set expires_at = now() - interval '1 second' where link_id = $1")
+        .bind(link.as_str())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pending = store.pending_grants(&t, 10).await.unwrap();
+    assert!(!pending.grants().contains(&expected));
+    drop(pending);
+    assert!(store.lock_grant(&row).await.unwrap().is_none());
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(!tx.live_guest(&guest).await.unwrap());
+    // Revoked: its guests are gone, and they are no one's guest any more.
+    assert_eq!(
+        tx.revoke_share_link(&link, &by).await.unwrap(),
+        Some(vec![guest.clone()])
+    );
+    assert_eq!(tx.share_links().await.unwrap()[0].guests, 0);
+    tx.commit().await.unwrap();
+
+    // Row-level security: B's transaction sees none of it.
+    let mut tx = store.company(&b.company).await.unwrap();
+    for table in ["share_links", "share_link_guests"] {
+        let n: i64 = sqlx::query_scalar(&format!("select count(*) from {table}"))
+            .fetch_one(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    drop(tx);
+    // The reconciler's role reads whether a link is live, never its secret.
+    let mut tx = store.pool.begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_grants")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("select secret_sha256 from share_links")
+            .execute(&mut *tx)
+            .await
+            .is_err()
+    );
+}

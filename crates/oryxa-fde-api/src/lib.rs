@@ -38,6 +38,8 @@ pub mod reads;
 mod records;
 pub mod session;
 mod threads;
+
+mod share;
 mod today;
 
 pub use auth::{Principal, VerifyToken};
@@ -142,6 +144,10 @@ fn routes() -> OpenApiRouter<Arc<App>> {
             records::remove_security_answer
         ))
         .routes(routes!(today::today))
+        .routes(routes!(share::create, share::list))
+        .routes(routes!(share::revoke))
+        .routes(routes!(share::redeem))
+        .routes(routes!(share::room))
         .routes(routes!(session::me))
         .routes(routes!(session::login))
         .routes(routes!(session::callback))
@@ -247,6 +253,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         (name = "context", description = "A company's documents and search over them"),
         (name = "planning", description = "Canvases and their shape links, comment threads and meeting notes, \
             for a company and for each project"),
+
+        (name = "room", description = "Share links, and the customer room a project's guests see"),
     )
 )]
 struct ApiDoc;

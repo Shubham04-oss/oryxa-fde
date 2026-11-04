@@ -558,6 +558,8 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/security-answers"),
     ("POST", "/v1/security-answers"),
     ("GET", "/v1/me"),
+    // Names nothing: the token is the permission, and only in the caller's own tenant.
+    ("POST", "/v1/share-links/redeem"),
     ("GET", "/v1/today"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
@@ -836,6 +838,18 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/share-links",
+        Some("{}"),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/share-links", None),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/share-links/{link}",
+        None,
+    ),
+    ("GET", "/v1/room/companies/{company}/projects/{project}", None),
+    (
         "PUT",
         "/v1/security-answers/{answer}",
         Some(r#"{"question":"pwned","answer":"pwned"}"#),
@@ -871,6 +885,8 @@ const RECORDS: &[&str] = &[
     "{answer}",
     "{thread}",
     "{note}",
+
+    "{link}",
 ];
 
 /// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
@@ -884,6 +900,8 @@ struct Tenant {
     engineer: User,
     assignee: User,
     admin: User,
+    /// A customer person who redeemed `{link}`: a guest of `project`.
+    guest: User,
     company: String,
     project: String,
     /// Placeholder -> id of this company's record.
@@ -908,6 +926,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     let engineer = user(org, &format!("{name}_eng"), "member");
     let assignee = user(org, &format!("{name}_asg"), "member");
     let admin = user(org, &format!("{name}_admin"), "admin");
+    let guest = user(org, &format!("{name}_guest"), "member");
     let c = w
         .ok(
             &lead,
@@ -990,12 +1009,32 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         json!({"question": format!("{name}: encrypted at rest?"), "answer": "Yes"}),
     )
     .await;
+    let made = w
+        .ok(
+            &lead,
+            "POST",
+            &format!("{pbase}/share-links"),
+            Some(json!({})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let link = made["link"]["id"].as_str().unwrap().to_owned();
+    let token = made["token"].clone();
+    w.ok(
+        &guest,
+        "POST",
+        "/v1/share-links/redeem",
+        Some(json!({"token": token})),
+        StatusCode::OK,
+    )
+    .await;
     let mut sessions = Vec::new();
     for (who, role) in [
         (&lead, "member"),
         (&engineer, "member"),
         (&assignee, "member"),
         (&admin, "admin"),
+        (&guest, "member"),
     ] {
         let (status, headers, body) = w.sign_in_as(Some(org), &who.id, role).await;
         assert_eq!(status, StatusCode::FOUND, "{body}");
@@ -1071,6 +1110,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         engineer,
         assignee,
         admin,
+        guest,
         sessions,
         company,
         project,
@@ -1092,6 +1132,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             // Not records: the same in every company, so they name the victim's only with its path.
             ("{shape}", "shape-1".into()),
             ("{version}", "1".into()),
+            ("{link}", link),
         ],
     }
 }
@@ -1126,6 +1167,9 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/activity"),
         format!("{project}/suggestions"),
         format!("{project}/updates"),
+
+        format!("{project}/share-links"),
+        format!("/v1/room/companies/{}/projects/{}", t.company, t.project),
         "/v1/security-answers".into(),
         format!("{base}/canvas"),
         format!("{base}/canvas/versions"),
@@ -1235,7 +1279,7 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
     // admin manages every company of their own tenant, so they attack the other tenant only.
     let mut attacks = Vec::new();
     for (own, victims) in [(&a, vec![&b, &c]), (&c, vec![&a])] {
-        for who in [&own.lead, &own.engineer, &own.assignee, &own.admin] {
+        for who in [&own.lead, &own.engineer, &own.assignee, &own.admin, &own.guest] {
             for v in &victims {
                 let cross_tenant = v.org != own.org;
                 if who.id == own.admin.id && !cross_tenant {
@@ -3128,11 +3172,14 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     let projects = export["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["project"]["id"], json!(a.project));
+    // Every record but the organisation's security answers and the share links, which grant
+    // access rather than record the work.
     for (placeholder, id) in &a.records {
-        if *placeholder != "{answer}" {
+        if !["{answer}", "{link}"].contains(placeholder) {
             assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
         }
     }
+    assert!(!text.contains(a.record("{link}")));
     assert!(!text.contains(&b.company) && !text.contains(&b.project));
     for (placeholder, id) in &b.records {
         assert!(!text.contains(id.as_str()), "B's {placeholder} {id} is in A's export");
@@ -3148,5 +3195,172 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
             "{}",
             who.id
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_closed() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let room = format!("/v1/room/companies/{}/projects/{}", t.company, t.project);
+
+    // The fixture's guest redeemed a link: the room shows room-safe fields only.
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(
+        (&seen["project"], &seen["stage"]),
+        (&json!(t.project), &json!("discover"))
+    );
+    assert_eq!((&seen["progress"], &seen["stages"]), (&json!(1), &json!(8)));
+    assert_eq!(seen["criteria"].as_array().unwrap().len(), 1);
+    assert_eq!(seen["scope_awaits_sign_off"], json!(true));
+    let text = seen.to_string();
+    for internal in ["Index tickets", "API token", "Tier-1 tickets", "Use Bedrock", "Zendesk"] {
+        assert!(!text.contains(internal), "the room shows {internal}");
+    }
+    // Every other route of its own company and project is refused to the guest.
+    let records = &t.records;
+    let fill = |s: &str| {
+        let mut out = s
+            .replace("{company}", &t.company)
+            .replace("{project}", &t.project)
+            .replace("{user}", &t.guest.id);
+        for (placeholder, id) in records {
+            out = out.replace(placeholder, id);
+        }
+        out
+    };
+    for (method, template, body) in TARGETED {
+        if template.starts_with("/v1/room/") || template.starts_with("/v1/security-answers") {
+            continue;
+        }
+        let body = body
+            .filter(|b| !b.starts_with("RAW:"))
+            .map(|b| serde_json::from_str::<Value>(&fill(b)).unwrap());
+        let path = fill(template) + query_for(method, template);
+        let (status, resp) = w.call(Some(&t.guest.token), method, &path, body).await;
+        assert!(
+            !status.is_success(),
+            "the guest reached {method} {path}: {status} {resp}"
+        );
+    }
+    // Another project of the same company is not theirs.
+    let other = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("/v1/companies/{}/projects", t.company),
+            Some(json!({"name": "Other"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let other_room = format!(
+        "/v1/room/companies/{}/projects/{}",
+        t.company,
+        other["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        w.status(&t.guest, "GET", &other_room, None).await,
+        StatusCode::FORBIDDEN
+    );
+
+    // Expired: refused at once, though SpiceDB still holds the guest relation.
+    let owner = testing::admin().await;
+    sqlx::query(
+        "update share_links set expires_at = now() - interval '1 second' where tenant_id = $1 and link_id = $2",
+    )
+    .bind(&org)
+    .bind(t.record("{link}"))
+    .execute(&owner)
+    .await
+    .unwrap();
+    assert_eq!(w.status(&t.guest, "GET", &room, None).await, StatusCode::FORBIDDEN);
+
+    // A new link: redeemed, then revoked; the revoked token is refused afterwards.
+    let links = format!("/v1/companies/{}/projects/{}/share-links", t.company, t.project);
+    let made = w
+        .ok(
+            &t.lead,
+            "POST",
+            &links,
+            Some(json!({"expires_in_days": 1})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let token = made["token"].clone();
+    let redeem = Some(json!({"token": token}));
+    w.ok(
+        &t.guest,
+        "POST",
+        "/v1/share-links/redeem",
+        redeem.clone(),
+        StatusCode::OK,
+    )
+    .await;
+    w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    let listed = w.ok(&t.lead, "GET", &links, None, StatusCode::OK).await;
+    assert!(
+        listed.to_string().find(token.as_str().unwrap()).is_none(),
+        "tokens are never listed"
+    );
+    let revoke = format!("{links}/{}", made["link"]["id"].as_str().unwrap());
+    w.ok(&t.lead, "DELETE", &revoke, None, StatusCode::NO_CONTENT).await;
+    assert_eq!(w.status(&t.guest, "GET", &room, None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        w.status(&t.guest, "POST", "/v1/share-links/redeem", redeem.clone())
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    // Revoked, the guest relation itself is gone from SpiceDB: the earlier link has expired, so
+    // no live link keeps it.
+    let tenant = TenantId::new(&org).unwrap();
+    let item = oryxa_authz::CheckItem {
+        resource: oryxa_authz::ObjectRef::new(&tenant, "fde_project", &t.project),
+        permission: "view",
+        subject: oryxa_authz::SubjectRef::object(oryxa_authz::ObjectRef::new(&tenant, "user", &t.guest.id)),
+        context: None,
+    };
+    let decision = w
+        .authz
+        .check(&tenant, &item, &oryxa_authz::Consistency::FullyConsistent)
+        .await
+        .unwrap();
+    assert!(!decision.allowed(), "{decision:?}");
+
+    // A live token in another tenant's hands, and malformed ones, are refused alike.
+    let made = w
+        .ok(&t.lead, "POST", &links, Some(json!({})), StatusCode::CREATED)
+        .await;
+    let stranger = user(&new_id("org"), "stranger", "member");
+    let foreign = Some(json!({"token": made["token"]}));
+    assert_eq!(
+        w.status(&stranger, "POST", "/v1/share-links/redeem", foreign).await,
+        StatusCode::NOT_FOUND
+    );
+    let secret = made["token"].as_str().unwrap().rsplit('.').next().unwrap().to_owned();
+    for bad in [
+        String::from("nonsense"),
+        format!("{}.{}.shr_none.{secret}", t.company, t.project),
+        format!(
+            "{}.{}.{}.{}",
+            t.company,
+            t.project,
+            made["link"]["id"].as_str().unwrap(),
+            "0".repeat(64)
+        ),
+    ] {
+        let body = Some(json!({"token": bad}));
+        assert_eq!(
+            w.status(&t.guest, "POST", "/v1/share-links/redeem", body).await,
+            StatusCode::NOT_FOUND,
+            "{bad}"
+        );
+    }
+    for (days, ok) in [(0, false), (91, false), (90, true)] {
+        let status = w
+            .status(&t.lead, "POST", &links, Some(json!({"expires_in_days": days})))
+            .await;
+        assert_eq!(status.is_success(), ok, "{days} days");
     }
 }
