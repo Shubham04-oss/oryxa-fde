@@ -60,16 +60,18 @@ describe("buffered exec", () => {
     const result = await runBuffered(
       container,
       ExecRequest.parse({ argv: ["sh", "-c", "echo hello"], env: { RUN_ID: "r1" } }),
+      "1001:1001",
     );
     expect(result).toEqual({ exitCode: 3, stdout: "hello\n", stderr: "warn\n", truncated: false, timedOut: false });
     expect(container.execs[0]?.options?.env).toEqual({ RUN_ID: "r1", ...TRUST_ENV });
     expect(container.execs[0]?.options?.cwd).toBe("/workspace");
+    expect(container.execs[0]?.options?.user).toBe("1001:1001");
   });
 
   it("caps each stream", async () => {
     const container = new FakeContainer();
     container.run = () => ({ stdout: "x".repeat(100) });
-    const result = await runBuffered(container, ExecRequest.parse({ argv: ["yes"] }), 10);
+    const result = await runBuffered(container, ExecRequest.parse({ argv: ["yes"] }), "1001:1001", 10);
     expect(result.stdout).toBe("x".repeat(10));
     expect(result.truncated).toBe(true);
   });

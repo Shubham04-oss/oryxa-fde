@@ -6,30 +6,39 @@ prompts for actions on the company's approval list to an approval channel. The r
 the API side are in `crates/oryxa-fde-agent`.
 
 ```
-oryxa-harness [/workspace/.oryxa/context.json]
+oryxa-harness --pack /etc/oryxa/runs/<run>.json --sha256 <hex>
 ```
 
-| Stream | Carries                                                                                                                                                  |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| stdout | Events: `plan`, `message`, `tool_call`, `file_change`, `command`, `approval_request`, then one `result`. Each line has `v: 1` and a `seq` from 0.        |
-| stdin  | Decisions: `{"type":"approval_decision","id":"apr_…","outcome":"approved"\|"rejected"}`. The API writes them through the gateway's `/exec/<exec>/stdin`. |
-| stderr | The SDK's diagnostics. Never parsed.                                                                                                                     |
+The gateway starts it as root (`POST /runs/<run>/harness`). Root is needed for two things only: reading the pack,
+which only root can open, and starting the agent as another user. Right after it starts the SDK's agent process
+as `agent`, the harness drops to its own user `harness` for good (`src/users.ts`). The agent's tool calls, and
+anything they leave running, then cannot open the harness's stdin through `/proc`, read its output or signal it.
+Started as any other user, the harness refuses to run (`not_root`).
 
-The exit code is 0 for `success`, 2 for `rejected` and 1 for `error`. The `result` event carries the outcome.
+| Stream | Carries                                                                                                                                                               |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| stdout | Events: `plan`, `message`, `tool_call`, `file_change`, `command`, `approval_request`, then one `result`. Each line has `v: 1` and a `seq` from 0.                     |
+| stdin  | `{"type":"approval_decision","id":"apr_…","outcome":"approved"\|"rejected"}` and `{"type":"cancel"}`. The API writes them through the gateway's `/exec/<exec>/stdin`. |
+| stderr | Diagnostics, the agent process's included. Never parsed.                                                                                                              |
+
+The exit code is 0 for `success`, 1 for `error`, 2 for `rejected` and 3 for `cancelled`. The `result` event carries
+the outcome.
 
 ## Context pack
 
-The API builds the pack (`oryxa_fde_agent::ContextPack`) and writes it to `/workspace/.oryxa/context.json`
-before the run starts. It holds the task, the agreed scope of work, the success criteria, decisions, conventions
-and the agent config: the Bedrock model, the region, the maximum number of turns and the approval list. The
-harness refuses a pack that does not match the schema, including one whose approval pattern does not compile.
-The project context goes into the system prompt as fenced data, not as instructions.
+The API builds the pack (`oryxa_fde_agent::ContextPack`), and the gateway writes it as root to
+`/etc/oryxa/runs/<run>.json` before the run starts. It holds the task, the agreed scope of work, the success
+criteria, decisions, conventions and the agent config: the Bedrock model, the region, the maximum number of turns
+and the approval list. The harness refuses a pack whose SHA-256 is not the one on its command line, and one that
+does not match the schema, including one whose approval pattern does not compile. It applies the same size limits
+as the API, in bytes (`test/fixtures/pack-limits.json`, checked by both sides' tests). The project context goes
+into the system prompt as fenced data, not as instructions.
 
 ## What the run may do
 
 - **No credentials.** The SDK runs with `CLAUDE_CODE_USE_BEDROCK=1` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`, and
-  its environment is built from an explicit list (`PATH`, `HOME`, locale, the CA variables). Nothing else from
-  the sandbox is inherited. The gateway's outbound handler adds the Bedrock credential to requests for the
+  its environment is built from an explicit list (`PATH`, locale, the CA variables, and `HOME=/home/agent`).
+  Nothing else from the sandbox is inherited. The gateway's outbound handler adds the Bedrock credential to requests for the
   allowed `bedrock-runtime.<region>.amazonaws.com` host, using a Bedrock API key as a bearer token. There is no
   claude.ai login.
 - **No repository settings.** The run passes `settingSources: []`. The SDK otherwise loads `.claude/` settings
@@ -40,7 +49,10 @@ The project context goes into the system prompt as fenced data, not as instructi
   the command or the JSON input) emits `approval_request` and waits. The request carries the tool and its full
   input, so an engineer approves exactly what will run. An input over 256 KiB is refused, never truncated.
   Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. A
-  closed stdin or an aborted run counts as a rejection.
+  closed stdin or an aborted run counts as a rejection. The gateway also holds the hosts behind an approval action
+  until the FDE approves it, so the prompt is not the only gate.
+- **Cancel.** A `cancel` line aborts the SDK, rejects a pending approval and ends the run with `result`
+  `cancelled`, even if the SDK is stuck. The API sends it to cancel a run or at its time limit.
 - **Error text.** An error `result` shows fixed text. The SDK's own messages go to stderr.
 
 ## Develop

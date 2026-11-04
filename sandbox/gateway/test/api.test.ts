@@ -1,3 +1,4 @@
+import { Files } from "@cloudflare/sandbox";
 import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -168,6 +169,146 @@ describe("exec", () => {
     expect(await next()).toEqual({ type: "stdout", data: "bye\n" });
     expect(await next()).toEqual({ type: "exit", code: 0, timedOut: false });
     expect((await api(stdin, { method: "POST", body: "late\n" })).status).toBe(404);
+  });
+
+  it("runs every command the API asks for as agent, never as the image's default user", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    await api("/v1/sandboxes/org_a/cmp_1/exec", post({ argv: ["id"] }));
+    await api("/v1/sandboxes/org_a/cmp_1/exec/stream", post({ argv: ["id"] })).then((r) => r.text());
+    expect(fake.execs.map((e) => e.options?.user)).toEqual(["1001:1001", "1001:1001"]);
+    expect((await api("/v1/sandboxes/org_a/cmp_1/exec", post({ argv: ["id"], user: "0:0" }))).status).toBe(400);
+  });
+});
+
+describe("runs", () => {
+  const SHA = "a".repeat(64);
+  const run = (path: string, init?: RequestInit) => api(`/v1/sandboxes/org_a/cmp_1/runs/run_1/${path}`, init);
+
+  it("write the context pack as root where the agent cannot reach it, and report what is on disk", async () => {
+    await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const pack = '{"v":1}';
+    const write = vi.spyOn(Files.prototype, "writeFile").mockResolvedValue();
+    // What the file holds when read back: here, something else than was sent.
+    const read = vi.spyOn(Files.prototype, "readFile").mockImplementation(async () => new Response('{"v":2}'));
+    const response = await run("context", { method: "PUT", body: pack });
+    expect(response.status).toBe(200);
+    const digest = async (text: string) =>
+      [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    expect(await response.json()).toEqual({ sha256: await digest('{"v":2}') });
+    expect(write).toHaveBeenCalledWith("/etc/oryxa/runs/run_1.json", expect.anything(), { user: "0:0" });
+    expect(read).toHaveBeenCalledWith("/etc/oryxa/runs/run_1.json", { user: "0:0" });
+  });
+
+  it("refuse a pack that is empty, too large, or for a malformed run id", async () => {
+    await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const write = vi.spyOn(Files.prototype, "writeFile").mockResolvedValue();
+    expect((await run("context", { method: "PUT", body: "" })).status).toBe(413);
+    expect((await run("context", { method: "PUT", body: "x".repeat(1024 * 1024 + 1) })).status).toBe(413);
+    for (const id of ["run%2F..%2Fx", "run.1", "x".repeat(129)]) {
+      const response = await api(`/v1/sandboxes/org_a/cmp_1/runs/${id}/context`, { method: "PUT", body: "{}" });
+      expect(response.status, id).toBe(400);
+    }
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("start the harness as root, on the pack's path and digest, with stdin for decisions", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const response = await run("harness", post({ sha256: SHA, timeoutMs: 60_000 }));
+    expect(response.headers.get("content-type")).toBe("application/x-ndjson");
+    const started = await lineReader(response)();
+    expect(started).toMatchObject({ type: "started" });
+    expect(fake.execs).toHaveLength(1);
+    const [exec] = fake.execs;
+    expect(exec?.argv).toEqual([
+      "/usr/local/bin/oryxa-harness",
+      "--pack",
+      "/etc/oryxa/runs/run_1.json",
+      "--sha256",
+      SHA,
+    ]);
+    expect(exec?.options).toMatchObject({
+      user: "0:0",
+      stdin: "pipe",
+      cwd: "/workspace",
+      env: { HOME: "/home/harness" },
+    });
+    const stdin = `/v1/sandboxes/org_a/cmp_1/exec/${started.exec}/stdin`;
+    expect((await api(stdin, { method: "POST", body: "bye\n" })).status).toBe(204);
+  });
+
+  it("refuse a harness start without a well-formed digest and time limit", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    for (const body of [
+      { sha256: SHA },
+      { sha256: SHA.toUpperCase(), timeoutMs: 60_000 },
+      { sha256: "a".repeat(63), timeoutMs: 60_000 },
+      { sha256: SHA, timeoutMs: 60_000, argv: ["sh"] },
+    ]) {
+      expect((await run("harness", post(body))).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(fake.execs).toEqual([]);
+  });
+});
+
+describe("approval grants", () => {
+  const deployPolicy = { hosts: [{ host: "api.cloudflare.com", approval: "deploy" }] };
+  const grant = (tenant: string, init: RequestInit) => api(`/v1/sandboxes/${tenant}/cmp_1/grants/deploy`, init);
+
+  async function setUp() {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("ok"));
+    const fakeA = await attachFake("org_a", "cmp_1");
+    const fakeB = await attachFake("org_b", "cmp_1");
+    for (const tenant of ["org_a", "org_b"]) {
+      await api(`/v1/sandboxes/${tenant}/cmp_1/outbound-policy`, json(deployPolicy));
+      await api(`/v1/sandboxes/${tenant}/cmp_1/start`, post());
+    }
+    return {
+      fromA: () => viaIntercept("org_a:cmp_1", fakeA, "https://api.cloudflare.com/client/v4/accounts"),
+      fromB: () => viaIntercept("org_b:cmp_1", fakeB, "https://api.cloudflare.com/client/v4/accounts"),
+    };
+  }
+
+  it("open an approved action's hosts for that company until closed", async () => {
+    const { fromA, fromB } = await setUp();
+    expect((await fromA()).status).toBe(403);
+    const opened = await grant("org_a", json({ approval: "apr_1" }));
+    expect(await opened.json()).toMatchObject({ action: "deploy", approval: "apr_1" });
+    expect((await fromA()).status).toBe(200);
+    // Another company's sandbox stays closed.
+    expect((await fromB()).status).toBe(403);
+    expect((await grant("org_a", { method: "DELETE" })).status).toBe(204);
+    expect((await fromA()).status).toBe(403);
+  });
+
+  it("close when the grant expires or the sandbox stops", async () => {
+    const { fromA } = await setUp();
+    await grant("org_a", json({ approval: "apr_1", ttlMs: 1_000 }));
+    expect((await fromA()).status).toBe(200);
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 1_001);
+    expect((await fromA()).status).toBe(403);
+    vi.spyOn(Date, "now").mockReturnValue(now);
+
+    await grant("org_a", json({ approval: "apr_2" }));
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await runInDurableObject(env.SANDBOX.getByName("org_a:cmp_1"), (sandbox: CompanySandbox) => {
+      expect(sandbox.grantOpen("deploy")).toBe(false);
+    });
+  });
+
+  it("refuse malformed grants", async () => {
+    await setUp();
+    for (const body of [{}, { approval: "a b" }, { approval: "apr_1", ttlMs: 2 * 60 * 60 * 1_000 }]) {
+      expect((await grant("org_a", json(body))).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await api("/v1/sandboxes/org_a/cmp_1/grants/de%20ploy", json({ approval: "apr_1" }))).status).toBe(400);
   });
 });
 

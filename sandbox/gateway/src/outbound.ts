@@ -14,6 +14,8 @@ export interface OutboundProps {
 
 export interface OutboundDeps {
   policy(): Promise<OutboundPolicy>;
+  /** Whether an FDE's approval currently opens the hosts held for `action`. */
+  approved(action: string): Promise<boolean>;
   secrets: SecretResolver;
   upstream(request: Request): Promise<Response>;
   log(entry: Record<string, unknown>): void;
@@ -29,6 +31,7 @@ export class Outbound extends WorkerEntrypoint<Env, OutboundProps> {
     const sandbox = this.env.SANDBOX.getByName(sandboxName(scope));
     return handleOutbound(request, scope, {
       policy: () => sandbox.outboundPolicy(),
+      approved: (action) => sandbox.grantOpen(action),
       secrets: resolverFor(this.env),
       upstream: (r) => fetch(r),
       log: (entry) => console.log(entry),
@@ -56,6 +59,16 @@ export async function handleOutbound(request: Request, scope: CompanyScope, deps
   }
   const rule = ruleFor(policy, url.hostname);
   if (rule === undefined) return deny(403, "not_allowed", `${url.hostname} is not on this company's allowlist`);
+  if (rule.approval !== undefined) {
+    // Checked before any secret is resolved; an unreadable grant counts as no approval.
+    let approved = false;
+    try {
+      approved = await deps.approved(rule.approval);
+    } catch {
+      approved = false;
+    }
+    if (!approved) return deny(403, "approval_required", `${url.hostname} needs an engineer's approval first`);
+  }
 
   const headers = new Headers(request.headers);
   headers.delete("host");

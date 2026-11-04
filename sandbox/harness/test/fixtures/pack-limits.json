@@ -1,0 +1,8 @@
+{
+  "max_pack_bytes": 1048576,
+  "max_text_bytes": 65536,
+  "max_items": 200,
+  "max_approval_rules": 64,
+  "max_pattern_bytes": 512,
+  "max_token_bytes": 128
+}

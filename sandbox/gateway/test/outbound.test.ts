@@ -38,6 +38,7 @@ function deps(overrides: Partial<OutboundDeps> = {}) {
   const { seen, upstream } = echoUpstream();
   const d: OutboundDeps = {
     policy: async () => githubPolicy,
+    approved: async () => false,
     secrets,
     upstream,
     log: (entry) => logs.push(entry),
@@ -166,6 +167,58 @@ describe("outbound handler", () => {
     expect(resolve).toHaveBeenCalledWith(B, "github");
     expect(resolve).not.toHaveBeenCalledWith(A, expect.anything());
     expect(seen[0]?.headers.get("authorization")).toBe(`Bearer ${SECRET_B}`);
+  });
+});
+
+describe("hosts held for an approval", () => {
+  const deployPolicy = OutboundPolicy.parse({
+    hosts: [
+      {
+        host: "api.cloudflare.com",
+        approval: "deploy",
+        inject: [{ header: "authorization", secret: "cloudflare", prefix: "Bearer " }],
+      },
+      { host: "hooks.slack.com", approval: "customer_send" },
+      { host: "registry.npmjs.org" },
+    ],
+  });
+  const resolve = vi.fn(async () => "sample-cloudflare-token");
+
+  it("refuse the request until an FDE approved the action, before any secret is resolved", async () => {
+    resolve.mockClear();
+    const { d, upstream, logs } = deps({ policy: async () => deployPolicy, secrets: { resolve } });
+    for (const url of ["https://api.cloudflare.com/client/v4/accounts", "https://hooks.slack.com/services/x"]) {
+      const response = await send(A, url, d, { method: "POST", body: "{}" });
+      expect(response.status, url).toBe(403);
+    }
+    expect(upstream).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "outbound.denied", reason: "approval_required" }));
+    // Hosts without an approval are unaffected.
+    expect((await send(A, "https://registry.npmjs.org/zod", d)).status).toBe(200);
+  });
+
+  it("pass the request once the action is approved, for that action only", async () => {
+    const approved = vi.fn(async (action: string) => action === "deploy");
+    const { d, upstream } = deps({ policy: async () => deployPolicy, secrets: { resolve }, approved });
+    expect((await send(A, "https://api.cloudflare.com/client/v4/accounts", d)).status).toBe(200);
+    expect(approved).toHaveBeenCalledWith("deploy");
+    expect((await send(A, "https://hooks.slack.com/services/x", d, { method: "POST", body: "{}" })).status).toBe(403);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it("fail closed when the approval cannot be checked", async () => {
+    const broken = [
+      () => Promise.reject(new Error("storage down")),
+      () => {
+        throw new Error("rpc failed");
+      },
+    ];
+    for (const approved of broken) {
+      const { d, upstream } = deps({ policy: async () => deployPolicy, approved });
+      expect((await send(A, "https://hooks.slack.com/services/x", d)).status).toBe(403);
+      expect(upstream).not.toHaveBeenCalled();
+    }
   });
 });
 

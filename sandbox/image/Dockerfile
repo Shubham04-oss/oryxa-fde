@@ -1,8 +1,10 @@
 # The sandbox base image: the harness, Git and common build tools. Build context: sandbox/
 #   docker build --platform linux/amd64 -f sandbox/image/Dockerfile sandbox
 # The gateway's wrangler.jsonc builds it the same way. sandbox-shim is linux/amd64 only.
-ARG NODE_IMAGE=node:24-trixie
-ARG SANDBOX_SHIM_IMAGE=docker.io/cloudflare/sandbox:1.0.3
+# Pinned by digest: a moved tag cannot change what runs in a customer's sandbox. To update, resolve the new tag's
+# digest (docker buildx imagetools inspect <image>:<tag>) and replace both parts.
+ARG NODE_IMAGE=node:24-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19
+ARG SANDBOX_SHIM_IMAGE=docker.io/cloudflare/sandbox:1.0.3@sha256:fc1740c3cba26461f0ab1771287c84018ab2cca43a70ebb823087c85d780aaec
 
 FROM ${SANDBOX_SHIM_IMAGE} AS shim
 
@@ -21,12 +23,21 @@ COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=harness /build/package.json /opt/oryxa-harness/package.json
 COPY --from=harness /build/node_modules /opt/oryxa-harness/node_modules
 COPY --from=harness /build/dist /opt/oryxa-harness/dist
-RUN chmod +x /opt/oryxa-harness/dist/main.js \
+COPY image/egress-check.mjs /usr/local/bin/oryxa-egress-check
+# Two users, ids fixed because the gateway and the harness name them (sandbox/harness/src/users.ts):
+# - agent (1001) runs the agent and every command it starts, and owns /workspace;
+# - harness (1002) is what the harness becomes after it starts the agent, so the agent cannot open its stdin.
+# Context packs live in a directory only root can open; the gateway writes them as root.
+RUN chmod +x /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-egress-check \
   && ln -s /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-harness \
-  && useradd --create-home --uid 1001 --shell /bin/bash agent \
-  && mkdir -p /workspace/.oryxa \
-  && chown -R agent:agent /workspace
-# The agent never runs as root. HTTPS trusts the ephemeral CA that the gateway points every command at.
+  && useradd --create-home --uid 1001 --user-group --shell /bin/bash agent \
+  && useradd --create-home --uid 1002 --user-group --shell /usr/sbin/nologin harness \
+  && chmod 700 /home/harness \
+  && mkdir -p /workspace /etc/oryxa/runs \
+  && chown agent:agent /workspace \
+  && chmod 700 /etc/oryxa/runs
+# The image's default user is agent; the gateway still names the user on every exec. HTTPS trusts the ephemeral CA
+# that the gateway points every command at.
 USER agent
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const WORKSPACE = "/workspace";
 const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
-const MAX_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+export const MAX_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
 export const MAX_BUFFERED_OUTPUT = 1024 * 1024;
 
 // HTTPS leaves only through the outbound handler, which re-signs it with this ephemeral CA, and exec() does not
@@ -71,10 +71,12 @@ export interface ExecResult {
 
 export type ExecContainer = Pick<Container, "exec">;
 
-export function execOptions(req: ExecRequest, signal: AbortSignal, stdin: boolean): ContainerExecOptions {
+/** `user` is `uid:gid`, always set: the image's default user is never relied on. */
+export function execOptions(req: ExecRequest, signal: AbortSignal, stdin: boolean, user: string): ContainerExecOptions {
   return {
     cwd: req.cwd,
     env: { ...req.env, ...TRUST_ENV },
+    user,
     signal,
     stdout: "pipe",
     stderr: "pipe",
@@ -86,13 +88,14 @@ export function execOptions(req: ExecRequest, signal: AbortSignal, stdin: boolea
 export async function runBuffered(
   container: ExecContainer,
   req: ExecRequest,
+  user: string,
   maxBytes = MAX_BUFFERED_OUTPUT,
 ): Promise<ExecResult> {
   // Not AbortSignal.timeout(): it stays armed after the command exits. Clear the timer instead.
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), req.timeoutMs);
   try {
-    const process = await container.exec(req.argv, execOptions(req, abort.signal, false));
+    const process = await container.exec(req.argv, execOptions(req, abort.signal, false, user));
     const [stdout, stderr, exitCode] = await Promise.all([
       collect(process.stdout, maxBytes),
       collect(process.stderr, maxBytes),
