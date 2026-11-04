@@ -1,6 +1,6 @@
 //! Access requests on a project: what access is needed, to which system, who at the customer owns
 //! it, its status and how long it has been waiting. A status change queues
-//! `access_request.status_changed`.
+//! `access-request.status-changed`.
 
 use oryxa_fde_core::{AccessRequestId, StakeholderId, SystemId};
 use oryxa_fde_events::{AccessRequestStatusChanged, AccessStatus};
@@ -130,7 +130,7 @@ impl ProjectTx {
     }
 
     /// Replaces the request's fields. A status change stamps the time, sets or clears
-    /// `granted_at` and queues `access_request.status_changed`. `None` if there is no such request.
+    /// `granted_at` and queues `access-request.status-changed`. `None` if there is no such request.
     pub async fn update_access_request(
         &mut self,
         id: &AccessRequestId,

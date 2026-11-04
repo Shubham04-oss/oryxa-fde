@@ -138,7 +138,7 @@ impl ProjectTx {
         project(row).map(Some)
     }
 
-    /// Moves the project to `to` through [`Stage::transition`] and queues `project.stage_changed`.
+    /// Moves the project to `to` through [`Stage::transition`] and queues `project.stage-changed`.
     /// `None` if the project is not in this company.
     pub async fn change_stage(&mut self, to: Stage, by: &Actor) -> Result<Option<Project>, StoreError> {
         let s = &self.scope;

@@ -457,7 +457,7 @@ async fn stage_changes_write_their_event_in_the_same_transaction() {
     use oryxa_fde_core::{Stage, StageError};
     let store = store().await;
     let (t, p) = project_world(&store).await;
-    let changed = "fde.project.stage_changed.v1";
+    let changed = "fde.project.stage-changed.v1";
 
     // Rolled back: the stage and the event both stay as they were.
     let mut tx = store.project(&p).await.unwrap();
@@ -497,7 +497,7 @@ async fn stage_changes_write_their_event_in_the_same_transaction() {
 async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transaction() {
     let store = store().await;
     let (t, p) = project_world(&store).await;
-    let signed = "fde.scope.signed_off.v1";
+    let signed = "fde.scope.signed-off.v1";
     let sam = add_stakeholder(&store, &p.company).await;
     let by = actor("alice");
 
@@ -586,7 +586,7 @@ async fn access_status_changes_write_their_event_in_the_same_transaction() {
     use oryxa_fde_events::AccessStatus;
     let store = store().await;
     let (t, p) = project_world(&store).await;
-    let changed = "fde.access_request.status_changed.v1";
+    let changed = "fde.access-request.status-changed.v1";
     let owner = add_stakeholder(&store, &p.company).await;
     let by = actor("alice");
     let id = oryxa_fde_core::AccessRequestId::new(new_id("acc")).unwrap();

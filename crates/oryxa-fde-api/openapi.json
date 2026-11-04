@@ -777,7 +777,7 @@
         "tags": [
           "lifecycle"
         ],
-        "summary": "Replace an access request; a status change is published as `access_request.status_changed`.",
+        "summary": "Replace an access request; a status change is published as `access-request.status-changed`.",
         "operationId": "update_access_request",
         "parameters": [
           {

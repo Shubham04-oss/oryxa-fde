@@ -652,7 +652,7 @@ pub(crate) async fn add_access_request(
     Ok((StatusCode::CREATED, Json(added.into())))
 }
 
-/// Replace an access request; a status change is published as `access_request.status_changed`.
+/// Replace an access request; a status change is published as `access-request.status-changed`.
 #[utoipa::path(put, operation_id = "update_access_request",
     path = "/v1/companies/{company}/projects/{project}/access-requests/{access_request}", tag = "lifecycle",
     request_body = AccessRequestBody,

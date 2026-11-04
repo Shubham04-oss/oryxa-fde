@@ -989,11 +989,11 @@ async fn lifecycle_records_end_to_end() {
         [
             "fde.company.created.v1",
             "fde.project.created.v1",
-            "fde.scope.signed_off.v1",
-            "fde.project.stage_changed.v1",
-            "fde.project.stage_changed.v1",
-            "fde.scope.signed_off.v1",
-            "fde.access_request.status_changed.v1",
+            "fde.scope.signed-off.v1",
+            "fde.project.stage-changed.v1",
+            "fde.project.stage-changed.v1",
+            "fde.scope.signed-off.v1",
+            "fde.access-request.status-changed.v1",
         ]
     );
 }

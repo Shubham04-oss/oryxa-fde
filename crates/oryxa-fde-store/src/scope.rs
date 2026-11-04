@@ -1,6 +1,6 @@
 //! A project's scope: in-scope and out-of-scope items, success criteria with measurable targets,
 //! a change log and the customer's sign-off. Every change bumps the scope version; a sign-off pins
-//! the version the customer agreed to and queues `scope.signed_off`.
+//! the version the customer agreed to and queues `scope.signed-off`.
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{CriterionId, ScopeItemId, StakeholderId};
@@ -354,7 +354,7 @@ impl ProjectTx {
     }
 
     /// Records that `stakeholder` (a person at the customer) signed off the current scope version,
-    /// and queues `scope.signed_off`. `None` if the project is not in this company.
+    /// and queues `scope.signed-off`. `None` if the project is not in this company.
     pub async fn sign_off(&mut self, stakeholder: &StakeholderId, by: &Actor) -> Result<Option<SignOff>, StoreError> {
         let (t, c, p) = self.keys();
         let version: Option<i32> = sqlx::query_scalar(
