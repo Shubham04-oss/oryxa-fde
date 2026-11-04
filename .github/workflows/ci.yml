@@ -136,6 +136,8 @@ jobs:
     env:
       TOFU_URL: https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip
       TOFU_SHA256: 5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8
+      ACTIONLINT_URL: https://github.com/rhysd/actionlint/releases/download/v1.7.8/actionlint_1.7.8_linux_amd64.tar.gz
+      ACTIONLINT_SHA256: be92c2652ab7b6d08425428797ceabeb16e31a781c07bc388456b4e592f3e36a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install OpenTofu
@@ -159,3 +161,10 @@ jobs:
       # Plans the environment and each module on mock providers and asserts the security rules.
       - run: tofu -chdir=infra/envs/dev test
       - run: shellcheck infra/scripts/*.sh
+      # Every workflow, with shellcheck over their run scripts.
+      - name: actionlint
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" "$ACTIONLINT_URL"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint"

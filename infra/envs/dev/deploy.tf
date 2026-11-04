@@ -1,6 +1,7 @@
 # Deploys from GitHub Actions (.github/workflows/deploy-api.yml) with OIDC: no AWS key exists
-# anywhere. The role trusts only this repository's jobs that run in the GitHub environment named
-# after var.env, and may only push the API image, run the migrate task and update the API service.
+# anywhere. The role trusts only that workflow, run from main, in the GitHub environment named after
+# var.env, and may only push the API image, run the migrate task and update the API service.
+# deploy-workers needs no AWS access, so it cannot assume the role.
 
 # One GitHub OIDC provider per account. Pass github_oidc_provider_arn when the account already has one.
 resource "aws_iam_openid_connect_provider" "github" {
@@ -33,6 +34,13 @@ data "aws_iam_policy_document" "github_deploy_assume" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values   = ["repo:${var.github_repository}:environment:${var.env}"]
+    }
+    # And only the deploy workflow as it is on main, so no other workflow or branch gets in, even
+    # before the environment's branch rule exists. STS validates this GitHub claim directly.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:job_workflow_ref"
+      values   = ["${var.github_repository}/.github/workflows/deploy-api.yml@refs/heads/main"]
     }
   }
 }

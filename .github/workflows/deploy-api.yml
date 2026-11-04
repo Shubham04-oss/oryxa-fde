@@ -17,23 +17,30 @@ env:
 
 jobs:
   build:
-    # Heavy Rust job (docs/ci.md): native on the ARM64 oryxa-a1 runners, cross-compiled on hosted x64 ones.
-    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
+    # A release build: only on a clean GitHub-hosted runner, with no sccache, no restored cache and a
+    # fresh CARGO_HOME (docs/ci.md). The a1 runners share CARGO_HOME and sccache with every PR's CI.
+    # Only main deploys; the deploy role trusts this workflow on main only.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: ./.github/actions/rust-cache
-      - name: Cross toolchain (x64 runners only)
-        if: runner.arch == 'X64'
+          persist-credentials: false
+      # The exact toolchain rust-toolchain.toml pins, plus the ARM64 target.
+      - run: rustup toolchain install && rustup target add "$TARGET"
+      # The runners are x64: cross-compile with the distribution's aarch64 gcc.
+      - name: Cross toolchain
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       # The service and the one-off operations (migrations) ship in one image.
-      - run: cargo build --release --locked -p oryxa-fde-api --bin oryxa-fde-api --bin oryxa-fde-ops --target "$TARGET"
+      - name: Build
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo # fresh: every crate comes from the registry for this build
+          RUSTC_WRAPPER: "" # no sccache
+        run: cargo build --release --locked -p oryxa-fde-api --bin oryxa-fde-api --bin oryxa-fde-ops --target "$TARGET"
       # The image's base is Debian 13 (glibc 2.41): refuse a binary that would not start on it.
       - name: Check the glibc the binaries need
         run: |
@@ -65,6 +72,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: infra/docker
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: oryxa-fde-api

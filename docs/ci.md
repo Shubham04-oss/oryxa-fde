@@ -6,6 +6,11 @@
 | --- | --- |
 | Heavy Rust jobs (`check`, `platform-base`, anything that compiles the workspace) | oryxa-a1 when the repository variable `A1_RUNNERS` is `true`, GitHub-hosted otherwise |
 | Light jobs (`deny`, `sandbox`, schema and OpenTofu validation, the web app) | Always GitHub-hosted |
+| Release and deploy builds (`deploy-api`'s `build`) | Always GitHub-hosted, with no sccache, no restored cache and a fresh `CARGO_HOME` |
+
+Release and deploy builds never run on a1 or use shared caches. An a1 runner keeps one `CARGO_HOME`
+and sccache store for every PR's CI, so a PR could plant a tampered crate there for the next deploy
+to ship. A release build compiles everything from the registry on a clean hosted runner instead.
 
 Heavy jobs use this expression, so one variable moves them between a1 and GitHub-hosted:
 

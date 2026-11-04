@@ -157,8 +157,8 @@ run "only_the_migrate_task_connects_as_the_table_owner" {
   }
 }
 
-# GitHub deploys (#31): only this repository's jobs in the dev environment may assume the deploy
-# role, and it may only push the API image, run the migrate task and update the API service.
+# GitHub deploys (#31): only deploy-api.yml on main, in this repository's dev environment, may assume
+# the deploy role, and it may only push the API image, run the migrate task and update the API service.
 run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
   command = plan
 
@@ -167,10 +167,11 @@ run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
       for c in one(data.aws_iam_policy_document.github_deploy_assume.statement).condition :
       c.variable => "${c.test} ${join(" ", c.values)}"
       } == {
-      "token.actions.githubusercontent.com:aud" = "StringEquals sts.amazonaws.com"
-      "token.actions.githubusercontent.com:sub" = "StringEquals repo:Shubham04-oss/oryxa-fde:environment:dev"
+      "token.actions.githubusercontent.com:aud"              = "StringEquals sts.amazonaws.com"
+      "token.actions.githubusercontent.com:sub"              = "StringEquals repo:Shubham04-oss/oryxa-fde:environment:dev"
+      "token.actions.githubusercontent.com:job_workflow_ref" = "StringEquals Shubham04-oss/oryxa-fde/.github/workflows/deploy-api.yml@refs/heads/main"
     }
-    error_message = "the deploy role trusts exactly this repository's dev environment, with no wildcard"
+    error_message = "the deploy role trusts exactly deploy-api.yml on main in this repository's dev environment, with no wildcard"
   }
   assert {
     condition     = length(aws_iam_openid_connect_provider.github) == 1

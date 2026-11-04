@@ -1,0 +1,5 @@
+# One exact Rust toolchain for CI, the deploy build and local work. Bump it on purpose, in its own PR.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

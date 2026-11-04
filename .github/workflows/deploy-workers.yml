@@ -1,7 +1,8 @@
 name: deploy-workers
 # Deploys the Cloudflare Workers with Wrangler: the sandbox gateway and realtime/ first (fde-web may
-# bind their Durable Objects), then fde-web. Manual and dev only. The Cloudflare API token and the
-# dev values come from the `dev` environment, never the repository. Setup: infra/README.md, Deploys.
+# bind their Durable Objects), then fde-web. Manual, main only, dev only. The Cloudflare API token is
+# a `dev` environment secret that only the deploy steps see; installs and builds never get it.
+# Setup: infra/README.md, Deploys.
 on:
   workflow_dispatch:
 permissions:
@@ -12,6 +13,8 @@ concurrency:
 
 jobs:
   workers:
+    # Only main deploys (the dev environment allows main only, too).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
     strategy:
@@ -20,6 +23,8 @@ jobs:
         package: [sandbox/gateway, realtime]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # A Worker that has not landed yet (realtime/) is skipped.
       - id: present
         run: echo "yes=$([ -f '${{ matrix.package }}/package.json' ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -29,17 +34,22 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: ${{ matrix.package }}/package-lock.json
-      # Lockfile-exact install; wrangler comes from the package's own devDependencies. The gateway's
-      # container image is built here by Docker and pushed to Cloudflare's registry.
+      # Lockfile-exact install with no install scripts, and without the Cloudflare token.
+      - if: steps.present.outputs.yes == 'true'
+        working-directory: ${{ matrix.package }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      # Only this step sees the token. wrangler comes from the package's own devDependencies; the
+      # gateway's container image is built here by Docker and pushed to Cloudflare's registry.
       - if: steps.present.outputs.yes == 'true'
         working-directory: ${{ matrix.package }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: npm ci --no-audit --no-fund && npx wrangler deploy
+        run: npx wrangler deploy
 
   web:
     needs: workers
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
     defaults:
@@ -47,6 +57,8 @@ jobs:
         working-directory: fde-web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # setup-node's pnpm cache asks pnpm where its store is, so pnpm comes first, at the version package.json pins.
       - run: npm install -g pnpm@12.4.2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
