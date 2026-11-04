@@ -3,7 +3,9 @@
 -- (src/runs.rs); a run's end, its use and its agent-run.finished event commit together.
 --
 -- Runs are driven by whichever API task started them. That task keeps `alive_until` ahead of now while it lives;
--- a run's budget reservation counts only while it does, and its sandbox lease lapses with it.
+-- a run's budget reservation counts only while it does, and its sandbox lease lapses with it. A run whose task
+-- stopped (a deploy) is ended by any API task's sweep once `alive_until` has passed; a new run gets a minute before
+-- its driver first renews it.
 --
 -- `state` is the agent's run state machine as oryxa-fde-agent serialises it; the other columns are what lists,
 -- decisions, cancels and budgets need. A run, its approvals and its events always belong to a project of its
@@ -27,7 +29,7 @@ create table agent_runs (
     output_tokens    bigint not null default 0 check (output_tokens >= 0),
     delivery         jsonb not null,
     cancel_requested boolean not null default false,
-    alive_until      timestamptz not null default now(),
+    alive_until      timestamptz not null default now() + interval '1 minute',
     -- What the run may use, held against the project's budget from its start until it ends.
     reserved_seconds    bigint not null default 0 check (reserved_seconds >= 0),
     reserved_usd_micros bigint not null default 0 check (reserved_usd_micros >= 0),
@@ -36,6 +38,7 @@ create table agent_runs (
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)
 );
 create index agent_runs_by_project on agent_runs (tenant_id, project_id, created_at desc);
+create index agent_runs_unended on agent_runs (alive_until) where ended_at is null;
 
 -- The harness's event lines, in order; a replayed line is the same row. JSON as text: jsonb refuses \u0000,
 -- which agent output can hold.
@@ -114,6 +117,12 @@ create policy in_scope on agent_run_events to oryxa_fde_app using (fde_in_scope(
 create policy in_scope on agent_approvals to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on agent_budgets to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on agent_sandbox_leases to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
+
+-- The sweep finds runs whose API task stopped in any tenant, as the relay (0003): their ids only, and only once
+-- their `alive_until` has passed. It then ends each in a transaction scoped to its project, as oryxa_fde_app.
+create policy sweep_lapsed on agent_runs for select to oryxa_fde_relay
+    using (ended_at is null and alive_until < now());
+grant select (tenant_id, company_id, project_id, run_id, ended_at, alive_until) on agent_runs to oryxa_fde_relay;
 
 -- The runtime login reaches these only through oryxa_fde_app (0003). Nothing is deleted: a run's record stays.
 -- Updates are limited to the columns that change after a row is written.

@@ -42,6 +42,10 @@ from the image. Only the two run routes use root:
   digest differs, starts the agent as `agent` and then drops to its own user `harness` (uid 1002). The agent's
   processes then cannot open the harness's stdin, where approval decisions and cancellation arrive, through
   `/proc`, and cannot read its output or signal it.
+- **One harness at a time.** A harness start is refused (`409`) from an earlier harness's start until its process
+  exits or the sandbox stops, even if nobody reads its output any more (its API task is gone). If this object
+  restarts meanwhile, the exit is never seen, so the sandbox must be stopped first. The API destroys the container
+  before every run anyway.
 
 ## Outbound policy
 

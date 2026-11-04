@@ -43,8 +43,9 @@ const Input = z.discriminatedUnion("type", [
 /**
  * Decisions and cancellation arrive on stdin, one JSON line each, written by the API through the gateway. Only the
  * API can write there: the harness runs as its own user (see `agentSpawner`), so the agent's processes cannot open
- * its stdin through `/proc`. Fails closed: a closed stdin or an aborted request is a rejection, and lines that do
- * not parse are ignored.
+ * its stdin through `/proc`. Fails closed: an aborted request is a rejection, and lines that do not parse are
+ * ignored. A closed stdin rejects and cancels: the gateway closes it when the API task that drove the run is gone
+ * (a deploy), and a run nobody can approve or cancel any more must not go on.
  */
 export class StdioApprovals implements ApprovalChannel {
   readonly #pending = new Map<string, (outcome: ApprovalOutcome) => void>();
@@ -58,6 +59,7 @@ export class StdioApprovals implements ApprovalChannel {
       this.#closed = true;
       for (const resolve of this.#pending.values()) resolve("rejected");
       this.#pending.clear();
+      this.#cancel.abort();
     });
   }
 

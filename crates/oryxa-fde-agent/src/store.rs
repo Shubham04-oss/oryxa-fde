@@ -190,6 +190,16 @@ pub trait RunStore: Send + Sync + 'static {
         default: Budget,
         max_run: Duration,
     ) -> impl Future<Output = Result<Option<Remaining>, StoreError>> + Send;
+    /// Unended runs in any tenant whose driver stopped renewing them (its API task stopped), oldest lapse first.
+    fn lapsed(&self, limit: u32) -> impl Future<Output = Result<Vec<(ProjectScope, AgentRunId)>, StoreError>> + Send;
+    /// Ends such a run as `run` says, counting its time up to when it was last kept alive and `usd_micros`, and
+    /// enqueues `agent-run.finished` with `outcome`, all or nothing. `false` if it has ended or is driven again.
+    fn settle_lapsed(
+        &self,
+        run: &RunRecord,
+        usd_micros: u64,
+        outcome: RunOutcome,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
     /// Saves the ended run, adds its use to the project's spend, lets go of the sandbox and enqueues
     /// `agent-run.finished` with `outcome`, all or nothing. A run that has already ended is left as it is.
     fn finish(
@@ -199,6 +209,9 @@ pub trait RunStore: Send + Sync + 'static {
         outcome: RunOutcome,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
+
+/// How long a new run counts as driven before its driver first renews it.
+pub const NEW_RUN_GRACE: Duration = Duration::from_secs(60);
 
 /// What a live run holds back from the budget: what is left, its seconds capped at the longest a run may take.
 pub fn reservation(left: Remaining, max_run: Duration) -> Spend {
@@ -216,6 +229,7 @@ struct Entry {
     cancel: bool,
     alive_until: Instant,
     reserved: Spend,
+    started: Option<Instant>,
 }
 
 impl Entry {
@@ -275,8 +289,9 @@ impl RunStore for InMemoryRuns {
                 events: Vec::new(),
                 approvals: Vec::new(),
                 cancel: false,
-                alive_until: Instant::now(),
+                alive_until: Instant::now() + NEW_RUN_GRACE,
                 reserved: Spend::default(),
+                started: None,
             },
         );
         Ok(())
@@ -304,6 +319,9 @@ impl RunStore for InMemoryRuns {
             // An ended run is never changed.
             if e.record.ended_at.is_some() {
                 return Err(StoreError::NotFound);
+            }
+            if run.started_at.is_some() && e.started.is_none() {
+                e.started = Some(Instant::now());
             }
             e.record = run.clone();
             Ok(())
@@ -447,6 +465,49 @@ impl RunStore for InMemoryRuns {
             entry.reserved = reservation(left, max_run);
         }
         Ok(left)
+    }
+
+    async fn lapsed(&self, limit: u32) -> Result<Vec<(ProjectScope, AgentRunId)>, StoreError> {
+        let inner = self.lock();
+        let now = Instant::now();
+        let mut lapsed: Vec<_> = inner
+            .runs
+            .iter()
+            .filter(|(_, e)| e.record.ended_at.is_none() && e.alive_until <= now)
+            .map(|(key, e)| (e.alive_until, key.clone()))
+            .collect();
+        lapsed.sort_by_key(|(until, _)| *until);
+        Ok(lapsed.into_iter().take(limit as usize).map(|(_, key)| key).collect())
+    }
+
+    async fn settle_lapsed(&self, run: &RunRecord, usd_micros: u64, outcome: RunOutcome) -> Result<bool, StoreError> {
+        let mut inner = self.lock();
+        let (scope, id) = key(run);
+        let Some(entry) = inner.runs.get_mut(&(scope.clone(), id.clone())) else {
+            return Err(StoreError::NotFound);
+        };
+        if entry.record.ended_at.is_some() || entry.alive_until > Instant::now() {
+            return Ok(false);
+        }
+        let seconds = entry
+            .started
+            .map_or(Duration::ZERO, |s| entry.alive_until.saturating_duration_since(s));
+        entry.record = run.clone();
+        let used = Spend {
+            seconds: seconds.as_secs(),
+            usd_micros,
+        };
+        if inner
+            .leases
+            .get(&scope.company)
+            .is_some_and(|(holder, _)| holder == &id)
+        {
+            inner.leases.remove(&scope.company);
+        }
+        let total = inner.spend.entry(scope.clone()).or_default();
+        *total = total.plus(used);
+        inner.outbox.push(AgentRunFinished::new(&scope, id, outcome));
+        Ok(true)
     }
 
     async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {

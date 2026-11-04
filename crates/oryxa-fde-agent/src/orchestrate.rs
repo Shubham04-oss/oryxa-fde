@@ -2,9 +2,11 @@
 //! single order (as `AgentRun` requires):
 //!
 //! 1. Wait for the company's sandbox (one run at a time, across API tasks), then reserve the run's part of the
-//!    project's budget. A heartbeat keeps both until the run's end is recorded.
-//! 2. Build the context pack, start the sandbox, check out the repository, write the pack and check the digest
-//!    read back, then start the harness on it.
+//!    project's budget. A heartbeat keeps both until the run's end is recorded. A run that loses its hold on the
+//!    sandbox (the store refuses a renewal, or cannot be reached before the hold lapses) destroys the sandbox and
+//!    ends, since another run may already have been given it.
+//! 2. Build the context pack, destroy whatever container the sandbox still has and start a fresh one, check out the
+//!    repository, write the pack and check the digest read back, then start the harness on it.
 //! 3. Apply the harness's lines; store the transcript and approval requests, and stream lines live. Decisions and
 //!    cancels arrive through the store. The run stops at its time limit or when its budget runs out.
 //! 4. Put a finished run's work on a branch with a draft pull request, then record the end and its
@@ -12,6 +14,8 @@
 //!
 //! Everything fails closed: a store, gateway or digest failure stops the run; a harness that does not stop when
 //! told to, a grant that does not close, or a lost hold on the sandbox has the sandbox destroyed.
+//!
+//! A run whose API task stops (a deploy) is ended by [`sweep`] on any task once its heartbeat has lapsed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -35,6 +39,9 @@ use crate::service::{Deps, Remaining, Runs};
 use crate::store::{ApprovalRecord, RunRecord, RunStore, Spend};
 
 const LIVE_QUEUE: usize = 1024;
+const SWEEP_BATCH: u32 = 100;
+/// A sandbox that will not stop is asked this many times, waiting a poll interval, then twice that, between.
+const STOP_ATTEMPTS: u32 = 3;
 const LIVE_BATCH: usize = 100;
 
 pub(crate) async fn drive<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, id: AgentRunId) {
@@ -62,19 +69,27 @@ pub(crate) async fn drive<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, id: 
     runs.changed();
 }
 
+/// The heartbeat's task, stopped when the driver lets it go or is itself dropped (a panic, an abort), so a lease
+/// never outlives the run that holds it.
+struct Heartbeat(JoinHandle<()>);
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Keeps the run's hold on the company's sandbox and its budget reservation while the driver works. If the store
 /// refuses a renewal, or cannot be reached until the hold is about to lapse, another run may be given the sandbox:
 /// it is destroyed, and `lost` is set.
-// ponytail: a run whose API task stops lets go of both, but stays `queued` or `running` with its use uncounted;
-// a sweep that ends such runs must read every tenant's runs, which only a privileged role like the relay's can.
 fn hold_sandbox<D: Deps>(
     runs: Arc<Runs<D>>,
     scope: ProjectScope,
     run: AgentRunId,
     mut until: Instant,
     lost: watch::Sender<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Heartbeat {
+    Heartbeat(tokio::spawn(async move {
         let lease = runs.config.lease;
         loop {
             sleep(lease / 4).await;
@@ -95,7 +110,50 @@ fn hold_sandbox<D: Deps>(
             }
             return;
         }
-    })
+    }))
+}
+
+/// Ends runs whose API task stopped (a deploy) before they did, in any tenant: those whose heartbeat has lapsed,
+/// never one that is still driven, whatever its state reads. Each fails as `interrupted` (or keeps the end its
+/// model already reached) and its use up to its last heartbeat is counted. Returns how many it ended.
+///
+/// Its harness, if any, cancels itself once its stdin closes with the API task, and the next run destroys the
+/// container before starting.
+pub(crate) async fn sweep<D: Deps>(runs: &Runs<D>) -> usize {
+    let lapsed = match runs.store.lapsed(SWEEP_BATCH).await {
+        Ok(lapsed) => lapsed,
+        Err(e) => {
+            tracing::error!(error = %e, "could not look for interrupted runs");
+            return 0;
+        }
+    };
+    let mut ended = 0;
+    for (scope, id) in lapsed {
+        let mut record = match runs.store.run(&scope, &id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::error!(error = %e, run = %id, "could not load an interrupted run");
+                continue;
+            }
+        };
+        record.run.interrupted();
+        record.ended_at = Some(OffsetDateTime::now_utc());
+        let outcome = outcome(record.run.state(), &record.delivery);
+        let usd_micros = runs.config.pricing.cost(record.usage);
+        match runs.store.settle_lapsed(&record, usd_micros, outcome).await {
+            Ok(true) => {
+                tracing::warn!(run = %id, "ended a run whose API task stopped");
+                ended += 1;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::error!(error = %e, run = %id, "could not end an interrupted run"),
+        }
+    }
+    if ended > 0 {
+        runs.changed();
+    }
+    ended
 }
 
 /// How the run's own task ends it, besides the harness's result.
@@ -118,7 +176,7 @@ struct Driver<D: Deps> {
     grants: BTreeMap<ToolCallId, (String, ApprovalId)>,
     started: Option<Instant>,
     /// Renews the run's hold on the sandbox from when it is given until its end is recorded.
-    heartbeat: Option<JoinHandle<()>>,
+    heartbeat: Option<Heartbeat>,
     /// Set when that hold was lost and the sandbox destroyed.
     lost: watch::Receiver<bool>,
 }
@@ -234,6 +292,9 @@ impl<D: Deps> Driver<D> {
             return Err("approval action without a held host");
         }
         let pack = pack.encode().map_err(|_| "context")?;
+        // A fresh container for every run: nothing an earlier run left (a harness orphaned by a deploy, or whatever
+        // its agent left running) survives into this one. A sandbox that will not stop is never reused.
+        runs.sandbox.stop(&company).await.map_err(|_| "sandbox")?;
         runs.sandbox.start(&company).await.map_err(|_| "sandbox")?;
         for step in git::prepare(&self.record.repository) {
             let out = runs.sandbox.exec(&company, step).await.map_err(|_| "checkout")?;
@@ -358,7 +419,9 @@ impl<D: Deps> Driver<D> {
                 if let Some((action, approval)) = self.grants.remove(id)
                     && !self.close_grant(&action, &approval).await
                 {
-                    return self.fail_closed(StopReason::GrantNotClosed).await;
+                    // Kept, so the run's end tries it again if the sandbox will not stop either.
+                    self.grants.insert(id.clone(), (action, approval));
+                    return self.grant_not_closed().await;
                 }
             }
             HarnessEvent::ApprovalRequest {
@@ -485,9 +548,10 @@ impl<D: Deps> Driver<D> {
             .is_ok()
     }
 
-    /// Ends the run and destroys the sandbox, without asking the harness first.
-    async fn fail_closed(&mut self, reason: StopReason) {
-        let _ = self.record.run.stop(reason);
+    /// An approved action's hosts could not be closed: the run fails (even one the harness had finished) and the
+    /// sandbox is destroyed, without asking the harness first.
+    async fn grant_not_closed(&mut self) {
+        self.record.run.grant_not_closed();
         self.save().await;
         self.hard_stop().await;
     }
@@ -502,14 +566,26 @@ impl<D: Deps> Driver<D> {
         }
     }
 
-    /// Destroys the company's sandbox: the harness and everything the agent left running go with it.
+    /// Destroys the company's sandbox: the harness and everything the agent left running go with it. Retried a few
+    /// times; if it still runs, its grants stay listed so the run's end closes them one by one, and the next run to
+    /// take the sandbox destroys it before starting, or does not start.
     async fn hard_stop(&mut self) {
-        if let Err(e) = self.runs.sandbox.stop(self.company()).await {
-            tracing::error!(error = %e, run = %self.id(), "could not stop the sandbox");
-        }
         self.exec = None;
-        // Grants are closed when the sandbox stops.
-        self.grants.clear();
+        let mut wait = self.runs.config.poll;
+        for attempt in 1..=STOP_ATTEMPTS {
+            match self.runs.sandbox.stop(self.company()).await {
+                Ok(()) => {
+                    // Grants are closed when the sandbox stops.
+                    self.grants.clear();
+                    return;
+                }
+                Err(e) => tracing::error!(error = %e, run = %self.id(), attempt, "could not stop the sandbox"),
+            }
+            if attempt < STOP_ATTEMPTS {
+                sleep(wait).await;
+                wait *= 2;
+            }
+        }
     }
 
     async fn save(&mut self) {
@@ -535,15 +611,13 @@ impl<D: Deps> Driver<D> {
             closed &= self.close_grant(&action, &approval).await;
         }
         if !closed {
-            self.fail_closed(StopReason::GrantNotClosed).await;
+            self.grant_not_closed().await;
         }
         if closed && self.record.run.state() == &RunState::Finished && !*self.lost.borrow() {
             self.record.delivery = self.deliver().await;
         }
         // The end lets the sandbox go, so the heartbeat stops before it is recorded.
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
+        drop(self.heartbeat.take());
         self.record.ended_at = Some(OffsetDateTime::now_utc());
         let seconds = self
             .started

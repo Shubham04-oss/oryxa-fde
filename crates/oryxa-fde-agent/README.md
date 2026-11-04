@@ -18,7 +18,10 @@ Agent runs: the run model, the context pack, the harness event format, and the r
      approval list);
    - refuses to start if an action on the approval list has no host held for it in the company's outbound policy,
      since approving it would gate nothing at the network;
-   - starts the sandbox and checks out a fresh copy of the base branch in `/workspace/repo`;
+   - destroys whatever container the sandbox still has and starts a fresh one, so nothing an earlier run left (a
+     harness orphaned by a deploy, or whatever its agent left running) shares it; a sandbox that will not stop is
+     never reused;
+   - checks out a fresh copy of the base branch in `/workspace/repo`;
    - writes the pack through the gateway and compares the digest it reads back;
    - then starts the harness on it. Any failure here ends the run with `setup_failed`.
 4. **Run.** Each harness line is applied to the run model, stored in the transcript and posted to live output.
@@ -42,11 +45,13 @@ Everything fails closed:
 - a store that cannot keep the transcript or an approval request stops the run (`store_unavailable`);
 - output that is not a harness line stops it (`bad_output`);
 - a decision that cannot reach the harness, or whose hosts cannot open, ends it (`decision_undelivered`);
-- hosts that cannot be closed after their approved call returns end it and destroy the sandbox
-  (`grant_not_closed`);
-- a lease the store refuses to renew, or cannot renew before it would lapse, ends the run and destroys the
-  sandbox (`store_unavailable`), since another run may be given it;
-- a harness that does not stop within the grace period has its sandbox destroyed.
+- hosts that cannot be closed, after their approved call returns or at the run's end, fail it and destroy the
+  sandbox (`grant_not_closed`), even if the harness had finished: nothing is delivered from that sandbox;
+- a run that loses its lease (the store refuses to renew it, or cannot renew it before it would lapse) destroys
+  the sandbox and ends (`store_unavailable`), since another run may already have been given it;
+- a harness that does not stop within the grace period has its sandbox destroyed;
+- a sandbox that will not stop is asked three times; its grants are then closed one by one, and the next run
+  destroys it before starting, or does not start.
 
 ## API
 
@@ -68,8 +73,12 @@ security and updates limited by column. `pg.rs` implements `RunStore` on them: e
 to the project, and a run's end commits with its use, the lease's release and `agent-run.finished`, once.
 Decisions and cancels are read from there, so any API task can take them. `InMemoryRuns` is for tests.
 
-A run left unended by an API task that stopped (a deploy) holds neither the sandbox nor any budget once its
-heartbeat lapses, but it still reads `queued` or `running` and its use is not counted yet.
+A run whose API task stopped (a deploy) holds neither the sandbox nor any budget once its heartbeat lapses. Every
+API task sweeps for such runs when it starts and then every minute: each fails as `interrupted` (one whose model had
+already ended keeps that end) and its time up to its last heartbeat, and its model spend, are counted. A run that
+is still driven is never swept, whatever it reads; a new run counts as driven for its first minute. The sweep finds
+them across tenants as the relay role, which may read only the ids of such runs, and ends each in its project's
+own transaction. Its harness cancels itself when the gateway closes its stdin with the API task.
 
 ## Contracts with other streams
 

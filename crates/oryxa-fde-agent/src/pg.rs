@@ -275,6 +275,22 @@ impl RunStore for Store {
         .map(|_| ())
     }
 
+    async fn lapsed(&self, limit: u32) -> Result<Vec<(ProjectScope, AgentRunId)>, StoreError> {
+        self.lapsed_agent_runs(limit).await.map_err(failed)
+    }
+
+    async fn settle_lapsed(&self, run: &RunRecord, usd_micros: u64, outcome: RunOutcome) -> Result<bool, StoreError> {
+        let row = row(run)?;
+        let by = Actor {
+            user: run.created_by.clone(),
+            request_id: run.request_id.clone(),
+        };
+        on(self, run.run.scope(), async |tx| {
+            tx.settle_lapsed_agent_run(&row, usd_micros, outcome, &by).await
+        })
+        .await
+    }
+
     async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
         on(self, scope, async |tx| tx.take_agent_sandbox(run, lease).await).await
     }

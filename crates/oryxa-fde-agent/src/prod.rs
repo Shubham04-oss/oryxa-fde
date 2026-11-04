@@ -169,6 +169,14 @@ pub fn router_from_env<K: KeySource + 'static>(
         PlatformAccess::new(tokens, authz),
         config,
     );
+    // Runs whose API task stopped (a deploy) are ended by whichever task finds them: at start, then every lease.
+    let sweeper = runs.clone();
+    tokio::spawn(async move {
+        loop {
+            sweeper.sweep().await;
+            tokio::time::sleep(sweeper.config.lease).await;
+        }
+    });
     Ok(api::router(runs))
 }
 

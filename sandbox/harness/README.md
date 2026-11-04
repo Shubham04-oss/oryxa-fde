@@ -48,11 +48,13 @@ into the system prompt as fenced data, not as instructions.
 - **Approvals.** A tool call that matches a rule on the approval list (tool name, and a regular expression over
   the command or the JSON input) emits `approval_request` and waits. The request carries the tool and its full
   input, so an engineer approves exactly what will run. An input over 256 KiB is refused, never truncated.
-  Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. A
-  closed stdin or an aborted run counts as a rejection. The gateway also holds the hosts behind an approval action
+  Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. An
+  aborted run counts as a rejection. The gateway also holds the hosts behind an approval action
   until the FDE approves it, so the prompt is not the only gate.
 - **Cancel.** A `cancel` line aborts the SDK, rejects a pending approval and ends the run with `result`
-  `cancelled`, even if the SDK is stuck. The API sends it to cancel a run or at its time limit.
+  `cancelled`, even if the SDK is stuck. The API sends it to cancel a run or at its time limit. A closed stdin
+  does the same: the gateway closes it when the API task driving the run is gone (a deploy), and a run nobody can
+  approve or cancel must not go on.
 - **Error text.** An error `result` shows fixed text. The SDK's own messages go to stderr.
 - **Usage.** After each model response, a `usage` event carries the run's tokens so far, so the API can stop a run
   at its spend budget. The SDK's assistant messages carry only the usage known when a response starts; the

@@ -115,6 +115,12 @@ impl<D: Deps> Runs<D> {
         Ok((budget, self.store.spend(scope).await?))
     }
 
+    /// Ends runs whose API task stopped (a deploy) before they did; see [`crate::orchestrate`]. Any task may run it,
+    /// and it never touches a run that is still driven. Returns how many it ended.
+    pub async fn sweep(&self) -> usize {
+        crate::orchestrate::sweep(self).await
+    }
+
     /// Wakes runs on this task after a decision, a cancel or a run's end was stored; runs on other tasks see it on
     /// their next poll.
     pub(crate) fn changed(&self) {

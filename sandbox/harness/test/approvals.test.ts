@@ -47,16 +47,19 @@ describe("stdin approvals", () => {
     expect(await second).toBe("rejected");
   });
 
-  it("reject when stdin closes or the run is aborted", async () => {
+  it("reject when stdin closes or the run is aborted, and cancel the run when stdin closes", async () => {
     const input = new PassThrough();
     const approvals = new StdioApprovals(input);
     const abort = new AbortController();
     const aborted = approvals.request("apr_1", abort.signal);
     abort.abort();
     expect(await aborted).toBe("rejected");
+    expect(approvals.cancelled.aborted).toBe(false);
     const pending = approvals.request("apr_2", signal());
+    // The API task that drove the run is gone: nobody can decide or cancel any more.
     input.end();
     expect(await pending).toBe("rejected");
+    expect(approvals.cancelled.aborted).toBe(true);
     expect(await approvals.request("apr_3", signal())).toBe("rejected");
   });
 

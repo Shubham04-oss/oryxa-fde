@@ -12,14 +12,14 @@
 
 use std::time::Duration;
 
-use oryxa_core::UserId;
-use oryxa_fde_core::AgentRunId;
+use oryxa_core::{TenantId, UserId};
+use oryxa_fde_core::{AgentRunId, CompanyId, CompanyScope, ProjectId, ProjectScope};
 use oryxa_fde_events::{AgentRunFinished, RunOutcome};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::OffsetDateTime;
 
-use crate::{Actor, ProjectTx, StoreError, audit, enqueue, id, unique_violation};
+use crate::{Actor, ProjectTx, Store, StoreError, audit, enqueue, id, unique_violation};
 
 /// A run as stored. Approval and tool call ids are `oryxa-fde-agent`'s validated ids, passed as text.
 // ponytail: ApprovalId and ToolCallId live in oryxa-fde-agent; move them to oryxa-fde-core to type them here too.
@@ -504,6 +504,59 @@ impl ProjectTx {
                 None => Err(StoreError::Missing("agent run")),
             };
         }
+        self.settle_agent_run(&run.id, used, outcome, by).await?;
+        Ok(true)
+    }
+
+    /// Ends a run whose driver stopped renewing it (its API task stopped): saves `run` as the driver last left it
+    /// with the state, end and use the sweep gives it, counts its time up to when it was last kept alive and
+    /// `usd_micros`, lets go of the sandbox, and enqueues `agent-run.finished`. `false`, with nothing changed, if
+    /// the run has ended or was renewed meanwhile: a run that is still driven is never ended here.
+    pub async fn settle_lapsed_agent_run(
+        &mut self,
+        run: &AgentRunRow,
+        usd_micros: u64,
+        outcome: RunOutcome,
+        by: &Actor,
+    ) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let seconds: Option<i64> = sqlx::query_scalar(
+            "update agent_runs set ended_at = $5, state = $6::jsonb, input_tokens = $7, output_tokens = $8,
+                 delivery = $9::jsonb
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4
+               and ended_at is null and alive_until < now()
+             returning greatest(0, ceil(extract(epoch from alive_until - coalesce(started_at, alive_until))))::bigint",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(run.id.as_str())
+        .bind(run.ended_at)
+        .bind(run.state.to_string())
+        .bind(count(run.input_tokens)?)
+        .bind(count(run.output_tokens)?)
+        .bind(run.delivery.to_string())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(seconds) = seconds else {
+            return Ok(false);
+        };
+        let used = AgentSpend {
+            seconds: uncount(seconds, "run time")?,
+            usd_micros,
+        };
+        self.settle_agent_run(&run.id, used, outcome, by).await?;
+        Ok(true)
+    }
+
+    /// What a run's end adds: its use, the sandbox let go, and `agent-run.finished`.
+    async fn settle_agent_run(
+        &mut self,
+        run: &AgentRunId,
+        used: AgentSpend,
+        outcome: RunOutcome,
+        by: &Actor,
+    ) -> Result<(), StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(
             "insert into agent_budgets (tenant_id, company_id, project_id, used_seconds, used_usd_micros)
@@ -519,10 +572,10 @@ impl ProjectTx {
         .bind(count(used.usd_micros)?)
         .execute(&mut *self.tx)
         .await?;
-        self.release_sandbox(run.id.as_str()).await?;
-        let event = AgentRunFinished::new(&self.scope, run.id.clone(), outcome);
+        self.release_sandbox(run.as_str()).await?;
+        let event = AgentRunFinished::new(&self.scope, run.clone(), outcome);
         enqueue(&mut self.tx, &self.scope.company, by, &event).await?;
-        Ok(true)
+        Ok(())
     }
 
     /// Keeps an unended run alive for `ttl`; `false` if it has ended or does not exist.
@@ -683,6 +736,35 @@ impl ProjectTx {
         .await?
         .rows_affected();
         Ok(updated == 1)
+    }
+}
+
+impl Store {
+    /// Unended agent runs in any tenant whose driver stopped renewing them, oldest lapse first: their ids only,
+    /// read as the relay. Each is then ended through its own project's transaction.
+    pub async fn lapsed_agent_runs(&self, limit: u32) -> Result<Vec<(ProjectScope, AgentRunId)>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("set local role oryxa_fde_relay").execute(&mut *tx).await?;
+        let rows = sqlx::query(
+            "select tenant_id, company_id, project_id, run_id from agent_runs
+             where ended_at is null and alive_until < now() order by alive_until limit $1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|r| {
+                let company = CompanyScope::new(
+                    id("tenant id", TenantId::new, r.try_get("tenant_id")?)?,
+                    id("company id", CompanyId::new, r.try_get("company_id")?)?,
+                );
+                Ok((
+                    company.project(id("project id", ProjectId::new, r.try_get("project_id")?)?),
+                    id("agent run id", AgentRunId::new, r.try_get("run_id")?)?,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -1068,6 +1150,84 @@ mod tests {
         let three = queued(&store, &scope).await;
         let mut tx = store.project(&scope).await.unwrap();
         assert_eq!(tx.lock_agent_budget(&three.id).await.unwrap().2, AgentSpend::default());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn a_run_whose_driver_stopped_is_found_in_any_tenant_and_ended_once() {
+        let store = crate::testing::store().await;
+        let tenant = TenantId::new(new_id("org")).unwrap();
+        let scope = project(&store, &tenant).await;
+        let other = project(&store, &TenantId::new(new_id("org")).unwrap()).await;
+        // One run started 30 s before its driver stopped renewing it; one still driven, in another tenant.
+        let mut lapsed = queued(&store, &scope).await;
+        let live = queued(&store, &other).await;
+        let mut tx = store.project(&scope).await.unwrap();
+        lapsed.started_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(30));
+        assert!(tx.update_agent_run(&lapsed).await.unwrap());
+        assert!(
+            tx.take_agent_sandbox(&lapsed.id, Duration::from_millis(1))
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let found = store.lapsed_agent_runs(1000).await.unwrap();
+        assert!(found.contains(&(scope.clone(), lapsed.id.clone())));
+        assert!(!found.iter().any(|(_, id)| id == &live.id));
+        // The relay sees the ids of lapsed runs only: no task text, nothing still driven.
+        let mut tx = store.pool.begin().await.unwrap();
+        sqlx::query("set local role oryxa_fde_relay")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("select task from agent_runs")
+                .execute(&mut *tx)
+                .await
+                .is_err()
+        );
+        drop(tx);
+
+        let mut ended = lapsed.clone();
+        ended.state = json!({ "state": "failed", "reason": "interrupted" });
+        ended.ended_at = Some(OffsetDateTime::now_utc());
+        let mut tx = store.project(&other).await.unwrap();
+        let mut live_ended = live.clone();
+        live_ended.ended_at = ended.ended_at;
+        assert!(
+            !tx.settle_lapsed_agent_run(&live_ended, 1, RunOutcome::Failed, &actor())
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+        for first in [true, false] {
+            let mut tx = store.project(&scope).await.unwrap();
+            assert_eq!(
+                tx.settle_lapsed_agent_run(&ended, 4_000, RunOutcome::Failed, &actor())
+                    .await
+                    .unwrap(),
+                first
+            );
+            tx.commit().await.unwrap();
+        }
+        let mut tx = store.project(&scope).await.unwrap();
+        let stored = tx.agent_run(&lapsed.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, ended.state);
+        let used = tx.agent_budget().await.unwrap().1;
+        assert!((30..=31).contains(&used.seconds), "{used:?}");
+        assert_eq!(used.usd_micros, 4_000);
+        tx.commit().await.unwrap();
+        assert_eq!(finished_events(&store, &tenant).await.len(), 1);
+        assert!(
+            !store
+                .lapsed_agent_runs(1000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|(_, id)| id == &lapsed.id)
+        );
     }
 
     /// `agent-run.finished` rows of one tenant, as (group, detail), read as the relay.

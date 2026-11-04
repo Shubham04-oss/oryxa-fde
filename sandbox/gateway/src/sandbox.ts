@@ -30,6 +30,12 @@ const SCOPE_KEY = "scope";
 const GRANT_PREFIX = "grant:";
 /** The run whose harness this sandbox last started: only it may be granted anything. */
 const HARNESS_RUN_KEY = "harness-run";
+/**
+ * Set from a harness's start until its process exits or the container stops. While set, no other harness starts:
+ * a harness whose API task is gone (a deploy) keeps running until then, and a second one must never join it. If
+ * this object restarts while a harness runs, the exit is never seen, so the sandbox must be stopped first.
+ */
+const HARNESS_LIVE_KEY = "harness-live";
 const MAX_STDIN_WRITE = 1024 * 1024;
 
 // `lite` and `basic` are too small for a coding agent, and the durable_object policy refuses `basic`.
@@ -91,6 +97,7 @@ export class CompanySandbox extends DurableObject<Env> {
     // Approvals belong to the runs in this container; a new container starts with none.
     this.#closeAllGrants();
     this.ctx.storage.kv.delete(HARNESS_RUN_KEY);
+    this.ctx.storage.kv.delete(HARNESS_LIVE_KEY);
     return { running: false };
   }
 
@@ -117,13 +124,25 @@ export class CompanySandbox extends DurableObject<Env> {
 
   /**
    * Starts the harness as root on a written pack; it starts the agent as `agent` and then drops root itself. A new
-   * run inherits no grant from an earlier one.
+   * run inherits no grant from an earlier one, and none starts while an earlier harness may still run.
    */
-  startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
+  async startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
     this.#bind(scope);
+    if (this.ctx.storage.kv.get<string>(HARNESS_LIVE_KEY) !== undefined)
+      throw new GatewayError(409, "a harness may still be running in this sandbox; stop the sandbox first");
+    const live = crypto.randomUUID();
+    this.ctx.storage.kv.put(HARNESS_LIVE_KEY, live);
     this.#closeAllGrants();
     this.ctx.storage.kv.put(HARNESS_RUN_KEY, run);
-    return this.#stream(harnessCommand(run, req), ROOT_USER);
+    const exited = () => {
+      if (this.ctx.storage.kv.get<string>(HARNESS_LIVE_KEY) === live) this.ctx.storage.kv.delete(HARNESS_LIVE_KEY);
+    };
+    try {
+      return await this.#stream(harnessCommand(run, req), ROOT_USER, exited);
+    } catch (cause) {
+      exited();
+      throw cause;
+    }
   }
 
   /**
@@ -158,7 +177,7 @@ export class CompanySandbox extends DurableObject<Env> {
     return grant !== undefined && grant.expiresAt > Date.now();
   }
 
-  async #stream(req: ExecStreamRequest, user: string): Promise<ReadableStream<Uint8Array>> {
+  async #stream(req: ExecStreamRequest, user: string, exited?: () => void): Promise<ReadableStream<Uint8Array>> {
     const container = this.#running();
     const execId = crypto.randomUUID();
     const abort = new AbortController();
@@ -171,6 +190,8 @@ export class CompanySandbox extends DurableObject<Env> {
       throw cause;
     }
     if (process.stdin !== null) this.#stdin.set(execId, process.stdin.getWriter());
+    // The process may outlive its reader: only its own exit says it has ended.
+    if (exited !== undefined) void process.exitCode.then(exited, exited);
     return streamLines(
       execId,
       process,

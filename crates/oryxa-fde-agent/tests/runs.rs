@@ -3,6 +3,7 @@
 //! the fail-closed paths.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +16,9 @@ use oryxa_fde_agent::access::{Access, AccessError, Caller, Permission};
 use oryxa_fde_agent::api;
 use oryxa_fde_agent::event::{EVENT_VERSION, Usage};
 use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, ProcessEvent, Sandbox, SandboxError};
+use oryxa_fde_agent::git::Delivery;
 use oryxa_fde_agent::live::{LiveError, LiveOutput};
+use oryxa_fde_agent::run::AgentRun;
 use oryxa_fde_agent::service::{Deps, Pricing, Remaining, Runs, RunsConfig};
 use oryxa_fde_agent::store::{
     ApprovalRecord, Budget, DecideResult, Decided, InMemoryRuns, RunRecord, RunStore, Spend, StoreError,
@@ -110,6 +113,12 @@ struct FakeSandbox {
     stdin_down: bool,
     grants_down: bool,
     close_down: bool,
+    /// A harness runs in the container, from its start until it exits or the container stops: the gateway refuses
+    /// to start a second one.
+    harness_running: Arc<AtomicBool>,
+    /// Once a harness has started, the container will not stop.
+    stuck: bool,
+    harness_started: AtomicBool,
 }
 
 impl FakeSandbox {
@@ -126,6 +135,9 @@ impl FakeSandbox {
             stdin_down: false,
             grants_down: false,
             close_down: false,
+            harness_running: Arc::default(),
+            stuck: false,
+            harness_started: AtomicBool::new(false),
         }
     }
 
@@ -165,6 +177,10 @@ impl Sandbox for FakeSandbox {
 
     async fn stop(&self, company: &CompanyScope) -> Result<(), SandboxError> {
         self.call(format!("stop {}", company.company));
+        if self.stuck && self.harness_started.load(Ordering::SeqCst) {
+            return Err(SandboxError::Unreachable { route: "stop" });
+        }
+        self.harness_running.store(false, Ordering::SeqCst);
         // The container goes, and the harness with it.
         self.harness_out.lock().unwrap().take();
         self.stdin.lock().unwrap().take();
@@ -196,6 +212,13 @@ impl Sandbox for FakeSandbox {
         _: Duration,
     ) -> Result<HarnessProcess, SandboxError> {
         self.call(format!("harness {run} {}", &sha256[..8]));
+        if self.harness_running.swap(true, Ordering::SeqCst) {
+            return Err(SandboxError::Status {
+                status: 409,
+                route: "harness",
+            });
+        }
+        self.harness_started.store(true, Ordering::SeqCst);
         let (out_tx, out_rx) = mpsc::channel(64);
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         *self.stdin.lock().unwrap() = Some(in_tx);
@@ -203,13 +226,12 @@ impl Sandbox for FakeSandbox {
         let script = std::mem::take(&mut *self.script.lock().unwrap());
         // A new harness inherits no grant, as at the gateway.
         self.grants.lock().unwrap().clear();
-        tokio::spawn(fake_harness(
-            script,
-            out_tx,
-            in_rx,
-            self.grants.clone(),
-            self.probes.clone(),
-        ));
+        let running = self.harness_running.clone();
+        let (grants, probes) = (self.grants.clone(), self.probes.clone());
+        tokio::spawn(async move {
+            fake_harness(script, out_tx, in_rx, grants, probes).await;
+            running.store(false, Ordering::SeqCst);
+        });
         Ok(HarnessProcess {
             exec: "0b7a2f62-8f58-4d2e-a2a9-3d1b1f3c9e10".into(),
             output: out_rx,
@@ -428,6 +450,12 @@ impl<S: RunStore> RunStore for Failing<S> {
         max_run: Duration,
     ) -> Result<Option<Remaining>, StoreError> {
         self.0.reserve(scope, run, default, max_run).await
+    }
+    async fn lapsed(&self, limit: u32) -> Result<Vec<(ProjectScope, AgentRunId)>, StoreError> {
+        self.0.lapsed(limit).await
+    }
+    async fn settle_lapsed(&self, run: &RunRecord, usd_micros: u64, outcome: RunOutcome) -> Result<bool, StoreError> {
+        self.0.settle_lapsed(run, usd_micros, outcome).await
     }
     async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {
         self.0.finish(run, used, outcome).await
@@ -713,10 +741,11 @@ async fn a_run_goes_end_to_end_through_an_approval_to_a_pull_request() {
         json!({ "status": "pull_request", "number": 7, "url": "https://github.com/sample-org/status-page/pull/7" })
     );
 
-    // The sandbox saw the run in order: start, checkout, pack, harness, the grant for the approved action, its
-    // decision, the grant closed, then the branch and the pull request.
+    // The sandbox saw the run in order: a fresh container (stopped, then started), checkout, pack, harness, the
+    // grant for the approved action, its decision, the grant closed, then the branch and the pull request.
     let calls = runs.sandbox.calls();
     let pos = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
+    assert_eq!(calls[..2], ["stop cmp_1", "start cmp_1"]);
     assert!(pos("start cmp_1") < pos("exec rm"));
     assert!(pos("exec git") < pos(&format!("pack {run}")));
     assert!(pos(&format!("pack {run}")) < pos(&format!("harness {run}")));
@@ -1045,7 +1074,7 @@ async fn a_decision_that_cannot_reach_the_harness_fails_the_run_and_stops_the_sa
     .await;
     let done = wait(&app, &run, ended).await;
     assert_eq!(done["failure"], "decision_undelivered");
-    assert!(runs.sandbox.calls().contains(&"stop cmp_1".to_owned()));
+    assert!(stopped_after_harness(&runs.sandbox.calls()));
 }
 
 #[tokio::test]
@@ -1067,7 +1096,7 @@ async fn an_approval_whose_hosts_cannot_open_is_never_delivered() {
     let done = wait(&app, &run, ended).await;
     assert_eq!(done["failure"], "decision_undelivered");
     assert!(runs.sandbox.log.lock().unwrap().stdin.is_empty());
-    assert!(runs.sandbox.calls().contains(&"stop cmp_1".to_owned()));
+    assert!(stopped_after_harness(&runs.sandbox.calls()));
 }
 
 #[tokio::test]
@@ -1117,7 +1146,7 @@ async fn a_run_that_loses_the_sandbox_destroys_it_and_ends() {
     let run = create(&app).await;
     let done = wait(&app, &run, ended).await;
     assert_eq!(done["failure"], "store_unavailable");
-    assert!(runs.sandbox.calls().contains(&"stop cmp_1".to_owned()));
+    assert!(stopped_after_harness(&runs.sandbox.calls()));
 }
 
 #[tokio::test]
@@ -1227,6 +1256,197 @@ async fn runs_in_one_company_take_turns_on_its_sandbox() {
     assert_eq!(done["failure"], "harness_exited");
     let (_, list) = call(&app, "GET", RUNS_1, "lead", None).await;
     assert_eq!(list[0]["id"], second.as_str());
+}
+
+/// Whether the sandbox was destroyed after the run's harness started, not only before it, as every run's is.
+fn stopped_after_harness(calls: &[String]) -> bool {
+    calls
+        .iter()
+        .position(|c| c.starts_with("harness "))
+        .is_some_and(|h| calls[h..].iter().any(|c| c == "stop cmp_1"))
+}
+
+/// A run stored as the API stores it, for tests that drive it themselves.
+fn stored_run(id: &str, scope: &ProjectScope) -> RunRecord {
+    RunRecord {
+        run: AgentRun::new(AgentRunId::new(id).unwrap(), scope.clone()),
+        task: "Add a /healthz endpoint.".into(),
+        repository: serde_json::from_value(json!({ "owner": "sample-org", "name": "status-page", "base": "main" }))
+            .unwrap(),
+        created_by: UserId::new("usr_lead").unwrap(),
+        request_id: "req_1".into(),
+        created_at: time::OffsetDateTime::now_utc(),
+        started_at: None,
+        ended_at: None,
+        usage: Usage::default(),
+        delivery: Delivery::None,
+    }
+}
+
+#[tokio::test]
+async fn a_harness_left_in_the_container_is_destroyed_before_the_next_run_starts() {
+    // A harness orphaned by a deploy still runs in the company's container.
+    let sandbox = FakeSandbox::new(vec![result(Outcome::Success)]);
+    sandbox.harness_running.store(true, Ordering::SeqCst);
+    let runs = runs_with(sandbox);
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["state"], "finished", "{done}");
+    // The run got a fresh container: the old one was destroyed before anything else.
+    assert_eq!(runs.sandbox.calls()[..2], ["stop cmp_1", "start cmp_1"]);
+
+    // A container that will not stop is never reused: the run fails before any harness starts.
+    let mut sandbox = FakeSandbox::new(vec![result(Outcome::Success)]);
+    sandbox.stuck = true;
+    sandbox.harness_started.store(true, Ordering::SeqCst);
+    sandbox.harness_running.store(true, Ordering::SeqCst);
+    let runs = runs_with(sandbox);
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "setup_failed");
+    assert_eq!(runs.sandbox.calls(), ["stop cmp_1"]);
+}
+
+#[tokio::test]
+async fn a_finished_run_whose_grant_cannot_close_is_never_reported_succeeded() {
+    // The harness finishes while the approved deploy's grant is still open, and it will not close.
+    let mut sandbox = FakeSandbox::new(vec![deploy_request(), Step::AwaitDecision, result(Outcome::Success)]);
+    sandbox.close_down = true;
+    let runs = runs_with(sandbox);
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    wait(&app, &run, |r| r["state"] == "waiting_for_approval").await;
+    call(
+        &app,
+        "POST",
+        &format!("{RUNS_1}/{run}/approvals/apr_1/approve"),
+        "lead",
+        None,
+    )
+    .await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "grant_not_closed", "{done}");
+    assert_eq!(done["delivery"]["status"], "none");
+    assert_eq!(runs.store.outbox()[0].outcome, RunOutcome::Failed);
+    assert!(stopped_after_harness(&runs.sandbox.calls()));
+}
+
+#[tokio::test]
+async fn a_sandbox_that_will_not_stop_keeps_its_grants_for_the_runs_end() {
+    let mut sandbox = FakeSandbox::new(vec![deploy_request(), Step::AwaitDecision, Step::Hang]);
+    sandbox.stdin_down = true;
+    sandbox.stuck = true;
+    let runs = Runs::<Test>::new(
+        InMemoryRuns::default(),
+        sandbox,
+        FakeLive::default(),
+        context(),
+        access(),
+        RunsConfig {
+            grace: Duration::from_millis(200),
+            ..config()
+        },
+    );
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    wait(&app, &run, |r| r["state"] == "waiting_for_approval").await;
+    call(
+        &app,
+        "POST",
+        &format!("{RUNS_1}/{run}/approvals/apr_1/approve"),
+        "lead",
+        None,
+    )
+    .await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "decision_undelivered");
+    // Asked to stop three times at least (again once the harness outlived its grace), then the grant it opened was
+    // closed by itself, not forgotten.
+    let calls = runs.sandbox.calls();
+    let grant = calls.iter().position(|c| c.starts_with("grant deploy apr_1")).unwrap();
+    let stops: Vec<usize> = (grant..calls.len()).filter(|&i| calls[i] == "stop cmp_1").collect();
+    assert!(stops.len() >= 3, "{calls:?}");
+    assert!(
+        calls[stops[2]..].contains(&"close deploy apr_1".to_owned()),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_whose_api_task_stopped_is_swept_and_the_next_run_gets_a_fresh_container() {
+    let runs = runs_with(FakeSandbox::new(vec![message("Working."), Step::Hang]));
+    let app = api::router(runs.clone());
+    // The run's driver is stopped mid-run, as a deploy stops its API task; its harness is left running.
+    runs.store
+        .create(&stored_run("run_gone", &scope("org_a", "cmp_1", "prj_1")))
+        .await
+        .unwrap();
+    let driver = runs.launch(scope("org_a", "cmp_1", "prj_1"), AgentRunId::new("run_gone").unwrap());
+    wait(&app, "run_gone", |r| r["state"] == "running").await;
+    driver.abort();
+    let _ = driver.await;
+    // Within its lease nothing sweeps it, and the next run waits.
+    assert_eq!(runs.sweep().await, 0);
+    let next = create(&app).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, waiting) = call(&app, "GET", &format!("{RUNS_1}/{next}"), "lead", None).await;
+    assert_eq!(waiting["state"], "queued");
+
+    // Once its heartbeat has lapsed, it is ended as interrupted, once, and the next run takes the sandbox on a
+    // fresh container: the gateway would refuse a second harness next to the first.
+    tokio::time::sleep(config().lease).await;
+    assert_eq!(runs.sweep().await, 1);
+    assert_eq!(runs.sweep().await, 0);
+    let (_, gone) = call(&app, "GET", &format!("{RUNS_1}/run_gone"), "lead", None).await;
+    assert_eq!(
+        (gone["state"].as_str(), gone["failure"].as_str()),
+        (Some("failed"), Some("interrupted"))
+    );
+    assert!(!gone["ended_at"].is_null());
+    assert_eq!(runs.store.outbox()[0].outcome, RunOutcome::Failed);
+    let done = wait(&app, &next, ended).await;
+    assert_eq!(done["failure"], "harness_exited", "{done}");
+    let calls = runs.sandbox.calls();
+    let second = calls
+        .iter()
+        .position(|c| c.starts_with(&format!("pack {next}")))
+        .unwrap();
+    assert!(
+        calls[..second].ends_with(&[
+            "stop cmp_1".to_owned(),
+            "start cmp_1".to_owned(),
+            "exec rm".to_owned(),
+            "exec git".to_owned()
+        ]),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_run_nothing_drives_is_swept_after_its_grace() {
+    let runs = runs_with(FakeSandbox::new(vec![]));
+    let app = api::router(runs.clone());
+    runs.store
+        .create(&stored_run("run_orphan", &scope("org_a", "cmp_1", "prj_1")))
+        .await
+        .unwrap();
+    assert_eq!(runs.sweep().await, 0);
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(runs.sweep().await, 1);
+    let (_, run) = call(&app, "GET", &format!("{RUNS_1}/run_orphan"), "lead", None).await;
+    assert_eq!(run["failure"], "interrupted");
+    let (_, budget) = call(
+        &app,
+        "GET",
+        "/v1/companies/cmp_1/projects/prj_1/agent-budget",
+        "lead",
+        None,
+    )
+    .await;
+    assert_eq!(budget["used"]["seconds"], 0);
+    assert!(runs.sandbox.calls().is_empty());
 }
 
 // ---- On Postgres ----------------------------------------------------------------------------------------------
@@ -1435,4 +1655,62 @@ async fn a_companys_sandbox_takes_one_run_at_a_time_across_api_tasks() {
     let done = until(&app_b, &second, &|r| !r["ended_at"].is_null()).await;
     assert_eq!(done["state"], "finished", "{done}");
     assert!(b.sandbox.calls().contains(&"start cmp_1".to_owned()));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_run_whose_api_task_stopped_is_ended_by_another_tasks_sweep() {
+    let store = oryxa_fde_store::testing::store().await;
+    let (scope, access_a, context_a) = postgres_world(&store).await;
+    let (access_b, context_b) = second_task(&scope, &access_a);
+    let a = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![message("Working."), usage(1000, 100), Step::Hang]),
+        FakeLive::default(),
+        context_a,
+        access_a,
+        config(),
+    );
+    let b = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![]),
+        FakeLive::default(),
+        context_b,
+        access_b,
+        config(),
+    );
+    let app_b = api::router(b.clone());
+    let path = format!(
+        "/v1/companies/{}/projects/{}/agent-runs",
+        scope.company.company, scope.project
+    );
+    let run = oryxa_fde_store::new_id("run");
+    a.store.create(&stored_run(&run, &scope)).await.unwrap();
+    // Task A drives the run until a deploy stops it.
+    let driver = a.launch(scope.clone(), AgentRunId::new(run.clone()).unwrap());
+    let state = async || call(&app_b, "GET", &format!("{path}/{run}"), "lead", None).await.1;
+    for _ in 0..2000 {
+        if state().await["usage"]["input_tokens"] == 1000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    driver.abort();
+    let _ = driver.await;
+    // B's sweep leaves it alone while its heartbeat holds, and ends it once that has lapsed.
+    assert_eq!(b.sweep().await, 0);
+    tokio::time::sleep(config().lease + Duration::from_millis(200)).await;
+    assert!(b.sweep().await >= 1);
+    let ended = state().await;
+    assert_eq!(
+        (ended["state"].as_str(), ended["failure"].as_str()),
+        (Some("failed"), Some("interrupted")),
+        "{ended}"
+    );
+    // Its use up to its last heartbeat counts: the model spend it reported, and its time.
+    let mut tx = store.project(&scope).await.unwrap();
+    let used = tx.agent_budget().await.unwrap().1;
+    assert!(used.usd_micros > 0 && used.seconds >= 1, "{used:?}");
+    tx.commit().await.unwrap();
+    assert_eq!(b.sweep().await, 0);
 }
