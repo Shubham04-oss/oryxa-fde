@@ -346,7 +346,7 @@ pub struct TaskOut {
     pub updated_at: String,
 }
 
-const DATE: &[time::format_description::FormatItem<'static>] =
+pub(crate) const DATE: &[time::format_description::FormatItem<'static>] =
     time::macros::format_description!("[year]-[month]-[day]");
 
 impl From<Task> for TaskOut {

@@ -210,8 +210,18 @@ impl App {
     /// Whether `other`, a user of the caller's tenant, works on the project. User objects are
     /// per tenant, so a user of another tenant never does.
     pub(crate) async fn works_on(&self, who: &Principal, other: &UserId, s: &ProjectScope) -> Result<bool, ApiError> {
+        self.works_at(who, other, project(s)).await
+    }
+
+    /// Whether `other`, a user of the caller's tenant, has `work` on the company or project.
+    pub(crate) async fn works_at(
+        &self,
+        who: &Principal,
+        other: &UserId,
+        resource: ObjectRef,
+    ) -> Result<bool, ApiError> {
         let item = CheckItem {
-            resource: project(s),
+            resource,
             permission: "work",
             subject: user(&who.tenant, other),
             context: None,

@@ -24,15 +24,19 @@ use utoipa_axum::routes;
 
 pub mod auth;
 mod authz;
+mod canvas;
 mod companies;
 mod documents;
 mod engine;
 mod error;
 mod lifecycle;
+mod meetings;
+mod plan;
 mod projects;
 pub mod reads;
 mod records;
 pub mod session;
+mod threads;
 mod today;
 
 pub use auth::{Principal, VerifyToken};
@@ -89,6 +93,10 @@ impl App {
     }
 }
 
+/// Room in a canvas save's body for the JSON around the scene, which may also be less compact than
+/// the stored form.
+const CANVAS_BODY_SLACK: usize = 1024 * 1024;
+
 /// Every documented route, each registered with axum and the spec at once.
 fn routes() -> OpenApiRouter<Arc<App>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -140,11 +148,45 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(documents::get))
         .routes(routes!(documents::search))
         .routes(routes!(documents::search_in_project))
-        // Only uploads take a body this large; every other route keeps axum's 2 MB default.
+        .routes(routes!(canvas::company_canvas_versions))
+        .routes(routes!(canvas::company_canvas_version))
+        .routes(routes!(canvas::company_canvas_links))
+        .routes(routes!(canvas::link_company_shape, canvas::unlink_company_shape))
+        .routes(routes!(canvas::project_canvas_versions))
+        .routes(routes!(canvas::project_canvas_version))
+        .routes(routes!(canvas::project_canvas_links))
+        .routes(routes!(canvas::link_project_shape, canvas::unlink_project_shape))
+        .routes(routes!(threads::company_threads, threads::start_company_thread))
+        .routes(routes!(threads::company_thread))
+        .routes(routes!(threads::comment_company_thread))
+        .routes(routes!(threads::project_threads, threads::start_project_thread))
+        .routes(routes!(threads::project_thread))
+        .routes(routes!(threads::comment_project_thread))
+        .routes(routes!(threads::promote_project_thread))
+        .routes(routes!(meetings::company_notes, meetings::add_company_note))
+        .routes(routes!(
+            meetings::company_note,
+            meetings::update_company_note,
+            meetings::remove_company_note
+        ))
+        .routes(routes!(meetings::project_notes, meetings::add_project_note))
+        .routes(routes!(
+            meetings::project_note,
+            meetings::update_project_note,
+            meetings::remove_project_note
+        ))
+        // Only uploads and canvas saves take a body this large; every other route keeps axum's 2 MB
+        // default.
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(documents::upload))
                 .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES)),
+        )
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(canvas::company_canvas, canvas::save_company_canvas))
+                .routes(routes!(canvas::project_canvas, canvas::save_project_canvas))
+                .layer(DefaultBodyLimit::max(canvas::MAX_CANVAS_BYTES + CANVAS_BODY_SLACK)),
         )
 }
 
@@ -201,6 +243,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
         (name = "auth", description = "Browser sign-in, the session cookie and who is signed in"),
         (name = "context", description = "A company's documents and search over them"),
+        (name = "planning", description = "Canvases and their shape links, comment threads and meeting notes, \
+            for a company and for each project"),
     )
 )]
 struct ApiDoc;
