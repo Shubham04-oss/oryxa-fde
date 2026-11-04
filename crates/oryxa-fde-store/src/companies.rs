@@ -71,7 +71,8 @@ impl CompanyTx {
         self.tx.commit().await.map_err(Into::into)
     }
 
-    /// Creates the company with `by` as its lead, and queues `company.created`.
+    /// Creates the company with `by` as its lead, and queues `company.created`. Both grants
+    /// (`GrantRow::Company` and the lead's `GrantRow::Member`) are pending until written.
     pub async fn create(&mut self, name: &Name, by: &Actor) -> Result<Company, StoreError> {
         let s = &self.scope;
         let row = sqlx::query(
@@ -94,15 +95,7 @@ impl CompanyTx {
         let company = company(row)?;
         upsert_member(&mut self.tx, s, &by.user, Role::Lead, &by.user).await?;
         audit(&mut self.tx, s, None, by, "company.created", Some(s.company.as_str())).await?;
-        enqueue(
-            &mut self.tx,
-            s,
-            by,
-            &CompanyCreated {
-                company: s.company.clone(),
-            },
-        )
-        .await?;
+        enqueue(&mut self.tx, s, by, &CompanyCreated::new(s)).await?;
         Ok(company)
     }
 
@@ -156,7 +149,9 @@ impl CompanyTx {
             .collect()
     }
 
-    /// Adds `user` as a member or changes their role. `false` if the company does not exist.
+    /// Adds `user` as a member or changes their role, leaving the grant of the new role pending. The
+    /// caller revokes the old role before commit and grants the new one after. `false` if the company
+    /// does not exist.
     pub async fn set_member(&mut self, user: &UserId, role: Role, by: &Actor) -> Result<bool, StoreError> {
         if !self.exists().await? {
             return Ok(false);
@@ -254,7 +249,7 @@ async fn upsert_member(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "insert into company_members (tenant_id, company_id, user_id, role, added_by) values ($1, $2, $3, $4, $5)
-         on conflict (tenant_id, company_id, user_id) do update set role = excluded.role",
+         on conflict (tenant_id, company_id, user_id) do update set role = excluded.role, granted_at = null",
     )
     .bind(s.tenant.as_str())
     .bind(s.company.as_str())

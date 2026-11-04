@@ -1,12 +1,13 @@
-//! Company records (stakeholders and systems; `work` on the company to read or change them) and the
-//! organisation's security answer library (`access` to the workspace).
+//! Company records (stakeholders and systems; `work` on the company to read or change them, or
+//! `work` on one of its projects to read them) and the organisation's security answer library
+//! (`access` to the workspace).
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use oryxa_fde_core::{CompanyId, SecurityAnswerId, StakeholderId, SystemId};
+use oryxa_fde_core::{CompanyId, ProjectId, SecurityAnswerId, StakeholderId, SystemId};
 use oryxa_fde_store::{
     CompanyTx, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn, System, SystemIn, Text,
     new_id,
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::authz::{company, workspace};
+use crate::lifecycle::project_tx;
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
 pub(crate) fn name(raw: String, what: &'static str) -> Result<Name, ApiError> {
@@ -290,6 +292,39 @@ pub(crate) async fn remove_system(
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The company's stakeholders, for anyone who works on this project: assignees sign off with them
+/// and name them as owners of access requests.
+#[utoipa::path(get, operation_id = "list_project_stakeholders", path = "/v1/companies/{company}/projects/{project}/stakeholders",
+    tag = "records",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
+    responses((status = 200, body = [StakeholderOut]), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn project_stakeholders(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p)): Path<(CompanyId, ProjectId)>,
+) -> Result<Json<Vec<StakeholderOut>>, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let list = tx.company_stakeholders().await?.ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
+}
+
+/// The company's systems, for anyone who works on this project.
+#[utoipa::path(get, operation_id = "list_project_systems", path = "/v1/companies/{company}/projects/{project}/systems",
+    tag = "records",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
+    responses((status = 200, body = [SystemOut]), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn project_systems(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p)): Path<(CompanyId, ProjectId)>,
+) -> Result<Json<Vec<SystemOut>>, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let list = tx.company_systems().await?.ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
 /// The organisation's reusable answers to security questionnaires.

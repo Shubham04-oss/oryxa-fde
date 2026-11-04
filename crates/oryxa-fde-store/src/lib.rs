@@ -4,26 +4,34 @@
 //!
 //! State changes write an audit row and, where one applies, an outbox event in the same
 //! transaction; [`relay`] publishes the outbox.
+//!
+//! The service connects with a runtime login that owns nothing and holds no privilege outside a
+//! transaction's role ([`Store::connect`] refuses any other); migrations run separately as the
+//! owner ([`migrate`]).
 
 use std::fmt;
 
 use oryxa_core::{TenantId, UserId};
 use oryxa_events::{Event, encode, new_envelope, v1};
 use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, StageError};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
 mod companies;
+mod grants;
 mod org;
 mod projects;
 mod records;
 pub mod relay;
 mod scope;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use companies::{Company, CompanyTx, Member, Role};
+pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use projects::{Assignee, Project, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, System, SystemIn};
@@ -38,6 +46,9 @@ pub enum StoreError {
     Db(#[from] sqlx::Error),
     #[error("migrate: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// The runtime login could act as the owner; migrations need their own login.
+    #[error("refusing a database login that is {0}: the runtime login must own nothing")]
+    Privileged(&'static str),
     #[error("encode event: {0}")]
     Event(#[from] oryxa_events::PublishError),
     #[error("stored {0} is invalid")]
@@ -131,24 +142,34 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::now_v7().simple())
 }
 
+/// Runs the migrations as `url`'s login, which owns the tables: a one-off task with its own
+/// login, never the service's.
+pub async fn migrate(url: &str) -> Result<(), StoreError> {
+    let pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Store {
+    // Private: every query goes through a scoped transaction, which takes a role.
     pool: PgPool,
 }
 
 impl Store {
+    /// Connects as the runtime login, after checking it cannot act as the owner.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
-        let pool = PgPoolOptions::new().max_connections(10).connect(url).await?;
+        Self::connect_with(url.parse::<PgConnectOptions>()?).await
+    }
+
+    pub async fn connect_with(options: PgConnectOptions) -> Result<Self, StoreError> {
+        let pool = PgPoolOptions::new().max_connections(10).connect_with(options).await?;
+        if let Some(why) = owner_powers(&pool).await? {
+            pool.close().await;
+            return Err(StoreError::Privileged(why));
+        }
         Ok(Self { pool })
-    }
-
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
-    pub async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::migrate!("./migrations").run(&self.pool).await?;
-        Ok(())
     }
 
     /// Companies for the given scopes (the caller's permitted companies), by name.
@@ -201,6 +222,41 @@ impl Store {
             .await?;
         Ok(tx)
     }
+}
+
+const OWNER_POWERS: [&str; 5] = [
+    "a superuser",
+    "allowed to create roles",
+    "allowed to bypass row-level security",
+    "the database owner",
+    "a table owner",
+];
+
+/// What would let this login act as the owner, if anything: superuser, the right to create roles
+/// or bypass row-level security, or membership of the role that owns the database or a table.
+async fn owner_powers(pool: &PgPool) -> Result<Option<&'static str>, StoreError> {
+    let power: Option<i32> = sqlx::query_scalar(
+        "select case
+             when r.rolsuper then 0
+             when r.rolcreaterole then 1
+             when r.rolbypassrls then 2
+             when pg_has_role(current_user, d.datdba, 'MEMBER') then 3
+             when exists (
+                 select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname = current_schema() and pg_has_role(current_user, c.relowner, 'MEMBER')) then 4
+         end
+         from pg_roles r, pg_database d
+         where r.rolname = current_user and d.datname = current_database()",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(power.map(|p| {
+        usize::try_from(p)
+            .ok()
+            .and_then(|i| OWNER_POWERS.get(i))
+            .copied()
+            .unwrap_or(OWNER_POWERS[0])
+    }))
 }
 
 /// Appends an audit row: ids only.

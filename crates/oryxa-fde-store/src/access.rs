@@ -80,13 +80,18 @@ impl ProjectTx {
         .collect()
     }
 
-    /// `None` if the project is not in this company.
+    /// A request starts as requested or in progress: a status change is what reports it settled,
+    /// so one created settled would never be reported. `None` if the project is not in this
+    /// company.
     pub async fn add_access_request(
         &mut self,
         id: &AccessRequestId,
         v: &AccessRequestIn,
         by: &Actor,
     ) -> Result<Option<AccessRequest>, StoreError> {
+        if !matches!(v.status, AccessStatus::Requested | AccessStatus::InProgress) {
+            return Err(StoreError::Rejected("initial_status"));
+        }
         if !self.exists().await? {
             return Ok(None);
         }
@@ -94,8 +99,8 @@ impl ProjectTx {
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "insert into access_requests (tenant_id, company_id, project_id, access_request_id, description, system_id,
-                 owner_id, status, requested_by, granted_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, case when $8 = 'granted' then now() end)
+                 owner_id, status, requested_by)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              returning {COLUMNS}"
         ))
         .bind(&t)
@@ -186,13 +191,7 @@ impl ProjectTx {
         )
         .await?;
         if changed {
-            let event = AccessRequestStatusChanged {
-                company: s.company.company.clone(),
-                project: s.project.clone(),
-                access_request: id.clone(),
-                from,
-                to: v.status,
-            };
+            let event = AccessRequestStatusChanged::new(&s, id.clone(), from, v.status);
             enqueue(&mut self.tx, &s.company, by, &event).await?;
         }
         access_request(row).map(Some)

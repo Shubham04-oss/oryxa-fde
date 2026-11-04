@@ -2,11 +2,14 @@
 //! The token's organisation is the tenant; its role is mirrored onto the tenant's SpiceDB
 //! workspace, so `workspace->manage` follows WorkOS.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::FromRequestParts;
+use axum::http::Method;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use oryxa_authn::{AccessTokenVerifier, JwtError, KeySource, SessionClaims};
@@ -80,7 +83,10 @@ impl FromRequestParts<Arc<App>> for Principal {
         let tenant = TenantId::new(org).map_err(|_| ApiError::Unauthorized)?;
         let user = UserId::new(claims.sub).map_err(|_| ApiError::Unauthorized)?;
         let admin = claims.role.as_deref() == Some("admin");
-        app.sync_workspace_role(&tenant, &user, admin).await?;
+        // A change always re-mirrors the role, so a demotion stops every write at once on every
+        // replica; reads trust this replica's last mirror for up to ROLE_TTL.
+        let writes = !matches!(parts.method, Method::GET | Method::HEAD);
+        app.sync_workspace_role(&tenant, &user, admin, writes).await?;
         Ok(Principal {
             tenant,
             user,
@@ -90,12 +96,44 @@ impl FromRequestParts<Arc<App>> for Principal {
     }
 }
 
+/// How long a replica trusts its last mirror of a user's workspace role before writing it again.
+/// Short against a WorkOS access token's lifetime, which bounds how stale a role can be anyway.
+pub(crate) const ROLE_TTL: Duration = Duration::from_secs(30);
+/// Past this many entries, expired ones are dropped.
+const ROLE_CACHE_PRUNE_AT: usize = 10_000;
+
+/// The roles this replica mirrored to SpiceDB recently, by user.
+#[derive(Default)]
+pub(crate) struct RoleCache(Mutex<HashMap<(TenantId, UserId), (bool, Instant)>>);
+
+impl RoleCache {
+    fn fresh(&self, key: &(TenantId, UserId), admin: bool, now: Instant) -> bool {
+        let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(seen.get(key), Some(&(a, at)) if a == admin && now.saturating_duration_since(at) < ROLE_TTL)
+    }
+
+    fn record(&self, key: (TenantId, UserId), admin: bool, now: Instant) {
+        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.len() >= ROLE_CACHE_PRUNE_AT {
+            seen.retain(|_, (_, at)| now.saturating_duration_since(*at) < ROLE_TTL);
+        }
+        seen.insert(key, (admin, now));
+    }
+}
+
 impl App {
-    /// Mirrors the token's role onto `workspace:<tenant>|root`: admin or member, never both.
-    /// Written once per process per (user, role), so a role change takes effect on the next token.
-    async fn sync_workspace_role(&self, tenant: &TenantId, u: &UserId, admin: bool) -> Result<(), ApiError> {
-        let key = (tenant.clone(), u.clone(), admin);
-        if self.synced.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+    /// Mirrors the token's role onto `workspace:<tenant>|root`: admin or member, never both. Skipped
+    /// only for a read whose role this replica mirrored less than [`ROLE_TTL`] ago: another replica
+    /// may have mirrored a different role since, so no mirror is trusted for long.
+    async fn sync_workspace_role(
+        &self,
+        tenant: &TenantId,
+        u: &UserId,
+        admin: bool,
+        writes: bool,
+    ) -> Result<(), ApiError> {
+        let key = (tenant.clone(), u.clone());
+        if !writes && self.roles.fresh(&key, admin, Instant::now()) {
             return Ok(());
         }
         let (grant, revoke) = if admin {
@@ -111,9 +149,49 @@ impl App {
             ],
         )
         .await?;
-        let mut synced = self.synced.lock().unwrap_or_else(|e| e.into_inner());
-        synced.remove(&(tenant.clone(), u.clone(), !admin));
-        synced.insert(key);
+        self.roles.record(key, admin, Instant::now());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mirrored_role_is_trusted_briefly_and_only_for_the_same_role() {
+        let cache = RoleCache::default();
+        let key = (TenantId::new("org_1").unwrap(), UserId::new("user_1").unwrap());
+        let t0 = Instant::now();
+        assert!(!cache.fresh(&key, false, t0), "nothing mirrored yet");
+        cache.record(key.clone(), true, t0);
+        assert!(cache.fresh(&key, true, t0 + Duration::from_secs(1)));
+        assert!(
+            !cache.fresh(&key, false, t0 + Duration::from_secs(1)),
+            "a role change re-mirrors"
+        );
+        assert!(!cache.fresh(&key, true, t0 + ROLE_TTL), "expired");
+        let other = (TenantId::new("org_2").unwrap(), UserId::new("user_1").unwrap());
+        assert!(!cache.fresh(&other, true, t0), "per tenant");
+    }
+
+    #[test]
+    fn the_cache_drops_expired_entries_once_it_is_large() {
+        let cache = RoleCache::default();
+        let t0 = Instant::now();
+        for i in 0..ROLE_CACHE_PRUNE_AT {
+            let key = (
+                TenantId::new("org_1").unwrap(),
+                UserId::new(format!("user_{i}")).unwrap(),
+            );
+            cache.record(key, false, t0);
+        }
+        let later = t0 + ROLE_TTL + Duration::from_secs(1);
+        cache.record(
+            (TenantId::new("org_1").unwrap(), UserId::new("new").unwrap()),
+            true,
+            later,
+        );
+        assert_eq!(cache.0.lock().unwrap().len(), 1);
     }
 }

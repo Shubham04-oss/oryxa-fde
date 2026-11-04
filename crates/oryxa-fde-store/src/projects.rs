@@ -91,11 +91,7 @@ impl ProjectTx {
             Some(s.project.as_str()),
         )
         .await?;
-        let event = ProjectCreated {
-            company: s.company.company.clone(),
-            project: s.project.clone(),
-        };
-        enqueue(&mut self.tx, &s.company, by, &event).await?;
+        enqueue(&mut self.tx, &s.company, by, &ProjectCreated::new(s)).await?;
         project(row).map(Some)
     }
 
@@ -172,13 +168,7 @@ impl ProjectTx {
             Some(to.as_str()),
         )
         .await?;
-        let event = ProjectStageChanged {
-            company: s.company.company.clone(),
-            project: s.project.clone(),
-            from,
-            to,
-        };
-        enqueue(&mut self.tx, &s.company, by, &event).await?;
+        enqueue(&mut self.tx, &s.company, by, &ProjectStageChanged::new(s, from, to)).await?;
         project(row).map(Some)
     }
 
@@ -260,7 +250,8 @@ impl ProjectTx {
         Ok(true)
     }
 
-    pub(crate) async fn exists(&mut self) -> Result<bool, StoreError> {
+    /// Whether the project is in this transaction's company.
+    pub async fn exists(&mut self) -> Result<bool, StoreError> {
         let s = &self.scope;
         let found: bool = sqlx::query_scalar(
             "select exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)",

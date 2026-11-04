@@ -1,17 +1,21 @@
 //! The FDE HTTP API. Every request carries a WorkOS access token (verified with `oryxa-authn`);
-//! every handler checks `oryxa-authz` before it touches the store, and writes the SpiceDB
-//! relationships its change implies before the store transaction commits.
+//! every handler checks `oryxa-authz` before it touches the store. A change that grants access
+//! commits first and writes its SpiceDB grant after, under the lock of the row that justifies it;
+//! a change that revokes access deletes the relationship before it commits (see `authz`).
+//!
+//! The router and the OpenAPI spec are built from one list of handlers ([`routes`]), so the spec,
+//! and the isolation suite that walks it, name every route the API serves.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::get;
 use oryxa_authz::SpiceDb;
-use oryxa_core::{TenantId, UserId};
 use oryxa_fde_store::Store;
 use utoipa::OpenApi;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 pub mod auth;
 mod authz;
@@ -22,14 +26,14 @@ mod projects;
 mod records;
 
 pub use auth::{Principal, VerifyToken};
+pub use authz::{reconcile_grants, run_reconciler};
 pub use error::{ApiError, ErrorBody};
 
 pub struct App {
     pub store: Store,
     pub authz: SpiceDb,
     tokens: Box<dyn VerifyToken>,
-    // ponytail: per-process and unbounded; fine for P0's user counts, move to Postgres if it grows.
-    synced: Mutex<HashSet<(TenantId, UserId, bool)>>,
+    roles: auth::RoleCache,
 }
 
 impl App {
@@ -38,168 +42,89 @@ impl App {
             store,
             authz,
             tokens: Box::new(tokens),
-            synced: Mutex::new(HashSet::new()),
+            roles: auth::RoleCache::default(),
         })
     }
 }
 
-pub fn router(app: Arc<App>) -> Router {
-    use axum::routing::{post, put};
-    Router::new()
-        .route("/v1/companies", get(companies::list).post(companies::create))
-        .route("/v1/companies/{company}", get(companies::get).patch(companies::rename))
-        .route("/v1/companies/{company}/members", get(companies::members))
-        .route(
-            "/v1/companies/{company}/members/{user}",
-            put(companies::set_member).delete(companies::remove_member),
-        )
-        .route(
-            "/v1/companies/{company}/projects",
-            get(projects::list).post(projects::create),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}",
-            get(projects::get).patch(projects::rename),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/assignees",
-            get(projects::assignees),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/assignees/{user}",
-            put(projects::assign).delete(projects::unassign),
-        )
-        .route(
-            "/v1/companies/{company}/stakeholders",
-            get(records::stakeholders).post(records::add_stakeholder),
-        )
-        .route(
-            "/v1/companies/{company}/stakeholders/{stakeholder}",
-            put(records::update_stakeholder).delete(records::remove_stakeholder),
-        )
-        .route(
-            "/v1/companies/{company}/systems",
-            get(records::systems).post(records::add_system),
-        )
-        .route(
-            "/v1/companies/{company}/systems/{system}",
-            put(records::update_system).delete(records::remove_system),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/stage",
-            put(lifecycle::change_stage),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope",
-            get(lifecycle::scope),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/items",
-            post(lifecycle::add_scope_item),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/items/{item}",
-            put(lifecycle::update_scope_item).delete(lifecycle::remove_scope_item),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/criteria",
-            post(lifecycle::add_criterion),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}",
-            put(lifecycle::update_criterion).delete(lifecycle::remove_criterion),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/sign-offs",
-            post(lifecycle::sign_off),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/scope/changes",
-            get(lifecycle::scope_changes),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/access-requests",
-            get(lifecycle::access_requests).post(lifecycle::add_access_request),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/access-requests/{access_request}",
-            put(lifecycle::update_access_request),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/tasks",
-            get(lifecycle::tasks).post(lifecycle::add_task),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/tasks/{task}",
-            put(lifecycle::update_task).delete(lifecycle::remove_task),
-        )
-        .route(
-            "/v1/companies/{company}/projects/{project}/decisions",
-            get(lifecycle::decisions).post(lifecycle::record_decision),
-        )
-        .route(
-            "/v1/security-answers",
-            get(records::security_answers).post(records::add_security_answer),
-        )
-        .route(
-            "/v1/security-answers/{answer}",
-            put(records::update_security_answer).delete(records::remove_security_answer),
-        )
-        // Load balancer health check; reads nothing.
-        .route("/healthz", get(|| async { "ok" }))
-        .with_state(app)
+/// Every documented route, each registered with axum and the spec at once.
+fn routes() -> OpenApiRouter<Arc<App>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(companies::list, companies::create))
+        .routes(routes!(companies::get, companies::rename))
+        .routes(routes!(companies::members))
+        .routes(routes!(companies::set_member, companies::remove_member))
+        .routes(routes!(projects::list, projects::create))
+        .routes(routes!(projects::get, projects::rename))
+        .routes(routes!(projects::assignees))
+        .routes(routes!(projects::assign, projects::unassign))
+        .routes(routes!(records::stakeholders, records::add_stakeholder))
+        .routes(routes!(records::update_stakeholder, records::remove_stakeholder))
+        .routes(routes!(records::systems, records::add_system))
+        .routes(routes!(records::update_system, records::remove_system))
+        .routes(routes!(records::project_stakeholders))
+        .routes(routes!(records::project_systems))
+        .routes(routes!(lifecycle::change_stage))
+        .routes(routes!(lifecycle::scope))
+        .routes(routes!(lifecycle::add_scope_item))
+        .routes(routes!(lifecycle::update_scope_item, lifecycle::remove_scope_item))
+        .routes(routes!(lifecycle::add_criterion))
+        .routes(routes!(lifecycle::update_criterion, lifecycle::remove_criterion))
+        .routes(routes!(lifecycle::sign_off))
+        .routes(routes!(lifecycle::scope_changes))
+        .routes(routes!(lifecycle::access_requests, lifecycle::add_access_request))
+        .routes(routes!(lifecycle::update_access_request))
+        .routes(routes!(lifecycle::tasks, lifecycle::add_task))
+        .routes(routes!(lifecycle::update_task, lifecycle::remove_task))
+        .routes(routes!(lifecycle::decisions, lifecycle::record_decision))
+        .routes(routes!(records::security_answers, records::add_security_answer))
+        .routes(routes!(
+            records::update_security_answer,
+            records::remove_security_answer
+        ))
 }
 
+pub fn router(app: Arc<App>) -> Router {
+    let (router, _) = routes().split_for_parts();
+    // Load balancer health check; reads nothing, so it is not in the spec.
+    router.route("/healthz", get(|| async { "ok" })).with_state(app)
+}
+
+/// The spec of exactly the routes [`router`] serves.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    let mut api = routes().split_for_parts().1;
+    // OpenAPI 3.1 requires a description on every response; default to the status's reason phrase.
+    for item in api.paths.paths.values_mut() {
+        let ops = [
+            &mut item.get,
+            &mut item.put,
+            &mut item.post,
+            &mut item.delete,
+            &mut item.patch,
+        ];
+        for op in ops.into_iter().flatten() {
+            for (code, response) in &mut op.responses.responses {
+                if let utoipa::openapi::RefOr::T(r) = response
+                    && r.description.is_empty()
+                {
+                    r.description = code
+                        .parse::<u16>()
+                        .ok()
+                        .and_then(|c| axum::http::StatusCode::from_u16(c).ok())
+                        .and_then(|c| c.canonical_reason())
+                        .unwrap_or("Response")
+                        .to_owned();
+                }
+            }
+        }
+    }
+    api
+}
+
+/// The spec's info, security and tags; [`routes`] adds the paths.
 #[derive(OpenApi)]
 #[openapi(
     info(title = "oryxa-fde-api", version = "0.1.0", description = "The FDE workspace API."),
-    paths(
-        companies::list,
-        companies::create,
-        companies::get,
-        companies::rename,
-        companies::members,
-        companies::set_member,
-        companies::remove_member,
-        projects::list,
-        projects::create,
-        projects::get,
-        projects::rename,
-        projects::assignees,
-        projects::assign,
-        projects::unassign,
-        records::stakeholders,
-        records::add_stakeholder,
-        records::update_stakeholder,
-        records::remove_stakeholder,
-        records::systems,
-        records::add_system,
-        records::update_system,
-        records::remove_system,
-        records::security_answers,
-        records::add_security_answer,
-        records::update_security_answer,
-        records::remove_security_answer,
-        lifecycle::change_stage,
-        lifecycle::scope,
-        lifecycle::add_scope_item,
-        lifecycle::update_scope_item,
-        lifecycle::remove_scope_item,
-        lifecycle::add_criterion,
-        lifecycle::update_criterion,
-        lifecycle::remove_criterion,
-        lifecycle::sign_off,
-        lifecycle::scope_changes,
-        lifecycle::access_requests,
-        lifecycle::add_access_request,
-        lifecycle::update_access_request,
-        lifecycle::tasks,
-        lifecycle::add_task,
-        lifecycle::update_task,
-        lifecycle::remove_task,
-        lifecycle::decisions,
-        lifecycle::record_decision,
-    ),
     modifiers(&Bearer),
     security(("bearer" = [])),
     tags(
@@ -209,7 +134,7 @@ pub fn router(app: Arc<App>) -> Router {
         (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
     )
 )]
-pub struct ApiDoc;
+struct ApiDoc;
 
 struct Bearer;
 
@@ -233,6 +158,8 @@ fn ts(t: time::OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     const SPEC: &str = "openapi.json";
@@ -242,7 +169,7 @@ mod tests {
     #[test]
     fn openapi_spec_is_committed_and_current() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPEC);
-        let spec = ApiDoc::openapi().to_pretty_json().unwrap() + "\n";
+        let spec = openapi().to_pretty_json().unwrap() + "\n";
         if std::env::var_os("UPDATE_OPENAPI").is_some() {
             std::fs::write(&path, &spec).unwrap();
         }
@@ -254,8 +181,20 @@ mod tests {
     }
 
     #[test]
+    fn every_response_has_a_description() {
+        let spec = serde_json::to_value(openapi()).unwrap();
+        for (path, item) in spec["paths"].as_object().unwrap() {
+            for (method, op) in item.as_object().unwrap() {
+                for (code, r) in op["responses"].as_object().unwrap() {
+                    assert!(r["description"].is_string(), "{method} {path} {code}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn operation_ids_are_unique() {
-        let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let spec = serde_json::to_value(openapi()).unwrap();
         let mut seen = HashSet::new();
         for item in spec["paths"].as_object().unwrap().values() {
             for op in item.as_object().unwrap().values() {

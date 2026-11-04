@@ -1,13 +1,17 @@
-//! oryxa-fde-api on ECS Fargate: the HTTP API plus the outbox relay. Configuration comes from the
-//! environment; ECS injects the secrets (SpiceDB key, WorkOS key, event signing key) from Secrets
-//! Manager. The only third-party host it calls is WorkOS, for the JWKS of `WORKOS_ISSUER`.
+//! oryxa-fde-api on ECS Fargate: the HTTP API, the outbox relay and the grant reconciler.
+//! Configuration comes from the environment; ECS injects the secrets (SpiceDB key, WorkOS key,
+//! event signing key) from Secrets Manager. The only third-party host it calls is WorkOS, for the
+//! JWKS of `WORKOS_ISSUER`.
+//!
+//! `DATABASE_URL` is the runtime login, which owns nothing; the store refuses any other. Migrations
+//! run before a deploy as a one-off task (`oryxa-fde-ops migrate`) with the owner's login.
 
 use std::time::Duration;
 
 use oryxa_authn::AccessTokenVerifier;
 use oryxa_authz::SpiceDb;
 use oryxa_events::{EventBusPublisher, Signer};
-use oryxa_fde_api::{App, router};
+use oryxa_fde_api::{App, router, run_reconciler};
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
 use workos::helpers::JwksHelper;
@@ -26,7 +30,6 @@ async fn main() -> Result<(), Error> {
         .init();
 
     let store = Store::connect(&env("DATABASE_URL")?).await?;
-    store.migrate().await?;
     let authz = SpiceDb::connect_lazy(
         &env("SPICEDB_ENDPOINT")?,
         &env("SPICEDB_PRESHARED_KEY")?,
@@ -41,11 +44,14 @@ async fn main() -> Result<(), Error> {
 
     let signer = Signer::from_pkcs8_pem(env("EVENT_SIGNING_KID")?, &env("EVENT_SIGNING_KEY")?)?;
     let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
-    tokio::spawn(relay::run(store.pool().clone(), signer, publisher));
+    tokio::spawn(relay::run(store.clone(), signer, publisher));
+
+    let app = App::new(store, authz, tokens);
+    tokio::spawn(run_reconciler(app.clone()));
 
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "listening");
-    axum::serve(listener, router(App::new(store, authz, tokens))).await?;
+    axum::serve(listener, router(app)).await?;
     Ok(())
 }
