@@ -14,6 +14,7 @@ import { STAGES } from "../lib/api/schemas"
 import type { Me, Stage } from "../lib/api/schemas"
 import { canMove } from "../lib/stage"
 import { localDay } from "../lib/time"
+import { runRoutes, seedRuns } from "./mock-runs"
 
 type S = components["schemas"]
 
@@ -749,7 +750,7 @@ function seed() {
     organisation: { id: "org_northlight", name: "Northlight FDE" },
     role: "admin",
   }
-  return { me, companies, projects }
+  return { me, companies, projects, runs: seedRuns() }
 }
 
 let state = seed()
@@ -835,7 +836,7 @@ function today(): S["TodayOut"] {
 
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
-  const [companyId, collection, projectId, record] = parts
+  const [companyId, collection, projectId, record, ...rest] = parts
   if (companyId === undefined) return method === "GET" ? json(companyList()) : null
   // The API checks permission before it looks: anything not the FDE's is a 403.
   const found = state.companies.find((c) => c.company.id === companyId)
@@ -851,6 +852,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (collection !== "projects" || projectId === undefined) return null
   const p = projectsOf(companyId).find((x) => x.project.id === projectId)
   if (!p) return refuse(403, "forbidden")
+  if (record === "agent-runs")
+    return runRoutes((state.runs[projectId] ??= []), method, rest, request, state.me.user.id)
   if (method === "GET") {
     if (record === undefined) return json(p.project)
     if (record === "scope") return json(p.records.scope)

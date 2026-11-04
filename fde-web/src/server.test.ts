@@ -126,3 +126,116 @@ describe("upstream", () => {
     expect(upstream({ ...local, ...apiAnswering().env }, false)?.origin).toBe("http://api.internal")
   })
 })
+
+describe("failures", () => {
+  it("answer a forward that throws with 502 and the security headers, not Cloudflare's page", async () => {
+    const env = {
+      API: {
+        fetch: vi.fn(async () => {
+          throw new TypeError("network connection lost")
+        }),
+      } as unknown as Fetcher,
+    }
+
+    const response = await call(new Request(`${APP}/api/v1/companies`), env)
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: "bad_gateway" })
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff")
+    expect(policyOf(response)).toContain("frame-ancestors 'none'")
+  })
+
+  it("answer anything else that throws with 500 and the security headers", async () => {
+    page.mockImplementationOnce(() => {
+      throw new Error("render failed")
+    })
+
+    const response = await call(new Request(`${APP}/today`))
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ error: "internal" })
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY")
+  })
+})
+
+describe("live run output", () => {
+  const LIVE = `${APP}/live/companies/cmp_1/projects/prj_1/agent-runs/run_1`
+  const TOKEN = "sample-subscribe-token-for-tests-012345"
+  const browser = (headers: Record<string, string> = {}) =>
+    new Request(LIVE, {
+      headers: {
+        upgrade: "websocket",
+        origin: APP,
+        cookie: "__Host-fde_session=sealed",
+        ...headers,
+      },
+    })
+
+  /** The API answering for the run and for /v1/me, and a realtime Worker that records what reaches it. */
+  function services(run = () => Response.json({ id: "run_1" })) {
+    const api = vi.fn(async (request: Request) =>
+      new URL(request.url).pathname === "/v1/me"
+        ? Response.json({ user: { id: "u", name: "R" }, organisation: { id: "org_1", name: "N" } })
+        : run(),
+    )
+    const realtime = vi.fn(async (_request: Request) => new Response("subscribed"))
+    const env: Env = {
+      API: { fetch: api } as unknown as Fetcher,
+      REALTIME: { fetch: realtime } as unknown as Fetcher,
+      REALTIME_SUBSCRIBE_TOKEN: TOKEN,
+    }
+    return { env, api, realtime }
+  }
+
+  it("asks the API as the browser's session, then subscribes it to the run in its tenant", async () => {
+    const { env, api, realtime } = services()
+
+    const response = await call(browser(), env)
+
+    expect(await response.text()).toBe("subscribed")
+    const asked = api.mock.calls.map(([r]) => [new URL(r.url).pathname, r.headers.get("cookie")])
+    expect(asked).toContainEqual([
+      "/v1/companies/cmp_1/projects/prj_1/agent-runs/run_1",
+      "__Host-fde_session=sealed",
+    ])
+    const [subscribe] = realtime.mock.calls[0]!
+    expect(new URL(subscribe.url).pathname).toBe(
+      "/internal/v1/tenants/org_1/companies/cmp_1/projects/prj_1/agent-runs/run_1/live",
+    )
+    expect(subscribe.headers.get("authorization")).toBe(`Bearer ${TOKEN}`)
+    expect(subscribe.headers.get("cookie")).toBeNull()
+  })
+
+  it("passes on the API's refusal and never subscribes", async () => {
+    for (const status of [401, 403, 404]) {
+      const { env, realtime } = services(() => Response.json({ error: "no" }, { status }))
+
+      const response = await call(browser(), env)
+
+      expect(response.status).toBe(status)
+      expect(realtime).not.toHaveBeenCalled()
+    }
+  })
+
+  it("refuses another site's page, a plain request and a bad id before asking anyone", async () => {
+    const { env, api, realtime } = services()
+
+    expect((await call(browser({ origin: "https://evil.example" }), env)).status).toBe(403)
+    expect((await call(new Request(LIVE, { headers: { origin: APP } }), env)).status).toBe(426)
+    const badId = new Request(`${APP}/live/companies/cmp:1/projects/prj_1/agent-runs/run_1`, {
+      headers: { upgrade: "websocket", origin: APP },
+    })
+    expect((await call(badId, env)).status).not.toBe(101)
+    expect(api).not.toHaveBeenCalled()
+    expect(realtime).not.toHaveBeenCalled()
+  })
+
+  it("answers 503 without a realtime binding or token", async () => {
+    const { env } = services()
+
+    const response = await call(browser(), { ...env, REALTIME_SUBSCRIBE_TOKEN: undefined })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({ error: "live_not_configured" })
+  })
+})

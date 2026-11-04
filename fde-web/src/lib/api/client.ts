@@ -1,7 +1,10 @@
 import { queryOptions } from "@tanstack/react-query"
 import createClient from "openapi-fetch"
 import { z } from "zod"
+import type { paths as RunPaths } from "./agent-runs.gen"
 import type { paths } from "./fde-api.gen"
+import { ApprovalOut, EventsOut, RunOut, isActive, parseEvents } from "./runs"
+import type { AgentRunId, ApprovalId, CreateRun, RunEvent } from "./runs"
 import {
   AccessRequestOut,
   CompanyOut,
@@ -15,7 +18,7 @@ import {
   TaskOut,
   TodayOut,
 } from "./schemas"
-import type { Company, CompanyId, Project, ProjectScope, Stage } from "./schemas"
+import type { Company, CompanyId, Project, ProjectId, ProjectScope, Stage } from "./schemas"
 
 // The app's only way to the FDE API. Screens use `api` and `queries` and never see where the
 // answers come from. Calls go through a client generated from the API's OpenAPI spec
@@ -38,6 +41,14 @@ export class ApiError extends Error {
 /** Words for refusals the API answers with a code only. Anything else shows generic copy. */
 const SAFE_TEXT: Record<string, string> = {
   rejected_stage_transition: "A project moves one stage forward, or back to an earlier one.",
+  // The API could not reach a service it needs (WorkOS, SpiceDB). Nothing is wrong on this end.
+  unavailable: "The workspace is briefly unavailable. Try again in a minute.",
+  invalid_task: "Describe the task in plain text, up to 64 KiB.",
+  invalid_repository: "Give the repository's owner, name and branch.",
+  rejected_over_budget: "This project's agent budget is used up.",
+  rejected_ended: "This run has already ended.",
+  rejected_not_pending: "This approval is no longer waiting for a decision.",
+  rejected_already_decided: "Someone has already decided this approval.",
 }
 
 const ErrorBody = z.object({ error: z.string(), message: z.string().optional() })
@@ -90,6 +101,8 @@ function connect(transport: Transport) {
   // `/v1/*` goes under `/api`, which the Worker strips; `/auth/*` it forwards as it is.
   const client = createClient<paths>({ baseUrl: `${origin()}/api`, ...options })
   const auth = createClient<paths>({ baseUrl: origin(), ...options })
+  // Agent runs are served by the same API, from their own spec (crates/oryxa-fde-agent/openapi.json).
+  const runs = createClient<RunPaths>({ baseUrl: `${origin()}/api`, ...options })
 
   /** One call's answer, parsed; a refusal throws an `ApiError`. */
   async function read<T>(
@@ -103,6 +116,17 @@ function connect(transport: Transport) {
 
   const company = (id: CompanyId) => ({ params: { path: { company: id } } })
   const project = (scope: ProjectScope) => ({ params: { path: scope } })
+  const agentRun = (scope: ProjectScope, run: AgentRunId) => ({
+    params: { path: { ...scope, run } },
+  })
+  const approval = (scope: ProjectScope, run: AgentRunId, id: ApprovalId) => ({
+    params: { path: { ...scope, run, approval: id } },
+  })
+  const runsOf = (scope: ProjectScope) =>
+    read(
+      z.array(RunOut),
+      runs.GET("/v1/companies/{company}/projects/{project}/agent-runs", project(scope)),
+    )
 
   const get = {
     companies: () => read(z.array(CompanySummaryOut), client.GET("/v1/companies")),
@@ -210,7 +234,89 @@ function connect(transport: Transport) {
           body: { stage: to },
         }),
       ),
+
+    runs: runsOf,
+
+    /** A run with its events so far and its approval requests. */
+    async run(scope: ProjectScope, id: AgentRunId): Promise<RunDetail> {
+      const path = "/v1/companies/{company}/projects/{project}/agent-runs/{run}"
+      const [run, stored, approvals] = await Promise.all([
+        read(RunOut, runs.GET(path, agentRun(scope, id))),
+        read(EventsOut, runs.GET(`${path}/events`, agentRun(scope, id))),
+        read(z.array(ApprovalOut), runs.GET(`${path}/approvals`, agentRun(scope, id))),
+      ])
+      return { run, approvals, ...parseEvents(stored.events) }
+    },
+
+    startRun: (scope: ProjectScope, body: CreateRun) =>
+      read(
+        RunOut,
+        runs.POST("/v1/companies/{company}/projects/{project}/agent-runs", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    cancelRun: (scope: ProjectScope, id: AgentRunId) =>
+      read(
+        RunOut,
+        runs.POST(
+          "/v1/companies/{company}/projects/{project}/agent-runs/{run}/cancel",
+          agentRun(scope, id),
+        ),
+      ),
+
+    /** Approves or rejects one approval request: exactly the tool call it shows, nothing else. */
+    decide(scope: ProjectScope, run: AgentRunId, id: ApprovalId, outcome: "approve" | "reject") {
+      const path = approval(scope, run, id)
+      return read(
+        ApprovalOut,
+        outcome === "approve"
+          ? runs.POST(
+              "/v1/companies/{company}/projects/{project}/agent-runs/{run}/approvals/{approval}/approve",
+              path,
+            )
+          : runs.POST(
+              "/v1/companies/{company}/projects/{project}/agent-runs/{run}/approvals/{approval}/reject",
+              path,
+            ),
+      )
+    },
+
+    // ponytail: one call per project until the agent stream lists runs across projects (#27 comment).
+    async activeRuns(): Promise<Array<ActiveRun>> {
+      const companies = await get.companies()
+      const perProject = await Promise.all(
+        companies.flatMap((c) =>
+          c.projects.map(async (p) => {
+            const list = await runsOf({ company: c.id, project: p.id })
+            const where = {
+              company: { id: c.id, name: c.name },
+              project: { id: p.id, name: p.name },
+            }
+            return list.filter((run) => isActive(run.state)).map((run) => ({ run, ...where }))
+          }),
+        ),
+      )
+      return perProject.flat()
+    },
   }
+}
+
+/** A run as the review screen reads it. */
+export type RunDetail = {
+  run: RunOut
+  approvals: Array<ApprovalOut>
+  events: Array<RunEvent>
+  /** Lines the screen could not read, so it can say so. */
+  skipped: number
+}
+
+/** A run that may still need the FDE, with where it is. */
+export type ActiveRun = {
+  run: RunOut
+  company: { id: CompanyId; name: string }
+  project: { id: ProjectId; name: string }
 }
 
 type Api = ReturnType<typeof connect>
@@ -228,6 +334,12 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     project: async (scope) => (await use()).project(scope),
     today: async () => (await use()).today(),
     moveStage: async (scope, to) => (await use()).moveStage(scope, to),
+    runs: async (scope) => (await use()).runs(scope),
+    run: async (scope, id) => (await use()).run(scope, id),
+    startRun: async (scope, body) => (await use()).startRun(scope, body),
+    cancelRun: async (scope, id) => (await use()).cancelRun(scope, id),
+    decide: async (scope, run, id, outcome) => (await use()).decide(scope, run, id, outcome),
+    activeRuns: async () => (await use()).activeRuns(),
   }
 }
 
@@ -279,4 +391,23 @@ export const queries = {
       ...read,
     }),
   today: () => queryOptions({ queryKey: ["today"], queryFn: api.today, ...read }),
+  runs: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "runs"],
+      queryFn: () => api.runs(scope),
+      ...read,
+    }),
+  /** A run, read again every few seconds while it may change; live output arrives in between. */
+  run: (scope: ProjectScope, id: AgentRunId) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "runs", id],
+      queryFn: () => api.run(scope, id),
+      ...read,
+      refetchInterval: (query) =>
+        query.state.data && isActive(query.state.data.run.state) ? RUN_POLL_MS : false,
+    }),
+  activeRuns: () =>
+    queryOptions({ queryKey: ["runs", "active"], queryFn: api.activeRuns, ...read }),
 }
+
+const RUN_POLL_MS = 5_000

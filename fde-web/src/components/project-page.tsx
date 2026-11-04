@@ -4,6 +4,7 @@ import { ChevronLeft } from "lucide-react"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
 import type { Tone } from "./page"
 import { StageBar } from "./stage-bar"
+import { RunsCard } from "./runs"
 import { ApiError, api, queries } from "@/lib/api/client"
 import type {
   AccessState,
@@ -249,6 +250,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
           </Rows>
         )}
       </Card>
+
+      <RunsCard scope={scope} />
 
       <Card title="Decisions">
         {p.decisions.length === 0 ? (

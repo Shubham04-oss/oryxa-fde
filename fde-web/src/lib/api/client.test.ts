@@ -173,6 +173,13 @@ describe("api over the network", () => {
     })
     const gateway = await refusal(down.net.today())
     expect([gateway.status, gateway.code]).toEqual([502, "http_502"])
+
+    // The API's own 503 says a service it needs is down, not that the FDE is offline.
+    const unavailable = stub({
+      "GET /api/v1/me": () => Response.json({ error: "unavailable" }, { status: 503 }),
+    })
+    const refused = await refusal(unavailable.net.me())
+    expect(refused.message).toBe("The workspace is briefly unavailable. Try again in a minute.")
   })
 
   it("fails loudly on an answer that drifts from the spec", async () => {

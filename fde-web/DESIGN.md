@@ -84,6 +84,19 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   with its target), then Access, Tasks and Decisions. Scope says whether it is signed off, changed
   since sign-off, or not signed off. Access and waiting tasks name people and systems from the
   company's records; a task says why it is stuck, who it waits on, or when it is due.
+- **Agent runs (project).** A card after Tasks: the project's runs, newest first, each with its
+  state, and **Start a task**: what the agent should do and the GitHub repository and branch it
+  starts from, prefilled from the latest run. The form checks the repository with the API's own
+  rules before it sends.
+- **Agent run review.** The task and its state, then **Waiting for approval** while a request is
+  open: its title, action and tool, and the full input exactly as it would run. **Approve** acts at
+  once; **Reject** asks first, since it stops the run; on a phone both are full width. Then the
+  latest plan, the files changed, **Tests and commands** in order with how each ended, and what the
+  agent said, ending with its result. A finished run links its pull request (only a github.com pull
+  request page); a failed one says why. While a run may change, the screen follows its live output
+  and reads it again every few seconds; **Cancel** asks first.
+- **Today's runs.** A fourth card: runs that may still need the FDE across every company, waiting
+  for approval first.
 - **The stage bar.** Eight steps; done steps in `--text-soft`, the current one in `--text`, later
   ones in `--border-quiet`. Only the moves `oryxa_fde_core::Stage::transition` allows are buttons:
   the next stage, or back to any earlier one for rework. Later stages are disabled and say why. A
@@ -92,7 +105,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 ## 4. Data
 
 - `src/lib/api/client.ts` is the only way to the API. Screens use `api` and `queries` from it and
-  nothing else. Calls go through a client generated from the API's committed spec,
+  nothing else. Agent runs have their own spec, `crates/oryxa-fde-agent/openapi.json`, generated
+  into `agent-runs.gen.ts` and checked the same way; a run's events follow the harness format and
+  are parsed one by one (`src/lib/api/runs.ts`), tested on the harness's recorded session. Calls
+  go through a client generated from the API's committed spec,
   `crates/oryxa-fde-api/openapi.json` (`pnpm api:generate` writes `src/lib/api/fde-api.gen.ts`;
   `pnpm api:check` fails CI when it drifts). Every answer is parsed with zod (`schemas.ts`), and
   `schemas.test.ts` fails the typecheck when a schema stops matching its spec type.
@@ -112,6 +128,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Home, Jump to and Today read whole views from the API (`GET /v1/companies`, `/v1/today`). The
   company and project screens are gathered from a few calls each in `client.ts`; a project's
   people and systems are read through the project, so an assignee may see them.
+- Live run output comes over a WebSocket on this app's own origin (`/live/...`). The Worker
+  (`src/live.ts`) asks the API whether the session may see the run, then connects it to the run's
+  channel in the realtime Worker (`realtime/`) through a service binding; the browser never reaches
+  that Worker. Without it the screen reads the run every few seconds instead.
 - Pages carry a content security policy with a fresh script nonce per response; static assets get
   their headers from `public/_headers`, kept in step by `security-headers.test.ts`.
 - `pnpm dev:mock` answers from `src/dev/mock-api.ts`: the spec's routes in the browser, on
