@@ -17,6 +17,9 @@ oryxa-authn = { path = "vendor/oryxa-platform/crates/oryxa-authn" }
 oryxa-authz = { path = "vendor/oryxa-platform/crates/oryxa-authz" }
 oryxa-events = { path = "vendor/oryxa-platform/crates/oryxa-events" }
 
+oryxa-fde-core = { path = "crates/oryxa-fde-core" }
+oryxa-fde-events = { path = "crates/oryxa-fde-events" }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

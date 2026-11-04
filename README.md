@@ -13,6 +13,9 @@ Refresh them with `scripts/sync-platform.sh <commit>`; never edit them here.
 | Crate | Owns |
 | --- | --- |
 | `oryxa-fde-core` | FDE ids, `CompanyScope` and `ProjectScope` (every company-scoped call takes one), the project stage machine |
+| `oryxa-fde-events` | FDE event payloads (source `oryxa.fde`, ids only) on the `oryxa-events` contract |
+
+`schema/fde.zed` is the SpiceDB schema (ADR 0002); `zed validate schema/fde.validation.yaml` checks it.
 
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings

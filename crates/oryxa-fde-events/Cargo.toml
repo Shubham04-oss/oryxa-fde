@@ -1,0 +1,19 @@
+[package]
+name = "oryxa-fde-events"
+version = "0.1.0"
+description = "FDE event payloads on the oryxa-events bus contract"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+oryxa-events.workspace = true
+oryxa-fde-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+oryxa-core.workspace = true
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+rand = "0.8"
+serde_json.workspace = true

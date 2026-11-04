@@ -1,0 +1,37 @@
+// FDE SpiceDB schema v1 (ADR 0002). Every object id is "<tenant>|<id>" (see oryxa-authz ids.rs),
+// so tenants never share objects; the workspace object is the tenant root.
+// user, workspace and team are copied from the platform's schema/oryxa.zed; keep them in step.
+
+definition user {}
+
+definition workspace {
+    relation admin: user
+    relation member: user
+
+    permission manage = admin
+    permission access = admin + member
+}
+
+definition team {
+    relation workspace: workspace
+    relation member: user
+}
+
+definition fde_company {
+    relation workspace: workspace
+    relation lead: user
+    relation engineer: user | team#member
+
+    permission manage = lead + workspace->manage
+    permission work = engineer + manage
+}
+
+// Customer people get guest on a project, never on the company.
+definition fde_project {
+    relation company: fde_company
+    relation assignee: user
+    relation guest: user
+
+    permission work = assignee + company->work
+    permission view = work + guest
+}

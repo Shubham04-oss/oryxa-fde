@@ -1,0 +1,65 @@
+# Run: zed validate schema/fde.validation.yaml
+schemaFile: "./fde.zed"
+relationships: |-
+  workspace:t1|ws#admin@user:t1|alice
+  workspace:t1|ws#member@user:t1|bob
+  workspace:t1|ws#member@user:t1|carol
+  workspace:t1|ws#member@user:t1|dave
+  team:t1|eng#workspace@workspace:t1|ws
+  team:t1|eng#member@user:t1|dave
+  fde_company:t1|acme#workspace@workspace:t1|ws
+  fde_company:t1|acme#lead@user:t1|lena
+  fde_company:t1|acme#engineer@user:t1|bob
+  fde_company:t1|globex#workspace@workspace:t1|ws
+  fde_company:t1|globex#engineer@team:t1|eng#member
+  fde_project:t1|acme_rag#company@fde_company:t1|acme
+  fde_project:t1|acme_rag#guest@user:t1|gina
+  fde_project:t1|acme_evals#company@fde_company:t1|acme
+  fde_project:t1|acme_evals#assignee@user:t1|carol
+  fde_project:t1|globex_bot#company@fde_company:t1|globex
+  workspace:t2|ws#admin@user:t2|alice
+  fde_company:t2|initech#workspace@workspace:t2|ws
+  fde_company:t2|initech#engineer@user:t2|bob
+assertions:
+  assertTrue:
+    # An engineer works on every project of their company.
+    - fde_company:t1|acme#work@user:t1|bob
+    - fde_project:t1|acme_rag#work@user:t1|bob
+    - fde_project:t1|acme_evals#work@user:t1|bob
+    - fde_project:t1|acme_rag#view@user:t1|bob
+    # Engineers through a team.
+    - fde_project:t1|globex_bot#work@user:t1|dave
+    # The company lead manages and works.
+    - fde_company:t1|acme#manage@user:t1|lena
+    - fde_project:t1|acme_rag#work@user:t1|lena
+    # A workspace admin manages every company in the workspace.
+    - fde_company:t1|acme#manage@user:t1|alice
+    - fde_company:t1|globex#manage@user:t1|alice
+    - fde_project:t1|globex_bot#work@user:t1|alice
+    # An assignee works on that one project.
+    - fde_project:t1|acme_evals#work@user:t1|carol
+    # A project guest views that project.
+    - fde_project:t1|acme_rag#view@user:t1|gina
+  assertFalse:
+    # Engineers do not manage, and do not reach other companies.
+    - fde_company:t1|acme#manage@user:t1|bob
+    - fde_company:t1|globex#work@user:t1|bob
+    - fde_project:t1|globex_bot#view@user:t1|bob
+    # A workspace member is not an engineer anywhere by default.
+    - fde_company:t1|acme#work@user:t1|dave
+    - fde_project:t1|acme_rag#view@user:t1|dave
+    # An assignee does not get the company or its other projects.
+    - fde_company:t1|acme#work@user:t1|carol
+    - fde_project:t1|acme_rag#view@user:t1|carol
+    # A guest views that project and nothing else.
+    - fde_project:t1|acme_rag#work@user:t1|gina
+    - fde_project:t1|acme_evals#view@user:t1|gina
+    - fde_company:t1|acme#work@user:t1|gina
+    - fde_company:t1|acme#manage@user:t1|gina
+    # Another tenant's users get nothing, even with the same names and roles.
+    - fde_company:t1|acme#manage@user:t2|alice
+    - fde_company:t1|acme#work@user:t2|bob
+    - fde_project:t1|acme_rag#view@user:t2|bob
+    - fde_project:t1|acme_rag#view@user:t2|gina
+    - fde_company:t2|initech#work@user:t1|bob
+    - fde_company:t2|initech#manage@user:t1|alice

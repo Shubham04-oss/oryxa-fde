@@ -90,6 +90,13 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: npm ci --no-audit --no-fund && npm run check && npm test
 
+  schema:
+    # The SpiceDB schema must parse and every assertion in its validation file must hold.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker run --rm -v "$PWD/schema:/schema" authzed/zed:v1.2.1 validate /schema/fde.validation.yaml
+
   deny:
     runs-on: ubuntu-latest
     steps:
