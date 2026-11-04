@@ -1,6 +1,6 @@
-//! Where suites and runs live. `EvalStore` is what evals need; `InMemoryEvals` implements it until the store crate
-//! does on Postgres (with `finish` writing the outbox in the same transaction). Every lookup takes the full
-//! `ProjectScope`, so one company's suites and results are never found through another's.
+//! Where suites and runs live. `EvalStore` is what evals need: Postgres implements it in `pg`, and `InMemoryEvals`
+//! for tests. Every lookup takes the full `ProjectScope`, so one company's suites and results are never found
+//! through another's.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -42,7 +42,7 @@ pub enum EvalStoreError {
 }
 
 pub trait EvalStore: Send + Sync + 'static {
-    fn create_suite(&self, suite: &Suite) -> impl Future<Output = Result<(), EvalStoreError>> + Send;
+    fn create_suite(&self, suite: &Suite, by: &UserId) -> impl Future<Output = Result<(), EvalStoreError>> + Send;
     fn suite(
         &self,
         scope: &ProjectScope,
@@ -55,6 +55,7 @@ pub trait EvalStore: Send + Sync + 'static {
         scope: &ProjectScope,
         id: &SuiteId,
         cases: Vec<Case>,
+        by: &UserId,
     ) -> impl Future<Output = Result<Suite, EvalStoreError>> + Send;
     fn create_run(&self, run: &EvalRun) -> impl Future<Output = Result<(), EvalStoreError>> + Send;
     fn run(
@@ -64,9 +65,19 @@ pub trait EvalStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<EvalRun>, EvalStoreError>> + Send;
     /// The project's runs, newest first.
     fn runs(&self, scope: &ProjectScope) -> impl Future<Output = Result<Vec<EvalRun>, EvalStoreError>> + Send;
-    /// Saves the finished run and enqueues `event`, all or nothing.
-    fn finish(&self, run: &EvalRun, event: &EvalRunFinished)
-    -> impl Future<Output = Result<(), EvalStoreError>> + Send;
+    /// Ends the run with its report, once (a run already ended is a conflict), and enqueues its [`finished_event`],
+    /// all or nothing.
+    fn finish(&self, run: &EvalRun, report: &Report) -> impl Future<Output = Result<(), EvalStoreError>> + Send;
+}
+
+/// `eval-run.finished` for a run with this report: a case that could not be graded did not pass.
+pub fn finished_event(run: &EvalRun, report: &Report) -> EvalRunFinished {
+    EvalRunFinished::new(
+        &run.scope,
+        run.id.clone(),
+        report.passed,
+        report.failed.saturating_add(report.errored),
+    )
 }
 
 #[derive(Default)]
@@ -77,9 +88,7 @@ struct Inner {
     next: u64,
 }
 
-/// Suites and runs held in the API process.
-// ponytail: in memory until the store crate implements `EvalStore` on Postgres; one API task only, and a restart
-// loses suites, results and their events.
+/// Suites and runs held in memory, for tests.
 #[derive(Default)]
 pub struct InMemoryEvals {
     inner: Mutex<Inner>,
@@ -102,7 +111,7 @@ fn newest_first<T: Clone>(mut items: Vec<&(u64, T)>) -> Vec<T> {
 }
 
 impl EvalStore for InMemoryEvals {
-    async fn create_suite(&self, suite: &Suite) -> Result<(), EvalStoreError> {
+    async fn create_suite(&self, suite: &Suite, _by: &UserId) -> Result<(), EvalStoreError> {
         let mut inner = self.lock();
         let key = (suite.scope.clone(), suite.id.clone());
         if inner.suites.contains_key(&key) {
@@ -134,7 +143,13 @@ impl EvalStore for InMemoryEvals {
         ))
     }
 
-    async fn add_cases(&self, scope: &ProjectScope, id: &SuiteId, cases: Vec<Case>) -> Result<Suite, EvalStoreError> {
+    async fn add_cases(
+        &self,
+        scope: &ProjectScope,
+        id: &SuiteId,
+        cases: Vec<Case>,
+        _by: &UserId,
+    ) -> Result<Suite, EvalStoreError> {
         let mut inner = self.lock();
         let (_, suite) = inner
             .suites
@@ -179,14 +194,18 @@ impl EvalStore for InMemoryEvals {
         ))
     }
 
-    async fn finish(&self, run: &EvalRun, event: &EvalRunFinished) -> Result<(), EvalStoreError> {
+    async fn finish(&self, run: &EvalRun, report: &Report) -> Result<(), EvalStoreError> {
         let mut inner = self.lock();
         let (_, stored) = inner
             .runs
             .get_mut(&(run.scope.clone(), run.id.clone()))
             .ok_or(EvalStoreError::NotFound)?;
-        *stored = run.clone();
-        inner.outbox.push(event.clone());
+        if stored.report.is_some() {
+            return Err(EvalStoreError::Conflict);
+        }
+        stored.ended_at = Some(OffsetDateTime::now_utc());
+        stored.report = Some(report.clone());
+        inner.outbox.push(finished_event(run, report));
         Ok(())
     }
 }

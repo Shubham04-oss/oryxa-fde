@@ -33,5 +33,10 @@ Unknown columns, malformed rows, more than 10,000 rows, or more than 8 MiB are r
 
 ## Storage
 
-`EvalStore` is implemented in memory (`InMemoryEvals`) until the store crate implements it on Postgres, with
-`finish` writing `EvalRunFinished` (ids and counts) to the outbox in the same transaction.
+`EvalStore` is implemented on Postgres (`pg`, over `oryxa-fde-store`'s eval tables from `0007_evals.sql`): each call
+is one transaction scoped to the project, under forced row-level security. `finish` records the report once and
+writes `EvalRunFinished` (ids and counts, an errored case counted as failed) to the outbox in the same transaction.
+`InMemoryEvals` is for tests.
+
+Case text and outputs are sample data and stay in these tables, never in events or logs. A stored output cannot
+hold a NUL byte, so a target that prints one errors the case.

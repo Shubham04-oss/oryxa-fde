@@ -102,8 +102,18 @@ pub async fn produce(sandbox: &impl EvalSandbox, target: &Command, case: &Case) 
             exit_code: Some(0),
             stdout,
             ..
-        } if stdout.len() <= MAX_TEXT_BYTES => Ok(stdout),
-        CommandOutput { exit_code: Some(0), .. } => Err("the target's output is too large".into()),
+        } if stdout.len() > MAX_TEXT_BYTES => Err("the target's output is too large".into()),
+        // Stored outputs are text, which cannot hold a NUL; cases and imported outputs refuse one too.
+        CommandOutput {
+            exit_code: Some(0),
+            stdout,
+            ..
+        } if stdout.contains('\0') => Err("the target's output holds a NUL byte".into()),
+        CommandOutput {
+            exit_code: Some(0),
+            stdout,
+            ..
+        } => Ok(stdout),
         CommandOutput { exit_code, .. } => Err(format!("the target exited with {exit_code:?}")),
     }
 }
@@ -273,6 +283,7 @@ mod tests {
 
     struct Sandbox {
         exit: Option<i32>,
+        stdout: &'static str,
         timed_out: bool,
         down: bool,
         seen: Mutex<Vec<BTreeMap<String, String>>>,
@@ -282,6 +293,7 @@ mod tests {
         fn exiting(exit: i32) -> Self {
             Self {
                 exit: Some(exit),
+                stdout: "answer\n",
                 timed_out: false,
                 down: false,
                 seen: Mutex::new(vec![]),
@@ -305,7 +317,7 @@ mod tests {
             self.seen.lock().unwrap().push(env);
             Ok(CommandOutput {
                 exit_code: self.exit,
-                stdout: "answer\n".into(),
+                stdout: self.stdout.into(),
                 timed_out: self.timed_out,
             })
         }
@@ -475,6 +487,14 @@ mod tests {
         assert_eq!(
             produce(&slow, &target, &case(None)).await,
             Err("the target timed out".into())
+        );
+        let nul = Sandbox {
+            stdout: "ans\0wer",
+            ..Sandbox::exiting(0)
+        };
+        assert_eq!(
+            produce(&nul, &target, &case(None)).await,
+            Err("the target's output holds a NUL byte".into())
         );
     }
 }

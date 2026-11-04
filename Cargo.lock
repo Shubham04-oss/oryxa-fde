@@ -3269,12 +3269,14 @@ dependencies = [
  "oryxa-core",
  "oryxa-fde-core",
  "oryxa-fde-events",
+ "oryxa-fde-store",
  "regex",
  "serde",
  "serde_json",
  "thiserror",
  "time",
  "tokio",
+ "tracing",
  "utoipa",
 ]
 

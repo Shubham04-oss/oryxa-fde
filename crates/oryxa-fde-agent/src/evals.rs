@@ -23,7 +23,6 @@ use oryxa_fde_evals::{
     Case, CaseId, Command, CommandOutput, EvalRun, EvalSandbox, EvalStore, EvalStoreError, Grader, Judge, JudgeFailed,
     SandboxFailed, Suite, SuiteId,
 };
-use oryxa_fde_events::EvalRunFinished;
 use oryxa_fde_store::new_id;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -352,7 +351,7 @@ pub async fn create_suite<D: EvalDeps>(
     suite
         .check(&project_criteria(&evals, &scope).await?)
         .map_err(|_| RunsError::Invalid("suite"))?;
-    evals.store.create_suite(&suite).await?;
+    evals.store.create_suite(&suite, &caller.user).await?;
     Ok((StatusCode::CREATED, Json(suite.into())))
 }
 
@@ -407,7 +406,9 @@ pub async fn import_cases<D: EvalDeps>(
     let mut all = existing.cases.clone();
     all.extend(cases.iter().cloned());
     existing.check_cases(&all).map_err(|_| RunsError::Invalid("cases"))?;
-    Ok(Json(evals.store.add_cases(&scope, &suite, cases).await?.into()))
+    Ok(Json(
+        evals.store.add_cases(&scope, &suite, cases, &caller.user).await?.into(),
+    ))
 }
 
 /// Run the suite: its target produces each case's output in the company's sandbox, and every grader grades it.
@@ -474,12 +475,14 @@ async fn launch<D: EvalDeps>(
         report: None,
     };
     evals.store.create_run(&run).await?;
+    // ponytail: the run executes in this API task; if the task stops first, the run stays `running` (as an agent run
+    // does) until a sweep marks such runs errored.
     tokio::spawn(execute(evals.clone(), suite, source, run.clone()));
     Ok((StatusCode::ACCEPTED, Json(run.into())))
 }
 
 /// Runs the suite on its turn on the company's sandbox, then records the report and `eval_run.finished` together.
-async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source, mut run: EvalRun) {
+async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source, run: EvalRun) {
     let company = suite.scope.company.clone();
     let slot = evals.runs.company_slot(&company);
     let report = {
@@ -494,16 +497,7 @@ async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source
         };
         runner::run(&suite, &source, &sandbox, &judge).await
     };
-    // A case that could not be graded did not pass.
-    let event = EvalRunFinished::new(
-        &suite.scope,
-        run.id.clone(),
-        report.passed,
-        report.failed + report.errored,
-    );
-    run.ended_at = Some(OffsetDateTime::now_utc());
-    run.report = Some(report);
-    if let Err(e) = evals.store.finish(&run, &event).await {
+    if let Err(e) = evals.store.finish(&run, &report).await {
         tracing::error!(error = %e, eval_run = %run.id, "could not record the eval run's end");
     }
 }

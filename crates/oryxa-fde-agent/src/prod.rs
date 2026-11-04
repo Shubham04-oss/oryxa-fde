@@ -43,7 +43,7 @@ impl<K: KeySource + 'static> Deps for Production<K> {
 }
 
 impl<K: KeySource + 'static> EvalDeps for Production<K> {
-    type Evals = oryxa_fde_evals::InMemoryEvals;
+    type Evals = Store;
 }
 
 pub enum Live {
@@ -175,7 +175,7 @@ pub fn router_from_env<K: KeySource + 'static>(
         store.clone(),
         sandbox,
         live,
-        StoreContext::new(store, agent, Vec::new()),
+        StoreContext::new(store.clone(), agent, Vec::new()),
         PlatformAccess::new(tokens, authz),
         config,
     );
@@ -187,7 +187,7 @@ pub fn router_from_env<K: KeySource + 'static>(
             tokio::time::sleep(sweeper.config.lease).await;
         }
     });
-    let evals = Evals::new(runs.clone(), oryxa_fde_evals::InMemoryEvals::default(), judge);
+    let evals = Evals::new(runs.clone(), store, judge);
     Ok(api::router(runs).merge(evals::router(evals)))
 }
 

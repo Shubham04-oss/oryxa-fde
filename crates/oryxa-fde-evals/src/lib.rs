@@ -7,6 +7,7 @@
 pub mod grade;
 pub mod ids;
 pub mod import;
+pub mod pg;
 pub mod runner;
 pub mod schema;
 pub mod store;
@@ -15,5 +16,5 @@ pub mod suite;
 pub use grade::{CaseOutcome, CaseResult, CommandOutput, EvalSandbox, Judge, JudgeFailed, SandboxFailed, Verdict};
 pub use ids::{CaseId, SuiteId};
 pub use runner::{CriterionRate, Report, Source};
-pub use store::{EvalRun, EvalStore, EvalStoreError, InMemoryEvals};
+pub use store::{EvalRun, EvalStore, EvalStoreError, InMemoryEvals, finished_event};
 pub use suite::{Case, Command, Grader, Suite, SuiteError};
