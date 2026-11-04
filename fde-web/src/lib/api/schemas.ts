@@ -188,6 +188,8 @@ export const TaskOut = z.object({
   /** The stakeholder it waits on, and since when, while it waits on the customer. */
   waiting_on: StakeholderId.nullish(),
   waiting_since: instant.nullish(),
+  /** The access request it is blocked on, while blocked on one. */
+  blocked_by: AccessRequestId.nullish(),
   created_at: instant,
   updated_at: instant,
 })
