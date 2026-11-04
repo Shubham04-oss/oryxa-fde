@@ -202,7 +202,7 @@ pub(crate) async fn update(
     let s = scope(&who, c, p);
     app.require(&who, project(&s), "work").await?;
     let mut tx = app.store.project(&s).await?;
-    let current = tx.get().await?.ok_or(ApiError::NotFound)?;
+    let current = tx.get_for_update().await?.ok_or(ApiError::NotFound)?;
     let v = ProjectIn {
         name: match body.name {
             Some(n) => name(n, "name")?,

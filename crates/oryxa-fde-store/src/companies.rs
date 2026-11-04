@@ -128,9 +128,19 @@ impl CompanyTx {
     }
 
     pub async fn get(&mut self) -> Result<Option<Company>, StoreError> {
+        self.read("").await
+    }
+
+    /// The company, locked until this transaction ends: for a read-modify-write such as a PATCH,
+    /// so a concurrent change is not lost.
+    pub async fn get_for_update(&mut self) -> Result<Option<Company>, StoreError> {
+        self.read("for update").await
+    }
+
+    async fn read(&mut self, lock: &'static str) -> Result<Option<Company>, StoreError> {
         let s = &self.scope;
         sqlx::query(&format!(
-            "select {COLUMNS} from companies where tenant_id = $1 and company_id = $2"
+            "select {COLUMNS} from companies where tenant_id = $1 and company_id = $2 {lock}"
         ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())

@@ -39,7 +39,7 @@ pub use authz::{reconcile_grants, run_reconciler};
 pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
-pub use session::{AuthKit, SignIn, Tokens, WorkOsAuthKit};
+pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -185,7 +185,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 #[openapi(
     info(title = "oryxa-fde-api", version = "0.1.0", description = "The FDE workspace API."),
     modifiers(&Bearer),
-    security(("bearer" = [])),
+    security(("bearer" = []), ("session" = [])),
     tags(
         (name = "companies", description = "Customer companies and their members"),
         (name = "projects", description = "Projects and their assignees"),
@@ -205,9 +205,20 @@ impl utoipa::Modify for Bearer {
             .scheme(HttpAuthScheme::Bearer)
             .bearer_format("WorkOS access token")
             .build();
-        api.components
-            .get_or_insert_with(Default::default)
-            .add_security_scheme("bearer", SecurityScheme::Http(scheme));
+        let components = api.components.get_or_insert_with(Default::default);
+        components.add_security_scheme("bearer", SecurityScheme::Http(scheme));
+        let mut cookie = utoipa::openapi::security::ApiKeyValue::new(session::SESSION_COOKIE);
+        cookie.description = Some(
+            "The browser session from /auth/callback. A request carrying it, and no bearer token, that is not \
+             GET or HEAD must also send `X-Oryxa-Request: 1` and the web app's `Origin`, or it gets \
+             403 {\"error\":\"csrf\"}. While WorkOS cannot refresh an expired session, any request may get \
+             503 {\"error\":\"unavailable\"}: the cookie is kept, and the same request works once WorkOS answers."
+                .into(),
+        );
+        components.add_security_scheme(
+            "session",
+            SecurityScheme::ApiKey(utoipa::openapi::security::ApiKey::Cookie(cookie)),
+        );
     }
 }
 

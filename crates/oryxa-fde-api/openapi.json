@@ -128,21 +128,11 @@
         "tags": [
           "auth"
         ],
-        "summary": "Sign out: ends the WorkOS session and clears the cookie.",
+        "summary": "Sign out: clears the session cookie, always, and ends the WorkOS session if WorkOS answers.\nIt never refreshes or reissues the cookie, whatever state the session is in.",
         "operationId": "sign_out",
         "responses": {
           "204": {
-            "description": "Signed out"
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
+            "description": "Signed out; the cookie is cleared"
           },
           "403": {
             "description": "Forbidden",
@@ -153,18 +143,13 @@
                 }
               }
             }
-          },
-          "503": {
-            "description": "Service Unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
           }
-        }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/companies": {
@@ -3673,6 +3658,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -4912,12 +4907,21 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "WorkOS access token"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-fde_session",
+        "description": "The browser session from /auth/callback. A request carrying it, and no bearer token, that is not GET or HEAD must also send `X-Oryxa-Request: 1` and the web app's `Origin`, or it gets 403 {\"error\":\"csrf\"}. While WorkOS cannot refresh an expired session, any request may get 503 {\"error\":\"unavailable\"}: the cookie is kept, and the same request works once WorkOS answers."
       }
     }
   },
   "security": [
     {
       "bearer": []
+    },
+    {
+      "session": []
     }
   ],
   "tags": [
