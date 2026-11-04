@@ -14,6 +14,8 @@ Refresh them with `scripts/sync-platform.sh <commit>`; never edit them here.
 | --- | --- |
 | `oryxa-fde-core` | FDE ids, `CompanyScope` and `ProjectScope` (every company-scoped call takes one), the project stage machine |
 | `oryxa-fde-events` | FDE event payloads (source `oryxa.fde`, ids only) on the `oryxa-events` contract |
+| `oryxa-fde-store` | Postgres tables, migrations and row-level security, the audit log, the outbox and its relay |
+| `oryxa-fde-api` | The HTTP API (Axum): WorkOS token verification, SpiceDB checks, companies, projects and members; spec in `crates/oryxa-fde-api/openapi.json` |
 
 `schema/fde.zed` is the SpiceDB schema (ADR 0002); `zed validate schema/fde.validation.yaml` checks it.
 

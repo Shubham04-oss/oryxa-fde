@@ -1,0 +1,25 @@
+[package]
+name = "oryxa-fde-store"
+version = "0.1.0"
+description = "FDE tables, migrations, row-level security, the outbox and its relay"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+oryxa-core.workspace = true
+oryxa-events.workspace = true
+oryxa-fde-core.workspace = true
+oryxa-fde-events.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+rand = "0.8"
+serde_json.workspace = true
