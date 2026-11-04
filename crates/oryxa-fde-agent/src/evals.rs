@@ -3,8 +3,8 @@
 //! `view`, which the customer's guests hold. The suites, graders and runner are in `oryxa-fde-evals`; this module
 //! gives them the company's sandbox and the model.
 //!
-//! An eval run takes its turn on the company's sandbox like an agent run, so it never grades a checkout an agent
-//! is still changing.
+//! An eval run that uses the company's sandbox takes its turn on it like an agent run, through the same lease in
+//! the store, so it never grades a checkout an agent is still changing, whichever API task drives either.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -20,12 +20,14 @@ use oryxa_fde_core::{CompanyId, CompanyScope, CriterionId, EvalRunId, ProjectId,
 use oryxa_fde_evals::import::{self, MAX_CSV_BYTES};
 use oryxa_fde_evals::runner::{self, CriterionRate, Report, Source};
 use oryxa_fde_evals::{
-    Case, CaseId, Command, CommandOutput, EvalRun, EvalSandbox, EvalStore, EvalStoreError, Grader, Judge, JudgeFailed,
-    SandboxFailed, Suite, SuiteId,
+    Case, CaseId, CaseOutcome, CaseResult, Command, CommandOutput, EvalRun, EvalSandbox, EvalStore, EvalStoreError,
+    Grader, Judge, JudgeFailed, SandboxFailed, Suite, SuiteId,
 };
 use oryxa_fde_store::new_id;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::access::{Access, Caller, Permission};
@@ -481,25 +483,103 @@ async fn launch<D: EvalDeps>(
     Ok((StatusCode::ACCEPTED, Json(run.into())))
 }
 
-/// Runs the suite on its turn on the company's sandbox, then records the report and `eval_run.finished` together.
+/// Runs the suite (on its turn on the company's sandbox, if it uses it), then records the report and
+/// `eval_run.finished` together.
 async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source, run: EvalRun) {
-    let company = suite.scope.company.clone();
-    let slot = evals.runs.company_slot(&company);
-    let report = {
-        let _turn = slot.lock().await;
-        let sandbox = CompanySandbox {
-            runs: &evals.runs,
-            company,
-        };
-        let judge = SandboxJudge {
-            sandbox: &sandbox,
-            config: &evals.judge,
-        };
-        runner::run(&suite, &source, &sandbox, &judge).await
+    let report = if runner::uses_sandbox(&suite, &source) {
+        match take_turn(&evals, &run).await {
+            Some(until) => {
+                let heartbeat = hold_sandbox(evals.clone(), run.clone(), until);
+                let report = run_suite(&evals, &suite, &source).await;
+                // The end lets the sandbox go, so the heartbeat stops before it is recorded.
+                heartbeat.abort();
+                report
+            }
+            None => unavailable(&suite),
+        }
+    } else {
+        run_suite(&evals, &suite, &source).await
     };
     if let Err(e) = evals.store.finish(&run, &report).await {
         tracing::error!(error = %e, eval_run = %run.id, "could not record the eval run's end");
     }
+    // Runs on this task that wait for the sandbox try again now.
+    evals.runs.changed();
+}
+
+async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source) -> Report {
+    let sandbox = CompanySandbox {
+        runs: &evals.runs,
+        company: suite.scope.company.clone(),
+    };
+    let judge = SandboxJudge {
+        sandbox: &sandbox,
+        config: &evals.judge,
+    };
+    runner::run(suite, source, &sandbox, &judge).await
+}
+
+/// Waits for the company's sandbox; when it is given, until when it is held. `None` if the store cannot give it.
+async fn take_turn<D: EvalDeps>(evals: &Evals<D>, run: &EvalRun) -> Option<Instant> {
+    let mut changes = evals.runs.watch();
+    let config = &evals.runs.config;
+    loop {
+        let asked = Instant::now();
+        match evals.store.take_sandbox(&run.scope, &run.id, config.lease).await {
+            Ok(true) => return Some(asked + config.lease),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, eval_run = %run.id, "could not take the company's sandbox");
+                return None;
+            }
+        }
+        tokio::select! {
+            () = sleep(config.poll) => {}
+            Ok(()) = changes.changed() => {}
+        }
+    }
+}
+
+/// Keeps the run's hold on the company's sandbox. If the store refuses a renewal, or cannot be reached until the
+/// hold is about to lapse, another run may be given the sandbox: it is destroyed, and the cases left error.
+fn hold_sandbox<D: EvalDeps>(evals: Arc<Evals<D>>, run: EvalRun, mut until: Instant) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let lease = evals.runs.config.lease;
+        loop {
+            sleep(lease / 4).await;
+            let asked = Instant::now();
+            match evals.store.renew_sandbox(&run.scope, &run.id, lease).await {
+                Ok(true) => {
+                    until = asked + lease;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) if until.saturating_duration_since(Instant::now()) > lease / 4 => continue,
+                Err(_) => {}
+            }
+            tracing::error!(eval_run = %run.id, "lost the company's sandbox; destroying it");
+            if let Err(e) = evals.runs.sandbox.stop(&run.scope.company).await {
+                tracing::error!(error = %e, eval_run = %run.id, "could not stop the sandbox");
+            }
+            return;
+        }
+    })
+}
+
+/// The report of a run that never got the sandbox: every case errored, so no criterion passes.
+fn unavailable(suite: &Suite) -> Report {
+    let cases = suite
+        .cases
+        .iter()
+        .map(|c| CaseResult {
+            case: c.id.clone(),
+            output: None,
+            outcome: CaseOutcome::Errored,
+            verdicts: vec![],
+            error: Some("the company's sandbox was not available".into()),
+        })
+        .collect();
+    runner::report(suite, cases)
 }
 
 /// The project's eval runs, newest first.

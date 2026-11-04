@@ -2,8 +2,13 @@
 //! per case and per criterion. Every function is on a [`ProjectTx`], so it reads and writes one project of one
 //! company; row-level security holds the rest back. A run's results and `eval-run.finished` commit together.
 //!
+//! An eval run that uses the company's sandbox holds it through the same lease as agent runs (`runs.rs`), so the
+//! two never share it, whichever API task drives them.
+//!
 //! Suite and case ids are `oryxa-fde-evals`' validated ids, passed as text; what a suite's graders and target are
 //! is the evals crate's to define (`definition`), kept as JSON and not read here.
+
+use std::time::Duration;
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{CriterionId, EvalRunId};
@@ -371,6 +376,37 @@ impl ProjectTx {
         .collect()
     }
 
+    async fn eval_run_open(&mut self, run: &EvalRunId) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        Ok(sqlx::query_scalar(
+            "select exists (select 1 from eval_runs
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4 and ended_at is null)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(run.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?)
+    }
+
+    /// Takes the company's sandbox for an unfinished eval run for `ttl`, if no live lease is someone else's.
+    /// `Missing` once the run has finished or if there is no such run.
+    pub async fn take_eval_sandbox(&mut self, run: &EvalRunId, ttl: Duration) -> Result<bool, StoreError> {
+        if !self.eval_run_open(run).await? {
+            return Err(StoreError::Missing("eval run"));
+        }
+        self.lease_sandbox(run.as_str(), ttl).await
+    }
+
+    /// Extends the eval run's lease; `false` if it has finished or no longer holds the sandbox.
+    pub async fn renew_eval_sandbox(&mut self, run: &EvalRunId, ttl: Duration) -> Result<bool, StoreError> {
+        if !self.eval_run_open(run).await? {
+            return Ok(false);
+        }
+        self.renew_lease(run.as_str(), ttl).await
+    }
+
     pub async fn eval_run(&mut self, run: &EvalRunId) -> Result<Option<EvalRunRow>, StoreError> {
         Ok(self.run_rows(Some(run)).await?.pop())
     }
@@ -380,8 +416,9 @@ impl ProjectTx {
         self.run_rows(None).await
     }
 
-    /// Records a run's results, once, and enqueues `eval-run.finished` (an errored case counted as failed), all in
-    /// this transaction. A run that already has results is a conflict.
+    /// Records a run's results, once, lets go of the company's sandbox if the run holds it, and enqueues
+    /// `eval-run.finished` (an errored case counted as failed), all in this transaction. A run that already has
+    /// results is a conflict.
     pub async fn finish_eval_run(
         &mut self,
         run: &EvalRunId,
@@ -442,6 +479,7 @@ impl ProjectTx {
             .execute(&mut *self.tx)
             .await?;
         }
+        self.release_sandbox(run.as_str()).await?;
         let failed = results.failed.saturating_add(results.errored);
         let event = EvalRunFinished::new(&self.scope, run.clone(), results.passed, failed);
         enqueue(&mut self.tx, &self.scope.company, by, &event).await?;
@@ -666,6 +704,51 @@ mod tests {
             data["data"],
             json!({ "company": scope.company.company.as_str(), "project": scope.project.as_str(), "eval_run": r.id.as_str(), "passed": 1, "failed": 1 })
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn agent_and_eval_runs_take_turns_on_the_companys_sandbox() {
+        use crate::AgentRunRow;
+        let store = crate::testing::store().await;
+        let tenant = TenantId::new(new_id("org")).unwrap();
+        let scope = project(&store, &tenant).await;
+        let (_, r) = with_suite_and_run(&store, &scope).await;
+        let agent = AgentRunRow {
+            id: oryxa_fde_core::AgentRunId::new(new_id("run")).unwrap(),
+            task: "Add a /healthz endpoint.".into(),
+            repository: json!({ "owner": "sample-org", "name": "status-page", "base": "main" }),
+            created_by: UserId::new("usr_lead").unwrap(),
+            request_id: new_id("req"),
+            created_at: OffsetDateTime::now_utc(),
+            started_at: None,
+            ended_at: None,
+            state: json!({ "state": "queued" }),
+            input_tokens: 0,
+            output_tokens: 0,
+            delivery: json!({ "status": "none" }),
+        };
+        let lease = Duration::from_secs(60);
+        let mut tx = store.project(&scope).await.unwrap();
+        tx.create_agent_run(&agent, &actor()).await.unwrap();
+        assert!(tx.take_eval_sandbox(&r.id, lease).await.unwrap());
+        assert!(!tx.take_agent_sandbox(&agent.id, lease).await.unwrap());
+        assert!(tx.renew_eval_sandbox(&r.id, lease).await.unwrap());
+        tx.commit().await.unwrap();
+
+        // The eval run's results let it go; a finished run can neither take nor renew it.
+        let mut tx = store.project(&scope).await.unwrap();
+        tx.finish_eval_run(&r.id, &results(), &actor()).await.unwrap();
+        assert!(!tx.renew_eval_sandbox(&r.id, lease).await.unwrap());
+        assert!(matches!(
+            tx.take_eval_sandbox(&r.id, lease).await,
+            Err(StoreError::Missing(_))
+        ));
+        assert!(tx.take_agent_sandbox(&agent.id, lease).await.unwrap());
+        tx.commit().await.unwrap();
+        let (_, other) = with_suite_and_run(&store, &scope).await;
+        let mut tx = store.project(&scope).await.unwrap();
+        assert!(!tx.take_eval_sandbox(&other.id, lease).await.unwrap());
     }
 
     /// `eval-run.finished` rows of one tenant, as (group, detail), read as the relay.

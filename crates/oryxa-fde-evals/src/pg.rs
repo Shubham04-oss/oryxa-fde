@@ -1,6 +1,8 @@
 //! `EvalStore` on the FDE store (Postgres, `oryxa-fde-store`'s eval tables): each call is one transaction scoped to
 //! the project, and a run's report commits with its `eval-run.finished` event.
 
+use std::time::Duration;
+
 use oryxa_core::UserId;
 use oryxa_fde_core::{CriterionId, EvalRunId, ProjectScope};
 use oryxa_fde_store::{
@@ -274,6 +276,30 @@ impl EvalStore for Store {
     async fn runs(&self, scope: &ProjectScope) -> Result<Vec<EvalRun>, EvalStoreError> {
         let rows = on(self, scope, async |tx| tx.eval_runs().await.map_err(failed)).await?;
         rows.into_iter().map(|r| run(scope, r)).collect()
+    }
+
+    async fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> Result<bool, EvalStoreError> {
+        on(self, scope, async |tx| {
+            tx.take_eval_sandbox(run, lease).await.map_err(failed)
+        })
+        .await
+    }
+
+    async fn renew_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> Result<bool, EvalStoreError> {
+        on(self, scope, async |tx| {
+            tx.renew_eval_sandbox(run, lease).await.map_err(failed)
+        })
+        .await
     }
 
     async fn finish(&self, r: &EvalRun, report: &Report) -> Result<(), EvalStoreError> {

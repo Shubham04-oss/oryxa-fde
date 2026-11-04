@@ -41,9 +41,18 @@ pub struct Report {
     pub errored: u32,
 }
 
+/// Whether a run needs the company's sandbox: for the target, a script grader, or the judge (which calls the model
+/// from the sandbox).
+pub fn uses_sandbox(suite: &Suite, source: &Source) -> bool {
+    matches!(source, Source::Target)
+        || suite
+            .graders
+            .iter()
+            .any(|g| matches!(g, Grader::Script(_) | Grader::Judge { .. }))
+}
+
 pub async fn run(suite: &Suite, source: &Source, sandbox: &impl EvalSandbox, judge: &impl Judge) -> Report {
-    let uses_sandbox = matches!(source, Source::Target) || suite.graders.iter().any(|g| matches!(g, Grader::Script(_)));
-    let started = !uses_sandbox || sandbox.start().await.is_ok();
+    let started = !uses_sandbox(suite, source) || sandbox.start().await.is_ok();
     let mut cases = Vec::with_capacity(suite.cases.len());
     for case in &suite.cases {
         let output = if !started {
@@ -118,5 +127,45 @@ pub fn report(suite: &Suite, cases: Vec<CaseResult>) -> Report {
         errored: count(CaseOutcome::Errored),
         cases,
         criteria,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oryxa_core::TenantId;
+    use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId};
+
+    use super::*;
+    use crate::ids::SuiteId;
+    use crate::suite::Command;
+
+    fn suite(graders: Vec<Grader>) -> Suite {
+        Suite {
+            id: SuiteId::new("suite_1".to_owned()).unwrap(),
+            scope: CompanyScope::new(TenantId::new("org_a").unwrap(), CompanyId::new("cmp_1").unwrap())
+                .project(ProjectId::new("prj_1").unwrap()),
+            name: "Sample".into(),
+            criteria: vec![],
+            target: None,
+            graders,
+            cases: vec![],
+        }
+    }
+
+    #[test]
+    fn a_run_needs_the_sandbox_for_the_target_a_script_or_the_judge() {
+        let imported = Source::Imported(HashMap::new());
+        let script = Grader::Script(Command {
+            argv: vec!["sh".into()],
+            timeout_secs: 5,
+        });
+        let judge = Grader::Judge {
+            rubric: "Is it right?".into(),
+        };
+        let exact = Grader::ExactMatch { ignore_case: false };
+        assert!(uses_sandbox(&suite(vec![exact.clone()]), &Source::Target));
+        assert!(uses_sandbox(&suite(vec![exact.clone(), script]), &imported));
+        assert!(uses_sandbox(&suite(vec![judge]), &imported));
+        assert!(!uses_sandbox(&suite(vec![exact]), &imported));
     }
 }

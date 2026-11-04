@@ -1,15 +1,18 @@
 //! Where suites and runs live. `EvalStore` is what evals need: Postgres implements it in `pg`, and `InMemoryEvals`
 //! for tests. Every lookup takes the full `ProjectScope`, so one company's suites and results are never found
-//! through another's.
+//! through another's. A run that uses the company's sandbox holds it through the store, so agent and eval runs on
+//! any API task take turns.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{EvalRunId, ProjectScope};
+use oryxa_fde_core::{CompanyScope, EvalRunId, ProjectScope};
 use oryxa_fde_events::EvalRunFinished;
 use time::OffsetDateTime;
+use tokio::time::Instant;
 
 use crate::ids::SuiteId;
 use crate::runner::Report;
@@ -65,8 +68,23 @@ pub trait EvalStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<EvalRun>, EvalStoreError>> + Send;
     /// The project's runs, newest first.
     fn runs(&self, scope: &ProjectScope) -> impl Future<Output = Result<Vec<EvalRun>, EvalStoreError>> + Send;
-    /// Ends the run with its report, once (a run already ended is a conflict), and enqueues its [`finished_event`],
-    /// all or nothing.
+    /// Gives the company's sandbox to the unfinished run for `lease` if no live lease is someone else's. `NotFound`
+    /// once the run has finished.
+    fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> impl Future<Output = Result<bool, EvalStoreError>> + Send;
+    /// Extends the run's lease; `false` if it no longer holds the sandbox.
+    fn renew_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> impl Future<Output = Result<bool, EvalStoreError>> + Send;
+    /// Ends the run with its report, once (a run already ended is a conflict), lets go of the sandbox, and enqueues
+    /// its [`finished_event`], all or nothing.
     fn finish(&self, run: &EvalRun, report: &Report) -> impl Future<Output = Result<(), EvalStoreError>> + Send;
 }
 
@@ -84,6 +102,7 @@ pub fn finished_event(run: &EvalRun, report: &Report) -> EvalRunFinished {
 struct Inner {
     suites: HashMap<(ProjectScope, SuiteId), (u64, Suite)>,
     runs: HashMap<(ProjectScope, EvalRunId), (u64, EvalRun)>,
+    leases: HashMap<CompanyScope, (EvalRunId, Instant)>,
     outbox: Vec<EvalRunFinished>,
     next: u64,
 }
@@ -205,7 +224,53 @@ impl EvalStore for InMemoryEvals {
         }
         stored.ended_at = Some(OffsetDateTime::now_utc());
         stored.report = Some(report.clone());
+        if inner
+            .leases
+            .get(&run.scope.company)
+            .is_some_and(|(holder, _)| holder == &run.id)
+        {
+            inner.leases.remove(&run.scope.company);
+        }
         inner.outbox.push(finished_event(run, report));
         Ok(())
+    }
+
+    async fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> Result<bool, EvalStoreError> {
+        let mut inner = self.lock();
+        match inner.runs.get(&(scope.clone(), run.clone())) {
+            Some((_, r)) if r.report.is_none() => {}
+            _ => return Err(EvalStoreError::NotFound),
+        }
+        let now = Instant::now();
+        if inner
+            .leases
+            .get(&scope.company)
+            .is_some_and(|(holder, until)| holder != run && *until > now)
+        {
+            return Ok(false);
+        }
+        inner.leases.insert(scope.company.clone(), (run.clone(), now + lease));
+        Ok(true)
+    }
+
+    async fn renew_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &EvalRunId,
+        lease: Duration,
+    ) -> Result<bool, EvalStoreError> {
+        let mut inner = self.lock();
+        match inner.leases.get_mut(&scope.company) {
+            Some((holder, until)) if holder == run => {
+                *until = Instant::now() + lease;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }

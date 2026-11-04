@@ -18,8 +18,9 @@ use oryxa_fde_agent::live::Offline;
 use oryxa_fde_agent::service::{Deps, Pricing, Runs, RunsConfig};
 use oryxa_fde_agent::store::{Budget, InMemoryRuns};
 use oryxa_fde_agent::{AgentConfig, ApprovalId, Criterion, InMemoryContext, ProjectContext};
+use oryxa_fde_core::EvalRunId;
 use oryxa_fde_core::{AgentRunId, CompanyId, CompanyScope, CriterionId, ProjectId, ProjectScope};
-use oryxa_fde_evals::InMemoryEvals;
+use oryxa_fde_evals::{EvalRun, EvalStore, InMemoryEvals, Report, SuiteId};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -245,6 +246,7 @@ fn world() -> (Arc<Evals<Test>>, Router) {
         grant_ttl: Duration::from_secs(60),
         grace: Duration::from_secs(5),
         poll: Duration::from_millis(20),
+        lease: Duration::from_secs(2),
     };
     let sandbox = FakeSandbox {
         commands: Mutex::new(vec![]),
@@ -522,17 +524,93 @@ async fn suites_that_could_not_run_as_written_are_refused() {
 async fn an_eval_run_waits_its_turn_on_the_company_sandbox() {
     let (evals, app) = world();
     let suite = create_suite(&app, answer_suite()).await;
-    let company = CompanyScope::new(TenantId::new("org_a").unwrap(), CompanyId::new("cmp_1").unwrap());
-    let slot = evals.runs.company_slot(&company);
-    let turn = slot.lock().await;
+    // Another run of the company holds the sandbox.
+    let scope = CompanyScope::new(TenantId::new("org_a").unwrap(), CompanyId::new("cmp_1").unwrap())
+        .project(ProjectId::new("prj_3").unwrap());
+    let holder = EvalRun {
+        id: EvalRunId::new("eval_holder").unwrap(),
+        scope: scope.clone(),
+        suite: SuiteId::new("suite_holder".to_owned()).unwrap(),
+        imported: false,
+        created_by: UserId::new("usr_lead").unwrap(),
+        request_id: "req_1".into(),
+        created_at: time::OffsetDateTime::now_utc(),
+        ended_at: None,
+        report: None,
+    };
+    evals.store.create_run(&holder).await.unwrap();
+    assert!(
+        evals
+            .store
+            .take_sandbox(&scope, &holder.id, Duration::from_secs(60))
+            .await
+            .unwrap()
+    );
     let (_, run) = call(&app, "POST", &format!("{P1}/eval-suites/{suite}/runs"), "lead", None).await;
     let run = run["id"].as_str().unwrap().to_owned();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let (_, waiting) = call(&app, "GET", &format!("{P1}/eval-runs/{run}"), "lead", None).await;
     assert_eq!(waiting["state"], "running");
     assert!(evals.runs.sandbox.commands.lock().unwrap().is_empty());
-    drop(turn);
+    // Its end lets the sandbox go.
+    let report = Report {
+        cases: vec![],
+        criteria: vec![],
+        passed: 0,
+        failed: 0,
+        errored: 0,
+    };
+    evals.store.finish(&holder, &report).await.unwrap();
     finished(&app, &run).await;
+    assert!(!evals.runs.sandbox.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn imported_outputs_graded_without_the_sandbox_do_not_wait_for_it() {
+    let (evals, app) = world();
+    let suite = create_suite(
+        &app,
+        json!({
+            "name": "Exact answers",
+            "criteria": ["crit_accuracy"],
+            "graders": [{ "kind": "exact_match" }],
+            "cases": [{ "id": "c_1", "input": "2+2", "expected": "4" }],
+        }),
+    )
+    .await;
+    let scope = CompanyScope::new(TenantId::new("org_a").unwrap(), CompanyId::new("cmp_1").unwrap())
+        .project(ProjectId::new("prj_1").unwrap());
+    let holder = EvalRun {
+        id: EvalRunId::new("eval_holder").unwrap(),
+        scope: scope.clone(),
+        suite: SuiteId::new(suite.clone()).unwrap(),
+        imported: false,
+        created_by: UserId::new("usr_lead").unwrap(),
+        request_id: "req_1".into(),
+        created_at: time::OffsetDateTime::now_utc(),
+        ended_at: None,
+        report: None,
+    };
+    evals.store.create_run(&holder).await.unwrap();
+    assert!(
+        evals
+            .store
+            .take_sandbox(&scope, &holder.id, Duration::from_secs(60))
+            .await
+            .unwrap()
+    );
+    let (status, run) = call(
+        &app,
+        "POST",
+        &format!("{P1}/eval-suites/{suite}/results"),
+        "lead",
+        csv_body("case,output\nc_1,4\n"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{run}");
+    let done = finished(&app, run["id"].as_str().unwrap()).await;
+    assert_eq!(done["report"]["passed"], 1);
+    assert!(evals.runs.sandbox.commands.lock().unwrap().is_empty());
 }
 
 // ---- Isolation -----------------------------------------------------------------------------------------------
