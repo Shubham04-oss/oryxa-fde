@@ -91,6 +91,44 @@ export interface paths {
         patch: operations["update_company"];
         trace?: never;
     };
+    "/v1/companies/{company}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company's documents, newest first. */
+        get: operations["list_documents"];
+        put?: never;
+        /**
+         * Upload a document: text, Markdown, PDF or DOCX, at most 20 MiB. It is searchable once
+         *     ingested.
+         */
+        post: operations["upload_document"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/documents/{document}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One document and where its ingestion stands. */
+        get: operations["get_document"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/members": {
         parameters: {
             query?: never;
@@ -363,6 +401,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search the documents of the project's company. Needs `work` on the company, as the document
+         *     list does; the project must be in it.
+         */
+        get: operations["search_project"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/stage": {
         parameters: {
             query?: never;
@@ -444,6 +502,23 @@ export interface paths {
         put: operations["update_task"];
         post?: never;
         delete: operations["remove_task"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search the company's documents: full-text and semantic matches, merged. */
+        get: operations["search_company"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -692,10 +767,28 @@ export interface components {
             recorded_by: string;
             title: string;
         };
+        DocumentOut: {
+            /** Format: int32 */
+            chunks: number;
+            content_type: string;
+            created_at: string;
+            /** @description Why ingestion gave up: `unreadable`, `empty`, `too_large` or `checksum`. */
+            failure?: string | null;
+            id: string;
+            ingested_at?: string | null;
+            name: string;
+            sha256: string;
+            /** Format: int64 */
+            size_bytes: number;
+            status: components["schemas"]["IngestState"];
+            uploaded_by: string;
+        };
         ErrorBody: {
             /** @description A short machine-readable code, e.g. `forbidden`. */
             error: string;
         };
+        /** @enum {string} */
+        IngestState: "pending" | "ingested" | "failed";
         /** @enum {string} */
         ItemKind: "in" | "out";
         MeOut: {
@@ -783,6 +876,22 @@ export interface components {
              * @description Bumped by every change to the items or criteria.
              */
             version: number;
+        };
+        SearchHitOut: {
+            /**
+             * Format: int32
+             * @description The chunk's place in the document, from 0.
+             */
+            chunk: number;
+            document: string;
+            document_name: string;
+            /**
+             * Format: double
+             * @description Fused rank score; only its order means anything.
+             */
+            score: number;
+            /** @description The passage. */
+            text: string;
         };
         SecurityAnswerBody: {
             answer: string;
@@ -1174,6 +1283,158 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_documents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    upload_document: {
+        parameters: {
+            query: {
+                /** @description The document's name, 1 to 200 characters. */
+                name: string;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        /** @description The file; its Content-Type says which kind it is. */
+        requestBody?: {
+            content: {
+                "application/pdf": unknown;
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": unknown;
+                "text/markdown": unknown;
+                "text/plain": unknown;
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Over 20 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Document id */
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentOut"];
                 };
             };
             /** @description Forbidden */
@@ -2349,6 +2610,63 @@ export interface operations {
             };
         };
     };
+    search_project: {
+        parameters: {
+            query: {
+                /** @description What to look for, 1 to 500 characters; words, "quoted phrases" and -exclusions. */
+                q: string;
+                /** @description At most this many passages (1 to 50, default 10). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchHitOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     change_stage: {
         parameters: {
             query?: never;
@@ -2700,6 +3018,52 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    search_company: {
+        parameters: {
+            query: {
+                /** @description What to look for, 1 to 500 characters; words, "quoted phrases" and -exclusions. */
+                q: string;
+                /** @description At most this many passages (1 to 50, default 10). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchHitOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
