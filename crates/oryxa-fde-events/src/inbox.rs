@@ -74,6 +74,10 @@ pub mod sqs {
     /// document, thousands of Bedrock calls) is never redelivered while it runs, and a worker that
     /// dies lets its message go within [`VISIBILITY`] seconds.
     const HEARTBEAT: Duration = Duration::from_secs(40);
+    /// The longest one message is handled: past it the handler is dropped and the message is no
+    /// longer kept hidden, so a hung handler cannot hold its message, and its FIFO group, for ever.
+    /// Far above a real document (2M characters is under 2,000 chunks to embed).
+    const MAX_HANDLING: Duration = Duration::from_secs(15 * 60);
 
     /// Runs forever. `handle` must be idempotent: SQS delivers at least once.
     pub async fn run<F, Fut>(client: Client, queue_url: String, handle: F)
@@ -105,7 +109,13 @@ pub mod sqs {
                         None => Outcome::Quarantine,
                     }
                 };
-                let outcome = with_heartbeat(work, HEARTBEAT, || hide(&client, &queue_url, &receipt)).await;
+                let outcome = with_heartbeat(work, HEARTBEAT, MAX_HANDLING, || hide(&client, &queue_url, &receipt))
+                    .await
+                    .unwrap_or_else(|| {
+                        // Redelivered once its visibility lapses; handlers resume where they stopped.
+                        tracing::error!(message_id = ?m.message_id, "handler gave up after the ceiling");
+                        Outcome::Retry
+                    });
                 match outcome {
                     Outcome::Done => {
                         if let Err(e) = client
@@ -143,18 +153,27 @@ pub mod sqs {
         }
     }
 
-    /// Runs `work`, calling `beat` at once and then every `every` until `work` finishes.
-    pub(crate) async fn with_heartbeat<T, B, BF>(work: impl Future<Output = T>, every: Duration, mut beat: B) -> T
+    /// Runs `work`, calling `beat` at once and then every `every` until `work` finishes, or until
+    /// `ceiling` has passed: then `work` is dropped and the answer is `None`.
+    pub(crate) async fn with_heartbeat<T, B, BF>(
+        work: impl Future<Output = T>,
+        every: Duration,
+        ceiling: Duration,
+        mut beat: B,
+    ) -> Option<T>
     where
         B: FnMut() -> BF,
         BF: Future<Output = ()>,
     {
         let mut work = std::pin::pin!(work);
         let mut tick = tokio::time::interval(every);
+        let deadline = tokio::time::sleep(ceiling);
+        tokio::pin!(deadline);
         loop {
             tokio::select! {
                 biased;
-                out = &mut work => return out,
+                out = &mut work => return Some(out),
+                _ = &mut deadline => return None,
                 _ = tick.tick() => beat().await,
             }
         }
@@ -174,12 +193,12 @@ pub mod sqs {
                 tokio::time::sleep(Duration::from_secs(130)).await;
                 "done"
             };
-            let out = with_heartbeat(work, HEARTBEAT, || {
+            let out = with_heartbeat(work, HEARTBEAT, MAX_HANDLING, || {
                 beats.set(beats.get() + 1);
                 async {}
             })
             .await;
-            assert_eq!(out, "done");
+            assert_eq!(out, Some("done"));
             assert_eq!(started.elapsed(), Duration::from_secs(130));
             // At 0, 40, 80 and 120 seconds: never more than HEARTBEAT apart, and none after the end.
             assert_eq!(beats.get(), 4);
@@ -189,12 +208,30 @@ pub mod sqs {
         #[tokio::test(start_paused = true)]
         async fn a_handler_that_ends_at_once_needs_no_heartbeat() {
             let beats = Cell::new(0);
-            let out = with_heartbeat(async { 7 }, HEARTBEAT, || {
+            let out = with_heartbeat(async { 7 }, HEARTBEAT, MAX_HANDLING, || {
                 beats.set(beats.get() + 1);
                 async {}
             })
             .await;
-            assert_eq!((out, beats.get()), (7, 0));
+            assert_eq!((out, beats.get()), (Some(7), 0));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_hung_handler_is_dropped_at_the_ceiling_and_no_longer_hidden() {
+            let beats = Cell::new(0);
+            let started = tokio::time::Instant::now();
+            let out = with_heartbeat(std::future::pending::<()>(), HEARTBEAT, MAX_HANDLING, || {
+                beats.set(beats.get() + 1);
+                async {}
+            })
+            .await;
+            assert_eq!(out, None);
+            assert_eq!(started.elapsed(), MAX_HANDLING);
+            // Hidden from 0 s every 40 s while it ran, and never after: the message comes back.
+            assert_eq!(beats.get(), (MAX_HANDLING.as_secs() / HEARTBEAT.as_secs()) as usize + 1);
+            let at_end = beats.get();
+            tokio::time::sleep(HEARTBEAT * 3).await;
+            assert_eq!(beats.get(), at_end);
         }
     }
 }
