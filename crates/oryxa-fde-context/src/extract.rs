@@ -63,10 +63,10 @@ pub fn extract_guarded(content_type: ContentType, bytes: &[u8]) -> Result<String
     std::panic::catch_unwind(|| extract(content_type, bytes)).unwrap_or(Err(ExtractError::Unreadable))
 }
 
-// ponytail: page content draws on one budget for the whole file, but loading bounds each object
-// stream (MAX_PDF_STREAM_BYTES), not their total, so a file of many small bombs can still exhaust
-// the ingest worker. It takes one message at a time, so that costs only this document, whose event
-// reaches the dead-letter queue after its redeliveries.
+// ponytail: page content and the font maps decoded for it draw on one budget for the whole file,
+// but loading bounds each object stream (MAX_PDF_STREAM_BYTES), not their total, so a file of many
+// small bombs can still exhaust the ingest worker. It takes one message at a time, so that costs
+// only this document, whose event reaches the dead-letter queue after its redeliveries.
 fn pdf(bytes: &[u8]) -> Result<String, ExtractError> {
     pdf_within(bytes, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES)
 }
@@ -87,19 +87,32 @@ fn pdf_within(bytes: &[u8], stream_limit: usize, content_budget: usize) -> Resul
     let mut left = content_budget;
     let mut out = String::new();
     for (number, page) in doc.get_pages() {
-        // Measured within what is left before its text is read: every page draws on one budget.
-        let size = match doc.get_page_content_with_limit(page, left) {
+        // What reading the page's text decodes, measured within what is left before it is read:
+        // its content and the ToUnicode map of each font it uses, all on one budget for the file.
+        let mut size = match doc.get_page_content_with_limit(page, left) {
             Ok(content) => content.len(),
             Err(e) if over_limit(&e) => return Err(ExtractError::TooLarge),
             // A page that cannot be read is skipped; the rest of the document still counts.
             Err(_) => continue,
         };
-        // Each stream the text is read from (the content, its fonts) is bounded by what is left.
-        if let Ok(t) = doc.extract_text_with_limit(&[number], left) {
+        for font in doc.get_page_fonts(page).unwrap_or_default().values() {
+            let Ok(map) = font.get_deref(b"ToUnicode", &doc).and_then(lopdf::Object::as_stream) else {
+                continue;
+            };
+            match map.decompressed_content_with_limit(left) {
+                Ok(decoded) => size = size.saturating_add(decoded.len()),
+                Err(e) if over_limit(&e) => return Err(ExtractError::TooLarge),
+                Err(_) => {}
+            }
+        }
+        // lopdf ends the content with a newline of its own, so the page can come to more than was
+        // left by a byte: never let that wrap around.
+        let before = left;
+        left = before.checked_sub(size).ok_or(ExtractError::TooLarge)?;
+        if let Ok(t) = doc.extract_text_with_limit(&[number], before) {
             out.push_str(&t);
             out.push('\n');
         }
-        left -= size;
         if out.len() > MAX_TEXT_CHARS * 4 {
             break;
         }
@@ -199,13 +212,24 @@ pub(crate) mod tests {
 
     /// A PDF with one page per text, saved with `options`; page content is compressed.
     fn pdf_pages(texts: &[&str], options: lopdf::SaveOptions) -> Vec<u8> {
+        pdf_with_font_map(texts, options, None)
+    }
+
+    /// [`pdf_pages`] whose font carries `to_unicode` (compressed) as its ToUnicode map.
+    fn pdf_with_font_map(texts: &[&str], options: lopdf::SaveOptions, to_unicode: Option<&[u8]>) -> Vec<u8> {
         use lopdf::content::{Content, Operation};
         use lopdf::{Document, Object, Stream, dictionary};
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
-        let font_id = doc.add_object(dictionary! {
+        let mut font = dictionary! {
             "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        });
+        };
+        if let Some(map) = to_unicode {
+            let mut stream = Stream::new(dictionary! {}, map.to_vec());
+            stream.compress().unwrap();
+            font.set("ToUnicode", doc.add_object(stream));
+        }
+        let font_id = doc.add_object(font);
         let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font_id } });
         let mut kids: Vec<Object> = Vec::new();
         for text in texts {
@@ -306,6 +330,39 @@ pub(crate) mod tests {
         // Either page alone fits in 1,500 bytes, but not both: the budget is shared.
         assert_eq!(pdf_within(&file, 1 << 20, 1500), Err(ExtractError::TooLarge));
         assert_eq!(pdf_within(&file, 1 << 20, 500), Err(ExtractError::TooLarge));
+    }
+
+    #[test]
+    fn a_budget_the_first_page_just_fills_is_too_large_for_the_second() {
+        // lopdf ends each page's content with a newline it adds, one byte past what the stream
+        // decodes to: that byte must not wrap the budget around and lift it for later pages.
+        let (a, b) = ("a".repeat(1000), "b".repeat(1000));
+        let file = pdf_pages(&[&a, &b], lopdf::SaveOptions::default());
+        let doc = lopdf::Document::load_mem(&file).unwrap();
+        let first = doc.get_pages()[&1];
+        let decoded = doc.get_page_contents(first)[0];
+        let exact = doc
+            .get_object(decoded)
+            .and_then(lopdf::Object::as_stream)
+            .unwrap()
+            .decompressed_content()
+            .unwrap()
+            .len();
+        assert_eq!(pdf_within(&file, 1 << 20, exact), Err(ExtractError::TooLarge));
+    }
+
+    #[test]
+    fn font_maps_draw_on_the_same_budget() {
+        let text = "Refunds over 500 need approval";
+        // A font map that inflates to 100 KB from a few hundred bytes in the file.
+        let map = vec![b' '; 100_000];
+        let file = pdf_with_font_map(&[text], lopdf::SaveOptions::default(), Some(&map));
+        assert!(file.len() < 5_000, "{} bytes", file.len());
+        assert!(pdf_within(&file, 1 << 20, 200_000).unwrap().contains(text));
+        // The content alone fits in 1 KB; with its font map, it does not.
+        assert_eq!(pdf_within(&file, 1 << 20, 50_000), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 1 << 20, 1_000), Err(ExtractError::TooLarge));
+        assert!(pdf_within(&pdf_pages(&[text], lopdf::SaveOptions::default()), 1 << 20, 1_000).is_ok());
     }
 
     #[test]
