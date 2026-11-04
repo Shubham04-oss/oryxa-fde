@@ -108,12 +108,12 @@ macro_rules! events {
 events! {
     CompanyCreated => "fde.company.created.v1", ordered by company;
     ProjectCreated => "fde.project.created.v1", ordered by project;
-    ProjectStageChanged => "fde.project.stage_changed.v1", ordered by project;
-    ScopeSignedOff => "fde.scope.signed_off.v1", ordered by project;
-    AccessRequestStatusChanged => "fde.access_request.status_changed.v1", ordered by project;
+    ProjectStageChanged => "fde.project.stage-changed.v1", ordered by project;
+    ScopeSignedOff => "fde.scope.signed-off.v1", ordered by project;
+    AccessRequestStatusChanged => "fde.access-request.status-changed.v1", ordered by project;
     DocumentUploaded => "fde.document.uploaded.v1", ordered by company;
-    AgentRunFinished => "fde.agent_run.finished.v1", ordered by project;
-    EvalRunFinished => "fde.eval_run.finished.v1", ordered by project;
+    AgentRunFinished => "fde.agent-run.finished.v1", ordered by project;
+    EvalRunFinished => "fde.eval-run.finished.v1", ordered by project;
 }
 
 #[cfg(test)]
@@ -217,7 +217,6 @@ mod tests {
             }),
         ]
     }
-
     #[test]
     fn every_event_round_trips_and_groups_by_its_entity() {
         let p = project();
@@ -297,7 +296,8 @@ mod tests {
             assert_eq!((parts[0], parts[3]), ("fde", "v1"), "{detail}");
             let ok = detail
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'_');
+                // Kebab-case, the platform's own catalog rule (`vendor/oryxa-platform/crates/oryxa-events`).
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
             assert!(ok, "{detail}");
             assert!(seen.insert(*detail), "duplicate {detail}");
         }
