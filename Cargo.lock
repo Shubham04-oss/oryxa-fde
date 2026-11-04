@@ -3275,6 +3275,7 @@ dependencies = [
  "oryxa-fde-events",
  "rand 0.8.8",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror",
  "time",

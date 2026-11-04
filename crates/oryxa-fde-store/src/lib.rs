@@ -271,8 +271,8 @@ impl Store {
 
 /// What would let this login act as an owner, if anything, for the login and every role it can
 /// reach by SET ROLE or inheritance: superuser, the right to create roles or databases or to bypass
-/// row-level security, a predefined role, owning the database, a schema or a relation, creating in
-/// a schema, or an admin option. The same rule as the infra bootstrap's own check.
+/// row-level security, a predefined role, owning the database, a schema, a relation or a function,
+/// creating in a schema, or an admin option. The same rule as the infra bootstrap's own check.
 async fn owner_powers(pool: &PgPool) -> Result<Option<String>, StoreError> {
     let found: Option<String> = sqlx::query_scalar(
         "select string_agg(format('%s (%s)', r.rolname, why), ', ' order by r.rolname, why)
@@ -285,6 +285,8 @@ async fn owner_powers(pool: &PgPool) -> Result<Option<String>, StoreError> {
              (r.rolname like 'pg\\_%', 'predefined role'),
              (r.oid = (select datdba from pg_database where datname = current_database()), 'owns the database'),
              (exists (select from pg_class c where c.relowner = r.oid), 'owns a relation'),
+             -- An owner of fde_in_scope could redefine it and switch off every row-level policy.
+             (exists (select from pg_proc p where p.proowner = r.oid), 'owns a function'),
              (exists (select from pg_namespace n where n.nspowner = r.oid), 'owns a schema'),
              (exists (select from pg_namespace n
                       where n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'

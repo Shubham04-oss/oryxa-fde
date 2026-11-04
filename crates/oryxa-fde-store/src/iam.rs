@@ -1,11 +1,11 @@
 //! RDS IAM database authentication: the task role signs a token that the login presents as its
-//! password, over TLS verified against the RDS CA bundle. A token lasts 15 minutes and is checked
-//! only when a connection opens, so the pool gets a fresh one every [`REFRESH_EVERY`] for the
-//! connections it opens next. Startup fails if no token can be had; nothing falls back to a
-//! password.
+//! password, over TLS (`verify-full`) against the RDS global CA bundle, which is vendored here and
+//! checked against its pinned SHA-256. A token lasts 15 minutes and is checked only when a
+//! connection opens, so the pool gets a fresh one every [`REFRESH_EVERY`] for the connections it
+//! opens next. Startup fails if no token can be had; nothing falls back to a password or to an
+//! unverified connection.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime};
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SignatureLocation, SigningSettings, sign};
 use aws_sigv4::sign::v4;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
 use crate::{Store, StoreError, migrate_with};
@@ -31,54 +32,89 @@ pub trait TokenSource: Send + Sync + 'static {
     fn token(&self) -> BoxFuture<'_, Result<String, StoreError>>;
 }
 
-/// The database to reach with IAM tokens: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` and
-/// `DB_CA_BUNDLE` (the RDS CA bundle file).
+/// The RDS global CA bundle (<https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem>),
+/// 114 Amazon RDS root and intermediate CAs.
+const RDS_CA_BUNDLE: &[u8] = include_bytes!("../certs/rds-global-bundle.crt");
+/// Its SHA-256: a changed file is refused at startup, and by a test before it gets there.
+const RDS_CA_BUNDLE_SHA256: &str = "90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b";
+
+/// The vendored bundle, if it is the one pinned.
+fn rds_ca_bundle() -> Result<&'static [u8], StoreError> {
+    let digest: String = Sha256::digest(RDS_CA_BUNDLE)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if digest == RDS_CA_BUNDLE_SHA256 {
+        Ok(RDS_CA_BUNDLE)
+    } else {
+        Err(StoreError::Config(
+            "the vendored RDS CA bundle does not match its pin".into(),
+        ))
+    }
+}
+
+/// How the connection is protected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tls {
+    /// `verify-full` against the RDS CA bundle: the only choice outside tests.
+    // ponytail: sqlx adds the bundle to webpki's public roots rather than replacing them, so a
+    // publicly trusted certificate for the RDS host name would also be accepted.
+    Rds,
+    /// No TLS, against the local test server only.
+    #[cfg(test)]
+    Off,
+}
+
+/// The database to reach with IAM tokens: `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER`.
 #[derive(Debug, Clone)]
 pub struct IamConfig {
     pub host: String,
     pub port: u16,
     pub database: String,
     pub user: String,
-    /// The CA bundle to verify the server against; `None` only in tests against a local server.
-    pub ca_bundle: Option<PathBuf>,
+    pub tls: Tls,
 }
 
 impl IamConfig {
     /// `None` when none of the variables is set (local runs use a URL instead); an error when only
-    /// some are, or the port is not a number.
+    /// some are, the port is not a number, or the vendored CA bundle is not the pinned one.
     pub fn from_env() -> Result<Option<Self>, StoreError> {
-        let vars = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_CA_BUNDLE"];
+        let vars = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER"];
         let got: Vec<Option<String>> = vars.iter().map(|v| std::env::var(v).ok()).collect();
         if got.iter().all(Option::is_none) {
             return Ok(None);
         }
-        let [Some(host), Some(port), Some(database), Some(user), Some(ca)] =
-            <[Option<String>; 5]>::try_from(got).map_err(|_| StoreError::Config("DB_* variables".into()))?
+        let [Some(host), Some(port), Some(database), Some(user)] =
+            <[Option<String>; 4]>::try_from(got).map_err(|_| StoreError::Config("DB_* variables".into()))?
         else {
             return Err(StoreError::Config(format!("set all of {} or none", vars.join(", "))));
         };
+        rds_ca_bundle()?;
         Ok(Some(Self {
             host,
             port: port.parse().map_err(|_| StoreError::Config("DB_PORT".into()))?,
             database,
             user,
-            ca_bundle: Some(PathBuf::from(ca)),
+            tls: Tls::Rds,
         }))
     }
 
     /// Connect options that present `token` as the password, verifying the server's certificate
-    /// and host name against the CA bundle.
-    pub fn options(&self, token: &str) -> PgConnectOptions {
+    /// and host name against the RDS CA bundle.
+    pub fn options(&self, token: &str) -> Result<PgConnectOptions, StoreError> {
         let o = PgConnectOptions::new()
             .host(&self.host)
             .port(self.port)
             .database(&self.database)
             .username(&self.user)
             .password(token);
-        match &self.ca_bundle {
-            Some(ca) => o.ssl_mode(PgSslMode::VerifyFull).ssl_root_cert(ca),
-            None => o,
-        }
+        Ok(match self.tls {
+            Tls::Rds => o
+                .ssl_mode(PgSslMode::VerifyFull)
+                .ssl_root_cert_from_pem(rds_ca_bundle()?.to_vec()),
+            #[cfg(test)]
+            Tls::Off => o.ssl_mode(PgSslMode::Disable),
+        })
     }
 }
 
@@ -171,7 +207,7 @@ impl Store {
         every: Duration,
     ) -> Result<Self, StoreError> {
         let first = tokens.token().await?;
-        let store = Self::connect_with(cfg.options(&first)).await?;
+        let store = Self::connect_with(cfg.options(&first)?).await?;
         let pool = store.pool.clone();
         tokio::spawn(async move {
             let mut wait = every;
@@ -180,9 +216,9 @@ impl Store {
                 if pool.is_closed() {
                     return;
                 }
-                match tokens.token().await {
-                    Ok(t) => {
-                        pool.set_connect_options(cfg.options(&t));
+                match tokens.token().await.and_then(|t| cfg.options(&t)) {
+                    Ok(options) => {
+                        pool.set_connect_options(options);
                         wait = every;
                     }
                     Err(e) => {
@@ -202,7 +238,7 @@ pub async fn migrate_iam(cfg: &IamConfig, tokens: &dyn TokenSource) -> Result<()
     let token = tokens.token().await?;
     let pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(cfg.options(&token))
+        .connect_with(cfg.options(&token)?)
         .await?;
     let result = migrate_with(&pool).await;
     pool.close().await;
@@ -221,7 +257,7 @@ mod tests {
             port: 5432,
             database: "oryxa_fde".into(),
             user: "oryxa_fde_api".into(),
-            ca_bundle: Some("/etc/ssl/rds.pem".into()),
+            tls: Tls::Rds,
         }
     }
 
@@ -253,12 +289,20 @@ mod tests {
 
     #[test]
     fn connections_verify_the_server_against_the_ca_bundle() {
-        let o = cfg().options("tok");
+        let o = cfg().options("tok").unwrap();
         assert_eq!(o.get_host(), "fde.cluster-x.eu-west-2.rds.amazonaws.com");
         assert_eq!(
             (o.get_port(), o.get_username(), o.get_database()),
             (5432, "oryxa_fde_api", Some("oryxa_fde"))
         );
         assert!(matches!(o.get_ssl_mode(), PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn the_vendored_bundle_is_the_pinned_rds_bundle() {
+        let bundle = rds_ca_bundle().unwrap();
+        let pem = std::str::from_utf8(bundle).unwrap();
+        assert_eq!(pem.matches("-----BEGIN CERTIFICATE-----").count(), 114);
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
     }
 }

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oryxa_authz::{CheckItem, Consistency, ObjectRef, Relationship, SubjectRef, Write};
+use oryxa_authz::{AuthzError, CheckItem, Consistency, ObjectRef, Relationship, SubjectRef, Write};
 use oryxa_core::{TenantId, UserId};
 use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
 use oryxa_fde_store::{Grant, GrantRow};
@@ -56,29 +56,26 @@ pub(crate) fn relationship(g: &Grant) -> Relationship {
     }
 }
 
-/// Rows of each kind taken per round: few, because they stay locked (and revocations of them wait)
-/// until the round's SpiceDB writes return.
+/// Tenants per round, and rows of each kind per tenant.
 const RECONCILE_BATCH: i64 = 25;
 const RECONCILE_EVERY: Duration = Duration::from_secs(5);
 
-/// Writes pending grants (oldest first, a batch of each kind) in one SpiceDB call per tenant and
-/// returns how many it wrote. A tenant's call that fails backs its rows off, so a grant that keeps
-/// failing waits longer each time and the others still go through.
+/// Writes pending grants and returns how many it wrote. Tenants go in the order of their longest
+/// waiting row, never-tried first. Each tenant's rows are locked in a transaction of their own,
+/// only for that tenant's write: a slow SpiceDB holds one tenant's rows for one call (its timeout),
+/// never the whole round's, and an unreachable SpiceDB ends the round there. The lock is what keeps
+/// a grant from landing after a revocation of its row, so the write never happens without it.
 pub async fn reconcile_grants(app: &App) -> Result<usize, ApiError> {
-    let mut pending = app.store.pending_grants(RECONCILE_BATCH).await?;
-    // Grouped in the order rows were taken, so the oldest tenant's batch goes first.
-    let mut by_tenant: Vec<(TenantId, Vec<Grant>)> = Vec::new();
-    for g in pending.grants() {
-        match by_tenant.iter_mut().find(|(t, _)| t == g.tenant()) {
-            Some((_, list)) => list.push(g.clone()),
-            None => by_tenant.push((g.tenant().clone(), vec![g.clone()])),
-        }
-    }
     let mut written = 0;
-    for (tenant, grants) in by_tenant {
-        let writes: Vec<Write> = grants.iter().map(|g| Write::Touch(relationship(g))).collect();
-        let ok = app.write(&tenant, &writes).await.is_ok();
-        for g in &grants {
+    for tenant in app.store.pending_grant_tenants(RECONCILE_BATCH).await? {
+        let mut pending = app.store.pending_grants(&tenant, RECONCILE_BATCH).await?;
+        let grants = pending.grants().to_vec();
+        let t = &tenant;
+        let (done, reachable) = write_tenant(&grants, |writes| async move {
+            app.authz.write(t, &writes, &[]).await.map(|_| ())
+        })
+        .await;
+        for (g, ok) in grants.iter().zip(done) {
             if ok {
                 pending.mark(g).await?;
                 written += 1;
@@ -86,9 +83,63 @@ pub async fn reconcile_grants(app: &App) -> Result<usize, ApiError> {
                 pending.mark_failed(g).await?;
             }
         }
+        pending.commit().await?;
+        if !reachable {
+            break;
+        }
     }
-    pending.commit().await?;
     Ok(written)
+}
+
+/// Writes one tenant's grants in one call. A batch SpiceDB refuses is written again a row at a
+/// time, so one bad row fails alone. Returns which were written, and whether SpiceDB could be
+/// reached at all: unreachable, the rest are not tried.
+async fn write_tenant<F, Fut>(grants: &[Grant], write: F) -> (Vec<bool>, bool)
+where
+    F: Fn(Vec<Write>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), AuthzError>>,
+{
+    let touch = |g: &Grant| Write::Touch(relationship(g));
+    match write(grants.iter().map(touch).collect()).await {
+        Ok(()) => return (vec![true; grants.len()], true),
+        Err(e) if unreachable(&e) => {
+            tracing::warn!(error = %e, "spicedb unreachable; grants left for the next round");
+            return (vec![false; grants.len()], false);
+        }
+        Err(e) if grants.len() == 1 => {
+            tracing::warn!(error = %e, "grant refused");
+            return (vec![false], true);
+        }
+        Err(e) => tracing::warn!(error = %e, "grant batch refused; writing one at a time"),
+    }
+    let mut done = Vec::with_capacity(grants.len());
+    for g in grants {
+        match write(vec![touch(g)]).await {
+            Ok(()) => done.push(true),
+            Err(e) if unreachable(&e) => {
+                tracing::warn!(error = %e, "spicedb unreachable; grants left for the next round");
+                done.resize(grants.len(), false);
+                return (done, false);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "grant refused");
+                done.push(false);
+            }
+        }
+    }
+    (done, true)
+}
+
+/// SpiceDB could not answer, as opposed to refusing the write.
+fn unreachable(e: &AuthzError) -> bool {
+    match e {
+        AuthzError::Connect(_) => true,
+        AuthzError::Rpc(status) => matches!(
+            status.code(),
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled | tonic::Code::Unknown
+        ),
+        _ => false,
+    }
 }
 
 /// The reconciler loop, next to the relay in the API service.
@@ -214,5 +265,81 @@ impl App {
             .filter_map(|id| CompanyId::new(id).ok())
             .map(|c| who.company(c))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    fn grants(ids: &[&str]) -> Vec<Grant> {
+        let t = TenantId::new("org_1").unwrap();
+        ids.iter()
+            .map(|c| Grant::CompanyWorkspace(CompanyScope::new(t.clone(), CompanyId::new(*c).unwrap())))
+            .collect()
+    }
+
+    /// A SpiceDB that answers each write with `answer(writes)`, recording the size of each call.
+    async fn run(ids: &[&str], answer: impl Fn(&str) -> Result<(), AuthzError>) -> ((Vec<bool>, bool), Vec<usize>) {
+        let calls = Mutex::new(Vec::new());
+        let out = write_tenant(&grants(ids), |writes| {
+            calls.lock().unwrap().push(writes.len());
+            let result = answer(&format!("{writes:?}"));
+            async move { result }
+        })
+        .await;
+        (out, calls.into_inner().unwrap())
+    }
+
+    fn refused() -> AuthzError {
+        AuthzError::Rpc(tonic::Status::invalid_argument("no such relation"))
+    }
+
+    fn down() -> AuthzError {
+        AuthzError::Rpc(tonic::Status::unavailable("connection refused"))
+    }
+
+    #[tokio::test]
+    async fn a_batch_goes_in_one_call() {
+        let (out, calls) = run(&["cmp_1", "cmp_2"], |_| Ok(())).await;
+        assert_eq!((out, calls), ((vec![true, true], true), vec![2]));
+    }
+
+    #[tokio::test]
+    async fn a_refused_batch_is_written_a_row_at_a_time_so_one_bad_row_fails_alone() {
+        let (out, calls) = run(&["cmp_1", "cmp_bad", "cmp_3"], |w| {
+            if w.contains("cmp_bad") { Err(refused()) } else { Ok(()) }
+        })
+        .await;
+        assert_eq!((out, calls), ((vec![true, false, true], true), vec![3, 1, 1, 1]));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_spicedb_is_not_asked_again_this_round() {
+        let (out, calls) = run(&["cmp_1", "cmp_2"], |_| Err(down())).await;
+        assert_eq!((out, calls), ((vec![false, false], false), vec![2]));
+        // Gone while writing a row at a time: the rest are left for the next round.
+        let (out, calls) = run(&["cmp_1", "cmp_bad", "cmp_3", "cmp_4"], |w| {
+            if w.contains("cmp_bad") && !w.contains("cmp_1") {
+                Err(down())
+            } else if w.contains("cmp_bad") {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert_eq!((out, calls), ((vec![true, false, false, false], false), vec![4, 1, 1]));
+    }
+
+    #[test]
+    fn only_a_transport_failure_counts_as_unreachable() {
+        assert!(unreachable(&down()));
+        assert!(unreachable(&AuthzError::Rpc(tonic::Status::deadline_exceeded("slow"))));
+        assert!(!unreachable(&refused()));
+        assert!(!unreachable(&AuthzError::Rpc(tonic::Status::permission_denied("key"))));
+        assert!(!unreachable(&AuthzError::BadKey));
     }
 }

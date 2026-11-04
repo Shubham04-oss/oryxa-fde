@@ -9,7 +9,7 @@
 //! is also read, for rotating in two deploys (see `session`: the new key goes here first).
 //!
 //! The database login is the runtime login, which owns nothing; the store refuses any other. On
-//! ECS it signs in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_CA_BUNDLE`),
+//! ECS it signs in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`; the RDS CA bundle is built in),
 //! locally with `DATABASE_URL`. Migrations run before a deploy as a one-off task
 //! (`oryxa-fde-ops migrate`) with the migrator's login.
 

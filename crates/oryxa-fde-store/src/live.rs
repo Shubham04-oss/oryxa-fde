@@ -1029,7 +1029,7 @@ async fn grants_stay_pending_for_the_reconciler_until_written() {
 
     // A grant the API is writing right now is skipped, not waited for.
     let held = store.lock_grant(&GrantRow::Company(c.clone())).await.unwrap().unwrap();
-    let pending = store.pending_grants(10_000).await.unwrap();
+    let pending = store.pending_grants(&t, 10_000).await.unwrap();
     assert_eq!(
         mine(pending.grants()),
         [
@@ -1042,13 +1042,13 @@ async fn grants_stay_pending_for_the_reconciler_until_written() {
     held.done().await.unwrap();
 
     // Marked grants are done; the rest stay until marked.
-    let mut pending = store.pending_grants(10_000).await.unwrap();
+    let mut pending = store.pending_grants(&t, 10_000).await.unwrap();
     let left = mine(pending.grants());
     assert_eq!(left.len(), 3);
     pending.mark(&left[0]).await.unwrap();
     pending.mark(&left[2]).await.unwrap();
     pending.commit().await.unwrap();
-    let pending = store.pending_grants(10_000).await.unwrap();
+    let pending = store.pending_grants(&t, 10_000).await.unwrap();
     assert_eq!(mine(pending.grants()), [Grant::ProjectCompany(p.clone())]);
 }
 
@@ -1394,7 +1394,7 @@ async fn iam_tokens_connect_and_are_refreshed_before_they_expire() {
         port,
         database,
         user: login.clone(),
-        ca_bundle: None,
+        tls: iam::Tls::Off,
     };
 
     // No token at startup: refused, never a fallback.
@@ -1426,7 +1426,7 @@ async fn iam_tokens_connect_and_are_refreshed_before_they_expire() {
     );
     drop(held);
     // The old token no longer opens anything: the refresh is what kept the pool working.
-    let stale = <sqlx::PgConnection as sqlx::Connection>::connect_with(&cfg.options(&first)).await;
+    let stale = <sqlx::PgConnection as sqlx::Connection>::connect_with(&cfg.options(&first).unwrap()).await;
     assert!(stale.is_err());
 }
 
@@ -1485,12 +1485,12 @@ async fn a_grant_that_keeps_failing_backs_off_and_the_rest_go_through() {
     let mine = |grants: &[Grant]| -> Vec<Grant> { grants.iter().filter(|g| g.tenant() == &t).cloned().collect() };
     let workspace = Grant::CompanyWorkspace(c.clone());
 
-    let mut pending = store.pending_grants(10_000).await.unwrap();
+    let mut pending = store.pending_grants(&t, 10_000).await.unwrap();
     assert!(mine(pending.grants()).contains(&workspace));
     pending.mark_failed(&workspace).await.unwrap();
     pending.commit().await.unwrap();
     // Backing off: not taken again yet; the member's grant still is.
-    let pending = store.pending_grants(10_000).await.unwrap();
+    let pending = store.pending_grants(&t, 10_000).await.unwrap();
     assert_eq!(
         mine(pending.grants()),
         [Grant::Member(c.clone(), UserId::new("alice").unwrap(), Role::Lead)]
@@ -1513,7 +1513,7 @@ async fn a_grant_that_keeps_failing_backs_off_and_the_rest_go_through() {
         .execute(&owner)
         .await
         .unwrap();
-    let mut pending = store.pending_grants(10_000).await.unwrap();
+    let mut pending = store.pending_grants(&t, 10_000).await.unwrap();
     assert!(mine(pending.grants()).contains(&workspace));
     pending.mark_failed(&workspace).await.unwrap();
     pending.commit().await.unwrap();
@@ -1558,85 +1558,151 @@ async fn run_psql(conn: &mut sqlx::PgConnection, script: &str) {
 
 #[tokio::test]
 #[ignore = "needs Postgres (DATABASE_URL)"]
-async fn the_bootstrap_roles_migrate_and_serve_with_no_createrole_anywhere() {
+async fn the_bootstrap_makes_every_role_and_the_migrator_needs_no_other() {
     const BOOTSTRAP: &str = include_str!("../../../infra/sql/01-bootstrap.sql");
     let _turn = BOOTSTRAP_TESTS.lock().await;
-    let owner = admin().await;
+    // Roles are cluster-wide and other tests make the real ones, so every role of the bootstrap
+    // and the migrations takes a name of this run's own: the bootstrap meets none of them made.
+    let prefix = new_id("b").replace('_', "").to_lowercase();
+    let fresh = |sql: &str| sql.replace("oryxa_fde_", &format!("{prefix}_"));
+    let role = |name: &str| format!("{prefix}_{name}");
+    let base = testing::database_url().parse::<PgConnectOptions>().unwrap();
+    // A superuser that has run nothing: no migrations before the bootstrap.
+    let mut superuser = <sqlx::PgConnection as sqlx::Connection>::connect_with(&base)
+        .await
+        .unwrap();
+    let ours = format!("{prefix}\\_%");
+    assert!(roles_like(&mut superuser, &ours).await.is_empty());
     // A database of its own: the bootstrap closes the database it runs in to everyone else.
     let db = new_id("fde_boot");
     sqlx::query(&format!("create database {db}"))
-        .execute(&owner)
+        .execute(&mut superuser)
         .await
         .unwrap();
     // RDS gives every database the rds_iam role; plain Postgres needs it made.
     sqlx::query("do $$ begin if not exists (select from pg_roles where rolname = 'rds_iam') then create role rds_iam nologin; end if; end $$")
-        .execute(&owner)
+        .execute(&mut superuser)
         .await
         .unwrap();
-    let base = testing::database_url().parse::<PgConnectOptions>().unwrap();
     let mut master = <sqlx::PgConnection as sqlx::Connection>::connect_with(&base.clone().database(&db))
         .await
         .unwrap();
     run_psql(
         &mut master,
-        &BOOTSTRAP.replace("on database oryxa_fde", &format!("on database {db}")),
+        &fresh(&BOOTSTRAP.replace("on database oryxa_fde", &format!("on database {db}"))),
     )
     .await;
+    let made = roles_like(&mut master, &ours).await;
+    assert_eq!(
+        made,
+        ["api", "app", "grants", "migrator", "relay", "runtime"].map(role),
+        "the bootstrap makes every role"
+    );
 
     // IAM in production; passwords here, set for this run.
     let (migrator_pw, api_pw) = (new_id("pw"), new_id("pw"));
     for sql in [
-        format!("alter role oryxa_fde_migrator password '{migrator_pw}'"),
-        format!("alter role oryxa_fde_api password '{api_pw}'"),
+        format!("alter role {} password '{migrator_pw}'", role("migrator")),
+        format!("alter role {} password '{api_pw}'", role("api")),
     ] {
         sqlx::query(&sql).execute(&mut master).await.unwrap();
     }
-    let createrole: bool = sqlx::query_scalar(
-        "select bool_or(rolcreaterole or rolsuper) from pg_roles where rolname in ('oryxa_fde_migrator', 'oryxa_fde_api')",
-    )
-    .fetch_one(&mut master)
-    .await
-    .unwrap();
+    let createrole: bool =
+        sqlx::query_scalar("select bool_or(rolcreaterole or rolsuper) from pg_roles where rolname = any ($1)")
+            .bind([role("migrator"), role("api")])
+            .fetch_one(&mut master)
+            .await
+            .unwrap();
     assert!(!createrole, "neither login may create roles");
 
-    // The migrator migrates with no CREATEROLE; the API connects as a runtime login and works.
+    // The migrations, under the same names, as the migrator: with no CREATEROLE, they run only if
+    // every role they need is already there, and they make none.
+    let dir = std::env::temp_dir().join(new_id("fde_migrations"));
+    std::fs::create_dir(&dir).unwrap();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+        let path = entry.unwrap().path();
+        let sql = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(dir.join(path.file_name().unwrap()), fresh(&sql)).unwrap();
+    }
+    let migrations = sqlx::migrate::Migrator::new(dir.as_path()).await.unwrap();
     let as_migrator = base
         .clone()
         .database(&db)
-        .username("oryxa_fde_migrator")
+        .username(&role("migrator"))
         .password(&migrator_pw);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(as_migrator)
         .await
         .unwrap();
-    migrate_with(&pool).await.unwrap();
+    migrations.run(&pool).await.unwrap();
     pool.close().await;
-    let as_api = base.clone().database(&db).username("oryxa_fde_api").password(&api_pw);
-    let store = Store::connect_with(as_api).await.unwrap();
-    let c = scope(&tenant(), &new_id("cmp"));
-    create_company(&store, &c).await;
-    assert!(store.company(&c).await.unwrap().get().await.unwrap().is_some());
-    let mut conn = store.pool.acquire().await.unwrap();
-    assert!(
-        sqlx::query("set role oryxa_fde_migrator")
-            .execute(&mut *conn)
-            .await
-            .is_err()
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        roles_like(&mut master, &ours).await,
+        made,
+        "the migrations made no role"
     );
-    assert!(
-        sqlx::query("select 1 from companies")
-            .execute(&mut *conn)
-            .await
-            .is_err()
-    );
-    drop(conn);
-    drop(store);
-    drop(master);
-    sqlx::query(&format!("drop database {db} with (force)"))
-        .execute(&owner)
+
+    // The runtime login passes the store's owner check, and reaches tables only through the app role.
+    let as_api = base.clone().database(&db).username(&role("api")).password(&api_pw);
+    Store::connect_with(as_api.clone()).await.unwrap().pool.close().await;
+    let mut api = <sqlx::PgConnection as sqlx::Connection>::connect_with(&as_api)
         .await
         .unwrap();
+    for refused in [
+        format!("set role {}", role("migrator")),
+        "select 1 from companies".to_owned(),
+    ] {
+        assert!(sqlx::query(&refused).execute(&mut api).await.is_err(), "{refused}");
+    }
+    let mut tx = sqlx::Connection::begin(&mut api).await.unwrap();
+    sqlx::query(&format!("set local role {}", role("app")))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let visible: i64 = sqlx::query_scalar("select count(*) from companies")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(visible, 0, "no scope set: row-level security shows nothing");
+    tx.rollback().await.unwrap();
+    drop(api);
+
+    // A role the login reaches that owns the function behind every row-level policy: refused.
+    sqlx::query(&format!("alter function fde_in_scope owner to {}", role("app")))
+        .execute(&mut master)
+        .await
+        .unwrap();
+    match Store::connect_with(as_api).await {
+        Err(StoreError::Privileged(why)) => assert!(why.contains("owns a function"), "{why}"),
+        other => panic!("a reachable function owner must be refused: {:?}", other.err()),
+    }
+
+    drop(master);
+    sqlx::query(&format!("drop database {db} with (force)"))
+        .execute(&mut superuser)
+        .await
+        .unwrap();
+    for name in made.iter().rev() {
+        sqlx::query(&format!("drop owned by {name}"))
+            .execute(&mut superuser)
+            .await
+            .unwrap();
+        sqlx::query(&format!("drop role {name}"))
+            .execute(&mut superuser)
+            .await
+            .unwrap();
+    }
+}
+
+/// The names of the roles matching `pattern` (a `like` pattern), in order.
+async fn roles_like(conn: &mut sqlx::PgConnection, pattern: &str) -> Vec<String> {
+    sqlx::query_scalar("select rolname::text from pg_roles where rolname like $1 order by rolname")
+        .bind(pattern)
+        .fetch_all(conn)
+        .await
+        .unwrap()
 }
 
 /// The bootstrap's roles are cluster-wide, so its tests take turns.

@@ -95,13 +95,15 @@ impl PendingGrants {
     }
 
     /// Records a failed write of one of [`PendingGrants::grants`]: it waits 2 s after the first
-    /// failure, doubling to ten minutes, before it is taken again.
+    /// failure, doubling to ten minutes, before it is taken again. Counted from the failure itself
+    /// (`clock_timestamp()`), not from when the transaction began.
     pub async fn mark_failed(&mut self, grant: &Grant) -> Result<(), StoreError> {
         update(
             &mut self.tx,
             grant,
             "grant_attempts = grant_attempts + 1,
-             grant_retry_at = now() + make_interval(secs => least(power(2, least(grant_attempts + 1, 20)), 600))",
+             grant_retry_at = clock_timestamp()
+                 + make_interval(secs => least(power(2, least(grant_attempts + 1, 20)), 600))",
         )
         .await
     }
@@ -164,20 +166,44 @@ impl Store {
         Ok(grant.map(|grant| PendingGrant { tx, grant }))
     }
 
-    /// Up to `limit` rows of each kind whose grant is not yet written and not backing off, across
-    /// every tenant, locked and skipping rows another transaction holds (the API writing that
-    /// grant right now). Rows never tried come first, then those whose wait is longest over, so a
-    /// row that keeps failing cannot crowd out the rest.
-    pub async fn pending_grants(&self, limit: i64) -> Result<PendingGrants, StoreError> {
+    /// Up to `limit` tenants with a grant not yet written and not backing off, without locking
+    /// anything: tenants with a row never tried first, then those whose wait is longest over.
+    pub async fn pending_grant_tenants(&self, limit: i64) -> Result<Vec<TenantId>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("set local role oryxa_fde_grants").execute(&mut *tx).await?;
+        let due = "granted_at is null and (grant_retry_at is null or grant_retry_at <= now())";
+        let raw: Vec<String> = sqlx::query_scalar(&format!(
+            "select tenant_id from (
+                 select tenant_id, grant_retry_at from companies where {due}
+                 union all select tenant_id, grant_retry_at from company_members where {due}
+                 union all select tenant_id, grant_retry_at from projects where {due}
+                 union all select tenant_id, grant_retry_at from project_assignees where {due}
+             ) pending
+             group by tenant_id
+             order by bool_or(grant_retry_at is null) desc, min(grant_retry_at), tenant_id limit $1"
+        ))
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        raw.into_iter().map(|t| id("tenant id", TenantId::new, t)).collect()
+    }
+
+    /// Up to `limit` rows of each kind of one tenant whose grant is not yet written and not
+    /// backing off, locked and skipping rows another transaction holds (the API writing that grant
+    /// right now). Rows never tried come first, then those whose wait is longest over, so a row
+    /// that keeps failing cannot crowd out the rest.
+    pub async fn pending_grants(&self, tenant: &TenantId, limit: i64) -> Result<PendingGrants, StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("set local role oryxa_fde_grants").execute(&mut *tx).await?;
         let mut grants = Vec::new();
         for r in sqlx::query(
             "select tenant_id, company_id from companies
-             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             where tenant_id = $2 and granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
              order by grant_retry_at nulls first, tenant_id, company_id limit $1 for update skip locked",
         )
         .bind(limit)
+        .bind(tenant.as_str())
         .fetch_all(&mut *tx)
         .await?
         {
@@ -185,10 +211,11 @@ impl Store {
         }
         for r in sqlx::query(
             "select tenant_id, company_id, user_id, role from company_members
-             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             where tenant_id = $2 and granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
              order by grant_retry_at nulls first, tenant_id, company_id, user_id limit $1 for update skip locked",
         )
         .bind(limit)
+        .bind(tenant.as_str())
         .fetch_all(&mut *tx)
         .await?
         {
@@ -197,10 +224,11 @@ impl Store {
         }
         for r in sqlx::query(
             "select tenant_id, company_id, project_id from projects
-             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             where tenant_id = $2 and granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
              order by grant_retry_at nulls first, tenant_id, project_id limit $1 for update skip locked",
         )
         .bind(limit)
+        .bind(tenant.as_str())
         .fetch_all(&mut *tx)
         .await?
         {
@@ -208,10 +236,11 @@ impl Store {
         }
         for r in sqlx::query(
             "select tenant_id, company_id, project_id, user_id from project_assignees
-             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             where tenant_id = $2 and granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
              order by grant_retry_at nulls first, tenant_id, project_id, user_id limit $1 for update skip locked",
         )
         .bind(limit)
+        .bind(tenant.as_str())
         .fetch_all(&mut *tx)
         .await?
         {

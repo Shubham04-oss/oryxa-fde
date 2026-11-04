@@ -12,6 +12,7 @@ aws-config.workspace = true
 aws-credential-types = "1"
 aws-sigv4 = "1"
 http = "1"
+sha2.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true

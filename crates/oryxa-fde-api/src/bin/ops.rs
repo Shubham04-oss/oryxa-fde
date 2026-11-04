@@ -1,8 +1,8 @@
 //! One-off operations, each run as its own ECS task:
 //!   oryxa-fde-ops migrate                          migrations, as the migrator
 //!   oryxa-fde-ops replay-dead-events [<tenant>]    puts dead outbox rows back in line, as the runtime login
-//! On ECS both sign in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
-//! `DB_CA_BUNDLE`); locally with `MIGRATION_DATABASE_URL` and `DATABASE_URL`. The service itself
+//! On ECS both sign in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`; the RDS CA
+//! bundle is built in); locally with `MIGRATION_DATABASE_URL` and `DATABASE_URL`. The service itself
 //! never migrates: its login owns nothing.
 
 use oryxa_core::TenantId;
