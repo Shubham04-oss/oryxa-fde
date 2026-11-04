@@ -47,7 +47,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign out: ends the WorkOS session and clears the cookie. */
+        /**
+         * Sign out: clears the session cookie, always, and ends the WorkOS session if WorkOS answers.
+         *     It never refreshes or reissues the cookie, whatever state the session is in.
+         */
         post: operations["sign_out"];
         delete?: never;
         options?: never;
@@ -1103,33 +1106,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Signed out */
+            /** @description Signed out; the cookie is cleared */
             204: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
             /** @description Forbidden */
             403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3670,6 +3655,15 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

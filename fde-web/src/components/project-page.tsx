@@ -45,6 +45,12 @@ function target({ metric, comparator, target: value, unit }: CriterionOut) {
 }
 
 /** A task's second line: why it is stuck, who it waits on and since when, or when it is due. */
+// ponytail: the API returns only the assignee's WorkOS user id, so a teammate can't be named yet (tracked on the API).
+function assigneeLabel(assignee: string | null | undefined, me: string | undefined) {
+  if (!assignee) return "Unassigned"
+  return assignee === me ? "Assigned to you" : "Assigned to a teammate"
+}
+
 function taskDetail(task: TaskOut, today: string, person: (id: string) => string) {
   if (task.status === "blocked" && task.blocker) return task.blocker
   if (task.status === "waiting_on_customer") {
@@ -75,6 +81,7 @@ function signOffStatus(p: Project, person: (id: string) => string) {
 export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const queryClient = useQueryClient()
   const project = useQuery(queries.project(scope))
+  const me = useQuery(queries.me())
   const move = useMutation({
     mutationFn: (to: Stage) => api.moveStage(scope, to),
     onSuccess: (moved: ProjectOut) => {
@@ -220,7 +227,12 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
         ) : (
           <Rows>
             {p.tasks.map((task) => {
-              const detail = taskDetail(task, today, person)
+              const detail = [
+                assigneeLabel(task.assignee, me.data?.user.id),
+                taskDetail(task, today, person),
+              ]
+                .filter(Boolean)
+                .join(" · ")
               const late = task.status !== "done" && !!task.due_on && task.due_on < today
               return (
                 <Row key={task.id}>
