@@ -28,7 +28,7 @@ const CHILD_DEADLINE: Duration = Duration::from_secs(120);
 pub struct ChildLimits {
     /// CPU time; past it the kernel stops the child.
     pub cpu: Duration,
-    /// Address space.
+    /// Address space (Linux only).
     pub memory: u64,
     /// Wall-clock time; past it the parent kills the child.
     pub wall: Duration,
@@ -177,7 +177,11 @@ fn set_limits(limits: &ChildLimits) -> std::io::Result<()> {
     };
     let cpu = limits.cpu.as_secs().max(1);
     set(libc::RLIMIT_CPU, cpu, cpu + 1)?;
-    set(libc::RLIMIT_AS, limits.memory, limits.memory)?;
+    // ponytail: macOS refuses RLIMIT_AS (EINVAL), so local runs there have no memory limit; the
+    // worker runs on Linux.
+    if cfg!(target_os = "linux") {
+        set(libc::RLIMIT_AS, limits.memory, limits.memory)?;
+    }
     // It writes no file and leaves no core; it needs its three pipes and little else.
     set(libc::RLIMIT_FSIZE, 0, 0)?;
     set(libc::RLIMIT_CORE, 0, 0)?;
@@ -257,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn the_child_runs_under_its_limits_with_no_environment() {
         let probe = sh(
-            r#"cat >/dev/null; echo "cpu=$(ulimit -t) mem=$(ulimit -v) fsize=$(ulimit -f) home=[$HOME]""#,
+            r#"cat >/dev/null; echo "cpu=$(ulimit -t) fsize=$(ulimit -f) home=[$HOME]"; ulimit -v"#,
             quick(),
         );
         let text = probe
@@ -265,7 +269,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(text.trim(), format!("cpu=1 mem={} fsize=0 home=[]", (256 << 20) / 1024));
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("cpu=1 fsize=0 home=[]"));
+        // The address-space limit is set on Linux only (macOS refuses it).
+        if cfg!(target_os = "linux") {
+            assert_eq!(lines.next(), Some(((256 << 20) / 1024).to_string().as_str()));
+        }
     }
 
     #[tokio::test]
