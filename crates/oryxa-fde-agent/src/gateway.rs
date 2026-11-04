@@ -65,18 +65,29 @@ pub struct HarnessProcess {
     pub output: mpsc::Receiver<ProcessEvent>,
 }
 
+/// The generation of the company's sandbox lease a run holds. Every call that changes the sandbox carries it, and the
+/// gateway refuses one lower than the highest it has seen: a run whose lease has passed on cannot touch the sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LeaseToken(pub u64);
+
 pub trait Sandbox: Send + Sync + 'static {
-    fn start(&self, company: &CompanyScope) -> impl Future<Output = Result<(), SandboxError>> + Send;
+    fn start(&self, company: &CompanyScope, lease: LeaseToken)
+    -> impl Future<Output = Result<(), SandboxError>> + Send;
     /// Destroys the container: the hard stop for a harness that does not stop when told to.
-    fn stop(&self, company: &CompanyScope) -> impl Future<Output = Result<(), SandboxError>> + Send;
-    fn exec(&self, company: &CompanyScope, exec: Exec)
-    -> impl Future<Output = Result<ExecOutput, SandboxError>> + Send;
+    fn stop(&self, company: &CompanyScope, lease: LeaseToken) -> impl Future<Output = Result<(), SandboxError>> + Send;
+    fn exec(
+        &self,
+        company: &CompanyScope,
+        exec: Exec,
+        lease: LeaseToken,
+    ) -> impl Future<Output = Result<ExecOutput, SandboxError>> + Send;
     /// Writes a run's pack where only root can read it, and returns the SHA-256 of what is on disk.
     fn write_pack(
         &self,
         company: &CompanyScope,
         run: &AgentRunId,
         pack: Vec<u8>,
+        lease: LeaseToken,
     ) -> impl Future<Output = Result<String, SandboxError>> + Send;
     fn start_harness(
         &self,
@@ -84,12 +95,14 @@ pub trait Sandbox: Send + Sync + 'static {
         run: &AgentRunId,
         sha256: &str,
         timeout: Duration,
+        lease: LeaseToken,
     ) -> impl Future<Output = Result<HarnessProcess, SandboxError>> + Send;
     fn write_stdin(
         &self,
         company: &CompanyScope,
         exec: &str,
         line: String,
+        lease: LeaseToken,
     ) -> impl Future<Output = Result<(), SandboxError>> + Send;
     /// The approval actions the company's outbound policy holds hosts for.
     fn held_actions(
@@ -105,6 +118,7 @@ pub trait Sandbox: Send + Sync + 'static {
         approval: &ApprovalId,
         run: &AgentRunId,
         ttl: Duration,
+        lease: LeaseToken,
     ) -> impl Future<Output = Result<(), SandboxError>> + Send;
     /// Closes `action`'s hosts if `approval` opened them.
     fn close_grant(
@@ -216,6 +230,11 @@ impl GatewayClient {
     }
 
     // Ids are [A-Za-z0-9_-], so they need no escaping in a path.
+    /// A call that changes the sandbox, fenced by the caller's lease.
+    fn held(&self, request: reqwest::RequestBuilder, lease: LeaseToken) -> reqwest::RequestBuilder {
+        request.header("x-oryxa-lease", lease.0)
+    }
+
     fn url(&self, company: &CompanyScope, route: &str) -> String {
         format!(
             "{}/v1/sandboxes/{}/{}/{route}",
@@ -269,25 +288,26 @@ struct PolicyHost {
 }
 
 impl Sandbox for GatewayClient {
-    async fn start(&self, company: &CompanyScope) -> Result<(), SandboxError> {
-        self.send(self.http.post(self.url(company, "start")), "start").await?;
+    async fn start(&self, company: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        let request = self.held(self.http.post(self.url(company, "start")), lease);
+        self.send(request, "start").await?;
         Ok(())
     }
 
-    async fn stop(&self, company: &CompanyScope) -> Result<(), SandboxError> {
-        self.send(self.http.post(self.url(company, "stop")), "stop").await?;
+    async fn stop(&self, company: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        let request = self.held(self.http.post(self.url(company, "stop")), lease);
+        self.send(request, "stop").await?;
         Ok(())
     }
 
-    async fn exec(&self, company: &CompanyScope, exec: Exec) -> Result<ExecOutput, SandboxError> {
+    async fn exec(&self, company: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
         let body = ExecBody {
             argv: &exec.argv,
             env: &exec.env,
             timeout_ms: exec.timeout.as_millis(),
         };
         let request = self
-            .http
-            .post(self.url(company, "exec"))
+            .held(self.http.post(self.url(company, "exec")), lease)
             .json(&body)
             .timeout(exec.timeout + Duration::from_secs(30));
         let response = self.send(request, "exec").await?;
@@ -302,10 +322,10 @@ impl Sandbox for GatewayClient {
         company: &CompanyScope,
         run: &AgentRunId,
         pack: Vec<u8>,
+        lease: LeaseToken,
     ) -> Result<String, SandboxError> {
         let request = self
-            .http
-            .put(self.url(company, &format!("runs/{run}/context")))
+            .held(self.http.put(self.url(company, &format!("runs/{run}/context"))), lease)
             .body(pack)
             .timeout(Duration::from_secs(60));
         let response = self.send(request, "context").await?;
@@ -322,10 +342,10 @@ impl Sandbox for GatewayClient {
         run: &AgentRunId,
         sha256: &str,
         timeout: Duration,
+        lease: LeaseToken,
     ) -> Result<HarnessProcess, SandboxError> {
         let request = self
-            .http
-            .post(self.url(company, &format!("runs/{run}/harness")))
+            .held(self.http.post(self.url(company, &format!("runs/{run}/harness"))), lease)
             .json(&serde_json::json!({ "sha256": sha256, "timeoutMs": timeout.as_millis() as u64 }));
         let mut response = self.send(request, "harness").await?;
         // A gateway line carries a stdout chunk, JSON-escaped; allow for the escaping.
@@ -353,10 +373,15 @@ impl Sandbox for GatewayClient {
         Ok(HarnessProcess { exec, output: rx })
     }
 
-    async fn write_stdin(&self, company: &CompanyScope, exec: &str, line: String) -> Result<(), SandboxError> {
+    async fn write_stdin(
+        &self,
+        company: &CompanyScope,
+        exec: &str,
+        line: String,
+        lease: LeaseToken,
+    ) -> Result<(), SandboxError> {
         let request = self
-            .http
-            .post(self.url(company, &format!("exec/{exec}/stdin")))
+            .held(self.http.post(self.url(company, &format!("exec/{exec}/stdin"))), lease)
             .body(line)
             .timeout(Duration::from_secs(30));
         self.send(request, "stdin").await?;
@@ -380,11 +405,12 @@ impl Sandbox for GatewayClient {
         approval: &ApprovalId,
         run: &AgentRunId,
         ttl: Duration,
+        lease: LeaseToken,
     ) -> Result<(), SandboxError> {
         let route = format!("grants/{}", action_segment(action)?);
         let body = serde_json::json!({ "approval": approval, "run": run, "ttlMs": ttl.as_millis() as u64 });
-        self.send(self.http.put(self.url(company, &route)).json(&body), "grant")
-            .await?;
+        let request = self.held(self.http.put(self.url(company, &route)), lease).json(&body);
+        self.send(request, "grant").await?;
         Ok(())
     }
 

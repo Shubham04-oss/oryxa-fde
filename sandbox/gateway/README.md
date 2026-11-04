@@ -42,10 +42,16 @@ from the image. Only the two run routes use root:
   digest differs, starts the agent as `agent` and then drops to its own user `harness` (uid 1002). The agent's
   processes then cannot open the harness's stdin, where approval decisions and cancellation arrive, through
   `/proc`, and cannot read its output or signal it.
+- **Only the run holding the sandbox changes it.** Every call that changes the sandbox (start, stop, exec, files,
+  context, harness, stdin, opening a grant) carries `x-oryxa-lease: <generation>`, the lease generation the store
+  gave the calling run; it rises whenever the sandbox passes to another run. A generation lower than the highest
+  seen is refused (`409`), checked in the same call as the change, so a run whose lease has passed on never touches
+  the next run's container, however late its call arrives. Reads and closing a grant need none.
 - **One harness at a time.** A harness start is refused (`409`) from an earlier harness's start until its process
-  exits or the sandbox stops, even if nobody reads its output any more (its API task is gone). If this object
-  restarts meanwhile, the exit is never seen, so the sandbox must be stopped first. The API destroys the container
-  before every run anyway.
+  is seen to exit or the sandbox stops, even if nobody reads its output any more (its API task is gone). If the
+  start or the exit cannot be confirmed (starting it fails, waiting for it fails, or this object restarts), the
+  sandbox must be stopped first; a stream whose exit cannot be confirmed breaks off rather than report one. The API
+  destroys the container before every run anyway.
 
 ## Outbound policy
 

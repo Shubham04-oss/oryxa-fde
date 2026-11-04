@@ -47,8 +47,14 @@ Everything fails closed:
 - a decision that cannot reach the harness, or whose hosts cannot open, ends it (`decision_undelivered`);
 - hosts that cannot be closed, after their approved call returns or at the run's end, fail it and destroy the
   sandbox (`grant_not_closed`), even if the harness had finished: nothing is delivered from that sandbox;
-- a run that loses its lease (the store refuses to renew it, or cannot renew it before it would lapse) destroys
-  the sandbox and ends (`store_unavailable`), since another run may already have been given it;
+- a run is `succeeded` only once its work is delivered (or there was nothing to deliver): a finished run that
+  delivered nothing, because it lost its sandbox or its API task stopped, is `failed`;
+- a run touches the sandbox only while it holds the lease: every call that changes it carries the lease's
+  generation, which rises whenever the sandbox passes to another run, and the gateway refuses an older one. A run
+  that cannot renew its lease while it still holds it destroys the sandbox and ends (`store_unavailable`); if that
+  fails too, or the lease has lapsed or is someone else's, it ends the same way and never touches the sandbox again,
+  not even its harness's stdin. Dropping the harness's stream makes the gateway close that, and the harness cancels
+  itself. A renewal, and a stop, never outlast the lease;
 - a harness that does not stop within the grace period has its sandbox destroyed;
 - a sandbox that will not stop is asked three times; its grants are then closed one by one, and the next run
   destroys it before starting, or does not start.
@@ -75,7 +81,8 @@ Decisions and cancels are read from there, so any API task can take them. `InMem
 
 A run whose API task stopped (a deploy) holds neither the sandbox nor any budget once its heartbeat lapses. Every
 API task sweeps for such runs when it starts and then every minute: each fails as `interrupted` (one whose model had
-already ended keeps that end) and its time up to its last heartbeat, and its model spend, are counted. A run that
+already ended keeps that end) and its time up to its last heartbeat, and its model spend, are counted. The grants
+its approved actions opened are closed, each by its own approval. A run that
 is still driven is never swept, whatever it reads; a new run counts as driven for its first minute. The sweep finds
 them across tenants as the relay role, which may read only the ids of such runs, and ends each in its project's
 own transaction. Its harness cancels itself when the gateway closes its stdin with the API task.

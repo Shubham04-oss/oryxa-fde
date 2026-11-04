@@ -148,7 +148,9 @@ export function streamLines(
     try {
       await write({ type: "started", exec: execId });
       await Promise.all([pump(process.stdout, "stdout"), pump(process.stderr, "stderr")]);
-      const code = await process.exitCode.catch(() => null);
+      // Only a confirmed exit is reported as one: if waiting for it fails, the stream breaks off instead, and the
+      // reader treats the process as lost, not as ended.
+      const code = await process.exitCode;
       await write({ type: "exit", code: timedOut() ? null : code, timedOut: timedOut() });
       await writer.close();
     } catch (cause) {

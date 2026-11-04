@@ -2,9 +2,9 @@
 //! single order (as `AgentRun` requires):
 //!
 //! 1. Wait for the company's sandbox (one run at a time, across API tasks), then reserve the run's part of the
-//!    project's budget. A heartbeat keeps both until the run's end is recorded. A run that loses its hold on the
-//!    sandbox (the store refuses a renewal, or cannot be reached before the hold lapses) destroys the sandbox and
-//!    ends, since another run may already have been given it.
+//!    project's budget. A heartbeat keeps both until the run's end is recorded. A run that cannot renew its hold
+//!    while it still has it destroys the sandbox and ends; one whose hold has lapsed, or is someone else's, ends
+//!    and leaves the sandbox alone, since another run may already have been given it.
 //! 2. Build the context pack, destroy whatever container the sandbox still has and start a fresh one, check out the
 //!    repository, write the pack and check the digest read back, then start the harness on it.
 //! 3. Apply the harness's lines; store the transcript and approval requests, and stream lines live. Decisions and
@@ -26,11 +26,11 @@ use oryxa_fde_events::RunOutcome;
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use crate::context::ContextPack;
 use crate::event::{ApprovalOutcome, HarnessEvent, HarnessInput, ToolStatus, parse_line};
-use crate::gateway::{Exec, HarnessProcess, ProcessEvent, Sandbox};
+use crate::gateway::{Exec, HarnessProcess, LeaseToken, ProcessEvent, Sandbox};
 use crate::git::{self, Delivery};
 use crate::ids::{ApprovalId, ToolCallId};
 use crate::live::LiveOutput;
@@ -62,7 +62,7 @@ pub(crate) async fn drive<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, id: 
         grants: BTreeMap::new(),
         started: None,
         heartbeat: None,
-        lost: watch::channel(false).1,
+        hold: watch::channel(Hold::Waiting).1,
     };
     driver.run().await;
     // Runs on this task that wait for the sandbox try again now.
@@ -79,35 +79,66 @@ impl Drop for Heartbeat {
     }
 }
 
-/// Keeps the run's hold on the company's sandbox and its budget reservation while the driver works. If the store
-/// refuses a renewal, or cannot be reached until the hold is about to lapse, another run may be given the sandbox:
-/// it is destroyed, and `lost` is set.
+/// A run's hold on the company's sandbox. The run touches the sandbox only while it is `Held` and not past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// Not given yet.
+    Waiting,
+    /// Held until then, with this token at the gateway.
+    Held(Instant, LeaseToken),
+    /// It could not be renewed while still held, and the run destroyed the sandbox.
+    Destroyed,
+    /// It lapsed, is someone else's, or could not be renewed and the sandbox could not be destroyed in time: the
+    /// sandbox may be another run's now, so the run never touches it again.
+    Gone,
+}
+
+/// Keeps the run's hold on the company's sandbox and its budget reservation while the driver works, and tells the
+/// driver until when it holds it. A renewal never outlasts the hold it would extend. If the store cannot renew it
+/// while it is still held, the sandbox is destroyed (bounded by the same time) and reported `Destroyed` only once
+/// that succeeded; otherwise, or once the hold has lapsed or is someone else's, it is `Gone` and left alone.
 fn hold_sandbox<D: Deps>(
     runs: Arc<Runs<D>>,
     scope: ProjectScope,
     run: AgentRunId,
     mut until: Instant,
-    lost: watch::Sender<bool>,
+    token: LeaseToken,
+    hold: watch::Sender<Hold>,
 ) -> Heartbeat {
     Heartbeat(tokio::spawn(async move {
         let lease = runs.config.lease;
         loop {
             sleep(lease / 4).await;
             let asked = Instant::now();
-            match runs.store.renew_sandbox(&scope, &run, lease).await {
-                Ok(true) => {
+            let left = until.saturating_duration_since(asked);
+            let renewed = if left.is_zero() {
+                None
+            } else {
+                timeout(left, runs.store.renew_sandbox(&scope, &run, lease)).await.ok()
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            match renewed {
+                Some(Ok(true)) => {
                     until = asked + lease;
+                    let _ = hold.send(Hold::Held(until, token));
                     continue;
                 }
-                Ok(false) => {}
-                Err(_) if until.saturating_duration_since(Instant::now()) > lease / 4 => continue,
-                Err(_) => {}
+                Some(Err(_)) if left > lease / 4 => continue,
+                Some(Err(_)) | None if !left.is_zero() => {
+                    tracing::error!(run = %run, "could not renew the company's sandbox; destroying it");
+                    match timeout(left, runs.sandbox.stop(&scope.company, token)).await {
+                        Ok(Ok(())) => {
+                            let _ = hold.send(Hold::Destroyed);
+                            return;
+                        }
+                        Ok(Err(e)) => tracing::error!(error = %e, run = %run, "could not stop the sandbox"),
+                        Err(_) => tracing::error!(run = %run, "stopping the sandbox outlasted the hold"),
+                    }
+                }
+                _ => {}
             }
-            tracing::error!(run = %run, "lost the company's sandbox; destroying it");
-            let _ = lost.send(true);
-            if let Err(e) = runs.sandbox.stop(&scope.company).await {
-                tracing::error!(error = %e, run = %run, "could not stop the sandbox");
-            }
+            tracing::error!(run = %run, "lost the company's sandbox; leaving it alone");
+            let _ = hold.send(Hold::Gone);
             return;
         }
     }))
@@ -144,6 +175,7 @@ pub(crate) async fn sweep<D: Deps>(runs: &Runs<D>) -> usize {
         match runs.store.settle_lapsed(&record, usd_micros, outcome).await {
             Ok(true) => {
                 tracing::warn!(run = %id, "ended a run whose API task stopped");
+                close_grants(runs, &scope, &id).await;
                 ended += 1;
             }
             Ok(false) => {}
@@ -154,6 +186,28 @@ pub(crate) async fn sweep<D: Deps>(runs: &Runs<D>) -> usize {
         runs.changed();
     }
     ended
+}
+
+/// Closes the grants an ended run's approved actions may have left open. Each closes only the grant its own
+/// approval opened, so another run's is never touched; one that will not close expires on its own.
+async fn close_grants<D: Deps>(runs: &Runs<D>, scope: &ProjectScope, run: &AgentRunId) {
+    let approvals = match runs.store.approvals(scope, run).await {
+        Ok(approvals) => approvals,
+        Err(e) => {
+            tracing::error!(error = %e, run = %run, "could not read an interrupted run's approvals");
+            return;
+        }
+    };
+    let approved = approvals.iter().filter(|a| {
+        a.decision
+            .as_ref()
+            .is_some_and(|d| d.outcome == ApprovalOutcome::Approved)
+    });
+    for a in approved {
+        if let Err(e) = runs.sandbox.close_grant(&scope.company, &a.action, &a.id).await {
+            tracing::error!(error = %e, run = %run, "could not close an interrupted run's grant");
+        }
+    }
 }
 
 /// How the run's own task ends it, besides the harness's result.
@@ -177,8 +231,8 @@ struct Driver<D: Deps> {
     started: Option<Instant>,
     /// Renews the run's hold on the sandbox from when it is given until its end is recorded.
     heartbeat: Option<Heartbeat>,
-    /// Set when that hold was lost and the sandbox destroyed.
-    lost: watch::Receiver<bool>,
+    /// What became of that hold.
+    hold: watch::Receiver<Hold>,
 }
 
 impl<D: Deps> Driver<D> {
@@ -246,19 +300,21 @@ impl<D: Deps> Driver<D> {
             }
             let asked = Instant::now();
             match self.runs.store.take_sandbox(&self.scope, self.id(), lease).await {
-                Ok(true) => {
-                    let (tx, rx) = watch::channel(false);
-                    self.lost = rx;
+                Ok(Some(token)) => {
+                    let until = asked + lease;
+                    let (tx, rx) = watch::channel(Hold::Held(until, token));
+                    self.hold = rx;
                     self.heartbeat = Some(hold_sandbox(
                         self.runs.clone(),
                         self.scope.clone(),
                         self.id().clone(),
-                        asked + lease,
+                        until,
+                        token,
                         tx,
                     ));
                     return Ok(true);
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(_) => return Err(()),
             }
             tokio::select! {
@@ -292,19 +348,25 @@ impl<D: Deps> Driver<D> {
             return Err("approval action without a held host");
         }
         let pack = pack.encode().map_err(|_| "context")?;
+        // Every step below changes the sandbox: each first checks the run still holds it.
+        let held = |driver: &Self| driver.lease().ok_or("sandbox lease");
         // A fresh container for every run: nothing an earlier run left (a harness orphaned by a deploy, or whatever
         // its agent left running) survives into this one. A sandbox that will not stop is never reused.
-        runs.sandbox.stop(&company).await.map_err(|_| "sandbox")?;
-        runs.sandbox.start(&company).await.map_err(|_| "sandbox")?;
+        runs.sandbox.stop(&company, held(self)?).await.map_err(|_| "sandbox")?;
+        runs.sandbox.start(&company, held(self)?).await.map_err(|_| "sandbox")?;
         for step in git::prepare(&self.record.repository) {
-            let out = runs.sandbox.exec(&company, step).await.map_err(|_| "checkout")?;
+            let out = runs
+                .sandbox
+                .exec(&company, step, held(self)?)
+                .await
+                .map_err(|_| "checkout")?;
             if !out.ok() {
                 return Err("checkout");
             }
         }
         let on_disk = runs
             .sandbox
-            .write_pack(&company, self.id(), pack.bytes.clone())
+            .write_pack(&company, self.id(), pack.bytes.clone(), held(self)?)
             .await
             .map_err(|_| "context pack")?;
         pack.check_written(&on_disk).map_err(|_| "context pack digest")?;
@@ -315,7 +377,7 @@ impl<D: Deps> Driver<D> {
         let hard_limit = limit + runs.config.grace + runs.config.grace;
         let process = runs
             .sandbox
-            .start_harness(&company, self.id(), &pack.sha256, hard_limit)
+            .start_harness(&company, self.id(), &pack.sha256, hard_limit, held(self)?)
             .await
             .map_err(|_| "harness")?;
         self.exec = Some(process.exec.clone());
@@ -330,7 +392,7 @@ impl<D: Deps> Driver<D> {
         let deadline = sleep_until(started + limit);
         tokio::pin!(deadline);
         let mut changes = self.runs.watch();
-        let mut lost = self.lost.clone();
+        let mut hold = self.hold.clone();
         let mut poll = tokio::time::interval(self.runs.config.poll);
         let mut stopping: Option<Instant> = None;
         loop {
@@ -346,20 +408,24 @@ impl<D: Deps> Driver<D> {
                     Some(ProcessEvent::Line(line)) => self.line(&line, &live, left).await,
                     Some(ProcessEvent::Invalid) => self.stop(Stop::Reason(StopReason::BadOutput)).await,
                     Some(ProcessEvent::Exited { .. }) => {
-                        self.sandbox_lost(&lost).await;
+                        self.sandbox_lost(&hold).await;
                         self.record.run.harness_exited();
                         break;
                     }
                     None => {
                         // The stream was lost and the harness may still run: stop it the hard way.
                         tracing::warn!(run = %self.id(), "lost the harness's output");
-                        self.sandbox_lost(&lost).await;
+                        self.sandbox_lost(&hold).await;
                         self.record.run.harness_exited();
                         self.hard_stop().await;
                         break;
                     }
                 },
-                Ok(()) = lost.changed() => self.sandbox_lost(&lost).await,
+                Ok(()) = hold.changed() => {
+                    if self.sandbox_lost(&hold).await {
+                        break;
+                    }
+                }
                 () = &mut deadline, if !self.record.run.is_ended() => {
                     let why = if over_budget { Stop::Reason(StopReason::OverBudget) } else { Stop::TimeLimit };
                     self.stop(why).await;
@@ -494,6 +560,10 @@ impl<D: Deps> Driver<D> {
                 let _ = self.record.run.undelivered(&approval);
                 return self.hard_stop().await;
             }
+            let Some(lease) = self.lease() else {
+                let _ = self.record.run.undelivered(&approval);
+                return self.hard_stop().await;
+            };
             let opened = self
                 .runs
                 .sandbox
@@ -503,6 +573,7 @@ impl<D: Deps> Driver<D> {
                     &approval,
                     self.id(),
                     self.runs.config.grant_ttl,
+                    lease,
                 )
                 .await;
             if opened.is_err() {
@@ -538,12 +609,12 @@ impl<D: Deps> Driver<D> {
     }
 
     async fn deliver_input(&self, input: HarnessInput) -> bool {
-        let Some(exec) = &self.exec else {
+        let (Some(exec), Some(lease)) = (&self.exec, self.lease()) else {
             return false;
         };
         self.runs
             .sandbox
-            .write_stdin(self.company(), exec, input.to_line())
+            .write_stdin(self.company(), exec, input.to_line(), lease)
             .await
             .is_ok()
     }
@@ -556,30 +627,54 @@ impl<D: Deps> Driver<D> {
         self.hard_stop().await;
     }
 
-    /// If the heartbeat lost the sandbox (and destroyed it), the run ends for that reason.
-    async fn sandbox_lost(&mut self, lost: &watch::Receiver<bool>) {
-        if *lost.borrow() && !self.record.run.is_ended() {
+    /// If the heartbeat lost the sandbox, the run ends for that reason and the driver stops watching (`true`): it
+    /// touches the sandbox no more. Dropping the harness's stream makes the gateway close its stdin, and the harness
+    /// then cancels itself. A destroyed sandbox took the grants with it; otherwise the run's end closes them.
+    async fn sandbox_lost(&mut self, hold: &watch::Receiver<Hold>) -> bool {
+        let hold = *hold.borrow();
+        if matches!(hold, Hold::Waiting | Hold::Held(..)) {
+            return false;
+        }
+        if !self.record.run.is_ended() {
             let _ = self.record.run.stop(StopReason::StoreUnavailable);
             self.save().await;
-            self.exec = None;
+        }
+        self.exec = None;
+        if hold == Hold::Destroyed {
             self.grants.clear();
+        }
+        true
+    }
+
+    /// The run's token at the gateway while it still holds the sandbox; `None` once the hold has lapsed or is lost.
+    fn lease(&self) -> Option<LeaseToken> {
+        match *self.hold.borrow() {
+            Hold::Held(until, token) if Instant::now() < until => Some(token),
+            _ => None,
         }
     }
 
-    /// Destroys the company's sandbox: the harness and everything the agent left running go with it. Retried a few
+    /// Destroys the company's sandbox: the harness and everything the agent left running go with it. Only while the
+    /// run still holds it, each attempt bounded by the time left: after that it may be the next run's. Retried a few
     /// times; if it still runs, its grants stay listed so the run's end closes them one by one, and the next run to
     /// take the sandbox destroys it before starting, or does not start.
     async fn hard_stop(&mut self) {
         self.exec = None;
         let mut wait = self.runs.config.poll;
         for attempt in 1..=STOP_ATTEMPTS {
-            match self.runs.sandbox.stop(self.company()).await {
-                Ok(()) => {
+            let (Some(lease), Hold::Held(until, _)) = (self.lease(), *self.hold.borrow()) else {
+                tracing::warn!(run = %self.id(), "not stopping a sandbox this run no longer holds");
+                return;
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            match timeout(left, self.runs.sandbox.stop(self.company(), lease)).await {
+                Ok(Ok(())) => {
                     // Grants are closed when the sandbox stops.
                     self.grants.clear();
                     return;
                 }
-                Err(e) => tracing::error!(error = %e, run = %self.id(), attempt, "could not stop the sandbox"),
+                Ok(Err(e)) => tracing::error!(error = %e, run = %self.id(), attempt, "could not stop the sandbox"),
+                Err(_) => tracing::error!(run = %self.id(), attempt, "stopping the sandbox outlasted the hold"),
             }
             if attempt < STOP_ATTEMPTS {
                 sleep(wait).await;
@@ -613,7 +708,7 @@ impl<D: Deps> Driver<D> {
         if !closed {
             self.grant_not_closed().await;
         }
-        if closed && self.record.run.state() == &RunState::Finished && !*self.lost.borrow() {
+        if closed && self.record.run.state() == &RunState::Finished && self.lease().is_some() {
             self.record.delivery = self.deliver().await;
         }
         // The end lets the sandbox go, so the heartbeat stops before it is recorded.
@@ -638,7 +733,12 @@ impl<D: Deps> Driver<D> {
         let steps = git::deliver(&self.record.repository, self.id(), &self.record.task);
         let company = self.company();
         let ok = |step: &'static str, exec: Exec| async move {
-            match self.runs.sandbox.exec(company, exec).await {
+            // Each step only while the run still holds the sandbox.
+            let Some(lease) = self.lease() else {
+                tracing::warn!(run = %self.id(), step, "delivery stopped: the run no longer holds the sandbox");
+                return None;
+            };
+            match self.runs.sandbox.exec(company, exec, lease).await {
                 Ok(out) => Some(out),
                 Err(e) => {
                     tracing::warn!(error = %e, run = %self.id(), step, "delivery failed");
@@ -683,10 +783,11 @@ impl<D: Deps> Driver<D> {
 }
 
 /// How a run ended, in `agent-run.finished`'s terms: a rejected approval is `Rejected`; a run an FDE or its budget
-/// stopped is `Cancelled`; a finished run whose work could not be delivered `Failed`.
+/// stopped is `Cancelled`; a finished run whose work was not delivered `Failed`.
 fn outcome(state: &RunState, delivery: &Delivery) -> RunOutcome {
     match (state, delivery) {
-        (RunState::Finished, Delivery::Failed) => RunOutcome::Failed,
+        // Finished but never delivered (its sandbox was lost, or its API task stopped): nothing came of it.
+        (RunState::Finished, Delivery::Failed | Delivery::None) => RunOutcome::Failed,
         (RunState::Finished, _) => RunOutcome::Succeeded,
         (
             RunState::Failed {
@@ -722,4 +823,37 @@ fn live_forwarder<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, run: AgentRu
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finished_run_succeeds_only_once_delivered() {
+        let pr = Delivery::PullRequest(crate::git::PullRequest {
+            number: 7,
+            url: "https://github.com/sample-org/status-page/pull/7".into(),
+        });
+        assert_eq!(outcome(&RunState::Finished, &pr), RunOutcome::Succeeded);
+        assert_eq!(
+            outcome(&RunState::Finished, &Delivery::NoChanges),
+            RunOutcome::Succeeded
+        );
+        assert_eq!(outcome(&RunState::Finished, &Delivery::Failed), RunOutcome::Failed);
+        assert_eq!(outcome(&RunState::Finished, &Delivery::None), RunOutcome::Failed);
+        let failed = |reason| RunState::Failed { reason };
+        assert_eq!(
+            outcome(&failed(FailReason::ApprovalRejected), &Delivery::None),
+            RunOutcome::Rejected
+        );
+        assert_eq!(
+            outcome(&failed(FailReason::OverBudget), &Delivery::None),
+            RunOutcome::Cancelled
+        );
+        assert_eq!(
+            outcome(&failed(FailReason::Interrupted), &Delivery::None),
+            RunOutcome::Failed
+        );
+    }
 }

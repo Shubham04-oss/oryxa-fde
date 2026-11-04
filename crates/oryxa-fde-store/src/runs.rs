@@ -597,9 +597,10 @@ impl ProjectTx {
     }
 
     /// Takes the company's sandbox for `run` for `ttl`: only when no live lease is someone else's and no older run of
-    /// the company is still waiting for it, so runs take turns in the order they were created. The run is kept
-    /// alive either way. `Missing` if the run has ended or does not exist.
-    pub async fn take_agent_sandbox(&mut self, run: &AgentRunId, ttl: Duration) -> Result<bool, StoreError> {
+    /// the company is still waiting for it, so runs take turns in the order they were created. Returns the lease's
+    /// generation, the run's token at the gateway, if it was given. The run is kept alive either way. `Missing` if
+    /// the run has ended or does not exist.
+    pub async fn take_agent_sandbox(&mut self, run: &AgentRunId, ttl: Duration) -> Result<Option<u64>, StoreError> {
         if !self.keep_alive(run, ttl).await? {
             return Err(StoreError::Missing("agent run"));
         }
@@ -616,7 +617,7 @@ impl ProjectTx {
         .fetch_one(&mut *self.tx)
         .await?;
         if behind {
-            return Ok(false);
+            return Ok(None);
         }
         self.lease_sandbox(run.as_str(), ttl).await
     }
@@ -641,15 +642,18 @@ impl ProjectTx {
         Ok(updated == 1)
     }
 
-    /// The company's sandbox lease for `holder` (an agent or eval run), if it is free, lapsed or already theirs.
-    async fn lease_sandbox(&mut self, holder: &str, ttl: Duration) -> Result<bool, StoreError> {
+    /// The company's sandbox lease for `holder` (an agent or eval run), if it is free, lapsed or already theirs, with
+    /// its generation: one more than the last holder's whenever it changes hands.
+    async fn lease_sandbox(&mut self, holder: &str, ttl: Duration) -> Result<Option<u64>, StoreError> {
         let (t, c, _) = self.keys();
-        let taken: Option<String> = sqlx::query_scalar(
+        let generation: Option<i64> = sqlx::query_scalar(
             "insert into agent_sandbox_leases (tenant_id, company_id, holder, expires_at)
              values ($1, $2, $3, now() + make_interval(secs => $4))
-             on conflict (tenant_id, company_id) do update set holder = excluded.holder, expires_at = excluded.expires_at
+             on conflict (tenant_id, company_id) do update set holder = excluded.holder, expires_at = excluded.expires_at,
+                 generation = case when agent_sandbox_leases.holder = excluded.holder
+                     then agent_sandbox_leases.generation else agent_sandbox_leases.generation + 1 end
                  where agent_sandbox_leases.expires_at <= now() or agent_sandbox_leases.holder = excluded.holder
-             returning holder",
+             returning generation",
         )
         .bind(&t)
         .bind(&c)
@@ -657,7 +661,7 @@ impl ProjectTx {
         .bind(ttl.as_secs_f64())
         .fetch_optional(&mut *self.tx)
         .await?;
-        Ok(taken.is_some())
+        generation.map(|g| uncount(g, "lease generation")).transpose()
     }
 
     async fn release_sandbox(&mut self, holder: &str) -> Result<(), StoreError> {
@@ -1025,11 +1029,15 @@ mod tests {
         r
     }
 
-    async fn take(store: &Store, scope: &ProjectScope, run: &AgentRunRow) -> bool {
+    async fn take_token(store: &Store, scope: &ProjectScope, run: &AgentRunRow) -> Option<u64> {
         let mut tx = store.project(scope).await.unwrap();
         let taken = tx.take_agent_sandbox(&run.id, LEASE).await.unwrap();
         tx.commit().await.unwrap();
         taken
+    }
+
+    async fn take(store: &Store, scope: &ProjectScope, run: &AgentRunRow) -> bool {
+        take_token(store, scope, run).await.is_some()
     }
 
     async fn end(store: &Store, scope: &ProjectScope, run: &AgentRunRow) {
@@ -1065,9 +1073,13 @@ mod tests {
         let first = queued(&store, &a).await;
         let second = queued(&store, &a2).await;
         let third = queued(&store, &a).await;
-        // The newest run waits behind the second, which waits behind the holder.
-        assert!(take(&store, &a, &first).await);
-        assert!(take(&store, &a, &first).await, "the holder takes it again");
+        // The newest run waits behind the second, which waits behind the holder. Taking it again keeps its generation.
+        let held = take_token(&store, &a, &first).await.unwrap();
+        assert_eq!(
+            take_token(&store, &a, &first).await,
+            Some(held),
+            "the holder takes it again"
+        );
         assert!(!take(&store, &a, &third).await);
         assert!(!take(&store, &a2, &second).await);
         assert!(take(&store, &elsewhere, &queued(&store, &elsewhere).await).await);
@@ -1077,10 +1089,10 @@ mod tests {
         assert!(!tx.renew_agent_sandbox(&third.id, LEASE).await.unwrap());
         tx.commit().await.unwrap();
 
-        // Its end lets go: the older waiter goes next, not the newer one.
+        // Its end lets go: the older waiter goes next, not the newer one, with the next generation.
         end(&store, &a, &first).await;
         assert!(!take(&store, &a, &third).await);
-        assert!(take(&store, &a2, &second).await);
+        assert_eq!(take_token(&store, &a2, &second).await, Some(held + 1));
         let mut tx = store.project(&a).await.unwrap();
         assert!(!tx.renew_agent_sandbox(&first.id, LEASE).await.unwrap());
         assert!(matches!(
@@ -1095,6 +1107,7 @@ mod tests {
             tx.take_agent_sandbox(&second.id, Duration::from_millis(1))
                 .await
                 .unwrap()
+                .is_some()
         );
         tx.commit().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1117,7 +1130,7 @@ mod tests {
         let mut tx = store.project(&scope).await.unwrap();
         let (_, used, reserved) = tx.lock_agent_budget(&one.id).await.unwrap();
         assert_eq!((used, reserved), (AgentSpend::default(), AgentSpend::default()));
-        assert!(tx.take_agent_sandbox(&one.id, LEASE).await.unwrap());
+        assert!(tx.take_agent_sandbox(&one.id, LEASE).await.unwrap().is_some());
         assert!(tx.reserve_agent_budget(&one.id, held).await.unwrap());
         let waiter = {
             let store = store.clone();
@@ -1143,7 +1156,12 @@ mod tests {
 
         // A run whose driver is gone holds nothing.
         let mut tx = store.project(&scope).await.unwrap();
-        assert!(tx.take_agent_sandbox(&two.id, Duration::from_millis(1)).await.unwrap());
+        assert!(
+            tx.take_agent_sandbox(&two.id, Duration::from_millis(1))
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(tx.reserve_agent_budget(&two.id, held).await.unwrap());
         tx.commit().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1169,6 +1187,7 @@ mod tests {
             tx.take_agent_sandbox(&lapsed.id, Duration::from_millis(1))
                 .await
                 .unwrap()
+                .is_some()
         );
         tx.commit().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
