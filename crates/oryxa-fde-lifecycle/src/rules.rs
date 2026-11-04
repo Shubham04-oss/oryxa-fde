@@ -47,8 +47,9 @@ pub fn fact<T: Event + DeserializeOwned>(verifier: &Verifier, msg: &Message) -> 
         tracing::error!(reason = refusal(&e), detail_type = %msg.detail_type, "event refused");
         Outcome::Quarantine
     })?;
+    // Verified from here on, so its id can be logged to find it in the bus archive.
     let occurred_at = OffsetDateTime::parse(&v.envelope.occurred_at, &Rfc3339).map_err(|_| {
-        tracing::error!(detail_type = %msg.detail_type, "event time unreadable");
+        tracing::error!(event_id = %v.envelope.event_id, detail_type = %msg.detail_type, "event time unreadable");
         Outcome::Quarantine
     })?;
     Ok(Fact {
@@ -64,47 +65,48 @@ pub fn fact<T: Event + DeserializeOwned>(verifier: &Verifier, msg: &Message) -> 
 /// that would fail the same way again quarantines it (see [`outcome`]).
 pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcome {
     let t = msg.detail_type.as_str();
-    let applied = if t == AccessRequestStatusChanged::DETAIL_TYPE {
+    let (event_id, applied) = if t == AccessRequestStatusChanged::DETAIL_TYPE {
         match fact(verifier, msg) {
-            Ok(f) => on_access_changed(store, &f).await,
+            Ok(f) => (f.event_id.clone(), on_access_changed(store, &f).await),
             Err(o) => return o,
         }
     } else if t == EvalRunFinished::DETAIL_TYPE {
         match fact(verifier, msg) {
-            Ok(f) => on_eval_run(store, &f).await,
+            Ok(f) => (f.event_id.clone(), on_eval_run(store, &f).await),
             Err(o) => return o,
         }
     } else if t == AgentRunFinished::DETAIL_TYPE {
         match fact(verifier, msg) {
-            Ok(f) => on_agent_run(store, &f).await,
+            Ok(f) => (f.event_id.clone(), on_agent_run(store, &f).await),
             Err(o) => return o,
         }
     } else if t == PullRequestMerged::DETAIL_TYPE {
         match fact(verifier, msg) {
-            Ok(f) => on_pull_request(store, &f).await,
+            Ok(f) => (f.event_id.clone(), on_pull_request(store, &f).await),
             Err(o) => return o,
         }
     } else {
         return Outcome::Done;
     };
-    outcome(t, applied)
+    outcome(t, &event_id, applied)
 }
 
 /// A rule's result as the queue's outcome. Only a failure that may pass (the database unreachable
-/// or busy) is retried; one of the data is quarantined, so it does not hold up the project's
-/// FIFO group until the dead-letter queue.
-pub fn outcome(detail_type: &str, applied: Result<Applied, StoreError>) -> Outcome {
+/// or busy) is retried; one of the data is quarantined, and the queue deletes a quarantined
+/// message, so it does not hold up the project's FIFO group until the dead-letter queue. The
+/// verified event id is logged, to find the event in the bus archive.
+pub fn outcome(detail_type: &str, event_id: &str, applied: Result<Applied, StoreError>) -> Outcome {
     match applied {
         Ok(applied) => {
-            tracing::info!(detail_type, ?applied, "lifecycle rule applied");
+            tracing::info!(detail_type, event_id, ?applied, "lifecycle rule applied");
             Outcome::Done
         }
         Err(e) if e.is_permanent() => {
-            tracing::error!(detail_type, error = %e, "lifecycle rule cannot apply; quarantined");
+            tracing::error!(detail_type, event_id, error = %e, "lifecycle rule cannot apply; quarantined");
             Outcome::Quarantine
         }
         Err(e) => {
-            tracing::warn!(detail_type, error = %e, "lifecycle rule failed; will retry");
+            tracing::warn!(detail_type, event_id, error = %e, "lifecycle rule failed; will retry");
             Outcome::Retry
         }
     }
@@ -187,15 +189,15 @@ mod tests {
     #[test]
     fn only_a_failure_that_may_pass_is_retried() {
         let t = "fde.access-request.status-changed.v1";
-        assert_eq!(outcome(t, Ok(Applied::Nothing)), Outcome::Done);
+        assert_eq!(outcome(t, "evt_1", Ok(Applied::Nothing)), Outcome::Done);
         for permanent in [
             StoreError::Rejected("value"),
             StoreError::Corrupt("task id"),
             StoreError::Conflict,
         ] {
-            assert_eq!(outcome(t, Err(permanent)), Outcome::Quarantine);
+            assert_eq!(outcome(t, "evt_1", Err(permanent)), Outcome::Quarantine);
         }
-        assert_eq!(outcome(t, Err(StoreError::Db(sqlx_io()))), Outcome::Retry);
+        assert_eq!(outcome(t, "evt_1", Err(StoreError::Db(sqlx_io()))), Outcome::Retry);
     }
 
     fn sqlx_io() -> sqlx::Error {

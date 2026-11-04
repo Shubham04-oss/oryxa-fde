@@ -45,8 +45,9 @@ pub enum Outcome {
     Done,
     /// A dependency failed; leave it to be redelivered after the visibility timeout.
     Retry,
-    /// It cannot be trusted or read (bad signature, wrong payload): never act on it. It stays in
-    /// the queue until the redrive policy moves it to the dead-letter queue.
+    /// It cannot be trusted, read or applied (bad signature, wrong payload, data a rule refuses):
+    /// never act on it. It is logged with its ids and deleted, so it does not hold its FIFO group
+    /// back; the bus archive keeps the event.
     Quarantine,
 }
 
@@ -54,8 +55,8 @@ pub enum Outcome {
 pub mod sqs {
     //! Reads one SQS FIFO queue (fed by an EventBridge FIFO subscriber) and hands each message
     //! to a handler. Within a message group SQS releases the next message only once the current
-    //! one is deleted, so a message that is retried or quarantined holds its group back: events
-    //! of one project are handled in order.
+    //! one is deleted, so a message that is retried holds its group back: events of one project
+    //! are handled in order. A quarantined one is deleted, as a handled one is.
 
     use std::future::Future;
     use std::time::Duration;
@@ -103,8 +104,10 @@ pub mod sqs {
             };
             for m in messages {
                 let Some(receipt) = m.receipt_handle else { continue };
+                let parsed = m.body.as_deref().and_then(Message::parse);
+                let detail_type = parsed.as_ref().map(|p| p.detail_type.clone());
                 let work = async {
-                    match m.body.as_deref().and_then(Message::parse) {
+                    match parsed {
                         Some(msg) => handle(msg).await,
                         None => Outcome::Quarantine,
                     }
@@ -116,25 +119,38 @@ pub mod sqs {
                         tracing::error!(message_id = ?m.message_id, "handler gave up after the ceiling");
                         Outcome::Retry
                     });
-                match outcome {
-                    Outcome::Done => {
-                        if let Err(e) = client
-                            .delete_message()
-                            .queue_url(&queue_url)
-                            .receipt_handle(receipt)
-                            .send()
-                            .await
-                        {
-                            // Redelivered later; handlers are idempotent.
-                            tracing::warn!(error = %e, "sqs delete failed");
-                        }
-                    }
-                    Outcome::Retry => tracing::warn!(message_id = ?m.message_id, "event left for redelivery"),
-                    Outcome::Quarantine => {
-                        tracing::error!(message_id = ?m.message_id, "event quarantined")
-                    }
-                }
+                let ids = (m.message_id.as_deref(), detail_type.as_deref());
+                finish(&client, &queue_url, &receipt, ids, outcome).await;
             }
+        }
+    }
+
+    /// Settles a handled message: deleted when done or quarantined, left for redelivery when
+    /// retried. A failed delete is only logged: the message comes back and is handled, or
+    /// quarantined, again, which handlers allow.
+    pub(crate) async fn finish(
+        client: &Client,
+        queue_url: &str,
+        receipt: &str,
+        (message_id, detail_type): (Option<&str>, Option<&str>),
+        outcome: Outcome,
+    ) {
+        match outcome {
+            Outcome::Retry => {
+                tracing::warn!(message_id, detail_type, "event left for redelivery");
+                return;
+            }
+            Outcome::Quarantine => tracing::error!(message_id, detail_type, "event quarantined and deleted"),
+            Outcome::Done => {}
+        }
+        if let Err(e) = client
+            .delete_message()
+            .queue_url(queue_url)
+            .receipt_handle(receipt)
+            .send()
+            .await
+        {
+            tracing::warn!(message_id, error = %e, "sqs delete failed");
         }
     }
 
@@ -184,6 +200,39 @@ pub mod sqs {
         use std::cell::Cell;
 
         use super::*;
+
+        fn capturing() -> (Client, aws_smithy_http_client::test_util::CaptureRequestReceiver) {
+            use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region};
+            let (http, requests) = aws_smithy_http_client::test_util::capture_request(None);
+            let conf = aws_sdk_sqs::Config::builder()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("eu-west-2"))
+                .credentials_provider(Credentials::new("AKIDTEST", "secret", None, None, "test"))
+                .http_client(http)
+                .build();
+            (Client::from_conf(conf), requests)
+        }
+
+        #[tokio::test]
+        async fn a_quarantined_message_is_deleted_and_a_retried_one_is_not() {
+            let queue = "https://sqs.eu-west-2.amazonaws.com/123456789012/lifecycle.fifo";
+            for outcome in [Outcome::Quarantine, Outcome::Done] {
+                let (client, requests) = capturing();
+                finish(&client, queue, "receipt-1", (Some("m-1"), Some("fde.x.v1")), outcome).await;
+                let sent = requests.expect_request();
+                let action = sent.headers().get("x-amz-target").unwrap_or_default().to_owned();
+                let body = std::str::from_utf8(sent.body().bytes().unwrap_or_default())
+                    .unwrap_or_default()
+                    .to_owned();
+                assert!(
+                    action.ends_with("DeleteMessage") && body.contains("receipt-1"),
+                    "{outcome:?}: {action} {body}"
+                );
+            }
+            let (client, requests) = capturing();
+            finish(&client, queue, "receipt-1", (Some("m-1"), None), Outcome::Retry).await;
+            requests.expect_no_request();
+        }
 
         #[tokio::test(start_paused = true)]
         async fn a_message_is_kept_hidden_from_the_start_until_its_handler_ends() {

@@ -3244,6 +3244,7 @@ name = "oryxa-fde-events"
 version = "0.1.0"
 dependencies = [
  "aws-sdk-sqs",
+ "aws-smithy-http-client",
  "ed25519-dalek",
  "oryxa-core",
  "oryxa-events",
