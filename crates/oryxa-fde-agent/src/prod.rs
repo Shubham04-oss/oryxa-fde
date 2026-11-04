@@ -113,8 +113,8 @@ fn default_approvals() -> Vec<ApprovalRule> {
     ]
 }
 
-/// The agent run and eval routers, or an empty one when `SANDBOX_GATEWAY_URL` is unset. Secrets come from the task's environment
-/// (Secrets Manager through ECS); none is logged.
+/// The agent run and eval routers, or an empty one when `SANDBOX_GATEWAY_URL` is unset. Secrets come from the task's
+/// environment (Secrets Manager through ECS); none is logged.
 pub fn router_from_env<K: KeySource + 'static>(
     store: Store,
     authz: SpiceDb,

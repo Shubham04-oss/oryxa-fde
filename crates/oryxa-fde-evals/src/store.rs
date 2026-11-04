@@ -68,14 +68,15 @@ pub trait EvalStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<EvalRun>, EvalStoreError>> + Send;
     /// The project's runs, newest first.
     fn runs(&self, scope: &ProjectScope) -> impl Future<Output = Result<Vec<EvalRun>, EvalStoreError>> + Send;
-    /// Gives the company's sandbox to the unfinished run for `lease` if no live lease is someone else's. `NotFound`
-    /// once the run has finished.
+    /// Gives the company's sandbox to the unfinished run for `lease` if no live lease is someone else's, with the
+    /// lease's generation: the run's token at the gateway, higher than the last holder's. `NotFound` once the run
+    /// has finished.
     fn take_sandbox(
         &self,
         scope: &ProjectScope,
         run: &EvalRunId,
         lease: Duration,
-    ) -> impl Future<Output = Result<bool, EvalStoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<u64>, EvalStoreError>> + Send;
     /// Extends the run's lease; `false` if it no longer holds the sandbox.
     fn renew_sandbox(
         &self,
@@ -102,7 +103,8 @@ pub fn finished_event(run: &EvalRun, report: &Report) -> EvalRunFinished {
 struct Inner {
     suites: HashMap<(ProjectScope, SuiteId), (u64, Suite)>,
     runs: HashMap<(ProjectScope, EvalRunId), (u64, EvalRun)>,
-    leases: HashMap<CompanyScope, (EvalRunId, Instant)>,
+    /// Each company's lease: its holder, until when, and its generation.
+    leases: HashMap<CompanyScope, (EvalRunId, Instant, u64)>,
     outbox: Vec<EvalRunFinished>,
     next: u64,
 }
@@ -224,12 +226,11 @@ impl EvalStore for InMemoryEvals {
         }
         stored.ended_at = Some(OffsetDateTime::now_utc());
         stored.report = Some(report.clone());
-        if inner
-            .leases
-            .get(&run.scope.company)
-            .is_some_and(|(holder, _)| holder == &run.id)
+        // Let go, keeping the generation: the next holder's is higher.
+        if let Some((holder, until, _)) = inner.leases.get_mut(&run.scope.company)
+            && holder == &run.id
         {
-            inner.leases.remove(&run.scope.company);
+            *until = Instant::now();
         }
         inner.outbox.push(finished_event(run, report));
         Ok(())
@@ -240,22 +241,23 @@ impl EvalStore for InMemoryEvals {
         scope: &ProjectScope,
         run: &EvalRunId,
         lease: Duration,
-    ) -> Result<bool, EvalStoreError> {
+    ) -> Result<Option<u64>, EvalStoreError> {
         let mut inner = self.lock();
         match inner.runs.get(&(scope.clone(), run.clone())) {
             Some((_, r)) if r.report.is_none() => {}
             _ => return Err(EvalStoreError::NotFound),
         }
         let now = Instant::now();
-        if inner
+        let generation = match inner.leases.get(&scope.company) {
+            Some((holder, _, generation)) if holder == run => *generation,
+            Some((_, until, _)) if *until > now => return Ok(None),
+            Some((_, _, generation)) => generation + 1,
+            None => 1,
+        };
+        inner
             .leases
-            .get(&scope.company)
-            .is_some_and(|(holder, until)| holder != run && *until > now)
-        {
-            return Ok(false);
-        }
-        inner.leases.insert(scope.company.clone(), (run.clone(), now + lease));
-        Ok(true)
+            .insert(scope.company.clone(), (run.clone(), now + lease, generation));
+        Ok(Some(generation))
     }
 
     async fn renew_sandbox(
@@ -266,7 +268,7 @@ impl EvalStore for InMemoryEvals {
     ) -> Result<bool, EvalStoreError> {
         let mut inner = self.lock();
         match inner.leases.get_mut(&scope.company) {
-            Some((holder, until)) if holder == run => {
+            Some((holder, until, _)) if holder == run => {
                 *until = Instant::now() + lease;
                 Ok(true)
             }

@@ -283,7 +283,7 @@ impl EvalStore for Store {
         scope: &ProjectScope,
         run: &EvalRunId,
         lease: Duration,
-    ) -> Result<bool, EvalStoreError> {
+    ) -> Result<Option<u64>, EvalStoreError> {
         on(self, scope, async |tx| {
             tx.take_eval_sandbox(run, lease).await.map_err(failed)
         })

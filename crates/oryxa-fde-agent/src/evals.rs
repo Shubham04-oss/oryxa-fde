@@ -26,14 +26,15 @@ use oryxa_fde_evals::{
 use oryxa_fde_store::new_id;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::access::{Access, Caller, Permission};
 use crate::api::{Bearer, ErrorBody, RunsError};
 use crate::context::ContextSource;
-use crate::gateway::{Exec, Sandbox};
+use crate::gateway::{Exec, LeaseToken, Sandbox};
 use crate::service::{Deps, Runs};
 
 const BASE: &str = "/v1/companies/{company}/projects/{project}";
@@ -124,9 +125,24 @@ fn ts(t: OffsetDateTime) -> String {
 }
 
 /// The company's sandbox for one eval run: commands run as `agent` through the gateway.
+/// An eval run's hold on the company's sandbox, as its heartbeat keeps it: until when, with which token at the
+/// gateway. `None` before it is given and once it is lost.
+type Hold = watch::Receiver<Option<(Instant, LeaseToken)>>;
+
 struct CompanySandbox<'a, D: Deps> {
     runs: &'a Runs<D>,
     company: CompanyScope,
+    hold: Hold,
+}
+
+impl<D: Deps> CompanySandbox<'_, D> {
+    /// The run's token while it still holds the sandbox. No call that changes the sandbox is made without it.
+    fn lease(&self) -> Result<LeaseToken, SandboxFailed> {
+        match *self.hold.borrow() {
+            Some((until, token)) if Instant::now() < until => Ok(token),
+            _ => Err(SandboxFailed),
+        }
+    }
 }
 
 impl<D: Deps> EvalSandbox for CompanySandbox<'_, D> {
@@ -137,7 +153,11 @@ impl<D: Deps> EvalSandbox for CompanySandbox<'_, D> {
             Ok(false) => {}
             Ok(true) | Err(_) => return Err(SandboxFailed),
         }
-        self.runs.sandbox.start(&self.company).await.map_err(|_| SandboxFailed)
+        self.runs
+            .sandbox
+            .start(&self.company, self.lease()?)
+            .await
+            .map_err(|_| SandboxFailed)
     }
 
     async fn run(
@@ -154,7 +174,7 @@ impl<D: Deps> EvalSandbox for CompanySandbox<'_, D> {
         let out = self
             .runs
             .sandbox
-            .exec(&self.company, exec)
+            .exec(&self.company, exec, self.lease()?)
             .await
             .map_err(|_| SandboxFailed)?;
         Ok(CommandOutput {
@@ -494,17 +514,18 @@ async fn launch<D: EvalDeps>(
 async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source, run: EvalRun) {
     let report = if runner::uses_sandbox(&suite, &source) {
         match take_turn(&evals, &run).await {
-            Some(until) => {
-                let heartbeat = hold_sandbox(evals.clone(), run.clone(), until);
-                let report = run_suite(&evals, &suite, &source).await;
+            Some((until, token)) => {
+                let (tx, hold) = watch::channel(Some((until, token)));
+                let heartbeat = hold_sandbox(evals.clone(), run.clone(), until, token, tx);
+                let report = run_suite(&evals, &suite, &source, hold).await;
                 // The end lets the sandbox go, so the heartbeat stops before it is recorded.
-                heartbeat.abort();
+                drop(heartbeat);
                 report
             }
             None => unavailable(&suite),
         }
     } else {
-        run_suite(&evals, &suite, &source).await
+        run_suite(&evals, &suite, &source, watch::channel(None).1).await
     };
     if let Err(e) = evals.store.finish(&run, &report).await {
         tracing::error!(error = %e, eval_run = %run.id, "could not record the eval run's end");
@@ -513,10 +534,11 @@ async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source
     evals.runs.changed();
 }
 
-async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source) -> Report {
+async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source, hold: Hold) -> Report {
     let sandbox = CompanySandbox {
         runs: &evals.runs,
         company: suite.scope.company.clone(),
+        hold,
     };
     let judge = SandboxJudge {
         sandbox: &sandbox,
@@ -525,15 +547,16 @@ async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source
     runner::run(suite, source, &sandbox, &judge).await
 }
 
-/// Waits for the company's sandbox; when it is given, until when it is held. `None` if the store cannot give it.
-async fn take_turn<D: EvalDeps>(evals: &Evals<D>, run: &EvalRun) -> Option<Instant> {
+/// Waits for the company's sandbox; when it is given, until when it is held and the run's token at the gateway.
+/// `None` if the store cannot give it.
+async fn take_turn<D: EvalDeps>(evals: &Evals<D>, run: &EvalRun) -> Option<(Instant, LeaseToken)> {
     let mut changes = evals.runs.watch();
     let config = &evals.runs.config;
     loop {
         let asked = Instant::now();
         match evals.store.take_sandbox(&run.scope, &run.id, config.lease).await {
-            Ok(true) => return Some(asked + config.lease),
-            Ok(false) => {}
+            Ok(Some(generation)) => return Some((asked + config.lease, LeaseToken(generation))),
+            Ok(None) => {}
             Err(e) => {
                 tracing::error!(error = %e, eval_run = %run.id, "could not take the company's sandbox");
                 return None;
@@ -546,30 +569,64 @@ async fn take_turn<D: EvalDeps>(evals: &Evals<D>, run: &EvalRun) -> Option<Insta
     }
 }
 
-/// Keeps the run's hold on the company's sandbox. If the store refuses a renewal, or cannot be reached until the
-/// hold is about to lapse, another run may be given the sandbox: it is destroyed, and the cases left error.
-fn hold_sandbox<D: EvalDeps>(evals: Arc<Evals<D>>, run: EvalRun, mut until: Instant) -> JoinHandle<()> {
-    tokio::spawn(async move {
+/// The heartbeat's task, stopped when the run lets it go or is itself dropped, so a lease never outlives its run.
+struct Heartbeat(JoinHandle<()>);
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Keeps the run's hold on the company's sandbox, as an agent run's heartbeat does: a renewal never outlasts the
+/// hold. If the store cannot renew it while it is still held, the sandbox is destroyed within the time left;
+/// otherwise, or once it has lapsed or is someone else's, it is left alone. Either way the hold ends, and the cases
+/// left error.
+fn hold_sandbox<D: EvalDeps>(
+    evals: Arc<Evals<D>>,
+    run: EvalRun,
+    mut until: Instant,
+    token: LeaseToken,
+    hold: watch::Sender<Option<(Instant, LeaseToken)>>,
+) -> Heartbeat {
+    Heartbeat(tokio::spawn(async move {
         let lease = evals.runs.config.lease;
         loop {
             sleep(lease / 4).await;
             let asked = Instant::now();
-            match evals.store.renew_sandbox(&run.scope, &run.id, lease).await {
-                Ok(true) => {
+            let left = until.saturating_duration_since(asked);
+            let renewed = if left.is_zero() {
+                None
+            } else {
+                timeout(left, evals.store.renew_sandbox(&run.scope, &run.id, lease))
+                    .await
+                    .ok()
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            match renewed {
+                Some(Ok(true)) => {
                     until = asked + lease;
+                    let _ = hold.send(Some((until, token)));
                     continue;
                 }
-                Ok(false) => {}
-                Err(_) if until.saturating_duration_since(Instant::now()) > lease / 4 => continue,
-                Err(_) => {}
+                Some(Err(_)) if left > lease / 4 => continue,
+                Some(Err(_)) | None if !left.is_zero() => {
+                    tracing::error!(eval_run = %run.id, "could not renew the company's sandbox; destroying it");
+                    let _ = hold.send(None);
+                    match timeout(left, evals.runs.sandbox.stop(&run.scope.company, token)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::error!(error = %e, eval_run = %run.id, "could not stop the sandbox"),
+                        Err(_) => tracing::error!(eval_run = %run.id, "stopping the sandbox outlasted the hold"),
+                    }
+                    return;
+                }
+                _ => {}
             }
-            tracing::error!(eval_run = %run.id, "lost the company's sandbox; destroying it");
-            if let Err(e) = evals.runs.sandbox.stop(&run.scope.company).await {
-                tracing::error!(error = %e, eval_run = %run.id, "could not stop the sandbox");
-            }
+            tracing::error!(eval_run = %run.id, "lost the company's sandbox; leaving it alone");
+            let _ = hold.send(None);
             return;
         }
-    })
+    }))
 }
 
 /// The report of a run that never got the sandbox: every case errored, so no criterion passes.

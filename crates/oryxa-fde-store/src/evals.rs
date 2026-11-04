@@ -392,7 +392,7 @@ impl ProjectTx {
 
     /// Takes the company's sandbox for an unfinished eval run for `ttl`, if no live lease is someone else's.
     /// `Missing` once the run has finished or if there is no such run.
-    pub async fn take_eval_sandbox(&mut self, run: &EvalRunId, ttl: Duration) -> Result<bool, StoreError> {
+    pub async fn take_eval_sandbox(&mut self, run: &EvalRunId, ttl: Duration) -> Result<Option<u64>, StoreError> {
         if !self.eval_run_open(run).await? {
             return Err(StoreError::Missing("eval run"));
         }
@@ -731,8 +731,8 @@ mod tests {
         let lease = Duration::from_secs(60);
         let mut tx = store.project(&scope).await.unwrap();
         tx.create_agent_run(&agent, &actor()).await.unwrap();
-        assert!(tx.take_eval_sandbox(&r.id, lease).await.unwrap());
-        assert!(!tx.take_agent_sandbox(&agent.id, lease).await.unwrap());
+        let held = tx.take_eval_sandbox(&r.id, lease).await.unwrap().unwrap();
+        assert_eq!(tx.take_agent_sandbox(&agent.id, lease).await.unwrap(), None);
         assert!(tx.renew_eval_sandbox(&r.id, lease).await.unwrap());
         tx.commit().await.unwrap();
 
@@ -744,11 +744,12 @@ mod tests {
             tx.take_eval_sandbox(&r.id, lease).await,
             Err(StoreError::Missing(_))
         ));
-        assert!(tx.take_agent_sandbox(&agent.id, lease).await.unwrap());
+        // The agent run that takes it next gets a higher generation, so the eval run's late calls are refused.
+        assert_eq!(tx.take_agent_sandbox(&agent.id, lease).await.unwrap(), Some(held + 1));
         tx.commit().await.unwrap();
         let (_, other) = with_suite_and_run(&store, &scope).await;
         let mut tx = store.project(&scope).await.unwrap();
-        assert!(!tx.take_eval_sandbox(&other.id, lease).await.unwrap());
+        assert_eq!(tx.take_eval_sandbox(&other.id, lease).await.unwrap(), None);
     }
 
     /// `eval-run.finished` rows of one tenant, as (group, detail), read as the relay.

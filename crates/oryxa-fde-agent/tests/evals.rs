@@ -13,7 +13,7 @@ use http_body_util::BodyExt;
 use oryxa_core::{TenantId, UserId};
 use oryxa_fde_agent::access::{Access, AccessError, Caller, Permission};
 use oryxa_fde_agent::evals::{self, EvalDeps, Evals, JudgeConfig};
-use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, Sandbox, SandboxError};
+use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, LeaseToken, Sandbox, SandboxError};
 use oryxa_fde_agent::live::Offline;
 use oryxa_fde_agent::service::{Deps, Pricing, Runs, RunsConfig};
 use oryxa_fde_agent::store::{Budget, InMemoryRuns};
@@ -64,6 +64,8 @@ struct FakeSandbox {
     commands: Mutex<Vec<Exec>>,
     /// A harness an earlier agent run left may still run in the container.
     harness: std::sync::atomic::AtomicBool,
+    /// The lease generation each call that changes the sandbox carried.
+    leases: Mutex<Vec<u64>>,
 }
 
 fn out(code: i32, stdout: &str) -> ExecOutput {
@@ -107,21 +109,30 @@ fn answer(exec: &Exec) -> ExecOutput {
 }
 
 impl Sandbox for FakeSandbox {
-    async fn start(&self, _: &CompanyScope) -> Result<(), SandboxError> {
+    async fn start(&self, _: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        self.leases.lock().unwrap().push(lease.0);
         Ok(())
     }
-    async fn stop(&self, _: &CompanyScope) -> Result<(), SandboxError> {
+    async fn stop(&self, _: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        self.leases.lock().unwrap().push(lease.0);
         Ok(())
     }
     async fn harness_may_run(&self, _: &CompanyScope) -> Result<bool, SandboxError> {
         Ok(self.harness.load(std::sync::atomic::Ordering::SeqCst))
     }
-    async fn exec(&self, _: &CompanyScope, exec: Exec) -> Result<ExecOutput, SandboxError> {
+    async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
+        self.leases.lock().unwrap().push(lease.0);
         let output = answer(&exec);
         self.commands.lock().unwrap().push(exec);
         Ok(output)
     }
-    async fn write_pack(&self, _: &CompanyScope, _: &AgentRunId, _: Vec<u8>) -> Result<String, SandboxError> {
+    async fn write_pack(
+        &self,
+        _: &CompanyScope,
+        _: &AgentRunId,
+        _: Vec<u8>,
+        _: LeaseToken,
+    ) -> Result<String, SandboxError> {
         unreachable!("evals write no pack")
     }
     async fn start_harness(
@@ -130,10 +141,11 @@ impl Sandbox for FakeSandbox {
         _: &AgentRunId,
         _: &str,
         _: Duration,
+        _: LeaseToken,
     ) -> Result<HarnessProcess, SandboxError> {
         unreachable!("evals start no harness")
     }
-    async fn write_stdin(&self, _: &CompanyScope, _: &str, _: String) -> Result<(), SandboxError> {
+    async fn write_stdin(&self, _: &CompanyScope, _: &str, _: String, _: LeaseToken) -> Result<(), SandboxError> {
         unreachable!("evals write no stdin")
     }
     async fn held_actions(&self, _: &CompanyScope) -> Result<BTreeSet<String>, SandboxError> {
@@ -146,6 +158,7 @@ impl Sandbox for FakeSandbox {
         _: &ApprovalId,
         _: &AgentRunId,
         _: Duration,
+        _: LeaseToken,
     ) -> Result<(), SandboxError> {
         unreachable!("evals open no grant")
     }
@@ -256,6 +269,7 @@ fn world() -> (Arc<Evals<Test>>, Router) {
     let sandbox = FakeSandbox {
         commands: Mutex::new(vec![]),
         harness: std::sync::atomic::AtomicBool::new(false),
+        leases: Mutex::default(),
     };
     let runs = Runs::<Test>::new(InMemoryRuns::default(), sandbox, Offline, context, access, config);
     let judge = JudgeConfig {
@@ -551,6 +565,7 @@ async fn an_eval_run_waits_its_turn_on_the_company_sandbox() {
             .take_sandbox(&scope, &holder.id, Duration::from_secs(60))
             .await
             .unwrap()
+            .is_some()
     );
     let (_, run) = call(&app, "POST", &format!("{P1}/eval-suites/{suite}/runs"), "lead", None).await;
     let run = run["id"].as_str().unwrap().to_owned();
@@ -569,6 +584,19 @@ async fn an_eval_run_waits_its_turn_on_the_company_sandbox() {
     evals.store.finish(&holder, &report).await.unwrap();
     finished(&app, &run).await;
     assert!(!evals.runs.sandbox.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_eval_runs_sandbox_calls_carry_its_lease_generation() {
+    let (evals, app) = world();
+    let suite = create_suite(&app, answer_suite()).await;
+    let (_, run) = call(&app, "POST", &format!("{P1}/eval-suites/{suite}/runs"), "lead", None).await;
+    finished(&app, run["id"].as_str().unwrap()).await;
+    // The start, the target for each case and the judge each carried the generation the store gave the run, so the
+    // gateway refuses them once the sandbox has passed to a later run.
+    let leases = evals.runs.sandbox.leases.lock().unwrap().clone();
+    assert!(leases.len() > 2, "{leases:?}");
+    assert!(leases.iter().all(|l| *l == 1), "{leases:?}");
 }
 
 #[tokio::test]
@@ -621,6 +649,7 @@ async fn imported_outputs_graded_without_the_sandbox_do_not_wait_for_it() {
             .take_sandbox(&scope, &holder.id, Duration::from_secs(60))
             .await
             .unwrap()
+            .is_some()
     );
     let (status, run) = call(
         &app,
