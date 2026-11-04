@@ -89,8 +89,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   starts from, prefilled from the latest run. The form checks the repository with the API's own
   rules before it sends.
 - **Agent run review.** The task and its state, then **Waiting for approval** while a request is
-  open: its title, action and tool, and the full input exactly as it would run. **Approve** acts at
-  once; **Reject** asks first, since it stops the run; on a phone both are full width. Then the
+  open: its title, action and tool, and the full input exactly as it would run. **Approve** and
+  **Reject** both ask first: approving runs the action, and rejecting stops the run. On a phone the
+  buttons are full width. Then the
   latest plan, the files changed, **Tests and commands** in order with how each ended, and what the
   agent said, ending with its result. A finished run links its pull request (only a github.com pull
   request page); a failed one says why. While a run may change, the screen follows its live output

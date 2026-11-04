@@ -28,7 +28,7 @@ function renderRun(scope: typeof dispatch, run: string) {
 const runState = () => within(screen.getByRole("region", { name: "Task" })).getAllByText(/./)
 
 describe("RunPage", () => {
-  it("shows a run waiting for approval with exactly what would run, and approves it", async () => {
+  it("shows a run waiting for approval with exactly what would run, and approves it once confirmed", async () => {
     renderRun(dispatch, "run_k2")
 
     const waiting = await screen.findByRole("region", { name: "Waiting for approval" })
@@ -41,6 +41,16 @@ describe("RunPage", () => {
     ).toBeInTheDocument()
     expect(within(waiting).getByText("Waiting for you")).toBeInTheDocument()
 
+    // One tap only asks; backing out leaves the request waiting.
+    await userEvent.click(within(waiting).getByRole("button", { name: "Approve…" }))
+    expect(
+      within(waiting).getByText("Approve this action? It runs exactly as shown."),
+    ).toBeInTheDocument()
+    await userEvent.click(within(waiting).getByRole("button", { name: "Keep waiting" }))
+    expect(within(waiting).getByText("Waiting for you")).toBeInTheDocument()
+    expect(within(waiting).queryByRole("button", { name: "Approve" })).toBeNull()
+
+    await userEvent.click(within(waiting).getByRole("button", { name: "Approve…" }))
     await userEvent.click(within(waiting).getByRole("button", { name: "Approve" }))
 
     await waitFor(() =>
@@ -58,7 +68,7 @@ describe("RunPage", () => {
     await userEvent.click(within(waiting).getByRole("button", { name: "Reject…" }))
     expect(within(waiting).getByText("Reject this action? The run stops.")).toBeInTheDocument()
     await userEvent.click(within(waiting).getByRole("button", { name: "Keep waiting" }))
-    expect(within(waiting).getByRole("button", { name: "Approve" })).toBeInTheDocument()
+    expect(within(waiting).getByRole("button", { name: "Approve…" })).toBeInTheDocument()
 
     await userEvent.click(within(waiting).getByRole("button", { name: "Reject…" }))
     await userEvent.click(within(waiting).getByRole("button", { name: "Reject" }))

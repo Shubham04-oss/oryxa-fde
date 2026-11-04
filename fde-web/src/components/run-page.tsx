@@ -68,7 +68,8 @@ function Approval({
   deciding: boolean
   onDecide: (outcome: "approve" | "reject") => void
 }) {
-  const [confirmReject, setConfirmReject] = useState(false)
+  // Both decisions ask first: approving runs the action, and one stray tap on a phone must not.
+  const [confirming, setConfirming] = useState<"approve" | "reject" | null>(null)
   const decided = approval.decision
   return (
     <Row>
@@ -94,23 +95,27 @@ function Approval({
       </pre>
       {waiting && !decided && (
         <div className="mt-2.5 flex flex-wrap items-center justify-end gap-2 max-[560px]:grid max-[560px]:grid-cols-1">
-          {confirmReject ? (
+          {confirming ? (
             <>
-              <p className="mr-auto text-xs">Reject this action? The run stops.</p>
-              <Button variant="ghost" onClick={() => setConfirmReject(false)} disabled={deciding}>
+              <p className="mr-auto text-xs">
+                {confirming === "approve"
+                  ? "Approve this action? It runs exactly as shown."
+                  : "Reject this action? The run stops."}
+              </p>
+              <Button variant="ghost" onClick={() => setConfirming(null)} disabled={deciding}>
                 Keep waiting
               </Button>
-              <Button onClick={() => onDecide("reject")} disabled={deciding}>
-                Reject
+              <Button onClick={() => onDecide(confirming)} disabled={deciding}>
+                {deciding ? "Sending…" : confirming === "approve" ? "Approve" : "Reject"}
               </Button>
             </>
           ) : (
             <>
-              <Button variant="outline" onClick={() => setConfirmReject(true)} disabled={deciding}>
+              <Button variant="outline" onClick={() => setConfirming("reject")} disabled={deciding}>
                 Reject…
               </Button>
-              <Button onClick={() => onDecide("approve")} disabled={deciding}>
-                {deciding ? "Sending…" : "Approve"}
+              <Button onClick={() => setConfirming("approve")} disabled={deciding}>
+                Approve…
               </Button>
             </>
           )}
