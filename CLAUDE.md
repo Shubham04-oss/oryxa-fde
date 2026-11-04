@@ -9,9 +9,9 @@ user, so these rules are the contract. Read `docs/plan.md` and `docs/adr/` befor
 | Account | Owns | Label |
 | --- | --- | --- |
 | Lead | Design, ADRs, the hands-off paths below, reviews every PR | `lead`; only the lead adds `lead-approved` |
-| API | `schema/`, `crates/oryxa-fde-events`, `crates/oryxa-fde-store`, `crates/oryxa-fde-api`, later context, MCP, lifecycle and evals crates | `agent:api` |
-| Web | `fde-web/` | `agent:web` |
-| Agent | `sandbox/`, `crates/oryxa-fde-agent` | `agent:agent` |
+| API | `schema/`, `crates/oryxa-fde-events`, `crates/oryxa-fde-store`, `crates/oryxa-fde-api`, `crates/oryxa-fde-context`, `crates/oryxa-fde-mcp`, `crates/oryxa-fde-lifecycle`, `crates/oryxa-fde-integrations`, `crates/oryxa-fde-billing` | `agent:api` |
+| Web | `fde-web/`, `realtime/` (Durable Objects for presence, canvas and live agent output) | `agent:web` |
+| Agent | `sandbox/`, `crates/oryxa-fde-agent`, `crates/oryxa-fde-evals` | `agent:agent` |
 | Infra | `infra/`, and `.github/workflows/` with lead review | `agent:infra` |
 
 If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the issue instead of guessing.
