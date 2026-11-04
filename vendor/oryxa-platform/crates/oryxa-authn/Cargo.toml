@@ -11,7 +11,9 @@ jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rus
 oryxa-core = { version = "0.1.0", path = "../oryxa-core" }
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
-workos = "3.4"
+# Pinned: workos 3.5 turns on jsonwebtoken's aws_lc_rs backend beside rust_crypto, and with both on
+# jsonwebtoken cannot pick a crypto provider and panics on the first verify (#162). The token tests catch it.
+workos = "=3.4.1"
 
 [dev-dependencies]
 base64 = "0.23.1"
