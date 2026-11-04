@@ -212,6 +212,10 @@ impl Sandbox for FakeSandbox {
         Ok(())
     }
 
+    async fn harness_may_run(&self, _: &CompanyScope) -> Result<bool, SandboxError> {
+        Ok(self.harness_running.load(Ordering::SeqCst))
+    }
+
     async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
         self.fence(lease)?;
         let out = exec_output(&exec.argv);

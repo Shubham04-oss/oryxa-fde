@@ -91,7 +91,7 @@ describe("sandbox lifecycle", () => {
   it("starts the container with no internet and every HTTP(S) request routed to the outbound handler", async () => {
     const fake = await attachFake("org_a", "cmp_1");
     const response = await api("/v1/sandboxes/org_a/cmp_1/start", post());
-    expect(await response.json()).toEqual({ running: true });
+    expect(await response.json()).toEqual({ running: true, harness: false });
     expect(fake.started).toEqual([
       {
         image: "sandbox:test",
@@ -259,6 +259,7 @@ describe("runs", () => {
     await reader.cancel();
     expect((await harness()).status).toBe(409);
     expect(fake.execs).toHaveLength(1);
+    expect(await (await api("/v1/sandboxes/org_a/cmp_1")).json()).toEqual({ running: true, harness: true });
     // A stopped sandbox has no harness left: the next one may start.
     await api("/v1/sandboxes/org_a/cmp_1/stop", post());
     await api("/v1/sandboxes/org_a/cmp_1/start", post());

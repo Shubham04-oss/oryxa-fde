@@ -62,6 +62,8 @@ impl Access for FakeAccess {
 /// A sandbox whose commands are answered by `answer`; it records each one.
 struct FakeSandbox {
     commands: Mutex<Vec<Exec>>,
+    /// A harness an earlier agent run left may still run in the container.
+    harness: std::sync::atomic::AtomicBool,
 }
 
 fn out(code: i32, stdout: &str) -> ExecOutput {
@@ -110,6 +112,9 @@ impl Sandbox for FakeSandbox {
     }
     async fn stop(&self, _: &CompanyScope) -> Result<(), SandboxError> {
         Ok(())
+    }
+    async fn harness_may_run(&self, _: &CompanyScope) -> Result<bool, SandboxError> {
+        Ok(self.harness.load(std::sync::atomic::Ordering::SeqCst))
     }
     async fn exec(&self, _: &CompanyScope, exec: Exec) -> Result<ExecOutput, SandboxError> {
         let output = answer(&exec);
@@ -250,6 +255,7 @@ fn world() -> (Arc<Evals<Test>>, Router) {
     };
     let sandbox = FakeSandbox {
         commands: Mutex::new(vec![]),
+        harness: std::sync::atomic::AtomicBool::new(false),
     };
     let runs = Runs::<Test>::new(InMemoryRuns::default(), sandbox, Offline, context, access, config);
     let judge = JudgeConfig {
@@ -563,6 +569,23 @@ async fn an_eval_run_waits_its_turn_on_the_company_sandbox() {
     evals.store.finish(&holder, &report).await.unwrap();
     finished(&app, &run).await;
     assert!(!evals.runs.sandbox.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_eval_never_runs_beside_a_harness_that_may_still_run() {
+    let (evals, app) = world();
+    let suite = create_suite(&app, answer_suite()).await;
+    evals
+        .runs
+        .sandbox
+        .harness
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, run) = call(&app, "POST", &format!("{P1}/eval-suites/{suite}/runs"), "lead", None).await;
+    let done = finished(&app, run["id"].as_str().unwrap()).await;
+    // Every case errors, so no criterion passes, and nothing ran in that container.
+    assert_eq!(done["report"]["errored"], 2, "{done}");
+    assert_eq!(done["report"]["cases"][0]["error"], "the sandbox could not start");
+    assert!(evals.runs.sandbox.commands.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

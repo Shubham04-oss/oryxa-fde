@@ -9,7 +9,9 @@ pass rate the customer can see. The HTTP API is mounted with the agent run API (
 - **Criteria.** The project's success criteria it measures; each must exist on the project. A case can name a
   subset; otherwise it measures all of them.
 - **Target** (optional). A command run in the sandbox for each case, with `EVAL_CASE` and `EVAL_INPUT` in its
-  environment; its stdout is the output. Without a target, a run grades outputs imported as CSV.
+  environment; its stdout is the output. Without a target, a run grades outputs imported as CSV. A run grades the
+  checkout an agent run left in `/workspace`, so it does not start a fresh container; it refuses to start beside a
+  harness that may still run (one whose API task is gone), and every case errors.
 - **Graders**, applied to every case in order. A case passes only if every grader passes it.
 
 | Grader | Passes when |

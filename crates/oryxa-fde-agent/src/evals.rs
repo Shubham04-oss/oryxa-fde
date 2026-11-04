@@ -131,6 +131,12 @@ struct CompanySandbox<'a, D: Deps> {
 
 impl<D: Deps> EvalSandbox for CompanySandbox<'_, D> {
     async fn start(&self) -> Result<(), SandboxFailed> {
+        // An eval grades the checkout an agent run left, so it does not start fresh; but never beside a harness that
+        // may still run (one whose API task is gone), whose agent could change what is graded.
+        match self.runs.sandbox.harness_may_run(&self.company).await {
+            Ok(false) => {}
+            Ok(true) | Err(_) => return Err(SandboxFailed),
+        }
         self.runs.sandbox.start(&self.company).await.map_err(|_| SandboxFailed)
     }
 
