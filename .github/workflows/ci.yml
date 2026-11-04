@@ -97,6 +97,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD/schema:/schema" authzed/zed:v1.2.1 validate /schema/fde.validation.yaml
 
+  # Light: the web app (fde-web/, TanStack Start on Cloudflare Workers), always hosted (docs/ci.md). Never deploys.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fde-web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # setup-node's pnpm cache asks pnpm where its store is, so pnpm comes first, at the version package.json pins.
+      - run: npm install -g pnpm@12.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: fde-web/pnpm-lock.yaml
+      # Lockfile-exact install; only the build scripts pnpm-workspace.yaml allows run.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+
   deny:
     runs-on: ubuntu-latest
     steps:

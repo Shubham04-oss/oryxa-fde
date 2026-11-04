@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Local development only. Deployment and the route come with the infra stream: do not run
+  // `wrangler deploy`.
+  "name": "oryxa-fde-web",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Serves the app and sets the security headers on every answer.
+  "main": "src/server.ts",
+  "observability": { "enabled": true },
+}
