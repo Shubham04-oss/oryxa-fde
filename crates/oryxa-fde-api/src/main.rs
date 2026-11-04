@@ -46,6 +46,8 @@ async fn main() -> Result<(), Error> {
     let workos = workos::Client::builder()
         .api_key(env("WORKOS_API_KEY")?)
         .client_id(env("WORKOS_CLIENT_ID")?)
+        // A request waiting on a refresh answers 503 within this, not after the SDK's 30 s default.
+        .timeout(Duration::from_secs(10))
         .build();
     let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
     let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
