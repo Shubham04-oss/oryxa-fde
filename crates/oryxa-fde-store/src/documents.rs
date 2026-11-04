@@ -257,8 +257,13 @@ impl CompanyTx {
         .collect()
     }
 
-    /// Deletes the document's chunks under `model`: an interrupted set that cannot be resumed.
-    pub async fn drop_chunks(&mut self, id: &DocumentId, model: &str) -> Result<(), StoreError> {
+    /// Deletes the document's chunks under `model`, an interrupted set that cannot be resumed, with
+    /// the document locked. `false`, deleting nothing, if it no longer needs `model`'s chunks: a
+    /// complete set (another worker finished it) is never dropped.
+    pub async fn drop_chunks(&mut self, id: &DocumentId, model: &str, replaces: &[String]) -> Result<bool, StoreError> {
+        if !self.lock_needing(id, model, replaces).await? {
+            return Ok(false);
+        }
         let s = &self.scope;
         sqlx::query(
             "delete from document_chunks
@@ -270,7 +275,7 @@ impl CompanyTx {
         .bind(model)
         .execute(&mut *self.tx)
         .await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Stores chunks of a document that still needs `model`'s ([`Document::needs`]), with the
@@ -459,10 +464,11 @@ impl ProjectTx {
 
 const HIT_COLUMNS: &str = "c.document_id, d.name, c.chunk_index, c.content";
 /// A document's chunks that search reads: the complete set of the model it names, never one being
-/// written.
+/// written. A document an older worker ingested names no model and holds one set, which is read too,
+/// so a deploy of the API and the ingest worker in either order keeps it findable.
 const CHUNKS: &str = "document_chunks c join documents d
      on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id
-         and d.embedding_model = c.embedding_model";
+         and (d.embedding_model = c.embedding_model or (d.embedding_model is null and d.status = 'ingested'))";
 
 /// A company with at most this many chunks for a model is searched exactly, every chunk compared,
 /// so its recall never depends on how large the shared index has grown. A larger company is a

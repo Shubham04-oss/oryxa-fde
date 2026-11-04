@@ -2005,6 +2005,9 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
         (DocumentStatus::Ingested, 2, Some("m1"))
     );
     assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 2);
+    // A complete set is never dropped, whoever asks.
+    assert!(!tx.drop_chunks(&id, "m1", &[]).await.unwrap());
+    assert_eq!(tx.stored_chunks(&id, "m1").await.unwrap().len(), 2);
     tx.commit().await.unwrap();
 
     // Re-embedded under m2, which replaces m1: until its set is complete, search reads m1's, once.
@@ -2050,4 +2053,60 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     assert!(tx.stored_chunks(&failed, "m2").await.unwrap().is_empty());
     assert!(!tx.add_chunks(&failed, "m2", &[], &[chunk(0)]).await.unwrap());
     tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_document_an_older_worker_ingested_stays_findable() {
+    let store = store().await;
+    let admin = admin().await;
+    let by = actor("alice");
+    let s = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &s).await;
+    let id = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    let v = DocumentIn {
+        name: Name::new("runbook.md").unwrap(),
+        content_type: ContentType::Markdown,
+        size_bytes: 5,
+        sha256: "00".repeat(32),
+        blob_key: format!("{}/{}/documents/{id}", s.tenant, s.company),
+    };
+    let mut tx = store.company(&s).await.unwrap();
+    tx.add_document(&id, &v, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    // As an ingest worker from before re-embedding left it: ingested, one set, no model named.
+    sqlx::query(&format!(
+        "insert into document_chunks (tenant_id, company_id, document_id, chunk_index, content, embedding,
+             embedding_model)
+         values ($1, $2, $3, 0, 'Refunds over 500 need approval', '[1{}]'::vector, 'm1')",
+        ",0".repeat(1023)
+    ))
+    .bind(s.tenant.as_str())
+    .bind(s.company.as_str())
+    .bind(id.as_str())
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("update documents set status = 'ingested', chunks = 1 where tenant_id = $1 and document_id = $2")
+        .bind(s.tenant.as_str())
+        .bind(id.as_str())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut tx = store.company(&s).await.unwrap();
+    assert_eq!(tx.search_text("refunds", 10).await.unwrap().len(), 1);
+    assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 1);
+    // A pending document's partial set stays unsearched.
+    let pending = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    tx.add_document(&pending, &v, &by).await.unwrap().unwrap();
+    let chunk = ChunkIn {
+        index: 0,
+        content: Text::new("Refunds pending").unwrap(),
+        embedding: axis(0),
+    };
+    assert!(tx.add_chunks(&pending, "m1", &[], &[chunk]).await.unwrap());
+    assert_eq!(tx.search_text("refunds", 10).await.unwrap().len(), 1);
+    // And an interrupted set is dropped, under the document's lock.
+    assert!(tx.drop_chunks(&pending, "m1", &[]).await.unwrap());
+    assert!(tx.stored_chunks(&pending, "m1").await.unwrap().is_empty());
 }

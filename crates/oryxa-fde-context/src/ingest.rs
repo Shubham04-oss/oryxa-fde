@@ -22,6 +22,8 @@ use crate::{Context, ContextError};
 
 /// Chunks embedded and stored per transaction: what a redelivery need not embed again.
 pub const BATCH: usize = 32;
+/// The longest one document's text may take to extract; past it the document fails as `too_slow`.
+const MAX_EXTRACTION: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ingested {
@@ -62,7 +64,9 @@ pub async fn ingest(
         return fail(store, scope, id, (model, replaces), "checksum").await;
     }
     let content_type = doc.content_type;
-    let text = tokio::task::spawn_blocking(move || extract_guarded(content_type, &bytes))
+    // The handler may be dropped at the message's ceiling; the extraction stops on its own too.
+    let deadline = std::time::Instant::now() + MAX_EXTRACTION;
+    let text = tokio::task::spawn_blocking(move || extract_guarded(content_type, &bytes, deadline))
         .await
         .map_err(|e| ContextError::Blob(e.to_string()))?;
     let text = match text {
@@ -78,8 +82,9 @@ pub async fn ingest(
     let mut tx = store.company(scope).await?;
     let stored = tx.stored_chunks(id, model).await?;
     let same = stored.iter().all(|(i, c)| chunks.get(*i as usize) == Some(c));
-    if !same {
-        tx.drop_chunks(id, model).await?;
+    // Under the document's lock: a set another worker has just completed is not dropped.
+    if !same && !tx.drop_chunks(id, model, replaces).await? {
+        return Ok(Ingested::Settled);
     }
     tx.commit().await?;
     let done: HashSet<u32> = if same {

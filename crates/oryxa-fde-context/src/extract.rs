@@ -2,7 +2,9 @@
 //! from its `word/document.xml`. Everything here is untrusted input, so each reader is bounded
 //! and a reader that fails (or panics) makes the document unreadable, never the worker.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::time::Instant;
 
 use oryxa_fde_store::ContentType;
 use quick_xml::events::Event;
@@ -25,6 +27,8 @@ pub enum ExtractError {
     Empty,
     #[error("the file expands past the size limit")]
     TooLarge,
+    #[error("reading the file took longer than allowed")]
+    TooSlow,
 }
 
 impl ExtractError {
@@ -34,16 +38,18 @@ impl ExtractError {
             ExtractError::Unreadable => "unreadable",
             ExtractError::Empty => "empty",
             ExtractError::TooLarge => "too_large",
+            ExtractError::TooSlow => "too_slow",
         }
     }
 }
 
-/// The document's text, with control characters (other than newlines and tabs) removed.
-pub fn extract(content_type: ContentType, bytes: &[u8]) -> Result<String, ExtractError> {
+/// The document's text, with control characters (other than newlines and tabs) removed. Past
+/// `deadline` a PDF or DOCX stops between pages, fonts or parts as `TooSlow`.
+pub fn extract(content_type: ContentType, bytes: &[u8], deadline: Instant) -> Result<String, ExtractError> {
     let raw = match content_type {
         ContentType::Text | ContentType::Markdown => String::from_utf8_lossy(bytes).into_owned(),
-        ContentType::Pdf => pdf(bytes)?,
-        ContentType::Docx => docx(bytes)?,
+        ContentType::Pdf => pdf(bytes, deadline)?,
+        ContentType::Docx => docx(bytes, deadline)?,
     };
     let text: String = raw
         .chars()
@@ -59,20 +65,33 @@ pub fn extract(content_type: ContentType, bytes: &[u8]) -> Result<String, Extrac
 
 /// Like [`extract`], but a panic inside a reader (some PDF parsers panic on malformed input) is
 /// caught and reported as unreadable. CPU-bound: run it on a blocking thread.
-pub fn extract_guarded(content_type: ContentType, bytes: &[u8]) -> Result<String, ExtractError> {
-    std::panic::catch_unwind(|| extract(content_type, bytes)).unwrap_or(Err(ExtractError::Unreadable))
+pub fn extract_guarded(content_type: ContentType, bytes: &[u8], deadline: Instant) -> Result<String, ExtractError> {
+    std::panic::catch_unwind(|| extract(content_type, bytes, deadline)).unwrap_or(Err(ExtractError::Unreadable))
+}
+
+fn in_time(deadline: Instant) -> Result<(), ExtractError> {
+    if Instant::now() < deadline {
+        Ok(())
+    } else {
+        Err(ExtractError::TooSlow)
+    }
 }
 
 // ponytail: page content and the font maps decoded for it draw on one budget for the whole file,
 // but loading bounds each object stream (MAX_PDF_STREAM_BYTES), not their total, so a file of many
 // small bombs can still exhaust the ingest worker. It takes one message at a time, so that costs
 // only this document, whose event reaches the dead-letter queue after its redeliveries.
-fn pdf(bytes: &[u8]) -> Result<String, ExtractError> {
-    pdf_within(bytes, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES)
+fn pdf(bytes: &[u8], deadline: Instant) -> Result<String, ExtractError> {
+    pdf_within(bytes, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, deadline)
 }
 
 /// [`pdf`] with its limits as parameters, so tests reach them with small files.
-fn pdf_within(bytes: &[u8], stream_limit: usize, content_budget: usize) -> Result<String, ExtractError> {
+fn pdf_within(
+    bytes: &[u8],
+    stream_limit: usize,
+    content_budget: usize,
+    deadline: Instant,
+) -> Result<String, ExtractError> {
     let options = lopdf::LoadOptions {
         max_decompressed_size: Some(stream_limit),
         ..Default::default()
@@ -86,7 +105,11 @@ fn pdf_within(bytes: &[u8], stream_limit: usize, content_budget: usize) -> Resul
     })?;
     let mut left = content_budget;
     let mut out = String::new();
+    // Each font map is decoded once, by object id. Every font name that uses it is charged for
+    // it, because reading the text decodes it again for each name on each page.
+    let mut maps: HashMap<lopdf::ObjectId, usize> = HashMap::new();
     for (number, page) in doc.get_pages() {
+        in_time(deadline)?;
         // What reading the page's text decodes, measured within what is left before it is read:
         // its content and the ToUnicode map of each font it uses, all on one budget for the file.
         let mut size = match doc.get_page_content_with_limit(page, left) {
@@ -96,19 +119,38 @@ fn pdf_within(bytes: &[u8], stream_limit: usize, content_budget: usize) -> Resul
             Err(_) => continue,
         };
         for font in doc.get_page_fonts(page).unwrap_or_default().values() {
-            let Ok(map) = font.get_deref(b"ToUnicode", &doc).and_then(lopdf::Object::as_stream) else {
-                continue;
+            in_time(deadline)?;
+            let decoded = match font.get(b"ToUnicode") {
+                Ok(lopdf::Object::Reference(id)) => match maps.get(id) {
+                    Some(n) => *n,
+                    None => {
+                        let Ok(map) = doc.get_object(*id).and_then(lopdf::Object::as_stream) else {
+                            continue;
+                        };
+                        let Some(n) = decoded_len(map, left.saturating_sub(size))? else {
+                            continue;
+                        };
+                        maps.insert(*id, n);
+                        n
+                    }
+                },
+                Ok(lopdf::Object::Stream(map)) => match decoded_len(map, left.saturating_sub(size))? {
+                    Some(n) => n,
+                    None => continue,
+                },
+                _ => continue,
             };
-            match map.decompressed_content_with_limit(left) {
-                Ok(decoded) => size = size.saturating_add(decoded.len()),
-                Err(e) if over_limit(&e) => return Err(ExtractError::TooLarge),
-                Err(_) => {}
+            size = size.saturating_add(decoded);
+            // Over budget already: stop before decoding anything more.
+            if size > left {
+                return Err(ExtractError::TooLarge);
             }
         }
         // lopdf ends the content with a newline of its own, so the page can come to more than was
         // left by a byte: never let that wrap around.
         let before = left;
         left = before.checked_sub(size).ok_or(ExtractError::TooLarge)?;
+        in_time(deadline)?;
         if let Ok(t) = doc.extract_text_with_limit(&[number], before) {
             out.push_str(&t);
             out.push('\n');
@@ -120,6 +162,15 @@ fn pdf_within(bytes: &[u8], stream_limit: usize, content_budget: usize) -> Resul
     Ok(out)
 }
 
+/// How many bytes a stream decodes to within `limit`; `None` if it cannot be decoded at all.
+fn decoded_len(stream: &lopdf::Stream, limit: usize) -> Result<Option<usize>, ExtractError> {
+    match stream.decompressed_content_with_limit(limit) {
+        Ok(decoded) => Ok(Some(decoded.len())),
+        Err(e) if over_limit(&e) => Err(ExtractError::TooLarge),
+        Err(_) => Ok(None),
+    }
+}
+
 fn over_limit(e: &lopdf::Error) -> bool {
     matches!(
         e,
@@ -127,7 +178,7 @@ fn over_limit(e: &lopdf::Error) -> bool {
     )
 }
 
-fn docx(bytes: &[u8]) -> Result<String, ExtractError> {
+fn docx(bytes: &[u8], deadline: Instant) -> Result<String, ExtractError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| ExtractError::Unreadable)?;
     let file = zip.by_name("word/document.xml").map_err(|_| ExtractError::Unreadable)?;
     if file.size() > MAX_DOCX_XML_BYTES {
@@ -141,17 +192,20 @@ fn docx(bytes: &[u8]) -> Result<String, ExtractError> {
     if xml.len() as u64 > MAX_DOCX_XML_BYTES {
         return Err(ExtractError::TooLarge);
     }
-    docx_text(&xml)
+    docx_text(&xml, deadline)
 }
 
 /// The text of WordprocessingML: runs of `w:t`, a tab for `w:tab`, a line break for `w:br` and
 /// the end of each paragraph `w:p`.
-fn docx_text(xml: &[u8]) -> Result<String, ExtractError> {
+fn docx_text(xml: &[u8], deadline: Instant) -> Result<String, ExtractError> {
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut out = String::new();
     let mut in_text = false;
-    loop {
+    for event in 0u64.. {
+        if event % 4096 == 0 {
+            in_time(deadline)?;
+        }
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if e.name().as_ref() == "w:t" => in_text = true,
             Ok(Event::End(e)) => match e.name().as_ref() {
@@ -194,6 +248,11 @@ pub(crate) mod tests {
 
     use super::*;
 
+    /// A deadline no test reaches.
+    fn later() -> Instant {
+        Instant::now() + std::time::Duration::from_secs(60)
+    }
+
     /// A minimal DOCX holding `document_xml`.
     pub(crate) fn docx_file(document_xml: &str) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());
@@ -212,11 +271,17 @@ pub(crate) mod tests {
 
     /// A PDF with one page per text, saved with `options`; page content is compressed.
     fn pdf_pages(texts: &[&str], options: lopdf::SaveOptions) -> Vec<u8> {
-        pdf_with_font_map(texts, options, None)
+        pdf_with_font_map(texts, options, None, 1)
     }
 
-    /// [`pdf_pages`] whose font carries `to_unicode` (compressed) as its ToUnicode map.
-    fn pdf_with_font_map(texts: &[&str], options: lopdf::SaveOptions, to_unicode: Option<&[u8]>) -> Vec<u8> {
+    /// [`pdf_pages`] whose font carries `to_unicode` (compressed) as its ToUnicode map, under
+    /// `names` font names (F1, F2, ...) that all point to it.
+    fn pdf_with_font_map(
+        texts: &[&str],
+        options: lopdf::SaveOptions,
+        to_unicode: Option<&[u8]>,
+        names: usize,
+    ) -> Vec<u8> {
         use lopdf::content::{Content, Operation};
         use lopdf::{Document, Object, Stream, dictionary};
         let mut doc = Document::with_version("1.5");
@@ -230,7 +295,11 @@ pub(crate) mod tests {
             font.set("ToUnicode", doc.add_object(stream));
         }
         let font_id = doc.add_object(font);
-        let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font_id } });
+        let mut fonts = lopdf::Dictionary::new();
+        for n in 1..=names {
+            fonts.set(format!("F{n}"), font_id);
+        }
+        let resources_id = doc.add_object(dictionary! { "Font" => fonts });
         let mut kids: Vec<Object> = Vec::new();
         for text in texts {
             let content = Content {
@@ -266,10 +335,21 @@ pub(crate) mod tests {
 
     #[test]
     fn text_and_markdown_are_read_as_utf8_without_control_characters() {
-        let got = extract(ContentType::Markdown, b"# Runbook\n\tRestart \x07the \x00queue\r\n").unwrap();
+        let got = extract(
+            ContentType::Markdown,
+            b"# Runbook\n\tRestart \x07the \x00queue\r\n",
+            later(),
+        )
+        .unwrap();
         assert_eq!(got, "# Runbook\n\tRestart the queue\n");
-        assert_eq!(extract(ContentType::Text, "caf\u{e9}".as_bytes()).unwrap(), "caf\u{e9}");
-        assert_eq!(extract(ContentType::Text, b"  \n\t "), Err(ExtractError::Empty));
+        assert_eq!(
+            extract(ContentType::Text, "caf\u{e9}".as_bytes(), later()).unwrap(),
+            "caf\u{e9}"
+        );
+        assert_eq!(
+            extract(ContentType::Text, b"  \n\t ", later()),
+            Err(ExtractError::Empty)
+        );
     }
 
     #[test]
@@ -278,13 +358,18 @@ pub(crate) mod tests {
             <w:p><w:r><w:t>Refunds over</w:t></w:r><w:r><w:t xml:space="preserve"> &amp;pound;500</w:t></w:r></w:p>
             <w:p><w:r><w:t>Escalate</w:t><w:tab/><w:t>to &#x4C;2</w:t><w:br/><w:t>within 4h</w:t></w:r></w:p>
             <w:p/></w:body></w:document>"#;
-        let got = extract(ContentType::Docx, &docx_file(xml)).unwrap();
+        let got = extract(ContentType::Docx, &docx_file(xml), later()).unwrap();
         assert_eq!(got, "Refunds over &pound;500\nEscalate\tto L2\nwithin 4h\n\n");
     }
 
     #[test]
     fn pdf_text_is_extracted() {
-        let got = extract(ContentType::Pdf, &pdf_file("Tier-1 tickets are answered in 2 minutes")).unwrap();
+        let got = extract(
+            ContentType::Pdf,
+            &pdf_file("Tier-1 tickets are answered in 2 minutes"),
+            later(),
+        )
+        .unwrap();
         assert!(got.contains("Tier-1 tickets are answered in 2 minutes"), "{got:?}");
     }
 
@@ -298,14 +383,18 @@ pub(crate) mod tests {
                 docx_file("<w:document><w:p><w:t>mismatched</w:p></w:t>"),
             ),
         ] {
-            let got = extract_guarded(ct, &bytes);
+            let got = extract_guarded(ct, &bytes, later());
             assert!(
                 matches!(got, Err(ExtractError::Unreadable | ExtractError::Empty)),
                 "{ct:?}: {got:?}"
             );
         }
         // Cut short: what was read so far still counts.
-        let cut = extract(ContentType::Docx, &docx_file("<w:document><w:p><w:t>cut short"));
+        let cut = extract(
+            ContentType::Docx,
+            &docx_file("<w:document><w:p><w:t>cut short"),
+            later(),
+        );
         assert_eq!(cut.as_deref(), Ok("cut short"));
         // A DOCX without its main part.
         let mut out = Cursor::new(Vec::new());
@@ -314,7 +403,7 @@ pub(crate) mod tests {
             .unwrap();
         zip.finish().unwrap();
         assert_eq!(
-            extract(ContentType::Docx, &out.into_inner()),
+            extract(ContentType::Docx, &out.into_inner(), later()),
             Err(ExtractError::Unreadable)
         );
     }
@@ -325,11 +414,11 @@ pub(crate) mod tests {
         let (a, b) = ("a".repeat(1000), "b".repeat(1000));
         let file = pdf_pages(&[&a, &b], lopdf::SaveOptions::default());
         assert!(file.len() < 2000, "{} bytes", file.len());
-        let both = pdf_within(&file, 1 << 20, 4000).unwrap();
+        let both = pdf_within(&file, 1 << 20, 4000, later()).unwrap();
         assert!(both.contains(&a) && both.contains(&b));
         // Either page alone fits in 1,500 bytes, but not both: the budget is shared.
-        assert_eq!(pdf_within(&file, 1 << 20, 1500), Err(ExtractError::TooLarge));
-        assert_eq!(pdf_within(&file, 1 << 20, 500), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 1 << 20, 1500, later()), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 1 << 20, 500, later()), Err(ExtractError::TooLarge));
     }
 
     #[test]
@@ -348,7 +437,7 @@ pub(crate) mod tests {
             .decompressed_content()
             .unwrap()
             .len();
-        assert_eq!(pdf_within(&file, 1 << 20, exact), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 1 << 20, exact, later()), Err(ExtractError::TooLarge));
     }
 
     #[test]
@@ -356,13 +445,59 @@ pub(crate) mod tests {
         let text = "Refunds over 500 need approval";
         // A font map that inflates to 100 KB from a few hundred bytes in the file.
         let map = vec![b' '; 100_000];
-        let file = pdf_with_font_map(&[text], lopdf::SaveOptions::default(), Some(&map));
+        let file = pdf_with_font_map(&[text], lopdf::SaveOptions::default(), Some(&map), 1);
         assert!(file.len() < 5_000, "{} bytes", file.len());
-        assert!(pdf_within(&file, 1 << 20, 200_000).unwrap().contains(text));
+        assert!(pdf_within(&file, 1 << 20, 200_000, later()).unwrap().contains(text));
         // The content alone fits in 1 KB; with its font map, it does not.
-        assert_eq!(pdf_within(&file, 1 << 20, 50_000), Err(ExtractError::TooLarge));
-        assert_eq!(pdf_within(&file, 1 << 20, 1_000), Err(ExtractError::TooLarge));
-        assert!(pdf_within(&pdf_pages(&[text], lopdf::SaveOptions::default()), 1 << 20, 1_000).is_ok());
+        assert_eq!(pdf_within(&file, 1 << 20, 50_000, later()), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 1 << 20, 1_000, later()), Err(ExtractError::TooLarge));
+        assert!(
+            pdf_within(
+                &pdf_pages(&[text], lopdf::SaveOptions::default()),
+                1 << 20,
+                1_000,
+                later()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn one_font_map_under_many_names_is_decoded_once_and_charged_for_every_use() {
+        // The reviewer's shape: 1,000 names for one font whose map inflates to 4 MiB. Reading the
+        // text would decode it 1,000 times (4 GiB), so the 64 MiB budget refuses it, and at once.
+        let map = vec![b' '; 4 << 20];
+        let file = pdf_with_font_map(&["Hello"], lopdf::SaveOptions::default(), Some(&map), 1000);
+        assert!(file.len() < 64 << 10, "{} bytes", file.len());
+        let started = Instant::now();
+        assert_eq!(
+            pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()),
+            Err(ExtractError::TooLarge)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // Ten uses, 40 MiB, fit.
+        let file = pdf_with_font_map(&["Hello"], lopdf::SaveOptions::default(), Some(&map), 10);
+        assert!(pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()).is_ok());
+    }
+
+    #[test]
+    fn a_document_past_its_deadline_stops() {
+        let now = Instant::now();
+        assert_eq!(
+            extract(ContentType::Pdf, &pdf_file("Tier-1 tickets"), now),
+            Err(ExtractError::TooSlow)
+        );
+        let xml = "<w:document><w:p><w:t>late</w:t></w:p></w:document>";
+        assert_eq!(
+            extract(ContentType::Docx, &docx_file(xml), now),
+            Err(ExtractError::TooSlow)
+        );
+        // Plain text has no parts to stop between.
+        assert!(extract(ContentType::Text, b"quick", now).is_ok());
     }
 
     #[test]
@@ -374,11 +509,11 @@ pub(crate) mod tests {
             .build();
         let file = pdf_pages(&["Packed in an object stream"], modern);
         assert!(
-            pdf_within(&file, 1 << 20, 1 << 20)
+            pdf_within(&file, 1 << 20, 1 << 20, later())
                 .unwrap()
                 .contains("Packed in an object stream")
         );
-        assert_eq!(pdf_within(&file, 64, 1 << 20), Err(ExtractError::TooLarge));
+        assert_eq!(pdf_within(&file, 64, 1 << 20, later()), Err(ExtractError::TooLarge));
     }
 
     #[test]
@@ -387,6 +522,6 @@ pub(crate) mod tests {
         let xml = "a".repeat(MAX_DOCX_XML_BYTES as usize + 1);
         let file = docx_file(&xml);
         assert!(file.len() < 1024 * 1024);
-        assert_eq!(extract(ContentType::Docx, &file), Err(ExtractError::TooLarge));
+        assert_eq!(extract(ContentType::Docx, &file, later()), Err(ExtractError::TooLarge));
     }
 }
