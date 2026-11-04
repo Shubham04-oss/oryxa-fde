@@ -1850,3 +1850,118 @@ async fn tasks_and_decisions_page_in_order_from_a_cursor_in_the_project() {
         Err(StoreError::Missing("after"))
     ));
 }
+
+/// A unit vector along `axis`, the size of the embedding column.
+fn axis(axis: usize) -> Vec<f32> {
+    let mut v = vec![0.0; 1024];
+    v[axis] = 1.0;
+    v
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_small_company_finds_all_its_chunks_among_many_tenants() {
+    let store = store().await;
+    let admin = admin().await;
+    // Forty other tenants, fifty chunks each, spread over sixteen dimensions: the shared index is
+    // full of them, and a scan that stops early never reaches the small company's chunks.
+    let run = new_id("bulk");
+    sqlx::query(
+        "insert into companies (tenant_id, company_id, name, created_by)
+         select $1 || '_' || g, 'cmp_bulk', 'Bulk', 'alice' from generate_series(1, 40) g",
+    )
+    .bind(&run)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into documents (tenant_id, company_id, document_id, name, content_type, size_bytes, sha256, blob_key,
+             uploaded_by, status, chunks, ingested_at)
+         select tenant_id, company_id, 'doc_bulk', 'bulk.md', 'text/markdown', 1, 'x', 'x', 'alice', 'ingested', 50, now()
+         from companies where tenant_id like $1 || '\\_%'",
+    )
+    .bind(&run)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into document_chunks (tenant_id, company_id, document_id, chunk_index, content, embedding,
+             embedding_model)
+         select d.tenant_id, d.company_id, d.document_id, i, 'bulk',
+             ('[' || array_to_string(array(select random() + 0 * i from generate_series(1, 16)), ',')
+                 || repeat(',0', 1008) || ']')::vector, 'fake'
+         from documents d, generate_series(0, 49) i where d.tenant_id like $1 || '\\_%'",
+    )
+    .bind(&run)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    // The small company: three chunks in the same region, but nearly at right angles to the query
+    // (axis 0), so they rank behind almost every chunk of the other tenants.
+    let by = actor("alice");
+    let small = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &small).await;
+    let id = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    let v = DocumentIn {
+        name: Name::new("runbook.md").unwrap(),
+        content_type: ContentType::Markdown,
+        size_bytes: 5,
+        sha256: "00".repeat(32),
+        blob_key: format!("{}/{}/documents/{id}", small.tenant, small.company),
+    };
+    let chunks: Vec<ChunkIn> = (0..3)
+        .map(|i| ChunkIn {
+            index: i,
+            content: Text::new(format!("Passage {i}")).unwrap(),
+            embedding: {
+                let mut v = axis(0);
+                v[0] = 0.05;
+                v[1..16].fill(1.0);
+                v[5 + i as usize] = 3.0;
+                v
+            },
+        })
+        .collect();
+    let mut tx = store.company(&small).await.unwrap();
+    tx.add_document(&id, &v, &by).await.unwrap().unwrap();
+    tx.lock_document(&id).await.unwrap().unwrap();
+    tx.record_chunks(&id, "fake", &chunks).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = store.company(&small).await.unwrap();
+    // As at scale: the planner walks the shared index in distance order (no sort of the company's
+    // rows), and the index has grown far past what one scan visits.
+    for setting in [
+        "set local enable_sort = off",
+        "set local enable_bitmapscan = off",
+        "set local enable_seqscan = off",
+        "set local hnsw.max_scan_tuples = 1",
+        "set local hnsw.ef_search = 1",
+    ] {
+        sqlx::query(setting).execute(tx.conn()).await.unwrap();
+    }
+    let hits = tx.search_vector(&axis(0), "fake", 40).await.unwrap();
+    let mut got: Vec<u32> = hits.iter().map(|h| h.chunk).collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [0, 1, 2],
+        "every chunk of the small company, however full the shared index"
+    );
+    // A company over the exact bound walks the shared index, with a scan budget raised past the
+    // one set above: here it still reaches every chunk.
+    let hits = crate::documents::search_vector_with(tx.conn(), &small, &axis(0), "fake", 40, 0)
+        .await
+        .unwrap();
+    let mut got: Vec<u32> = hits.iter().map(|h| h.chunk).collect();
+    got.sort();
+    assert_eq!(got, [0, 1, 2]);
+    // Best first, on both paths: the query along axis 6 ranks chunk 1 first.
+    let hits = tx.search_vector(&axis(6), "fake", 40).await.unwrap();
+    assert_eq!(hits[0].chunk, 1);
+    let hits = crate::documents::search_vector_with(tx.conn(), &small, &axis(6), "fake", 40, 0)
+        .await
+        .unwrap();
+    assert_eq!(hits[0].chunk, 1);
+}

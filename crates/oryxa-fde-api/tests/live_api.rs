@@ -2387,3 +2387,53 @@ async fn mcp_calls_are_reads_and_do_not_rewrite_the_role_mirror() {
     let rename = Some(json!({"name": "Renamed"}));
     assert_eq!(w.status(&dana, "PATCH", &company, rename).await, StatusCode::OK);
 }
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn uploads_take_up_to_20_mib_of_a_known_type_and_other_routes_keep_2_mb() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let upload = format!("/v1/companies/{}/documents?name=big", t.company);
+    let limit = oryxa_fde_context::MAX_DOCUMENT_BYTES;
+
+    let (status, body) = w
+        .send_raw(&t.lead.token, "POST", &upload, "text/plain", &vec![b'a'; limit])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "exactly 20 MiB: {body}");
+    let (status, _) = w
+        .send_raw(&t.lead.token, "POST", &upload, "text/plain", &vec![b'a'; limit + 1])
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    for unsupported in ["text/html", "application/zip", "application/octet-stream", ""] {
+        let (status, body) = w
+            .send_raw(&t.lead.token, "POST", &upload, unsupported, b"<p>hello</p>")
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, Some("unsupported_media_type")),
+            "{unsupported:?}"
+        );
+    }
+    // Only the upload route takes a large body: a JSON body over axum's 2 MB default is refused.
+    let big = json!({"name": "a".repeat(2 * 1024 * 1024)});
+    let tasks = format!("/v1/companies/{}/projects/{}/tasks", t.company, t.project);
+    for path in ["/v1/companies", tasks.as_str()] {
+        assert_eq!(
+            w.status(&t.lead, "POST", path, Some(big.clone())).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{path}"
+        );
+    }
+    // Refused uploads stored nothing: only the 20 MiB file and the fixture's document are listed.
+    let docs = w
+        .ok(
+            &t.lead,
+            "GET",
+            &format!("/v1/companies/{}/documents", t.company),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(docs.as_array().unwrap().len(), 2, "{docs}");
+}

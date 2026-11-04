@@ -320,8 +320,18 @@ impl ProjectTx {
     }
 }
 
-const HIT: &str = "c.document_id, d.name, c.chunk_index, c.content from document_chunks c
-     join documents d on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id";
+const HIT_COLUMNS: &str = "c.document_id, d.name, c.chunk_index, c.content";
+const CHUNKS: &str = "document_chunks c join documents d
+     on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id";
+
+/// A company with at most this many chunks for a model is searched exactly, every chunk compared,
+/// so its recall never depends on how large the shared index has grown. A larger company is a
+/// large enough share of the index for one raised-budget scan to find its nearest chunks.
+const EXACT_SEARCH_MAX: i64 = 20_000;
+/// Index entries one HNSW scan may visit; pgvector's default is 20,000.
+// ponytail: 200 candidates for a company of 20,000 chunks are within a 100,000-tuple scan until the
+// shared index holds about 10M chunks; past that, partition the chunks by tenant.
+const HNSW_MAX_SCAN_TUPLES: &str = "100000";
 
 async fn search_text(
     conn: &mut PgConnection,
@@ -330,7 +340,7 @@ async fn search_text(
     limit: i64,
 ) -> Result<Vec<ChunkHit>, StoreError> {
     sqlx::query(&format!(
-        "select {HIT}, websearch_to_tsquery('english', $3) q
+        "select {HIT_COLUMNS} from {CHUNKS}, websearch_to_tsquery('english', $3) q
          where c.tenant_id = $1 and c.company_id = $2 and c.tsv @@ q
          order by ts_rank_cd(c.tsv, q) desc, c.document_id, c.chunk_index limit $4"
     ))
@@ -352,28 +362,71 @@ async fn search_vector(
     model: &str,
     limit: i64,
 ) -> Result<Vec<ChunkHit>, StoreError> {
+    search_vector_with(conn, s, embedding, model, limit, EXACT_SEARCH_MAX).await
+}
+
+/// [`search_vector`] with the exact-search bound as a parameter, so tests reach both paths.
+pub(crate) async fn search_vector_with(
+    conn: &mut PgConnection,
+    s: &CompanyScope,
+    embedding: &[f32],
+    model: &str,
+    limit: i64,
+    exact_max: i64,
+) -> Result<Vec<ChunkHit>, StoreError> {
     if embedding.is_empty() || embedding.iter().any(|f| !f.is_finite()) {
         return Err(StoreError::Rejected("embedding"));
     }
-    // Keep scanning the index past other companies' chunks until `limit` of this one's are found.
-    sqlx::query("set local hnsw.iterative_scan = relaxed_order")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query(&format!(
-        "select {HIT}
-         where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3
-         order by c.embedding <=> $4::vector, c.document_id, c.chunk_index limit $5"
-    ))
+    // Counted through the company index, and never past the bound.
+    let chunks: i64 = sqlx::query_scalar(
+        "select count(*) from (select 1 from document_chunks
+             where tenant_id = $1 and company_id = $2 and embedding_model = $3 limit $4) x",
+    )
     .bind(s.tenant.as_str())
     .bind(s.company.as_str())
     .bind(model)
-    .bind(vector(embedding))
-    .bind(limit)
-    .fetch_all(conn)
-    .await?
-    .into_iter()
-    .map(hit)
-    .collect()
+    .bind(exact_max + 1)
+    .fetch_one(&mut *conn)
+    .await?;
+    let sql = if chunks <= exact_max {
+        // Materialised first, so the planner cannot walk the shared index instead.
+        format!(
+            "with mine as materialized (
+                 select {HIT_COLUMNS}, c.embedding <=> $4::vector as distance from {CHUNKS}
+                 where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3)
+             select document_id, name, chunk_index, content from mine
+             order by distance, document_id, chunk_index limit $5"
+        )
+    } else {
+        // Keep scanning past other companies' chunks, within a raised budget; relaxed order is put
+        // right by the outer sort.
+        sqlx::query(
+            "select set_config('hnsw.iterative_scan', 'relaxed_order', true),
+                 set_config('hnsw.max_scan_tuples', $1, true), set_config('hnsw.ef_search', $2, true)",
+        )
+        .bind(HNSW_MAX_SCAN_TUPLES)
+        .bind(limit.clamp(40, 1000).to_string())
+        .execute(&mut *conn)
+        .await?;
+        format!(
+            "with near as materialized (
+                 select {HIT_COLUMNS}, c.embedding <=> $4::vector as distance from {CHUNKS}
+                 where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3
+                 order by distance limit $5)
+             select document_id, name, chunk_index, content from near order by distance, document_id, chunk_index"
+        )
+    };
+    sqlx::query(&sql)
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(model)
+        .bind(vector(embedding))
+        .bind(limit)
+        .fetch_all(conn)
+        .await?
+        .into_iter()
+        .map(hit)
+        .collect()
 }
 
 /// pgvector's text form, `[0.1,0.2,...]`.
