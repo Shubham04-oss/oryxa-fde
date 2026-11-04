@@ -42,10 +42,12 @@ looks like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*PASSWORD*`, `*CREDENT
   wins over the others. `*.example.com` does not match `example.com`, and patterns as broad as `*` or `*.com`
   are refused.
 - `inject` names a secret reference, never a value. The value is resolved per request, inside the Worker, for
-  that company only. A host with `inject` is reachable over HTTPS only. If the secret is missing, the request
-  is refused and never forwarded.
+  that company only. Only an exact host can carry `inject`, never a wildcard. A host with `inject` is reachable
+  over HTTPS only. If the secret is missing, the request is refused and never forwarded.
 - Responses to requests that carried a secret have its bytes replaced with `[redacted]`, in headers and body,
-  so an upstream that echoes the credential cannot hand it to the sandbox.
+  so an upstream that echoes the credential cannot hand it to the sandbox. Those requests ask for an
+  uncompressed response and drop `Range`. A response in an encoding the redactor cannot read (anything but
+  none, gzip or br) is refused.
 - Redirects are returned to the sandbox, not followed. The next request goes through the policy again.
 - Only HTTP on port 80 and HTTPS on port 443 leave the container (`enableInternet: false`), and a request that
   names any other port is refused. Logs record ids, host and decision, never headers, paths or bodies.
