@@ -432,6 +432,8 @@ enum Fail {
     RenewalHangs,
     /// The store cannot be reached to renew the hold.
     RenewalErrs,
+    /// The same, but each attempt takes a while first, as on a loaded runner: the heartbeat's ticks drift.
+    RenewalErrsSlowly,
     /// Renewing panics: the heartbeat dies without a word, and only the hold's own expiry is left to stop the run.
     RenewalPanics,
 }
@@ -501,6 +503,10 @@ impl<S: RunStore> RunStore for Failing<S> {
             Fail::RenewalRefused => Ok(false),
             Fail::RenewalHangs => std::future::pending().await,
             Fail::RenewalErrs => Err(StoreError::Unavailable),
+            Fail::RenewalErrsSlowly => {
+                tokio::time::sleep(Duration::from_millis(70)).await;
+                Err(StoreError::Unavailable)
+            }
             Fail::RenewalPanics => panic!("the heartbeat dies"),
             Fail::Approvals => self.0.renew_sandbox(scope, run, lease).await,
         }
@@ -1240,38 +1246,41 @@ async fn a_run_that_cannot_renew_while_it_holds_the_sandbox_destroys_it() {
 
 #[tokio::test]
 async fn a_sandbox_that_will_not_stop_is_never_stopped_after_the_lease_lapses() {
-    // The reviewer's case: renewals fail, the heartbeat's destroy fails, and the grace outlasts the lease.
-    let lease = Duration::from_millis(200);
-    let mut sandbox = FakeSandbox::new(vec![message("Working."), Step::Hang]);
-    sandbox.stuck = true;
-    let runs = Runs::<TestFailingStore>::new(
-        Failing(InMemoryRuns::default(), Fail::RenewalErrs),
-        sandbox,
-        FakeLive::default(),
-        context(),
-        access(),
-        RunsConfig {
-            lease,
-            grace: Duration::from_secs(1),
-            ..config()
-        },
-    );
-    let app = api::router(runs.clone());
-    let run = create(&app).await;
-    let done = wait(&app, &run, ended).await;
-    assert_eq!(done["failure"], "store_unavailable");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    // The run took the lease just before its first stop (the fresh container); every stop came before it lapsed:
-    // the heartbeat's one attempt, and nothing from the grace timer, the lost stream or the run's end.
-    let times = runs.sandbox.stop_times.lock().unwrap().clone();
-    let lapsed = times[0] + lease;
-    let after: Vec<_> = times.iter().map(|t| t.duration_since(times[0])).collect();
-    assert!(times.iter().all(|t| *t < lapsed), "{after:?}");
-    assert_eq!(
-        times.len(),
-        2,
-        "the fresh container's stop and the heartbeat's destroy: {after:?}"
-    );
+    // The reviewer's case: renewals fail, the heartbeat's destroy fails, and the grace outlasts the lease. Slow
+    // failures make the heartbeat's ticks drift past the lapse, as on a loaded runner.
+    for fail in [Fail::RenewalErrs, Fail::RenewalErrsSlowly] {
+        let lease = Duration::from_millis(200);
+        let mut sandbox = FakeSandbox::new(vec![message("Working."), Step::Hang]);
+        sandbox.stuck = true;
+        let runs = Runs::<TestFailingStore>::new(
+            Failing(InMemoryRuns::default(), fail),
+            sandbox,
+            FakeLive::default(),
+            context(),
+            access(),
+            RunsConfig {
+                lease,
+                grace: Duration::from_secs(1),
+                ..config()
+            },
+        );
+        let app = api::router(runs.clone());
+        let run = create(&app).await;
+        let done = wait(&app, &run, ended).await;
+        assert_eq!(done["failure"], "store_unavailable");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // The run took the lease just before its first stop (the fresh container). Every stop came before the lease
+        // lapsed: at most the heartbeat's one attempt, if a tick landed while some lease was left, and nothing from
+        // the grace timer, the lost stream or the run's end.
+        let times = runs.sandbox.stop_times.lock().unwrap().clone();
+        let lapsed = times[0] + lease;
+        let after: Vec<_> = times.iter().map(|t| t.duration_since(times[0])).collect();
+        assert!(times.iter().all(|t| *t < lapsed), "{after:?}");
+        assert!(
+            times.len() <= 2,
+            "the fresh container's stop and the heartbeat's destroy: {after:?}"
+        );
+    }
 }
 
 #[tokio::test]
