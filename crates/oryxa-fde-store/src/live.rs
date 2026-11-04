@@ -22,6 +22,22 @@ async fn store() -> Store {
     crate::testing::store().await
 }
 
+fn company_in(name: &str) -> CompanyIn {
+    CompanyIn {
+        name: Name::new(name).unwrap(),
+        industry: None,
+        region: None,
+        summary: None,
+    }
+}
+
+fn project_in(name: &str) -> ProjectIn {
+    ProjectIn {
+        name: Name::new(name).unwrap(),
+        summary: None,
+    }
+}
+
 fn tenant() -> TenantId {
     TenantId::new(new_id("org")).unwrap()
 }
@@ -39,7 +55,7 @@ fn scope(t: &TenantId, company: &str) -> CompanyScope {
 
 async fn create_company(store: &Store, s: &CompanyScope) {
     let mut tx = store.company(s).await.unwrap();
-    tx.create(&Name::new("Acme").unwrap(), &actor("alice")).await.unwrap();
+    tx.create(&company_in("Acme"), &actor("alice")).await.unwrap();
     tx.commit().await.unwrap();
 }
 
@@ -184,7 +200,7 @@ async fn state_changes_and_their_events_commit_or_roll_back_together() {
 
     // Rolled back: neither the company nor its event exists.
     let mut tx = store.company(&c).await.unwrap();
-    tx.create(&Name::new("Acme").unwrap(), &actor("alice")).await.unwrap();
+    tx.create(&company_in("Acme"), &actor("alice")).await.unwrap();
     drop(tx);
     assert!(store.company(&c).await.unwrap().get().await.unwrap().is_none());
     assert!(outbox(&store, &t).await.is_empty());
@@ -193,11 +209,7 @@ async fn state_changes_and_their_events_commit_or_roll_back_together() {
     create_company(&store, &c).await;
     let p = c.project(ProjectId::new(new_id("prj")).unwrap());
     let mut tx = store.project(&p).await.unwrap();
-    let project = tx
-        .create(&Name::new("RAG").unwrap(), &actor("alice"))
-        .await
-        .unwrap()
-        .unwrap();
+    let project = tx.create(&project_in("RAG"), &actor("alice")).await.unwrap().unwrap();
     assert_eq!(project.stage, oryxa_fde_core::Stage::Discover);
     tx.commit().await.unwrap();
 
@@ -215,12 +227,7 @@ async fn state_changes_and_their_events_commit_or_roll_back_together() {
     // A project in a company that does not exist is not created.
     let ghost = scope(&t, &new_id("cmp")).project(ProjectId::new(new_id("prj")).unwrap());
     let mut tx = store.project(&ghost).await.unwrap();
-    assert!(
-        tx.create(&Name::new("x").unwrap(), &actor("alice"))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(tx.create(&project_in("x"), &actor("alice")).await.unwrap().is_none());
 }
 
 /// The relay sends every tenant's rows, so relay tests take turns to see only their own sends.
@@ -286,7 +293,7 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
     tx.commit().await.unwrap();
     let p = c.project(ProjectId::new(new_id("prj")).unwrap());
     let mut tx = store.project(&p).await.unwrap();
-    tx.create(&Name::new("RAG").unwrap(), &actor("alice")).await.unwrap();
+    tx.create(&project_in("RAG"), &actor("alice")).await.unwrap();
     tx.commit().await.unwrap();
     let rows = outbox(&store, &t).await;
     let company_rows: Vec<&String> = rows.iter().filter(|r| r.2 == c.event_group()).map(|r| &r.0).collect();
@@ -495,10 +502,7 @@ async fn project_world(store: &Store) -> (TenantId, ProjectScope) {
     create_company(store, &c).await;
     let p = c.project(ProjectId::new(new_id("prj")).unwrap());
     let mut tx = store.project(&p).await.unwrap();
-    tx.create(&Name::new("RAG").unwrap(), &actor("alice"))
-        .await
-        .unwrap()
-        .unwrap();
+    tx.create(&project_in("RAG"), &actor("alice")).await.unwrap().unwrap();
     tx.commit().await.unwrap();
     (t, p)
 }
@@ -509,6 +513,7 @@ async fn add_stakeholder(store: &Store, c: &CompanyScope) -> oryxa_fde_core::Sta
     let v = StakeholderIn {
         name: Name::new("Sam Sponsor").unwrap(),
         title: Some(Name::new("VP Engineering").unwrap()),
+        role: StakeholderRole::Sponsor,
     };
     tx.add_stakeholder(&id, &v, &actor("alice")).await.unwrap().unwrap();
     tx.commit().await.unwrap();
@@ -766,7 +771,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
         create_company(&store, &c).await;
         let p = c.project(ProjectId::new(new_id("prj")).unwrap());
         let mut tx = store.project(&p).await.unwrap();
-        tx.create(&Name::new("B").unwrap(), &by).await.unwrap().unwrap();
+        tx.create(&project_in("B"), &by).await.unwrap().unwrap();
         tx.commit().await.unwrap();
         p
     };
@@ -776,6 +781,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
         let sys = oryxa_fde_core::SystemId::new(new_id("sys")).unwrap();
         let v = SystemIn {
             name: Name::new("Zendesk").unwrap(),
+            kind: Some(Name::new("Ticketing").unwrap()),
             description: None,
         };
         tx.add_system(&sys, &v, &by).await.unwrap().unwrap();
@@ -819,6 +825,9 @@ async fn row_level_security_covers_every_lifecycle_table() {
             title: Name::new("Index tickets").unwrap(),
             status: TaskStatus::WaitingOnCustomer,
             blocker: None,
+            due_on: None,
+            assignee: None,
+            waiting_on: None,
         };
         tx.add_task(&oryxa_fde_core::TaskId::new(new_id("tsk")).unwrap(), &task, &by)
             .await
@@ -1008,10 +1017,7 @@ async fn grants_stay_pending_for_the_reconciler_until_written() {
     let p = c.project(ProjectId::new(new_id("prj")).unwrap());
     let carol = UserId::new("carol").unwrap();
     let mut tx = store.project(&p).await.unwrap();
-    tx.create(&Name::new("RAG").unwrap(), &actor("alice"))
-        .await
-        .unwrap()
-        .unwrap();
+    tx.create(&project_in("RAG"), &actor("alice")).await.unwrap().unwrap();
     tx.assign(&carol, &actor("alice")).await.unwrap();
     tx.commit().await.unwrap();
     // Leftovers of other runs come first, so take plenty and keep this tenant's.
@@ -1040,4 +1046,204 @@ async fn grants_stay_pending_for_the_reconciler_until_written() {
     pending.commit().await.unwrap();
     let pending = store.pending_grants(10_000).await.unwrap();
     assert_eq!(mine(pending.grants()), [Grant::ProjectCompany(p.clone())]);
+}
+
+fn task_in(title: &str, status: TaskStatus) -> TaskIn {
+    TaskIn {
+        title: Name::new(title).unwrap(),
+        status,
+        blocker: (status == TaskStatus::Blocked).then(|| Text::new("waiting on IT").unwrap()),
+        due_on: None,
+        assignee: None,
+        waiting_on: None,
+    }
+}
+
+async fn add_project(store: &Store, c: &CompanyScope, name: &str) -> ProjectScope {
+    let p = c.project(ProjectId::new(new_id("prj")).unwrap());
+    let mut tx = store.project(&p).await.unwrap();
+    tx.create(&project_in(name), &actor("alice")).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    p
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_today_view_reads_exactly_the_projects_it_names() {
+    use oryxa_fde_core::{AccessRequestId, TaskId};
+    use oryxa_fde_events::AccessStatus;
+    let store = store().await;
+    let by = actor("alice");
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let (p1, p2) = (
+        add_project(&store, &c, "Mine").await,
+        add_project(&store, &c, "Not mine").await,
+    );
+    let owner = add_stakeholder(&store, &c).await;
+    for p in [&p1, &p2] {
+        let mut tx = store.project(p).await.unwrap();
+        for (title, status) in [("Open", TaskStatus::Todo), ("Closed", TaskStatus::Done)] {
+            tx.add_task(&TaskId::new(new_id("tsk")).unwrap(), &task_in(title, status), &by)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let access = AccessRequestIn {
+            description: Text::new("VPN").unwrap(),
+            system: None,
+            owner: Some(owner.clone()),
+            status: AccessStatus::Requested,
+        };
+        tx.add_access_request(&AccessRequestId::new(new_id("acc")).unwrap(), &access, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let other = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &other).await;
+    let elsewhere = add_project(&store, &other, "Other tenant").await;
+
+    // Only ids of this tenant resolve; another tenant's project id is not found.
+    let scopes = store
+        .project_scopes(&t, &[p1.project.clone(), elsewhere.project.clone()])
+        .await
+        .unwrap();
+    assert_eq!(scopes, std::slice::from_ref(&p1));
+
+    // One project named: its open task and its unsettled request, nothing of the other project.
+    let items = store.today(&scopes).await.unwrap();
+    assert_eq!(items.len(), 2);
+    for item in &items {
+        match item {
+            TodayItem::Task { task, project, company } => {
+                assert_eq!(
+                    (task.title.as_str(), &project.id, project.name.as_str()),
+                    ("Open", &p1.project, "Mine")
+                );
+                assert_eq!(company.id, c.company);
+            }
+            TodayItem::AccessRequest { owner, project, .. } => {
+                assert_eq!(
+                    (owner.as_ref().map(Name::as_str), &project.id),
+                    (Some("Sam Sponsor"), &p1.project)
+                );
+            }
+        }
+    }
+    assert!(matches!(
+        store.today(&[p1.clone(), elsewhere.clone()]).await,
+        Err(StoreError::MixedTenants)
+    ));
+
+    // The by-project policy reads the named projects' rows, and nothing else of their company.
+    let mut tx = store.pool.begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_app")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("select set_config('fde.tenant', $1, true), set_config('fde.projects', $2, true)")
+        .bind(t.as_str())
+        .bind(p1.project.as_str())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let projects: Vec<String> = sqlx::query_scalar("select project_id from projects")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(projects, [p1.project.as_str()]);
+    for table in ["companies", "tasks", "access_requests", "stakeholders"] {
+        let n: i64 = sqlx::query_scalar(&format!("select count(*) from {table}"))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    // Read-only: naming a project does not let a transaction change it.
+    let changed = sqlx::query("update projects set name = 'x'")
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(changed, 0);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_task_records_since_when_it_waits_on_the_customer() {
+    use oryxa_fde_core::TaskId;
+    let store = store().await;
+    let by = actor("alice");
+    let (t, p) = project_world(&store).await;
+    let sam = add_stakeholder(&store, &p.company).await;
+    let id = TaskId::new(new_id("tsk")).unwrap();
+    let mut v = task_in("Get sample data", TaskStatus::Todo);
+    v.due_on = Some(time::macros::date!(2026 - 11 - 20));
+    v.assignee = Some(UserId::new("bob").unwrap());
+    let mut tx = store.project(&p).await.unwrap();
+    let task = tx.add_task(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!((task.due_on, task.waiting_since), (v.due_on, None));
+
+    v.status = TaskStatus::WaitingOnCustomer;
+    v.waiting_on = Some(sam.clone());
+    let waiting = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    let since = waiting.waiting_since.expect("stamped when it starts waiting");
+    assert_eq!(waiting.waiting_on.as_ref(), Some(&sam));
+    // Still waiting: the start stays put.
+    v.title = Name::new("Get the sample data").unwrap();
+    let still = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!(still.waiting_since, Some(since));
+    // No longer waiting: cleared.
+    v.status = TaskStatus::InProgress;
+    let moving = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    assert_eq!(moving.waiting_since, None);
+    tx.commit().await.unwrap();
+
+    // The stakeholder it waits on must be this company's.
+    let other = scope(&t, &new_id("cmp"));
+    create_company(&store, &other).await;
+    let theirs = add_stakeholder(&store, &other).await;
+    v.waiting_on = Some(theirs);
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(matches!(
+        tx.update_task(&id, &v, &by).await,
+        Err(StoreError::Missing("waiting_on"))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn company_summaries_carry_the_callers_role_and_projects() {
+    let store = store().await;
+    let t = tenant();
+    let (a, b) = (scope(&t, &new_id("cmp")), scope(&t, &new_id("cmp")));
+    for s in [&a, &b] {
+        create_company(&store, s).await;
+    }
+    add_project(&store, &a, "RAG").await;
+    let mut tx = store.company(&b).await.unwrap();
+    tx.set_member(&UserId::new("bob").unwrap(), Role::Engineer, &actor("alice"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let summaries = store
+        .company_summaries(&[a.clone(), b.clone()], &UserId::new("bob").unwrap())
+        .await
+        .unwrap();
+    let got: Vec<(Option<Role>, usize)> = summaries
+        .iter()
+        .map(|s| {
+            let role = s.role;
+            (role, s.projects.len())
+        })
+        .collect();
+    // Both are "Acme"; ordered by name, then id.
+    let by_id: std::collections::BTreeMap<&str, (Option<Role>, usize)> =
+        summaries.iter().map(|s| s.company.id.as_str()).zip(got).collect();
+    assert_eq!(by_id[a.company.as_str()], (None, 1));
+    assert_eq!(by_id[b.company.as_str()], (Some(Role::Engineer), 0));
 }

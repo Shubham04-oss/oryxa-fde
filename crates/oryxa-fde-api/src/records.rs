@@ -9,8 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_fde_core::{CompanyId, ProjectId, SecurityAnswerId, StakeholderId, SystemId};
 use oryxa_fde_store::{
-    CompanyTx, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn, System, SystemIn, Text,
-    new_id,
+    CompanyTx, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn, StakeholderRole, System,
+    SystemIn, Text, new_id,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -42,12 +42,54 @@ async fn org_tx(app: &App, who: &Principal) -> Result<OrgTx, ApiError> {
     Ok(app.store.organisation(&who.tenant).await?)
 }
 
+/// The part a stakeholder plays in the engagement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StakeholderPart {
+    Sponsor,
+    Champion,
+    User,
+    It,
+    Security,
+    #[default]
+    Other,
+}
+
+impl From<StakeholderPart> for StakeholderRole {
+    fn from(p: StakeholderPart) -> Self {
+        match p {
+            StakeholderPart::Sponsor => StakeholderRole::Sponsor,
+            StakeholderPart::Champion => StakeholderRole::Champion,
+            StakeholderPart::User => StakeholderRole::User,
+            StakeholderPart::It => StakeholderRole::It,
+            StakeholderPart::Security => StakeholderRole::Security,
+            StakeholderPart::Other => StakeholderRole::Other,
+        }
+    }
+}
+
+impl From<StakeholderRole> for StakeholderPart {
+    fn from(r: StakeholderRole) -> Self {
+        match r {
+            StakeholderRole::Sponsor => StakeholderPart::Sponsor,
+            StakeholderRole::Champion => StakeholderPart::Champion,
+            StakeholderRole::User => StakeholderPart::User,
+            StakeholderRole::It => StakeholderPart::It,
+            StakeholderRole::Security => StakeholderPart::Security,
+            StakeholderRole::Other => StakeholderPart::Other,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StakeholderBody {
     pub name: String,
-    /// Their role at the customer, e.g. "VP Engineering".
+    /// Their job at the customer, e.g. "VP Engineering".
     pub title: Option<String>,
+    /// Their part in the engagement; `other` if left out.
+    #[serde(default)]
+    pub role: StakeholderPart,
 }
 
 impl StakeholderBody {
@@ -55,6 +97,7 @@ impl StakeholderBody {
         Ok(StakeholderIn {
             name: name(self.name, "name")?,
             title: self.title.map(|t| name(t, "title")).transpose()?,
+            role: self.role.into(),
         })
     }
 }
@@ -64,6 +107,7 @@ pub struct StakeholderOut {
     pub id: String,
     pub name: String,
     pub title: Option<String>,
+    pub role: StakeholderPart,
     pub updated_at: String,
 }
 
@@ -73,6 +117,7 @@ impl From<Stakeholder> for StakeholderOut {
             id: s.id.to_string(),
             name: s.name.as_str().to_owned(),
             title: s.title.map(|t| t.as_str().to_owned()),
+            role: s.role.into(),
             updated_at: ts(s.updated_at),
         }
     }
@@ -82,6 +127,8 @@ impl From<Stakeholder> for StakeholderOut {
 #[serde(deny_unknown_fields)]
 pub struct SystemBody {
     pub name: String,
+    /// What sort of system, e.g. "CRM" or "data warehouse".
+    pub kind: Option<String>,
     pub description: Option<String>,
 }
 
@@ -89,6 +136,7 @@ impl SystemBody {
     fn parse(self) -> Result<SystemIn, ApiError> {
         Ok(SystemIn {
             name: name(self.name, "name")?,
+            kind: self.kind.map(|k| name(k, "kind")).transpose()?,
             description: self.description.map(|d| text(d, "description")).transpose()?,
         })
     }
@@ -98,6 +146,7 @@ impl SystemBody {
 pub struct SystemOut {
     pub id: String,
     pub name: String,
+    pub kind: Option<String>,
     pub description: Option<String>,
     pub updated_at: String,
 }
@@ -107,6 +156,7 @@ impl From<System> for SystemOut {
         Self {
             id: s.id.to_string(),
             name: s.name.as_str().to_owned(),
+            kind: s.kind.map(|k| k.as_str().to_owned()),
             description: s.description.map(|d| d.as_str().to_owned()),
             updated_at: ts(s.updated_at),
         }

@@ -16,6 +16,9 @@ pub enum ApiError {
     NoOrganisation,
     #[error("forbidden")]
     Forbidden,
+    /// A cookie request that changes something without proving it comes from the web app.
+    #[error("cross-site request refused")]
+    Csrf,
     #[error("not found")]
     NotFound,
     #[error("invalid {0}")]
@@ -44,6 +47,7 @@ impl ApiError {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             ApiError::NoOrganisation => (StatusCode::FORBIDDEN, "no_organisation"),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::Csrf => (StatusCode::FORBIDDEN, "csrf"),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
             ApiError::Conflict => (StatusCode::CONFLICT, "conflict"),

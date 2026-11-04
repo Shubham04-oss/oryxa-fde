@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use oryxa_core::UserId;
 use oryxa_fde_core::{
     AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, ScopeItemId, Stage, StakeholderId, SystemId, TaskId,
 };
@@ -302,6 +303,14 @@ pub struct TaskBody {
     pub status: TaskState,
     /// What blocks the task; required when the status is `blocked`.
     pub blocker: Option<String>,
+    /// Due date, `YYYY-MM-DD`.
+    pub due_on: Option<String>,
+    /// The WorkOS user who works it.
+    #[schema(value_type = Option<String>)]
+    pub assignee: Option<UserId>,
+    /// The stakeholder at the customer it waits on.
+    #[schema(value_type = Option<String>)]
+    pub waiting_on: Option<StakeholderId>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -310,9 +319,18 @@ pub struct TaskOut {
     pub title: String,
     pub status: TaskState,
     pub blocker: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub due_on: Option<String>,
+    pub assignee: Option<String>,
+    pub waiting_on: Option<String>,
+    /// When it started waiting on the customer; set while the status is `waiting_on_customer`.
+    pub waiting_since: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
+
+const DATE: &[time::format_description::FormatItem<'static>] =
+    time::macros::format_description!("[year]-[month]-[day]");
 
 impl From<Task> for TaskOut {
     fn from(t: Task) -> Self {
@@ -321,6 +339,10 @@ impl From<Task> for TaskOut {
             title: t.title.as_str().to_owned(),
             status: t.status.into(),
             blocker: t.blocker.map(|b| b.as_str().to_owned()),
+            due_on: t.due_on.and_then(|d| d.format(DATE).ok()),
+            assignee: t.assignee.map(|a| a.to_string()),
+            waiting_on: t.waiting_on.map(|w| w.to_string()),
+            waiting_since: t.waiting_since.map(ts),
             created_at: ts(t.created_at),
             updated_at: ts(t.updated_at),
         }
@@ -406,6 +428,12 @@ impl TaskBody {
             title: name(self.title, "title")?,
             status: self.status.into(),
             blocker: self.blocker.map(|b| text(b, "blocker")).transpose()?,
+            due_on: self
+                .due_on
+                .map(|d| time::Date::parse(&d, DATE).map_err(|_| ApiError::Invalid("due_on")))
+                .transpose()?,
+            assignee: self.assignee,
+            waiting_on: self.waiting_on,
         })
     }
 }

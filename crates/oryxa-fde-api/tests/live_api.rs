@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use oryxa_authz::SpiceDb;
-use oryxa_fde_api::{App, openapi, reconcile_grants, router};
+use oryxa_fde_api::{App, SignIn, openapi, reconcile_grants, router};
 use oryxa_fde_store::{Store, new_id, testing};
 use oryxa_spicedb_proto::v1::{WriteSchemaRequest, schema_service_client::SchemaServiceClient};
 use serde_json::{Value, json};
@@ -25,12 +25,22 @@ use sqlx::Row;
 use tower::ServiceExt;
 
 const SCHEMA: &str = include_str!("../../../schema/fde.zed");
+/// The web app the API serves cookies for in these tests.
+const WEB: &str = "https://fde.test";
 
 struct World {
     router: Router,
     app: Arc<App>,
     store: Store,
     authz: SpiceDb,
+    /// AuthKit for browser sign-in.
+    authkit: Arc<support::FakeAuthKit>,
+    /// Seals session cookies; random per world.
+    password: String,
+}
+
+fn sign_in_config(authkit: &Arc<support::FakeAuthKit>, password: &str) -> SignIn {
+    SignIn::new(WEB, password, authkit.clone()).unwrap()
 }
 
 async fn world() -> World {
@@ -45,20 +55,106 @@ async fn world() -> World {
         .insert("authorization", format!("Bearer {key}").parse().unwrap());
     schema.write_schema(req).await.unwrap();
     let authz = SpiceDb::connect(&endpoint, &key, Duration::from_secs(2)).await.unwrap();
-    let app = App::new(store.clone(), authz.clone(), support::verifier());
+    let authkit = Arc::new(support::FakeAuthKit::default());
+    let password = format!("{}{}", new_id("x").replace("x_", ""), new_id("x").replace("x_", ""));
+    let app = App::with_sign_in(
+        store.clone(),
+        authz.clone(),
+        support::verifier(),
+        sign_in_config(&authkit, &password),
+    );
 
     World {
         router: router(app.clone()),
         app,
         store,
         authz,
+        authkit,
+        password,
     }
 }
 
 impl World {
     /// Another replica of the API: same database and SpiceDB, its own caches.
     fn replica(&self) -> Router {
-        router(App::new(self.store.clone(), self.authz.clone(), support::verifier()))
+        router(App::with_sign_in(
+            self.store.clone(),
+            self.authz.clone(),
+            support::verifier(),
+            sign_in_config(&self.authkit, &self.password),
+        ))
+    }
+
+    /// A raw request: the status, the response headers and the JSON body.
+    async fn send(&self, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// Signs in through `/auth/login` and `/auth/callback` as `user` of `org` (no org when
+    /// `None`); returns the response of the callback.
+    async fn sign_in_as(
+        &self,
+        org: Option<&str>,
+        user: &str,
+        role: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        *self.authkit.who.lock().unwrap() = (org.map(str::to_owned), user.to_owned(), role.to_owned());
+        let login = Request::get("/auth/login?return_to=/companies")
+            .body(Body::empty())
+            .unwrap();
+        let (status, headers, _) = self.send(login).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let location = headers["location"].to_str().unwrap();
+        let state = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_owned();
+        let pending = set_cookie(&headers, "__Host-fde_signin").unwrap();
+        let callback = Request::get(format!("/auth/callback?code=code-{state}&state={state}"))
+            .header("cookie", format!("__Host-fde_signin={pending}"))
+            .body(Body::empty())
+            .unwrap();
+        self.send(callback).await
+    }
+
+    /// A signed-in user's session cookie value.
+    async fn session(&self, who: &User, org: &str) -> String {
+        let (status, headers, body) = self.sign_in_as(Some(org), &who.id, "member").await;
+        assert_eq!(status, StatusCode::FOUND, "{body}");
+        set_cookie(&headers, "__Host-fde_session").unwrap()
+    }
+
+    /// Calls with a session cookie; `same_site` adds what the web app sends on changes.
+    async fn with_cookie(
+        &self,
+        cookie: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        same_site: bool,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", format!("__Host-fde_session={cookie}"));
+        if same_site {
+            req = req.header("x-oryxa-request", "1").header("origin", WEB);
+        }
+        let req = match body {
+            Some(b) => req
+                .header("content-type", "application/json")
+                .body(Body::from(b.to_string())),
+            None => req.body(Body::empty()),
+        }
+        .unwrap();
+        self.send(req).await
     }
 
     async fn call_on(
@@ -113,6 +209,20 @@ impl World {
             .map(|r| r.get("detail_type"))
             .collect()
     }
+}
+
+/// The value a response sets for cookie `name`, if it sets one.
+fn set_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|v| {
+            v.strip_prefix(&format!("{name}="))?
+                .split(';')
+                .next()
+                .map(str::to_owned)
+        })
 }
 
 struct User {
@@ -345,6 +455,11 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("POST", "/v1/companies"),
     ("GET", "/v1/security-answers"),
     ("POST", "/v1/security-answers"),
+    ("GET", "/v1/me"),
+    ("GET", "/v1/today"),
+    ("GET", "/auth/login"),
+    ("GET", "/auth/callback"),
+    ("POST", "/auth/logout"),
 ];
 
 /// Every route that names a company, project, record or answer, with a body that would succeed if
@@ -514,6 +629,8 @@ struct Tenant {
     project: String,
     /// Placeholder -> id of this company's record.
     records: Vec<(&'static str, String)>,
+    /// Each user's session cookie, by user id.
+    sessions: Vec<(String, String)>,
 }
 
 async fn company(w: &World, org: &str, name: &str) -> Tenant {
@@ -603,12 +720,24 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         json!({"question": format!("{name}: encrypted at rest?"), "answer": "Yes"}),
     )
     .await;
+    let mut sessions = Vec::new();
+    for (who, role) in [
+        (&lead, "member"),
+        (&engineer, "member"),
+        (&assignee, "member"),
+        (&admin, "admin"),
+    ] {
+        let (status, headers, body) = w.sign_in_as(Some(org), &who.id, role).await;
+        assert_eq!(status, StatusCode::FOUND, "{body}");
+        sessions.push((who.id.clone(), set_cookie(&headers, "__Host-fde_session").unwrap()));
+    }
     Tenant {
         org: org.to_owned(),
         lead,
         engineer,
         assignee,
         admin,
+        sessions,
         company,
         project,
         records: vec![
@@ -758,14 +887,24 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
         }
     }
 
+    // A session cookie is checked exactly as a bearer token is: the attacks aimed at another
+    // company are sent with each attacker's cookie too, as the web app sends them.
+    let cookie_of = |who: &User| -> String {
+        [&a, &b, &c]
+            .iter()
+            .flat_map(|t| t.sessions.iter())
+            .find(|(id, _)| *id == who.id)
+            .map(|(_, cookie)| cookie.clone())
+            .unwrap()
+    };
     let mut leaks = Vec::new();
     let mut tried = BTreeSet::new();
     let mut calls = 0;
     for (method, template, body) in TARGETED {
         for at in attacks.iter().filter(|at| at.applies(template, *body)) {
             let path = at.fill(template);
-            let body = body.map(|b| serde_json::from_str(&at.fill(b)).unwrap());
-            let (status, resp) = w.call(Some(&at.who.token), method, &path, body).await;
+            let body: Option<Value> = body.map(|b| serde_json::from_str(&at.fill(b)).unwrap());
+            let (status, resp) = w.call(Some(&at.who.token), method, &path, body.clone()).await;
             calls += 1;
             tried.insert((*method, *template));
             if status.is_success() {
@@ -773,6 +912,16 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     "{} ({:?}) {method} {path} -> {status} {resp}",
                     at.who.id, at.kind
                 ));
+            }
+            if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
+                let (status, _, resp) = w.with_cookie(&cookie_of(at.who), method, &path, body, true).await;
+                calls += 1;
+                if status.is_success() {
+                    leaks.push(format!(
+                        "{} ({:?}, cookie) {method} {path} -> {status} {resp}",
+                        at.who.id, at.kind
+                    ));
+                }
             }
         }
     }
@@ -795,6 +944,30 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+    // Today and me show only the caller's own projects and organisation.
+    for (t, own_tenant_companies) in [(&a, vec![&a.company, &b.company]), (&c, vec![&c.company])] {
+        for who in [&t.lead, &t.engineer, &t.assignee, &t.admin] {
+            let today = w.ok(who, "GET", "/v1/today", None, StatusCode::OK).await;
+            for item in today["items"].as_array().unwrap() {
+                let company = item["company"]["id"].as_str().unwrap();
+                assert!(
+                    own_tenant_companies.iter().any(|c| c.as_str() == company),
+                    "{} sees {item}",
+                    who.id
+                );
+                if who.id == t.assignee.id {
+                    assert_eq!(
+                        item["project"]["id"],
+                        t.project.as_str(),
+                        "an assignee sees their project only"
+                    );
+                }
+            }
+            let me = w.ok(who, "GET", "/v1/me", None, StatusCode::OK).await;
+            assert_eq!(me["organisation"]["id"], t.org.as_str());
+        }
+    }
+
     // An admin sees every company of their own tenant and none of another's.
     for (admin, own, others) in [
         (&a.admin, vec![&a.company, &b.company], vec![&c.company]),
@@ -1107,11 +1280,17 @@ async fn lifecycle_records_end_to_end() {
 #[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn every_documented_route_is_served() {
     let w = world().await;
-    // Without a token every route answers 401; a route the router lacked would answer 404 or 405.
+    // Without a token every route answers 401 (sign-in itself something else of its own); a
+    // route the router lacked would answer 404 or 405.
     for (method, template) in spec_routes() {
         let path = template.replace('{', "x").replace('}', "");
         let (status, _) = w.call(None, &method, &path, Some(json!({}))).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {template}");
+        let want = match template.as_str() {
+            "/auth/login" => StatusCode::FOUND,
+            "/auth/callback" => StatusCode::BAD_REQUEST,
+            _ => StatusCode::UNAUTHORIZED,
+        };
+        assert_eq!(status, want, "{method} {template}");
     }
 }
 
@@ -1120,7 +1299,7 @@ async fn every_documented_route_is_served() {
 async fn a_grant_left_pending_after_commit_is_written_by_the_reconciler() {
     use oryxa_core::{TenantId, UserId};
     use oryxa_fde_core::{CompanyId, CompanyScope};
-    use oryxa_fde_store::{Actor, Name};
+    use oryxa_fde_store::{Actor, CompanyIn, Name};
 
     let w = world().await;
     let org = new_id("org");
@@ -1132,7 +1311,13 @@ async fn a_grant_left_pending_after_commit_is_written_by_the_reconciler() {
         request_id: new_id("req"),
     };
     let mut tx = w.store.company(&c).await.unwrap();
-    tx.create(&Name::new("Acme").unwrap(), &by).await.unwrap();
+    let v = CompanyIn {
+        name: Name::new("Acme").unwrap(),
+        industry: None,
+        region: None,
+        summary: None,
+    };
+    tx.create(&v, &by).await.unwrap();
     tx.commit().await.unwrap();
     let path = format!("/v1/companies/{}", c.company);
     assert_eq!(w.status(&alice, "GET", &path, None).await, StatusCode::FORBIDDEN);
@@ -1185,4 +1370,406 @@ async fn a_demoted_admin_changes_nothing_on_any_replica() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = w.call(Some(&member), "GET", &company, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn browser_sign_in_sets_a_session_that_works_like_a_bearer_token() {
+    use std::sync::atomic::Ordering;
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+
+    // Login sends the browser to AuthKit and keeps the sign-in in a sealed, host-only cookie.
+    let (status, headers, _) = w
+        .send(
+            Request::get("/auth/login?return_to=/companies")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(
+        headers["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("https://auth.fake/authorize?state=")
+    );
+    assert!(
+        headers["location"]
+            .to_str()
+            .unwrap()
+            .contains("redirect_uri=https://fde.test/auth/callback")
+    );
+    let cookie = headers["set-cookie"].to_str().unwrap();
+    assert!(cookie.starts_with("__Host-fde_signin=") && cookie.contains("Secure; HttpOnly; SameSite=Lax"));
+
+    // The callback sets the session and returns to where sign-in started.
+    let (status, headers, _) = w.sign_in_as(Some(&org), &alice.id, "member").await;
+    assert_eq!(
+        (status, headers["location"].to_str().unwrap()),
+        (StatusCode::FOUND, "/companies")
+    );
+    let session = set_cookie(&headers, "__Host-fde_session").unwrap();
+    assert_eq!(
+        set_cookie(&headers, "__Host-fde_signin").as_deref(),
+        Some(""),
+        "the sign-in cookie is cleared"
+    );
+
+    // Reads need nothing more; changes need the web app's headers.
+    let (status, _, me) = w.with_cookie(&session, "GET", "/v1/me", None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        me["user"],
+        json!({"id": alice.id, "name": format!("Name of {}", alice.id)})
+    );
+    assert_eq!(
+        (me["organisation"]["id"].as_str(), me["role"].as_str()),
+        (Some(org.as_str()), Some("member"))
+    );
+    let create = || Some(json!({"name": "Acme"}));
+    let (status, _, body) = w.with_cookie(&session, "POST", "/v1/companies", create(), false).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")));
+    for (header, value) in [("x-oryxa-request", "1"), ("origin", WEB)] {
+        // One of the two alone is not enough.
+        let req = Request::post("/v1/companies")
+            .header("cookie", format!("__Host-fde_session={session}"))
+            .header(header, value)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"name": "Acme"}).to_string()))
+            .unwrap();
+        assert_eq!(w.send(req).await.0, StatusCode::FORBIDDEN, "{header} alone");
+    }
+    let req = Request::post("/v1/companies")
+        .header("cookie", format!("__Host-fde_session={session}"))
+        .header("x-oryxa-request", "1")
+        .header("origin", "https://evil.example")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name": "Acme"}).to_string()))
+        .unwrap();
+    assert_eq!(w.send(req).await.0, StatusCode::FORBIDDEN, "another origin");
+    let (status, _, created) = w.with_cookie(&session, "POST", "/v1/companies", create(), true).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let company = format!("/v1/companies/{}", created["id"].as_str().unwrap());
+    // The same permissions as the bearer token: alice leads it, bob cannot see it.
+    w.ok(&alice, "GET", &company, None, StatusCode::OK).await;
+    let bob = user(&org, "bob", "member");
+    let bob_session = w.session(&bob, &org).await;
+    assert_eq!(
+        w.with_cookie(&bob_session, "GET", &company, None, false).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // A bearer token wins over a cookie, and needs no web headers.
+    let req = Request::get(&company)
+        .header("authorization", format!("Bearer {}", alice.token))
+        .header("cookie", format!("__Host-fde_session={bob_session}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(w.send(req).await.0, StatusCode::OK);
+
+    // An expired access token is refreshed through AuthKit and the cookie reissued.
+    let sealed = |access: String, signed_in: u64| {
+        let s = json!({
+            "purpose": "fde_session", "access_token": access, "refresh_token": format!("refresh|{org}|{}|member", alice.id),
+            "user": alice.id, "organisation": org, "signed_in": signed_in,
+        });
+        workos::helpers::session::seal(&s, &w.password).unwrap()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired = || support::token_for(Some(&org), &alice.id, "member", -3600);
+    let stale = sealed(expired(), now - 3600);
+    let (status, headers, _) = w.with_cookie(&stale, "GET", &company, None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let renewed = set_cookie(&headers, "__Host-fde_session").unwrap();
+    assert!(!renewed.is_empty() && renewed != stale);
+    assert_eq!(
+        w.with_cookie(&renewed, "GET", &company, None, false).await.0,
+        StatusCode::OK
+    );
+    // A refresh AuthKit refuses ends the session.
+    w.authkit.refresh_fails.store(true, Ordering::SeqCst);
+    let (status, headers, _) = w.with_cookie(&stale, "GET", &company, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        set_cookie(&headers, "__Host-fde_session").as_deref(),
+        Some(""),
+        "and clears the cookie"
+    );
+    w.authkit.refresh_fails.store(false, Ordering::SeqCst);
+
+    // A tampered cookie, one sealed with another key, or a session past its week: refused.
+    let mut tampered = session.clone().into_bytes();
+    let i = tampered.len() / 2;
+    tampered[i] = if tampered[i] == b'A' { b'B' } else { b'A' };
+    let tampered = String::from_utf8(tampered).unwrap();
+    let old = sealed(alice.token.clone(), now - 8 * 24 * 3600);
+    let foreign = workos::helpers::session::seal(&json!({"purpose": "fde_session"}), &"0".repeat(64)).unwrap();
+    // Another user's token inside a session sealed for alice.
+    let swapped = sealed(support::token(Some(&org), &bob.id, "member"), now);
+    for bad in [tampered, old, foreign, swapped, "garbage".into()] {
+        let (status, headers, _) = w.with_cookie(&bad, "GET", "/v1/me", None, false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{bad}");
+        assert_eq!(set_cookie(&headers, "__Host-fde_session").as_deref(), Some(""));
+    }
+
+    // Logout ends the WorkOS session and clears the cookie; without a session there is nothing to end.
+    let (status, headers, _) = w.with_cookie(&session, "POST", "/auth/logout", None, true).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(set_cookie(&headers, "__Host-fde_session").as_deref(), Some(""));
+    assert_eq!(
+        w.authkit.revoked.lock().unwrap().last().map(String::as_str),
+        Some("session_1")
+    );
+    let (status, _, _) = w.with_cookie(&session, "POST", "/auth/logout", None, false).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "logout is a change: it needs the web headers too"
+    );
+    let (status, _) = w.call(None, "POST", "/auth/logout", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Starts a sign-in: its state and its sign-in cookie.
+async fn start_sign_in(w: &World) -> (String, String) {
+    let (_, headers, _) = w.send(Request::get("/auth/login").body(Body::empty()).unwrap()).await;
+    let location = headers["location"].to_str().unwrap().to_owned();
+    let state = location
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_owned();
+    (state, set_cookie(&headers, "__Host-fde_signin").unwrap())
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn sign_in_refuses_bad_return_paths_states_and_codes() {
+    let w = world().await;
+    let org = new_id("org");
+    for bad in [
+        "//evil.example",
+        "/%09/evil.example",
+        "https://evil.example",
+        "/\\\\evil",
+        "companies",
+    ] {
+        let path = format!("/auth/login?return_to={bad}");
+        let (status, _, body) = w.send(Request::get(&path).body(Body::empty()).unwrap()).await;
+        // %09 decodes to a tab, which is refused like the rest.
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_return_to")),
+            "{bad}"
+        );
+    }
+    // A callback with no sign-in in progress, or another sign-in's state or code.
+    let (status, _, body) = w
+        .send(
+            Request::get("/auth/callback?code=code-x&state=x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_sign_in"))
+    );
+    let (state, pending) = start_sign_in(&w).await;
+    let (other_state, _) = start_sign_in(&w).await;
+    *w.authkit.who.lock().unwrap() = (Some(org.clone()), "user_x".into(), "member".into());
+    for (code, st, want) in [
+        (format!("code-{state}"), other_state.clone(), "invalid_state"),
+        // The code of the other sign-in: its PKCE verifier is not this one's.
+        (format!("code-{other_state}"), state.clone(), "unauthorized"),
+    ] {
+        let req = Request::get(format!("/auth/callback?code={code}&state={st}"))
+            .header("cookie", format!("__Host-fde_signin={pending}"))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = w.send(req).await;
+        assert!(status.is_client_error(), "{want}: {status}");
+        assert_eq!(body["error"], want);
+    }
+    // A user who signed in without picking an organisation gets no session.
+    let (status, headers, body) = w.sign_in_as(None, "user_y", "member").await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("no_organisation"))
+    );
+    assert_eq!(set_cookie(&headers, "__Host-fde_session"), None);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn screens_get_their_fields_and_today_in_one_call() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let (lead, asg) = (&t.lead, &t.assignee);
+    let base = format!("/v1/companies/{}", t.company);
+    let p = format!("{base}/projects/{}", t.project);
+
+    // Company and project fields; PATCH changes what it names, `null` clears.
+    let patched = w
+        .ok(
+            lead,
+            "PATCH",
+            &base,
+            Some(json!({"industry": "Insurance", "region": "UK", "summary": "Claims automation"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (patched["name"].as_str(), patched["industry"].as_str()),
+        (Some("acme"), Some("Insurance"))
+    );
+    let patched = w
+        .ok(lead, "PATCH", &base, Some(json!({"region": null})), StatusCode::OK)
+        .await;
+    assert_eq!(
+        (patched["region"].clone(), patched["industry"].as_str()),
+        (Value::Null, Some("Insurance"))
+    );
+    let (status, _) = w
+        .call(Some(&lead.token), "PATCH", &base, Some(json!({"industry": ""})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let project = w
+        .ok(
+            asg,
+            "PATCH",
+            &p,
+            Some(json!({"summary": "Tier-1 support bot"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (project["summary"].as_str(), project["name"].as_str()),
+        (Some("Tier-1 support bot"), Some("acme"))
+    );
+
+    // Stakeholder role and system kind.
+    let s = w
+        .ok(
+            lead,
+            "POST",
+            &format!("{base}/stakeholders"),
+            Some(json!({"name": "Ana", "role": "sponsor"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(s["role"], "sponsor");
+    let (status, _) = w
+        .call(
+            Some(&lead.token),
+            "POST",
+            &format!("{base}/stakeholders"),
+            Some(json!({"name": "X", "role": "boss"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let sys = w
+        .ok(
+            lead,
+            "POST",
+            &format!("{base}/systems"),
+            Some(json!({"name": "Guidewire", "kind": "Policy admin"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(sys["kind"], "Policy admin");
+
+    // Task due date, assignee and what it waits on.
+    let task = w
+        .ok(
+            asg,
+            "POST",
+            &format!("{p}/tasks"),
+            Some(
+                json!({"title": "Claims export", "status": "waiting_on_customer", "due_on": "2026-11-20",
+                "assignee": asg.id, "waiting_on": s["id"]}),
+            ),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(
+        (
+            task["due_on"].as_str(),
+            task["assignee"].as_str(),
+            task["waiting_on"].as_str()
+        ),
+        (Some("2026-11-20"), Some(asg.id.as_str()), s["id"].as_str())
+    );
+    assert!(task["waiting_since"].is_string());
+    let (status, body) = w
+        .call(
+            Some(&asg.token),
+            "POST",
+            &format!("{p}/tasks"),
+            Some(json!({"title": "x", "status": "todo", "due_on": "20 Nov"})),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_due_on"))
+    );
+
+    // The company list carries the caller's role and the project summaries.
+    let list = w.ok(lead, "GET", "/v1/companies", None, StatusCode::OK).await;
+    assert_eq!(
+        (list[0]["role"].as_str(), list[0]["industry"].as_str()),
+        (Some("lead"), Some("Insurance"))
+    );
+    assert_eq!(
+        list[0]["projects"][0],
+        json!({"id": t.project, "name": "acme", "stage": "discover"})
+    );
+    let list = w.ok(&t.engineer, "GET", "/v1/companies", None, StatusCode::OK).await;
+    assert_eq!(list[0]["role"], "engineer");
+    let list = w.ok(&t.admin, "GET", "/v1/companies", None, StatusCode::OK).await;
+    assert_eq!(list[0]["role"], "admin");
+
+    // Today: the open tasks and the unsettled request across the caller's projects, with names.
+    let today = w.ok(asg, "GET", "/v1/today", None, StatusCode::OK).await;
+    let kinds: Vec<(&str, &str)> = today["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            let title = i["task"]["title"]
+                .as_str()
+                .or(i["access"]["description"].as_str())
+                .unwrap();
+            (i["kind"].as_str().unwrap(), title)
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("task", "Index tickets"),
+            ("task", "Claims export"),
+            ("access_request", "API token")
+        ]
+    );
+    let item = &today["items"][2];
+    assert_eq!(
+        (
+            item["owner"].as_str(),
+            item["company"]["name"].as_str(),
+            item["project"]["name"].as_str()
+        ),
+        (Some("Pat"), Some("acme"), Some("acme"))
+    );
+    // Someone in the organisation with no projects has nothing today.
+    let other = user(&org, "other", "member");
+    let today = w.ok(&other, "GET", "/v1/today", None, StatusCode::OK).await;
+    assert_eq!(today["items"], json!([]));
 }

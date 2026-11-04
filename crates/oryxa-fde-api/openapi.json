@@ -10,12 +10,169 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/auth/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Finish sign-in: sets the session cookie and redirects to where sign-in started.",
+        "operationId": "sign_in_callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Signed in; to the page sign-in started from"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start sign-in: redirects to WorkOS AuthKit.",
+        "operationId": "sign_in",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "description": "Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "To WorkOS AuthKit"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign out: ends the WorkOS session and clears the cookie.",
+        "operationId": "sign_out",
+        "responses": {
+          "204": {
+            "description": "Signed out"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies": {
       "get": {
         "tags": [
           "companies"
         ],
-        "summary": "The companies the caller works on.",
+        "summary": "The companies the caller works on, each with the caller's role and its projects.",
         "operationId": "list_companies",
         "responses": {
           "200": {
@@ -25,7 +182,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/CompanyOut"
+                    "$ref": "#/components/schemas/CompanySummaryOut"
                   }
                 }
               }
@@ -53,7 +210,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameIn"
+                "$ref": "#/components/schemas/CompanyBody"
               }
             }
           },
@@ -148,8 +305,8 @@
         "tags": [
           "companies"
         ],
-        "summary": "Rename a company.",
-        "operationId": "rename_company",
+        "summary": "Change some of a company's fields.",
+        "operationId": "update_company",
         "parameters": [
           {
             "name": "company",
@@ -165,7 +322,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameIn"
+                "$ref": "#/components/schemas/CompanyPatch"
               }
             }
           },
@@ -441,7 +598,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameIn"
+                "$ref": "#/components/schemas/ProjectBody"
               }
             }
           },
@@ -555,8 +712,8 @@
         "tags": [
           "projects"
         ],
-        "summary": "Rename a project.",
-        "operationId": "rename_project",
+        "summary": "Change some of a project's fields.",
+        "operationId": "update_project",
         "parameters": [
           {
             "name": "company",
@@ -581,7 +738,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameIn"
+                "$ref": "#/components/schemas/ProjectPatch"
               }
             }
           },
@@ -2887,6 +3044,47 @@
         }
       }
     },
+    "/v1/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Who is signed in.",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/security-answers": {
       "get": {
         "tags": [
@@ -3081,6 +3279,37 @@
           }
         }
       }
+    },
+    "/v1/today": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "What needs the caller across their projects: open tasks and unsettled access requests.",
+        "operationId": "get_today",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodayOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3192,6 +3421,47 @@
           }
         }
       },
+      "CallerRole": {
+        "type": "string",
+        "description": "The caller's role at a company: a member's role, or `admin` for a WorkOS admin who is not a\nmember.",
+        "enum": [
+          "lead",
+          "engineer",
+          "admin"
+        ]
+      },
+      "CompanyBody": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "industry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 200 characters, no control characters."
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Up to 4000 characters."
+          }
+        },
+        "additionalProperties": false
+      },
       "CompanyOut": {
         "type": "object",
         "required": [
@@ -3207,13 +3477,95 @@
           "id": {
             "type": "string"
           },
+          "industry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the company is, e.g. \"UK\" or \"EMEA\"."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "updated_at": {
             "type": "string"
           }
         }
+      },
+      "CompanyPatch": {
+        "type": "object",
+        "description": "A change to some of a company's fields: a field left out stays as it is, `null` clears it.",
+        "properties": {
+          "industry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompanySummaryOut": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CompanyOut"
+          },
+          {
+            "type": "object",
+            "required": [
+              "projects"
+            ],
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectSummaryOut"
+                }
+              },
+              "role": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CallerRole"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A company in the caller's list: the company, the caller's role and its projects."
       },
       "CriterionBody": {
         "type": "object",
@@ -3370,6 +3722,26 @@
           "out"
         ]
       },
+      "MeOut": {
+        "type": "object",
+        "required": [
+          "user",
+          "organisation",
+          "role"
+        ],
+        "properties": {
+          "organisation": {
+            "$ref": "#/components/schemas/NamedOut"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The caller's WorkOS role in the organisation."
+          },
+          "user": {
+            "$ref": "#/components/schemas/NamedOut"
+          }
+        }
+      },
       "MemberIn": {
         "type": "object",
         "required": [
@@ -3409,7 +3781,29 @@
           "engineer"
         ]
       },
-      "NameIn": {
+      "NamedOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "OrgRole": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "member"
+        ]
+      },
+      "ProjectBody": {
         "type": "object",
         "required": [
           "name"
@@ -3418,6 +3812,13 @@
           "name": {
             "type": "string",
             "description": "1 to 200 characters, no control characters."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Up to 4000 characters."
           }
         },
         "additionalProperties": false
@@ -3448,10 +3849,35 @@
           "stage": {
             "$ref": "#/components/schemas/ProjectStage"
           },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "updated_at": {
             "type": "string"
           }
         }
+      },
+      "ProjectPatch": {
+        "type": "object",
+        "description": "A change to some of a project's fields: a field left out stays as it is, `null` clears it.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "ProjectStage": {
         "type": "string",
@@ -3465,6 +3891,26 @@
           "handoff",
           "operate"
         ]
+      },
+      "ProjectSummaryOut": {
+        "type": "object",
+        "description": "A project in a company list.",
+        "required": [
+          "id",
+          "name",
+          "stage"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ProjectStage"
+          }
+        }
       },
       "ScopeChangeOut": {
         "type": "object",
@@ -3684,12 +4130,16 @@
           "name": {
             "type": "string"
           },
+          "role": {
+            "$ref": "#/components/schemas/StakeholderPart",
+            "description": "Their part in the engagement; `other` if left out."
+          },
           "title": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Their role at the customer, e.g. \"VP Engineering\"."
+            "description": "Their job at the customer, e.g. \"VP Engineering\"."
           }
         },
         "additionalProperties": false
@@ -3699,6 +4149,7 @@
         "required": [
           "id",
           "name",
+          "role",
           "updated_at"
         ],
         "properties": {
@@ -3707,6 +4158,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/StakeholderPart"
           },
           "title": {
             "type": [
@@ -3719,6 +4173,18 @@
           }
         }
       },
+      "StakeholderPart": {
+        "type": "string",
+        "description": "The part a stakeholder plays in the engagement.",
+        "enum": [
+          "sponsor",
+          "champion",
+          "user",
+          "it",
+          "security",
+          "other"
+        ]
+      },
       "SystemBody": {
         "type": "object",
         "required": [
@@ -3730,6 +4196,13 @@
               "string",
               "null"
             ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What sort of system, e.g. \"CRM\" or \"data warehouse\"."
           },
           "name": {
             "type": "string"
@@ -3754,6 +4227,12 @@
           "id": {
             "type": "string"
           },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -3776,6 +4255,13 @@
           "status"
         ],
         "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The WorkOS user who works it."
+          },
           "blocker": {
             "type": [
               "string",
@@ -3783,11 +4269,25 @@
             ],
             "description": "What blocks the task; required when the status is `blocked`."
           },
+          "due_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Due date, `YYYY-MM-DD`."
+          },
           "status": {
             "$ref": "#/components/schemas/TaskState"
           },
           "title": {
             "type": "string"
+          },
+          "waiting_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stakeholder at the customer it waits on."
           }
         },
         "additionalProperties": false
@@ -3802,6 +4302,12 @@
           "updated_at"
         ],
         "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "blocker": {
             "type": [
               "string",
@@ -3810,6 +4316,13 @@
           },
           "created_at": {
             "type": "string"
+          },
+          "due_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`YYYY-MM-DD`."
           },
           "id": {
             "type": "string"
@@ -3822,6 +4335,19 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "waiting_on": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waiting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it started waiting on the customer; set while the status is `waiting_on_customer`."
           }
         }
       },
@@ -3834,6 +4360,85 @@
           "blocked",
           "done"
         ]
+      },
+      "TodayItemOut": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A task that is not done.",
+            "required": [
+              "task",
+              "company",
+              "project",
+              "kind"
+            ],
+            "properties": {
+              "company": {
+                "$ref": "#/components/schemas/NamedOut"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "task"
+                ]
+              },
+              "project": {
+                "$ref": "#/components/schemas/NamedOut"
+              },
+              "task": {
+                "$ref": "#/components/schemas/TaskOut"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An access request that is not granted, with the name of the stakeholder who owns it.",
+            "required": [
+              "access",
+              "company",
+              "project",
+              "kind"
+            ],
+            "properties": {
+              "access": {
+                "$ref": "#/components/schemas/AccessRequestOut"
+              },
+              "company": {
+                "$ref": "#/components/schemas/NamedOut"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "access_request"
+                ]
+              },
+              "owner": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "project": {
+                "$ref": "#/components/schemas/NamedOut"
+              }
+            }
+          }
+        ],
+        "description": "Something that needs the FDE, tagged by `kind`."
+      },
+      "TodayOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TodayItemOut"
+            }
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -3865,6 +4470,10 @@
     {
       "name": "lifecycle",
       "description": "A project's stage, scope, access requests, tasks and decisions"
+    },
+    {
+      "name": "auth",
+      "description": "Browser sign-in, the session cookie and who is signed in"
     }
   ]
 }
