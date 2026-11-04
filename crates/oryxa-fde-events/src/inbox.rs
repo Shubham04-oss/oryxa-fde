@@ -65,7 +65,15 @@ pub mod sqs {
     use super::{Message, Outcome};
 
     const WAIT: i32 = 20;
-    const BATCH: i32 = 10;
+    /// One message at a time: a worker that dies on one (a crafted file exhausting its memory)
+    /// costs only that message's delivery, never other tenants' messages received with it.
+    const BATCH: i32 = 1;
+    /// Seconds each heartbeat keeps the message hidden from other consumers.
+    const VISIBILITY: i32 = 120;
+    /// How often a message being handled is kept hidden, starting at once: a long handler (a large
+    /// document, thousands of Bedrock calls) is never redelivered while it runs, and a worker that
+    /// dies lets its message go within [`VISIBILITY`] seconds.
+    const HEARTBEAT: Duration = Duration::from_secs(40);
 
     /// Runs forever. `handle` must be idempotent: SQS delivers at least once.
     pub async fn run<F, Fut>(client: Client, queue_url: String, handle: F)
@@ -91,10 +99,13 @@ pub mod sqs {
             };
             for m in messages {
                 let Some(receipt) = m.receipt_handle else { continue };
-                let outcome = match m.body.as_deref().and_then(Message::parse) {
-                    Some(msg) => handle(msg).await,
-                    None => Outcome::Quarantine,
+                let work = async {
+                    match m.body.as_deref().and_then(Message::parse) {
+                        Some(msg) => handle(msg).await,
+                        None => Outcome::Quarantine,
+                    }
                 };
+                let outcome = with_heartbeat(work, HEARTBEAT, || hide(&client, &queue_url, &receipt)).await;
                 match outcome {
                     Outcome::Done => {
                         if let Err(e) = client
@@ -114,6 +125,76 @@ pub mod sqs {
                     }
                 }
             }
+        }
+    }
+
+    /// Keeps the message hidden for another [`VISIBILITY`] seconds. A failure is only logged: at
+    /// worst the message is delivered again, which handlers allow.
+    async fn hide(client: &Client, queue_url: &str, receipt: &str) {
+        if let Err(e) = client
+            .change_message_visibility()
+            .queue_url(queue_url)
+            .receipt_handle(receipt)
+            .visibility_timeout(VISIBILITY)
+            .send()
+            .await
+        {
+            tracing::warn!(error = %e, "sqs visibility extension failed");
+        }
+    }
+
+    /// Runs `work`, calling `beat` at once and then every `every` until `work` finishes.
+    pub(crate) async fn with_heartbeat<T, B, BF>(work: impl Future<Output = T>, every: Duration, mut beat: B) -> T
+    where
+        B: FnMut() -> BF,
+        BF: Future<Output = ()>,
+    {
+        let mut work = std::pin::pin!(work);
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut work => return out,
+                _ = tick.tick() => beat().await,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::cell::Cell;
+
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn a_message_is_kept_hidden_from_the_start_until_its_handler_ends() {
+            let beats = Cell::new(0);
+            let started = tokio::time::Instant::now();
+            let work = async {
+                tokio::time::sleep(Duration::from_secs(130)).await;
+                "done"
+            };
+            let out = with_heartbeat(work, HEARTBEAT, || {
+                beats.set(beats.get() + 1);
+                async {}
+            })
+            .await;
+            assert_eq!(out, "done");
+            assert_eq!(started.elapsed(), Duration::from_secs(130));
+            // At 0, 40, 80 and 120 seconds: never more than HEARTBEAT apart, and none after the end.
+            assert_eq!(beats.get(), 4);
+            const { assert!(HEARTBEAT.as_secs() * 2 < VISIBILITY as u64) };
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_handler_that_ends_at_once_needs_no_heartbeat() {
+            let beats = Cell::new(0);
+            let out = with_heartbeat(async { 7 }, HEARTBEAT, || {
+                beats.set(beats.get() + 1);
+                async {}
+            })
+            .await;
+            assert_eq!((out, beats.get()), (7, 0));
         }
     }
 }
