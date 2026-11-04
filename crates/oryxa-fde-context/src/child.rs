@@ -285,16 +285,18 @@ mod tests {
         let r = sleeper.extract(ContentType::Pdf, Vec::new()).await.unwrap();
         assert_eq!(r, Err(ExtractError::TooSlow));
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-        // Past its CPU time: stopped by the kernel, well inside the wall clock.
+        // Past its CPU time: stopped by the kernel, not by the parent's wall clock. One second of
+        // CPU can take several of wall time on a busy machine, so the wall clock here is long and
+        // the test only asks that the child ended well before it.
         let mut long_wall = quick();
-        long_wall.wall = Duration::from_secs(20);
+        long_wall.wall = Duration::from_secs(60);
         let started = Instant::now();
         let spinner = sh("while :; do :; done", long_wall);
         assert_eq!(
             spinner.extract(ContentType::Pdf, Vec::new()).await.unwrap(),
             Err(ExtractError::TooSlow)
         );
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(45), "{:?}", started.elapsed());
         // More text than any document may give: cut off.
         let talker = sh("yes", quick());
         assert_eq!(
