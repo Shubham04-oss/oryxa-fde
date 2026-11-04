@@ -225,7 +225,8 @@ data "aws_iam_policy_document" "api" {
   }
 }
 
-# Reached only through the internal ALB. Env names are the contract with crates/oryxa-fde-api.
+# Reached only through the internal ALB. Env names match crates/oryxa-fde-api/src/main.rs, except
+# the database: DB_* are the inputs for IAM auth, where the API reads DATABASE_URL (README).
 module "api" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-api"
@@ -247,7 +248,7 @@ module "api" {
   environment = {
     ORYXA_ENV         = var.env
     AWS_REGION        = local.region
-    PORT              = tostring(var.api_port)
+    LISTEN_ADDR       = "0.0.0.0:${var.api_port}"
     DB_HOST           = module.db.address
     DB_PORT           = tostring(module.db.port)
     DB_NAME           = local.db_name
@@ -261,8 +262,8 @@ module "api" {
   }
   secrets = {
     WORKOS_API_KEY        = { arn = local.secret_arn["api/workos-api-key"] }
-    EVENT_SIGNING_KEY_PEM = { arn = local.secret_arn["api/event-signing-key"] }
-    SPICEDB_KEY           = { arn = local.secret_arn["shared/spicedb-preshared-key"] }
+    EVENT_SIGNING_KEY     = { arn = local.secret_arn["api/event-signing-key"] }
+    SPICEDB_PRESHARED_KEY = { arn = local.secret_arn["shared/spicedb-preshared-key"] }
   }
   task_policies      = { api = data.aws_iam_policy_document.api.json }
   load_balancer      = { target_group_arn = module.alb.target_group_arn }

@@ -83,12 +83,12 @@ run "dev_plans_without_credentials" {
     error_message = "one queue set per default consumer"
   }
 
-  # The env names crates/oryxa-fde-api reads (infra/README.md). Secrets arrive by reference only.
+  # The env names crates/oryxa-fde-api/src/main.rs reads, plus DB_* for IAM database auth in place of
+  # its DATABASE_URL (infra/README.md). Secrets arrive by reference only.
   assert {
     condition = length(setsubtract([
-      "ORYXA_ENV", "AWS_REGION", "PORT", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "SPICEDB_ENDPOINT",
-      "SPICEDB_KEY", "EVENT_BUS_ARN", "EVENT_SIGNING_KID", "EVENT_SIGNING_KEY_PEM", "DATA_BUCKET",
-      "WORKOS_CLIENT_ID", "WORKOS_API_KEY", "WEB_ORIGIN",
+      "LISTEN_ADDR", "SPICEDB_ENDPOINT", "SPICEDB_PRESHARED_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID",
+      "EVENT_SIGNING_KID", "EVENT_SIGNING_KEY", "EVENT_BUS_ARN", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER",
     ], module.api.env_names)) == 0
     error_message = "oryxa-fde-api is missing an env name from the contract"
   }

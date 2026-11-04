@@ -39,7 +39,7 @@ are bound to the VPC service reach it, through the tunnel.
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, SpiceDB migrate, SpiceDB schema write |
-| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_api` and `spicedb`, the schema owner role, the `spicedb` database |
+| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_api` and `spicedb`, the roles the API's transactions take, the `spicedb` database |
 
 Names: the ECS service is `oryxa-fde-api` and its ECR repository is `oryxa-fde-api`. Everything
 else is `oryxa-fde-<env>-…`: the cluster `oryxa-fde-dev`, SpiceDB `oryxa-fde-dev-spicedb`, the
@@ -67,7 +67,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `api_image_tag` | required | Git sha of the `oryxa-fde-api` image in ECR (tags are immutable); unused while `start_services` is false |
 | `start_services` | `false` | `false`: every service runs 0 tasks. Set `true` once the image and every secret value exist |
 | `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue |
-| `api_port` | `8080` | Port `oryxa-fde-api` listens on (`PORT`) |
+| `api_port` | `8080` | Port `oryxa-fde-api` listens on (`LISTEN_ADDR`) |
 | `api_health_check_path` | `/healthz` | Path the ALB polls; must answer 200 without auth |
 | `api_cpu` | `256` | API task CPU units (0.25 vCPU) |
 | `api_memory` | `512` | API task memory in MiB |
@@ -92,8 +92,8 @@ them as env vars when a task starts, and a task cannot start until its secrets h
 | Secret (`oryxa-fde-dev/…`) | Env name | Read by |
 | --- | --- | --- |
 | `api/workos-api-key` | `WORKOS_API_KEY` | oryxa-fde-api |
-| `api/event-signing-key` | `EVENT_SIGNING_KEY_PEM` | oryxa-fde-api (outbox relay) |
-| `shared/spicedb-preshared-key` | `SPICEDB_KEY` (API), `SPICEDB_GRPC_PRESHARED_KEY` (SpiceDB), `ZED_TOKEN` (zed task) | oryxa-fde-api, SpiceDB, the zed task |
+| `api/event-signing-key` | `EVENT_SIGNING_KEY` | oryxa-fde-api (outbox relay) |
+| `shared/spicedb-preshared-key` | `SPICEDB_PRESHARED_KEY` (API), `SPICEDB_GRPC_PRESHARED_KEY` (SpiceDB), `ZED_TOKEN` (zed task) | oryxa-fde-api, SpiceDB, the zed task |
 | `cloudflared/tunnel-token` | `TUNNEL_TOKEN` | cloudflared |
 | RDS master (created by RDS) | `PGUSER`, `PGPASSWORD` | the db-admin task only |
 
@@ -117,7 +117,7 @@ Tunnel, Access: Apps and Policies, Workers VPC (Connectivity Directory), and Zon
    10 minutes), the empty secrets, ECR, the ALB, the cluster with every service at 0 tasks, queues,
    CloudTrail, and on Cloudflare the DNS records, the tunnel, the VPC service and Access.
 4. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
-   pgvector, the IAM logins, the schema owner role and the `spicedb` database, and is safe to re-run.
+   pgvector, the IAM logins, the API's transaction roles and the `spicedb` database, and is safe to re-run.
 5. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
@@ -217,16 +217,22 @@ These could not be checked without an account. Each one is flagged at the place 
 
 ## Contracts with other streams
 
-- **API (`crates/oryxa-fde-api`)** gets these env names: `ORYXA_ENV`, `AWS_REGION`, `PORT`,
-  `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `SPICEDB_ENDPOINT`, `SPICEDB_KEY`, `EVENT_BUS_ARN`,
-  `EVENT_SIGNING_KID`, `EVENT_SIGNING_KEY_PEM`, `DATA_BUCKET`, `WORKOS_CLIENT_ID`, `WORKOS_API_KEY`,
-  `WEB_ORIGIN`. The names follow the platform's services; rename them here if the API picks others.
-  `tests/plan.tftest.hcl` pins the list. The API should:
-  - serve `GET /healthz` without auth;
-  - connect to Postgres over TLS with an IAM auth token as the password;
-  - `SET ROLE oryxa_fde_schema` to migrate;
-  - keep files under `tenants/<tenant>/companies/<company>/`;
-  - ship a `linux/arm64` image that writes nothing to its root filesystem, which is read-only.
+- **API (`crates/oryxa-fde-api`)** gets the env names its `main.rs` reads: `LISTEN_ADDR`,
+  `SPICEDB_ENDPOINT`, `SPICEDB_PRESHARED_KEY`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
+  `EVENT_SIGNING_KID`, `EVENT_SIGNING_KEY` and `EVENT_BUS_ARN`, plus `AWS_REGION`, `ORYXA_ENV`,
+  `DATA_BUCKET` and `WEB_ORIGIN`. `tests/plan.tftest.hcl` pins the list.
+  - **Open: the database.** The API reads one `DATABASE_URL`. Issue #7 asks for IAM database auth,
+    whose password is a 15-minute token, so infra provides `DB_HOST`, `DB_PORT`, `DB_NAME` and
+    `DB_USER` instead, and the API's role may connect only as `oryxa_fde_api`. Until the API builds
+    its connection from those with a token (as the platform's services do), it cannot start here.
+    The alternative, a password login with `DATABASE_URL` in Secrets Manager, needs no API change
+    but brings back a database password. The lead decides.
+  - It runs the store's migrations at startup as `oryxa_fde_api`, which owns the tables (they force
+    row-level security) and takes `oryxa_fde_app` or `oryxa_fde_relay` per transaction. The bootstrap
+    creates those two roles, so the API needs no CREATEROLE.
+  - It serves `GET /healthz` without auth (it does), keeps files under
+    `tenants/<tenant>/companies/<company>/`, and ships a `linux/arm64` image that writes nothing to
+    its root filesystem, which is read-only.
 - **Web (`fde-web/`)** uses the `vpc_services` binding (output `api_vpc_service_id`) and a zone route
   on `app.<domain>`, not a custom domain.
 - **Agent (`sandbox/`)** has nothing here yet. Its gateway's hostname and an AWS identity for the

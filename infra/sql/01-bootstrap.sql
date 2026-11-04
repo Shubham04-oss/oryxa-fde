@@ -5,19 +5,22 @@
 -- pgvector for context search. RDS ships it; only the master (rds_superuser) may create it.
 create extension if not exists vector;
 
--- oryxa_fde_api: the API's login. oryxa_fde_schema: owns every FDE table. The API may switch to
--- it to migrate (set role) but does not inherit it, so at run time it holds only what is granted
--- and row-level security applies to it. spicedb: SpiceDB's login, for its own database below.
+-- oryxa_fde_api: the API's login. It runs the store's migrations at startup, so it owns the FDE
+-- tables; they force row-level security, so ownership does not bypass it. oryxa_fde_app and
+-- oryxa_fde_relay: the roles each transaction takes (SET LOCAL ROLE), made here so the API needs no
+-- CREATEROLE; admin option lets its migration re-grant them to itself. spicedb: SpiceDB's login.
 select 'create role oryxa_fde_api login'
 where not exists (select from pg_roles where rolname = 'oryxa_fde_api') \gexec
-select 'create role oryxa_fde_schema nologin'
-where not exists (select from pg_roles where rolname = 'oryxa_fde_schema') \gexec
+select 'create role oryxa_fde_app nologin'
+where not exists (select from pg_roles where rolname = 'oryxa_fde_app') \gexec
+select 'create role oryxa_fde_relay nologin'
+where not exists (select from pg_roles where rolname = 'oryxa_fde_relay') \gexec
 select 'create role spicedb login'
 where not exists (select from pg_roles where rolname = 'spicedb') \gexec
 
 grant rds_iam to oryxa_fde_api, spicedb;
-grant usage, create on schema public to oryxa_fde_schema;
-grant oryxa_fde_schema to oryxa_fde_api with inherit false, set true;
+grant usage, create on schema public to oryxa_fde_api;
+grant oryxa_fde_app, oryxa_fde_relay to oryxa_fde_api with admin option;
 
 -- SpiceDB's datastore, reachable by its owner only. The RDS master is not a superuser: it takes
 -- the spicedb role just long enough to create the database and close it to everyone else.
