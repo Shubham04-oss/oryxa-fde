@@ -1331,12 +1331,16 @@ async fn row_level_security_covers_documents_and_chunks() {
         };
         let mut tx = store.company(s).await.unwrap();
         tx.add_document(&id, &v, &by).await.unwrap().unwrap();
-        assert!(tx.add_chunks(&id, "fake", std::slice::from_ref(&chunk)).await.unwrap());
-        assert!(tx.finish_chunks(&id, "fake", 1).await.unwrap());
+        assert!(
+            tx.add_chunks(&id, "fake", &[], std::slice::from_ref(&chunk))
+                .await
+                .unwrap()
+        );
+        assert!(tx.finish_chunks(&id, "fake", &[], 1).await.unwrap());
         tx.commit().await.unwrap();
         // Ingested under this model: more chunks for it are refused, and nothing is written.
         let mut tx = store.company(s).await.unwrap();
-        assert!(!tx.add_chunks(&id, "fake", &[chunk]).await.unwrap());
+        assert!(!tx.add_chunks(&id, "fake", &[], &[chunk]).await.unwrap());
     }
 
     // No WHERE clause: A's transaction sees A's document and chunk only.
@@ -1920,8 +1924,8 @@ async fn a_small_company_finds_all_its_chunks_among_many_tenants() {
         .collect();
     let mut tx = store.company(&small).await.unwrap();
     tx.add_document(&id, &v, &by).await.unwrap().unwrap();
-    assert!(tx.add_chunks(&id, "fake", &chunks).await.unwrap());
-    assert!(tx.finish_chunks(&id, "fake", chunks.len()).await.unwrap());
+    assert!(tx.add_chunks(&id, "fake", &[], &chunks).await.unwrap());
+    assert!(tx.finish_chunks(&id, "fake", &[], chunks.len()).await.unwrap());
     tx.commit().await.unwrap();
 
     let mut tx = store.company(&small).await.unwrap();
@@ -1985,16 +1989,16 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     let mut tx = store.company(&s).await.unwrap();
     tx.add_document(&id, &v, &by).await.unwrap().unwrap();
     // A pending document's first batch is stored, but search sees none of it yet.
-    assert!(tx.add_chunks(&id, "m1", &[chunk(0)]).await.unwrap());
+    assert!(tx.add_chunks(&id, "m1", &[], &[chunk(0)]).await.unwrap());
     assert!(tx.search_text("refunds", 10).await.unwrap().is_empty());
     assert!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().is_empty());
     assert!(matches!(
-        tx.finish_chunks(&id, "m1", 2).await,
+        tx.finish_chunks(&id, "m1", &[], 2).await,
         Err(StoreError::Rejected("chunks_missing"))
     ));
     // The same chunk again is kept as it is; with the last one, the set is complete.
-    assert!(tx.add_chunks(&id, "m1", &[chunk(0), chunk(1)]).await.unwrap());
-    assert!(tx.finish_chunks(&id, "m1", 2).await.unwrap());
+    assert!(tx.add_chunks(&id, "m1", &[], &[chunk(0), chunk(1)]).await.unwrap());
+    assert!(tx.finish_chunks(&id, "m1", &[], 2).await.unwrap());
     let doc = tx.document(&id).await.unwrap().unwrap();
     assert_eq!(
         (doc.status, doc.chunks, doc.embedding_model.as_deref()),
@@ -2003,10 +2007,13 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 2);
     tx.commit().await.unwrap();
 
-    // Re-embedded under m2: until its set is complete, search reads m1's, once.
+    // Re-embedded under m2, which replaces m1: until its set is complete, search reads m1's, once.
+    let from_m1 = ["m1".to_owned()];
     let mut tx = store.company(&s).await.unwrap();
-    assert!(tx.document(&id).await.unwrap().unwrap().needs("m2"));
-    assert!(tx.add_chunks(&id, "m2", &[chunk(0)]).await.unwrap());
+    assert!(tx.document(&id).await.unwrap().unwrap().needs("m2", &from_m1));
+    // A model that does not replace m1 leaves the document alone.
+    assert!(!tx.add_chunks(&id, "m2", &[], &[chunk(0)]).await.unwrap());
+    assert!(tx.add_chunks(&id, "m2", &from_m1, &[chunk(0)]).await.unwrap());
     assert_eq!(
         tx.search_text("refunds", 10).await.unwrap().len(),
         2,
@@ -2014,13 +2021,16 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     );
     assert!(tx.search_vector(&axis(0), "m2", 10).await.unwrap().is_empty());
     assert_eq!(tx.stored_chunks(&id, "m2").await.unwrap().len(), 1);
-    assert!(tx.add_chunks(&id, "m2", &[chunk(1)]).await.unwrap());
-    assert!(tx.finish_chunks(&id, "m2", 2).await.unwrap());
+    assert!(tx.add_chunks(&id, "m2", &from_m1, &[chunk(1)]).await.unwrap());
+    assert!(tx.finish_chunks(&id, "m2", &from_m1, 2).await.unwrap());
     assert_eq!(tx.search_vector(&axis(0), "m2", 10).await.unwrap().len(), 2);
     assert!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().is_empty());
     // Done under m2: nothing more is taken for it.
-    assert!(!tx.add_chunks(&id, "m2", &[chunk(2)]).await.unwrap());
-    assert!(!tx.finish_chunks(&id, "m2", 2).await.unwrap());
+    assert!(!tx.add_chunks(&id, "m2", &from_m1, &[chunk(2)]).await.unwrap());
+    assert!(!tx.finish_chunks(&id, "m2", &from_m1, 2).await.unwrap());
+    // Mid-deploy, a worker still on m1 never swaps the document back.
+    assert!(!tx.add_chunks(&id, "m1", &[], &[chunk(0)]).await.unwrap());
+    assert!(!tx.finish_chunks(&id, "m1", &[], 2).await.unwrap());
     tx.commit().await.unwrap();
     let models: Vec<(String, i64)> = sqlx::query_as(
         "select embedding_model, count(*) from document_chunks where document_id = $1 group by embedding_model",
@@ -2035,9 +2045,9 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     let failed = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
     let mut tx = store.company(&s).await.unwrap();
     tx.add_document(&failed, &v, &by).await.unwrap().unwrap();
-    assert!(tx.add_chunks(&failed, "m2", &[chunk(0)]).await.unwrap());
+    assert!(tx.add_chunks(&failed, "m2", &[], &[chunk(0)]).await.unwrap());
     tx.record_failure(&failed, "checksum").await.unwrap();
     assert!(tx.stored_chunks(&failed, "m2").await.unwrap().is_empty());
-    assert!(!tx.add_chunks(&failed, "m2", &[chunk(0)]).await.unwrap());
+    assert!(!tx.add_chunks(&failed, "m2", &[], &[chunk(0)]).await.unwrap());
     tx.commit().await.unwrap();
 }

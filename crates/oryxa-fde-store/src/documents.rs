@@ -2,7 +2,7 @@
 //! their text in chunks for full-text and vector search. An upload queues `document.uploaded`.
 //! Ingestion stores chunks a batch at a time under the embedding model, so a redelivered event
 //! resumes after the last batch; once every chunk is stored the document names that model's set,
-//! which is the only one search reads. A document ingested with another model is re-embedded the
+//! which is the only one search reads. A document ingested with a model this one replaces is re-embedded the
 //! same way, and its old set deleted when the new one is complete.
 
 use oryxa_core::UserId;
@@ -96,13 +96,14 @@ pub struct Document {
 }
 
 impl Document {
-    /// Whether ingestion under `model` has work to do: a pending document, or one ingested with
-    /// another model. A failed document is never retried.
-    pub fn needs(&self, model: &str) -> bool {
-        match self.status {
-            DocumentStatus::Pending => true,
-            DocumentStatus::Ingested => self.embedding_model.as_deref() != Some(model),
-            DocumentStatus::Failed => false,
+    /// Whether ingestion under `model` has work to do: a pending document, or one ingested with a
+    /// model `model` replaces. Any other set is left as it is, so while a rolling deploy runs two
+    /// models, the old one never swaps a document back. A failed document is never retried.
+    pub fn needs(&self, model: &str, replaces: &[String]) -> bool {
+        match (self.status, self.embedding_model.as_deref()) {
+            (DocumentStatus::Pending, _) | (DocumentStatus::Ingested, None) => true,
+            (DocumentStatus::Ingested, Some(m)) => m != model && replaces.iter().any(|r| r == m),
+            (DocumentStatus::Failed, _) => false,
         }
     }
 }
@@ -136,8 +137,10 @@ pub struct ChunkHit {
 
 const DOCUMENT: &str = "document_id, name, content_type, size_bytes, sha256, status, failure, chunks, embedding_model,
     uploaded_by, created_at, ingested_at";
-/// The same test as [`Document::needs`], in SQL over `documents`, with the model as `$4`.
-const NEEDS: &str = "(status = 'pending' or (status = 'ingested' and embedding_model is distinct from $4))";
+/// The same test as [`Document::needs`], in SQL over `documents`, with the model as `$4` and the
+/// models it replaces as `$5`.
+const NEEDS: &str = "(status = 'pending' or (status = 'ingested' and (embedding_model is null
+    or (embedding_model <> $4 and embedding_model = any ($5)))))";
 
 impl CompanyTx {
     /// Records an uploaded file and queues `document.uploaded` for ingestion. `None` if the
@@ -273,14 +276,20 @@ impl CompanyTx {
     /// Stores chunks of a document that still needs `model`'s ([`Document::needs`]), with the
     /// document locked; a chunk already stored is kept. `false`, storing nothing, if it no longer
     /// needs them.
-    pub async fn add_chunks(&mut self, id: &DocumentId, model: &str, chunks: &[ChunkIn]) -> Result<bool, StoreError> {
+    pub async fn add_chunks(
+        &mut self,
+        id: &DocumentId,
+        model: &str,
+        replaces: &[String],
+        chunks: &[ChunkIn],
+    ) -> Result<bool, StoreError> {
         if chunks
             .iter()
             .any(|c| c.embedding.is_empty() || c.embedding.iter().any(|f| !f.is_finite()))
         {
             return Err(StoreError::Rejected("embedding"));
         }
-        if !self.lock_needing(id, model).await? {
+        if !self.lock_needing(id, model, replaces).await? {
             return Ok(false);
         }
         let s = self.scope.clone();
@@ -307,8 +316,14 @@ impl CompanyTx {
     /// ingested and names that set, and every other chunk of it is deleted. `false`, changing
     /// nothing, if it no longer needs `model`'s chunks; `Rejected("chunks_missing")` if some are
     /// not stored yet.
-    pub async fn finish_chunks(&mut self, id: &DocumentId, model: &str, count: usize) -> Result<bool, StoreError> {
-        if !self.lock_needing(id, model).await? {
+    pub async fn finish_chunks(
+        &mut self,
+        id: &DocumentId,
+        model: &str,
+        replaces: &[String],
+        count: usize,
+    ) -> Result<bool, StoreError> {
+        if !self.lock_needing(id, model, replaces).await? {
             return Ok(false);
         }
         let s = self.scope.clone();
@@ -355,7 +370,7 @@ impl CompanyTx {
     }
 
     /// Locks the document; whether it still needs `model`'s chunks.
-    async fn lock_needing(&mut self, id: &DocumentId, model: &str) -> Result<bool, StoreError> {
+    async fn lock_needing(&mut self, id: &DocumentId, model: &str, replaces: &[String]) -> Result<bool, StoreError> {
         let s = &self.scope;
         let needs: Option<bool> = sqlx::query_scalar(&format!(
             "select {NEEDS} from documents where tenant_id = $1 and company_id = $2 and document_id = $3
@@ -365,6 +380,7 @@ impl CompanyTx {
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(model)
+        .bind(replaces)
         .fetch_optional(&mut *self.tx)
         .await?;
         Ok(needs.unwrap_or(false))
@@ -623,13 +639,18 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             ingested_at: None,
         };
-        assert!(d.needs("m1"));
+        let replaces_m1 = ["m1".to_owned()];
+        assert!(d.needs("m1", &[]));
         d.status = DocumentStatus::Ingested;
         d.embedding_model = Some("m1".into());
-        assert!(!d.needs("m1"));
-        assert!(d.needs("m2"), "a new model re-embeds it");
+        assert!(!d.needs("m1", &[]));
+        assert!(d.needs("m2", &replaces_m1), "a model that replaces m1 re-embeds it");
+        assert!(!d.needs("m2", &[]), "any other model leaves it as it is");
+        // Mid-deploy, the old model does not swap back a document the new one has re-embedded.
+        d.embedding_model = Some("m2".into());
+        assert!(!d.needs("m1", &[]));
         d.status = DocumentStatus::Failed;
-        assert!(!d.needs("m2"), "a failed document is never retried");
+        assert!(!d.needs("m2", &replaces_m1), "a failed document is never retried");
     }
 
     #[test]

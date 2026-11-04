@@ -2,7 +2,7 @@
 //! and embed it, and store the chunks. Chunks are embedded and stored [`BATCH`] at a time, so a
 //! run that stops (a Bedrock error, a restart, a visibility timeout) is resumed by the redelivery
 //! after the last batch stored. The document becomes `ingested`, and searchable, only once every
-//! chunk is stored. A document ingested with another model is re-embedded the same way, keeping
+//! chunk is stored. A document ingested with a model this one replaces is re-embedded the same way, keeping
 //! its old chunks searchable until the new set is complete. A file that cannot be read marks the
 //! document `failed` with a short code.
 
@@ -43,23 +43,23 @@ pub async fn ingest(
     scope: &CompanyScope,
     id: &DocumentId,
 ) -> Result<Ingested, ContextError> {
-    let model = ctx.embedder.model();
+    let (model, replaces) = (ctx.embedder.model(), ctx.replaces.as_slice());
     let mut tx = store.company(scope).await?;
     let Some((doc, key)) = tx.lock_document(id).await? else {
         return Ok(Ingested::Gone);
     };
     tx.commit().await?;
-    if !doc.needs(model) {
+    if !doc.needs(model, replaces) {
         return Ok(Ingested::Settled);
     }
     // The key was made from this scope at upload; refuse anything outside the company's prefix.
     if !key.starts_with(&company_prefix(scope)) {
-        return fail(store, scope, id, model, "blob_key").await;
+        return fail(store, scope, id, (model, replaces), "blob_key").await;
     }
     let bytes = ctx.blobs.get(&key).await?;
     let digest: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if bytes.len() as i64 != doc.size_bytes || digest != doc.sha256 {
-        return fail(store, scope, id, model, "checksum").await;
+        return fail(store, scope, id, (model, replaces), "checksum").await;
     }
     let content_type = doc.content_type;
     let text = tokio::task::spawn_blocking(move || extract_guarded(content_type, &bytes))
@@ -67,11 +67,11 @@ pub async fn ingest(
         .map_err(|e| ContextError::Blob(e.to_string()))?;
     let text = match text {
         Ok(t) => t,
-        Err(e) => return fail(store, scope, id, model, e.code()).await,
+        Err(e) => return fail(store, scope, id, (model, replaces), e.code()).await,
     };
     let chunks = chunk(&text);
     if chunks.is_empty() {
-        return fail(store, scope, id, model, "empty").await;
+        return fail(store, scope, id, (model, replaces), "empty").await;
     }
 
     // Resume from what an interrupted run stored, if it is this text; otherwise start again.
@@ -109,14 +109,14 @@ pub async fn ingest(
             })
             .collect();
         let mut tx = store.company(scope).await?;
-        if !tx.add_chunks(id, model, &rows).await? {
+        if !tx.add_chunks(id, model, replaces, &rows).await? {
             return Ok(Ingested::Settled);
         }
         tx.commit().await?;
     }
 
     let mut tx = store.company(scope).await?;
-    if !tx.finish_chunks(id, model, chunks.len()).await? {
+    if !tx.finish_chunks(id, model, replaces, chunks.len()).await? {
         return Ok(Ingested::Settled);
     }
     tx.commit().await?;
@@ -127,14 +127,14 @@ async fn fail(
     store: &Store,
     scope: &CompanyScope,
     id: &DocumentId,
-    model: &str,
+    (model, replaces): (&str, &[String]),
     why: &'static str,
 ) -> Result<Ingested, ContextError> {
     let mut tx = store.company(scope).await?;
     match tx.lock_document(id).await? {
         Some((doc, _)) if doc.status == DocumentStatus::Pending => {}
         // Being re-embedded: it stays searchable with the chunks it has.
-        Some((doc, _)) if doc.needs(model) => return Ok(Ingested::Failed(why)),
+        Some((doc, _)) if doc.needs(model, replaces) => return Ok(Ingested::Failed(why)),
         Some(_) => return Ok(Ingested::Settled),
         None => return Ok(Ingested::Gone),
     }

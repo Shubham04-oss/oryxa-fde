@@ -331,10 +331,12 @@ impl oryxa_fde_context::Embedder for Scripted {
     }
 }
 
-fn with(ctx: &Context, embedder: &std::sync::Arc<Scripted>) -> Context {
+/// `ctx`'s files with `embedder`, re-embedding documents on the models in `replaces`.
+fn with(ctx: &Context, embedder: &std::sync::Arc<Scripted>, replaces: &[&str]) -> Context {
     Context {
         blobs: ctx.blobs.clone(),
         embedder: embedder.clone(),
+        replaces: replaces.iter().map(|m| m.to_string()).collect(),
     }
 }
 
@@ -368,7 +370,7 @@ async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
 
     // Bedrock fails after the first batch: that batch is kept, and nothing is searchable yet.
     let throttled = Scripted::new("fake-v1", Some(BATCH));
-    let ctx = with(&base, &throttled);
+    let ctx = with(&base, &throttled, &[]);
     assert!(ingest(&ctx, &store, &s, &doc).await.is_err());
     assert_eq!(sets(&doc).await, [("fake-v1".to_owned(), BATCH as i64)]);
     let mut tx = store.company(&s).await.unwrap();
@@ -377,12 +379,12 @@ async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
         DocumentStatus::Pending
     );
     drop(tx);
-    let probe = with(&base, &Scripted::new("fake-v1", None));
+    let probe = with(&base, &Scripted::new("fake-v1", None), &[]);
     assert!(search_company(&probe, &store, &s, &q, 5).await.unwrap().is_empty());
 
     // The redelivery embeds only what is missing.
     let v1 = Scripted::new("fake-v1", None);
-    let ctx = with(&base, &v1);
+    let ctx = with(&base, &v1, &[]);
     let Ingested::Chunks(n) = ingest(&ctx, &store, &s, &doc).await.unwrap() else {
         panic!("not ingested");
     };
@@ -402,14 +404,30 @@ async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
     assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Settled);
     assert_eq!(v1.embedded(), n - BATCH, "a redelivery embeds nothing");
 
-    // A new model re-embeds it in full; the old set is gone once the new one is complete.
+    // A new model that does not name v1 as replaced leaves the document as it is (a rolling deploy
+    // in its first phase), and the document is still found, by full text.
     let v2 = Scripted::new("fake-v2", None);
-    let ctx = with(&base, &v2);
+    let first_phase = with(&base, &v2, &[]);
+    assert_eq!(ingest(&first_phase, &store, &s, &doc).await.unwrap(), Ingested::Settled);
+    assert_eq!(v2.embedded(), 0);
+    let probe_v2 = with(&base, &Scripted::new("fake-v2", None), &[]);
+    assert_eq!(
+        search_company(&probe_v2, &store, &s, &q, 5).await.unwrap()[0].document,
+        doc
+    );
+    // Replacing v1, it re-embeds it in full; the old set is gone once the new one is complete.
+    let ctx = with(&base, &v2, &["fake-v1"]);
     assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Chunks(n));
     assert_eq!(v2.embedded(), n);
     assert_eq!(sets(&doc).await, [("fake-v2".to_owned(), n as i64)]);
     assert_eq!(search_company(&ctx, &store, &s, &q, 5).await.unwrap()[0].document, doc);
     assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Settled);
+    // A task still on v1 never swaps it back.
+    assert_eq!(
+        ingest(&with(&base, &v1, &[]), &store, &s, &doc).await.unwrap(),
+        Ingested::Settled
+    );
+    assert_eq!(sets(&doc).await, [("fake-v2".to_owned(), n as i64)]);
 
     // Stored chunks that are not this text (extraction changed between runs) are not resumed.
     let other = upload(&base, &store, &s, "notes.md", ContentType::Markdown, RUNBOOK.as_bytes()).await;
@@ -419,7 +437,7 @@ async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
         content: oryxa_fde_store::Text::new("an older extraction").unwrap(),
         embedding: vec![0.5; 1024],
     };
-    assert!(tx.add_chunks(&other, "fake-v2", &[stale]).await.unwrap());
+    assert!(tx.add_chunks(&other, "fake-v2", &[], &[stale]).await.unwrap());
     tx.commit().await.unwrap();
     assert!(matches!(
         ingest(&ctx, &store, &s, &other).await.unwrap(),

@@ -43,6 +43,9 @@ pub enum ContextError {
 pub struct Context {
     pub blobs: Arc<dyn BlobStore>,
     pub embedder: Arc<dyn Embedder>,
+    /// Older models whose documents ingestion re-embeds with the embedder's model; a document on
+    /// any other model is left as it is.
+    pub replaces: Vec<String>,
 }
 
 impl Context {
@@ -51,14 +54,18 @@ impl Context {
         Self {
             blobs: Arc::new(MemoryBlobs::default()),
             embedder: Arc::new(FakeEmbedder),
+            replaces: Vec::new(),
         }
     }
 
-    /// From the environment: `DOCUMENTS_BUCKET`, and `EMBEDDING_PROVIDER` (`bedrock`, the
-    /// default, or `fake`) with `EMBEDDING_MODEL`.
+    /// From the environment: `DOCUMENTS_BUCKET`, `EMBEDDING_PROVIDER` (`bedrock`, the default, or
+    /// `fake`) with `EMBEDDING_MODEL`, and `EMBEDDING_REPLACES`, the comma-separated models whose
+    /// documents are re-embedded. Name the old model there only once every task runs the new one,
+    /// so a rolling deploy never re-embeds back and forth.
     // ponytail: one embedding model per deployment from the environment; the layered org, company
-    // and project config does not exist yet. A document ingested with another model is re-embedded
-    // when its `document.uploaded` is delivered again, but nothing replays those after a change yet.
+    // and project config does not exist yet. A document on a replaced model is re-embedded when its
+    // `document.uploaded` is delivered again, but nothing replays those after a change yet; until
+    // then it is found by full text.
     pub async fn from_env() -> Result<Self, ContextError> {
         let aws = aws_config::load_from_env().await;
         let bucket = std::env::var("DOCUMENTS_BUCKET").map_err(|_| ContextError::Config("DOCUMENTS_BUCKET".into()))?;
@@ -70,9 +77,18 @@ impl Context {
             )),
             Ok(other) => return Err(ContextError::Config(format!("unknown EMBEDDING_PROVIDER {other}"))),
         };
+        let model = embedder.model().to_owned();
+        let replaces = std::env::var("EMBEDDING_REPLACES")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|m| !m.is_empty() && *m != model)
+            .map(str::to_owned)
+            .collect();
         Ok(Self {
             blobs: Arc::new(S3Blobs::new(aws_sdk_s3::Client::new(&aws), bucket)),
             embedder,
+            replaces,
         })
     }
 }
