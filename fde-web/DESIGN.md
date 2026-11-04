@@ -71,19 +71,19 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   eight stages beside it, each a little stronger than the last. Continue goes to AuthKit's hosted
   page through the API (`/auth/login`), which brings the FDE back to where they were. On the mock
   it says that no account is checked.
-- **Companies (home).** Two cards per row (one below 960px): name and the FDE's part (Lead or
-  Engineer, when they are a member), each project with its stage, and what needs the FDE there
-  today.
-- **Today.** Two cards in a 880px column: **Blocked** (blocked tasks, denied or revoked access)
-  and **Waiting on the customer** (tasks waiting on the customer, open access requests), oldest
-  first in each. Each item appears once, and each row says why it is there: the blocker, who
-  refused, how long a request has waited and on whom. There is no Due card until tasks have due
-  dates in the API.
-- **Company.** Profile (the FDE's part, the project count, when it was added), then Stakeholders
-  and Systems side by side (stacked below 960px), then Projects.
-- **Project.** The company link, the stage bar, Scope beside Success criteria (each with its
-  target), then Access, Tasks and Decisions. Scope says whether it is signed off, changed since
-  sign-off, or not signed off. Access names the system and owner from the company's records.
+- **Companies (home).** Two cards per row (one below 960px): name, industry and the FDE's part
+  (Lead, Engineer, or Organisation admin when they reach it as one), each project with its stage,
+  and what needs the FDE there today.
+- **Today.** Three cards in a 880px column: **Blocked** (blocked tasks, denied or revoked access),
+  **Due** (open tasks due today or overdue, oldest first) and **Waiting on the customer** (tasks
+  waiting on the customer, open access requests, longest wait first). Each item appears once:
+  blocked wins over waiting, waiting over due. Each row says why it is there.
+- **Company.** Profile (summary, industry, region and the FDE's part), then Stakeholders (with
+  their part) and Systems (with their kind) side by side (stacked below 960px), then Projects.
+- **Project.** The company link, the summary, the stage bar, Scope beside Success criteria (each
+  with its target), then Access, Tasks and Decisions. Scope says whether it is signed off, changed
+  since sign-off, or not signed off. Access and waiting tasks name people and systems from the
+  company's records; a task says why it is stuck, who it waits on, or when it is due.
 - **The stage bar.** Eight steps; done steps in `--text-soft`, the current one in `--text`, later
   ones in `--border-quiet`. Only the moves `oryxa_fde_core::Stage::transition` allows are buttons:
   the next stage, or back to any earlier one for rework. Later stages are disabled and say why. A
@@ -109,8 +109,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
-- Screens read whole views (`api.companies`, `company`, `project`, `today`) that `client.ts`
-  gathers from the API's per-record endpoints, until the API serves those views itself.
+- Home, Jump to and Today read whole views from the API (`GET /v1/companies`, `/v1/today`). The
+  company and project screens are gathered from a few calls each in `client.ts`; a project's
+  people and systems are read through the project, so an assignee may see them.
 - Pages carry a content security policy with a fresh script nonce per response; static assets get
   their headers from `public/_headers`, kept in step by `security-headers.test.ts`.
 - `pnpm dev:mock` answers from `src/dev/mock-api.ts`: the spec's routes in the browser, on

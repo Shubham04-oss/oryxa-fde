@@ -53,7 +53,7 @@ describe("Jump to", () => {
 
     await userEvent.type(search, "lumen")
     expect(options()).toEqual([
-      "Lumen Grocers1 project",
+      "Lumen GrocersRetail",
       "Store demand forecastsLumen Grocers · Evaluate",
     ])
     expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-selected", "true")
@@ -133,17 +133,15 @@ describe("matchTargets", () => {
       {
         id: "cmp_a" as never,
         name: "Cobalt Grid",
+        industry: "Energy",
         role: "lead",
         created_at: "2026-11-03T10:00:00Z",
         updated_at: "2026-11-03T10:00:00Z",
         projects: [
           {
             id: "prj_a" as never,
-            company: "cmp_a" as never,
             name: "Field crew handbook search",
             stage: "deploy",
-            created_at: "2026-11-03T10:00:00Z",
-            updated_at: "2026-11-03T10:00:00Z",
           },
         ],
       },
@@ -156,6 +154,6 @@ describe("matchTargets", () => {
     expect(names("")).toEqual(["Cobalt Grid", "Field crew handbook search"])
     expect(names("FIELD cobalt")).toEqual(["Field crew handbook search"])
     expect(names("grid")).toEqual(["Cobalt Grid", "Field crew handbook search"])
-    expect(names("deploy")).toEqual([])
+    expect(names("energy")).toEqual([])
   })
 })

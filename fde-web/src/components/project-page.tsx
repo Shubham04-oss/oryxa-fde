@@ -12,9 +12,10 @@ import type {
   ProjectOut,
   ProjectScope,
   Stage,
+  TaskOut,
   TaskState,
 } from "@/lib/api/schemas"
-import { dayOf, shortDate } from "@/lib/time"
+import { dayOf, daysBetween, dueLabel, localDay, shortDate, waitingLabel } from "@/lib/time"
 
 const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   requested: { label: "Requested", tone: "neutral" },
@@ -41,6 +42,17 @@ const COMPARATOR: Record<CriterionOut["comparator"], string> = {
 function target({ metric, comparator, target: value, unit }: CriterionOut) {
   const units = unit ? (unit === "%" ? "%" : ` ${unit}`) : ""
   return `${metric}, ${COMPARATOR[comparator]} ${value}${units}`
+}
+
+/** A task's second line: why it is stuck, who it waits on and since when, or when it is due. */
+function taskDetail(task: TaskOut, today: string, person: (id: string) => string) {
+  if (task.status === "blocked" && task.blocker) return task.blocker
+  if (task.status === "waiting_on_customer") {
+    const days = daysBetween(dayOf(task.waiting_since ?? task.updated_at), today)
+    return waitingLabel(days, task.waiting_on ? person(task.waiting_on) : null)
+  }
+  if (task.status !== "done" && task.due_on) return dueLabel(task.due_on, today)
+  return null
 }
 
 /** How scope sign-off stands: signed for this version, signed before a change, or never. */
@@ -104,17 +116,21 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
   const inScope = p.scope.items.filter((item) => item.kind === "in")
   const outOfScope = p.scope.items.filter((item) => item.kind === "out")
+  const today = localDay()
 
   return (
     <Page wide>
-      <Link
-        to="/companies/$companyId"
-        params={{ companyId: p.company.id }}
-        className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-      >
-        <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
-        {p.company.name}
-      </Link>
+      <div className="grid gap-2">
+        <Link
+          to="/companies/$companyId"
+          params={{ companyId: p.company.id }}
+          className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
+          {p.company.name}
+        </Link>
+        {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
+      </div>
 
       <StageBar
         stage={p.stage}
@@ -203,15 +219,21 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
           <Quiet>No tasks yet.</Quiet>
         ) : (
           <Rows>
-            {p.tasks.map((task) => (
-              <Row key={task.id}>
-                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                  <p className="min-w-0 text-xs">{task.title}</p>
-                  <Status tone={TASK[task.status].tone}>{TASK[task.status].label}</Status>
-                </div>
-                {task.status === "blocked" && task.blocker && <Quiet>{task.blocker}</Quiet>}
-              </Row>
-            ))}
+            {p.tasks.map((task) => {
+              const detail = taskDetail(task, today, person)
+              const late = task.status !== "done" && !!task.due_on && task.due_on < today
+              return (
+                <Row key={task.id}>
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <p className="min-w-0 text-xs">{task.title}</p>
+                    <Status tone={late ? "attention" : TASK[task.status].tone}>
+                      {TASK[task.status].label}
+                    </Status>
+                  </div>
+                  {detail && <Quiet>{detail}</Quiet>}
+                </Row>
+              )
+            })}
           </Rows>
         )}
       </Card>

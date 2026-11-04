@@ -4,9 +4,17 @@ import { Avatar } from "./app-shell"
 import { ROLE_LABEL } from "./companies-home"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
 import { queries } from "@/lib/api/client"
-import type { CompanyId } from "@/lib/api/schemas"
+import type { CompanyId, StakeholderPart } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
-import { dayOf, shortDate } from "@/lib/time"
+
+const PART_LABEL: Record<StakeholderPart, string> = {
+  sponsor: "Sponsor",
+  champion: "Champion",
+  user: "User",
+  it: "IT",
+  security: "Security",
+  other: "Other",
+}
 
 /** A company (DESIGN.md §3): its profile, stakeholders, systems and projects. */
 export function CompanyPage({ companyId }: { companyId: CompanyId }) {
@@ -34,11 +42,12 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
   return (
     <Page wide>
       <Card title="Profile">
+        {c.summary && <p className="mb-3 text-xs leading-relaxed">{c.summary}</p>}
         <dl className="grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
           {[
+            ["Industry", c.industry || "Not set"],
+            ["Region", c.region || "Not set"],
             ["Your part", c.role ? ROLE_LABEL[c.role] : "Not a member"],
-            ["Projects", String(c.projects.length)],
-            ["Added", shortDate(dayOf(c.created_at))],
           ].map(([term, value]) => (
             <div key={term}>
               <dt className="text-[11px] text-muted-foreground">{term}</dt>
@@ -62,6 +71,9 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
                       <p className="truncate text-xs">{person.name}</p>
                       {person.title && <Quiet className="truncate">{person.title}</Quiet>}
                     </div>
+                    <span className="flex-none text-[11px] text-soft">
+                      {PART_LABEL[person.role]}
+                    </span>
                   </div>
                 </Row>
               ))}
@@ -76,7 +88,12 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
             <Rows>
               {c.systems.map((system) => (
                 <Row key={system.id}>
-                  <p className="truncate text-xs">{system.name}</p>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <p className="truncate text-xs">{system.name}</p>
+                    {system.kind && (
+                      <span className="flex-none text-[11px] text-soft">{system.kind}</span>
+                    )}
+                  </div>
                   {system.description && <Quiet>{system.description}</Quiet>}
                 </Row>
               ))}

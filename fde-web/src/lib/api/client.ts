@@ -5,25 +5,17 @@ import type { paths } from "./fde-api.gen"
 import {
   AccessRequestOut,
   CompanyOut,
+  CompanySummaryOut,
   DecisionOut,
   Me,
-  MemberOut,
   ProjectOut,
   ScopeOut,
   StakeholderOut,
   SystemOut,
   TaskOut,
+  TodayOut,
 } from "./schemas"
-import type {
-  Company,
-  CompanyId,
-  CompanySummary,
-  Project,
-  ProjectScope,
-  Stage,
-  TodayItem,
-  UserId,
-} from "./schemas"
+import type { Company, CompanyId, Project, ProjectScope, Stage } from "./schemas"
 
 // The app's only way to the FDE API. Screens use `api` and `queries` and never see where the
 // answers come from. Calls go through a client generated from the API's OpenAPI spec
@@ -94,13 +86,12 @@ const HEADERS = { "X-Oryxa-Request": "1" }
 const origin = () => globalThis.location.origin
 
 function connect(transport: Transport) {
-  const client = createClient<paths>({
-    baseUrl: `${origin()}/api`,
-    fetch: transport.fetch,
-    headers: HEADERS,
-  })
+  const options = { fetch: transport.fetch, headers: HEADERS }
+  // `/v1/*` goes under `/api`, which the Worker strips; `/auth/*` it forwards as it is.
+  const client = createClient<paths>({ baseUrl: `${origin()}/api`, ...options })
+  const auth = createClient<paths>({ baseUrl: origin(), ...options })
 
-  /** One spec'd call's answer, parsed; a refusal throws an `ApiError`. */
+  /** One call's answer, parsed; a refusal throws an `ApiError`. */
   async function read<T>(
     schema: z.ZodType<T>,
     call: Promise<{ data?: unknown; error?: unknown; response: Response }>,
@@ -110,28 +101,15 @@ function connect(transport: Transport) {
     return schema.parse(data)
   }
 
-  // ponytail: `/v1/me` and `/auth/*` are not in the spec yet (#24 comment), so they are called
-  // by hand here; move them to `client` when `openapi.json` has them.
-  async function unspecced(path: string, method = "GET"): Promise<Response> {
-    const response = await transport.fetch(
-      new Request(`${origin()}${path}`, { method, headers: HEADERS }),
-    )
-    if (!response.ok) throw refusal(response.status, await response.json().catch(() => null))
-    return response
-  }
-
   const company = (id: CompanyId) => ({ params: { path: { company: id } } })
   const project = (scope: ProjectScope) => ({ params: { path: scope } })
 
   const get = {
-    me: async () => Me.parse(await (await unspecced("/api/v1/me")).json()),
-    companies: () => read(z.array(CompanyOut), client.GET("/v1/companies")),
+    companies: () => read(z.array(CompanySummaryOut), client.GET("/v1/companies")),
     company: (id: CompanyId) =>
       read(CompanyOut, client.GET("/v1/companies/{company}", company(id))),
     projects: (id: CompanyId) =>
       read(z.array(ProjectOut), client.GET("/v1/companies/{company}/projects", company(id))),
-    members: (id: CompanyId) =>
-      read(z.array(MemberOut), client.GET("/v1/companies/{company}/members", company(id))),
     stakeholders: (id: CompanyId) =>
       read(
         z.array(StakeholderOut),
@@ -171,38 +149,26 @@ function connect(transport: Transport) {
       ),
   }
 
-  /** The FDE's part at a company, or null when they reach it some other way (an org admin). */
-  async function partAt(id: CompanyId, user: UserId) {
-    return (await get.members(id)).find((member) => member.user === user)?.role ?? null
-  }
-
   return {
-    me: get.me,
+    me: () => read(Me, client.GET("/v1/me")),
     signIn: (returnTo: string) => transport.signIn(safeReturnTo(returnTo)),
-    signOut: async () => void (await unspecced("/auth/logout", "POST")),
-
-    // ponytail: two calls per company until `GET /v1/companies` carries the caller's part and
-    // project summaries (#24 comment).
-    async companies(): Promise<{ companies: Array<CompanySummary> }> {
-      const [me, list] = await Promise.all([get.me(), get.companies()])
-      const companies = await Promise.all(
-        list.map(async (c) => {
-          const [projects, role] = await Promise.all([get.projects(c.id), partAt(c.id, me.user.id)])
-          return { ...c, role, projects }
-        }),
-      )
-      return { companies }
+    async signOut() {
+      const { error, response } = await auth.POST("/auth/logout")
+      if (!response.ok) throw refusal(response.status, error)
     },
 
+    companies: async () => ({ companies: await get.companies() }),
+
     async company(id: CompanyId): Promise<Company> {
-      const me = await get.me()
-      const [c, projects, role, stakeholders, systems] = await Promise.all([
+      const [c, list, projects, stakeholders, systems] = await Promise.all([
         get.company(id),
+        get.companies(),
         get.projects(id),
-        partAt(id, me.user.id),
         get.stakeholders(id),
         get.systems(id),
       ])
+      // The FDE's part there comes with their list of companies, not with the company.
+      const role = list.find((entry) => entry.id === c.id)?.role ?? null
       return { ...c, role, projects, stakeholders, systems }
     },
 
@@ -233,42 +199,7 @@ function connect(transport: Transport) {
       }
     },
 
-    // ponytail: one call per company and two per project until the API has `GET /v1/today`
-    // (#24 comment).
-    async today(): Promise<{ items: Array<TodayItem> }> {
-      const companies = await get.companies()
-      const perCompany = await Promise.all(
-        companies.map(async (c) => {
-          const [projects, people] = await Promise.all([get.projects(c.id), get.stakeholders(c.id)])
-          const names = new Map(people.map((person) => [person.id, person.name]))
-          const perProject = await Promise.all(
-            projects.map(async (p) => {
-              const scope = { company: c.id, project: p.id }
-              const [tasks, access] = await Promise.all([get.tasks(scope), get.access(scope)])
-              const where = {
-                company: { id: c.id, name: c.name },
-                project: { id: p.id, name: p.name },
-              }
-              return [
-                ...tasks
-                  .filter((task) => task.status !== "done")
-                  .map((task) => ({ kind: "task" as const, task, ...where })),
-                ...access
-                  .filter((request) => request.status !== "granted")
-                  .map((request) => ({
-                    kind: "access_request" as const,
-                    access: request,
-                    owner: (request.owner && names.get(request.owner)) ?? null,
-                    ...where,
-                  })),
-              ]
-            }),
-          )
-          return perProject.flat()
-        }),
-      )
-      return { items: perCompany.flat() }
-    },
+    today: () => read(TodayOut, client.GET("/v1/today")),
 
     /** Moves a project to `to`; the API refuses a move `canMove` would refuse. */
     moveStage: (scope: ProjectScope, to: Stage) =>

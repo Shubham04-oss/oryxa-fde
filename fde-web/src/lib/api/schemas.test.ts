@@ -4,6 +4,8 @@ import type { components } from "./fde-api.gen"
 import * as S from "./schemas"
 
 type Spec = components["schemas"]
+/** An `allOf` comes out as an intersection; compare it as the one object it describes. */
+type Flat<T> = { [K in keyof T]: T[K] }
 
 describe("schemas", () => {
   // Checked by `pnpm typecheck`: when the spec changes, `pnpm api:generate` changes these types
@@ -11,7 +13,6 @@ describe("schemas", () => {
   it("accept exactly what the OpenAPI spec says each answer is", () => {
     expectTypeOf<z.input<typeof S.CompanyOut>>().toEqualTypeOf<Spec["CompanyOut"]>()
     expectTypeOf<z.input<typeof S.ProjectOut>>().toEqualTypeOf<Spec["ProjectOut"]>()
-    expectTypeOf<z.input<typeof S.MemberOut>>().toEqualTypeOf<Spec["MemberOut"]>()
     expectTypeOf<z.input<typeof S.StakeholderOut>>().toEqualTypeOf<Spec["StakeholderOut"]>()
     expectTypeOf<z.input<typeof S.SystemOut>>().toEqualTypeOf<Spec["SystemOut"]>()
     expectTypeOf<z.input<typeof S.ScopeItemOut>>().toEqualTypeOf<Spec["ScopeItemOut"]>()
@@ -22,6 +23,12 @@ describe("schemas", () => {
     expectTypeOf<z.input<typeof S.TaskOut>>().toEqualTypeOf<Spec["TaskOut"]>()
     expectTypeOf<z.input<typeof S.DecisionOut>>().toEqualTypeOf<Spec["DecisionOut"]>()
     expectTypeOf<z.input<typeof S.Stage>>().toEqualTypeOf<Spec["ProjectStage"]>()
+    expectTypeOf<z.input<typeof S.Me>>().toEqualTypeOf<Spec["MeOut"]>()
+    expectTypeOf<z.input<typeof S.ProjectSummaryOut>>().toEqualTypeOf<Spec["ProjectSummaryOut"]>()
+    expectTypeOf<z.input<typeof S.CompanySummaryOut>>().toEqualTypeOf<
+      Flat<Spec["CompanySummaryOut"]>
+    >()
+    expectTypeOf<z.input<typeof S.TodayOut>>().toEqualTypeOf<Spec["TodayOut"]>()
   })
 
   it("refuse ids that break the platform's id rule", () => {

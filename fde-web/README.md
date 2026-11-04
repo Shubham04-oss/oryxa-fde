@@ -11,9 +11,9 @@ pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm
 ```
 
 - `pnpm dev` runs without the mock: the Worker forwards `/api/*` and `/auth/*` to a local
-  `oryxa-fde-api` at `API_URL` (`wrangler.jsonc`, `http://localhost:8080`). Sign-in needs the
-  API's `/auth/*` and `/v1/me` endpoints, which it does not have yet (#24); until then every
-  screen goes to sign-in.
+  `oryxa-fde-api` at `API_URL` (`wrangler.jsonc`, `http://localhost:8080`). Run the API with
+  `WEB_ORIGIN=http://localhost:3000`, and register `http://localhost:3000/auth/callback` as a
+  redirect URI in WorkOS, so AuthKit brings you back here signed in.
 - When the API's `openapi.json` changes, run `pnpm api:generate` and make `schemas.ts` follow it:
   `pnpm typecheck` says where.
 - On the mock, sign-in is simulated and kept for the browser tab. To see sign-in again, sign out

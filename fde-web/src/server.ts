@@ -19,8 +19,8 @@ export type Env = {
  * private link; a plain URL is honoured in a dev build alone, so a stray var cannot redirect it.
  */
 export function upstream(env: Env, dev: boolean): Upstream | null {
-  // ponytail: the VPC service is created for the internal ALB's host (infra); the host named here
-  // is assumed not to route. Confirm when infra binds it (#31), as nothing deploys yet.
+  // ponytail: the VPC service routes to the internal ALB it was created for (infra); the host
+  // named here is assumed not to route. The first `deploy-workers` run (#40) confirms it.
   if (env.API) return { fetch: (request) => env.API!.fetch(request), origin: "http://api.internal" }
   if (dev && env.API_URL) return { fetch: (request) => fetch(request), origin: env.API_URL }
   return null

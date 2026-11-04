@@ -17,16 +17,19 @@ export function daysBetween(from: string, to: string): number {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
+/** "Due today", "Due tomorrow", "Overdue by 3 days", "Due in 4 days". */
+export function dueLabel(due: string, today: string): string {
+  const days = daysBetween(today, due)
+  if (days === 0) return "Due today"
+  if (days === 1) return "Due tomorrow"
+  if (days < 0) return `Overdue by ${plural(-days, "day")}`
+  return `Due in ${plural(days, "day")}`
+}
+
 /** "Waiting 6 days on Priya Raman", "Waiting since today", from the API's day count. */
 export function waitingLabel(days: number, who: string | null): string {
   const wait = days <= 0 ? "Waiting since today" : `Waiting ${plural(days, "day")}`
   return who ? `${wait} on ${who}` : wait
-}
-
-/** "Updated today", "Updated 3 days ago". */
-export function updatedLabel(day: string, today: string): string {
-  const days = daysBetween(day, today)
-  return days <= 0 ? "Updated today" : `Updated ${plural(days, "day")} ago`
 }
 
 /** "3 Nov 2026": a day, for things that last. */

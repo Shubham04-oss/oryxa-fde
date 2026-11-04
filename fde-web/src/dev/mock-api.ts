@@ -1,9 +1,9 @@
 // A stand-in for the FDE API, for `pnpm dev:mock` and the tests only, so every screen can be
 // clicked through with no backend. It answers the spec's routes in the browser, typed from
-// fde-api.gen.ts so it follows the spec, plus `/v1/me` and `/auth/logout`. It keeps the API's
-// rules the screens depend on: a session, only the FDE's own companies (anything else is a 403,
-// as the API answers), and the stage machine. src/lib/api/client.ts loads it only in a dev build
-// with VITE_FDE_MOCK_API=1; mock-excluded.test.ts proves a production build leaves it out.
+// fde-api.gen.ts so it follows the spec. It keeps the API's rules the screens depend on: a
+// session, only the FDE's own companies (anything else is a 403, as the API answers), and the
+// stage machine. src/lib/api/client.ts loads it only in a dev build with VITE_FDE_MOCK_API=1;
+// mock-excluded.test.ts proves a production build leaves it out.
 //
 // Sample data only: every company, person and system here is invented.
 
@@ -13,6 +13,7 @@ import type { components } from "../lib/api/fde-api.gen"
 import { STAGES } from "../lib/api/schemas"
 import type { Me, Stage } from "../lib/api/schemas"
 import { canMove } from "../lib/stage"
+import { localDay } from "../lib/time"
 
 type S = components["schemas"]
 
@@ -30,32 +31,59 @@ const JONAH = "usr_jonah"
 const ago = (days: number, hours = 0) =>
   new Date(Date.now() - days * 86_400_000 - hours * 3_600_000).toISOString()
 
-const person = (id: string, name: string, title: string | null): S["StakeholderOut"] => ({
-  id,
-  name,
-  title,
-  updated_at: ago(30),
-})
-const system = (id: string, name: string, description: string | null): S["SystemOut"] => ({
-  id,
-  name,
-  description,
-  updated_at: ago(30),
-})
+/** `n` days from today, as `YYYY-MM-DD`. */
+function day(n: number) {
+  const d = new Date()
+  d.setDate(d.getDate() + n)
+  return localDay(d)
+}
+
+const person = (
+  id: string,
+  name: string,
+  title: string | null,
+  role: S["StakeholderPart"],
+): S["StakeholderOut"] => ({ id, name, title, role, updated_at: ago(30) })
+
+const system = (
+  id: string,
+  name: string,
+  kind: string | null,
+  description: string | null,
+): S["SystemOut"] => ({ id, name, kind, description, updated_at: ago(30) })
+
 const member = (user: string, role: S["MemberRole"]): S["MemberOut"] => ({
   user,
   role,
   added_at: ago(90),
 })
 
+/** A task last changed `daysAgo`; `due` is in days from today, and a wait began `waitingDays` ago. */
 function task(
   id: string,
   title: string,
   status: S["TaskState"],
   daysAgo: number,
-  blocker: string | null = null,
+  extra: {
+    due?: number
+    assignee?: string
+    blocker?: string
+    waitingOn?: string
+    waitingDays?: number
+  } = {},
 ): S["TaskOut"] {
-  return { id, title, status, blocker, created_at: ago(daysAgo + 10), updated_at: ago(daysAgo) }
+  return {
+    id,
+    title,
+    status,
+    blocker: extra.blocker ?? null,
+    due_on: extra.due === undefined ? null : day(extra.due),
+    assignee: extra.assignee ?? null,
+    waiting_on: extra.waitingOn ?? null,
+    waiting_since: extra.waitingDays === undefined ? null : ago(extra.waitingDays),
+    created_at: ago(daysAgo + 10),
+    updated_at: ago(daysAgo),
+  }
 }
 
 /** An access request asked for `asked` days ago and, unless still open, settled `settled` days ago. */
@@ -161,101 +189,151 @@ type CompanySeed = {
   systems: Array<S["SystemOut"]>
 }
 
-const company = (id: string, name: string, days: number): S["CompanyOut"] => ({
-  id,
-  name,
-  created_at: ago(days),
-  updated_at: ago(days),
-})
+function company(
+  id: string,
+  name: string,
+  industry: string,
+  region: string,
+  summary: string,
+  days: number,
+): S["CompanyOut"] {
+  return { id, name, industry, region, summary, created_at: ago(days), updated_at: ago(days) }
+}
 
-const project = (
+function project(
   id: string,
   companyId: string,
   name: string,
   stage: Stage,
   hours: number,
-): S["ProjectOut"] => ({
-  id,
-  company: companyId,
-  name,
-  stage,
-  created_at: ago(60),
-  updated_at: ago(0, hours),
-})
+  summary: string,
+): S["ProjectOut"] {
+  return {
+    id,
+    company: companyId,
+    name,
+    stage,
+    summary,
+    created_at: ago(60),
+    updated_at: ago(0, hours),
+  }
+}
 
 const NO_RECORDS: Records = { scope: scope([], []), access: [], tasks: [], decisions: [] }
 
 function seed() {
   const companies: Array<CompanySeed> = [
     {
-      company: company("cmp_kestrel", "Kestrel Freight", 80),
+      company: company(
+        "cmp_kestrel",
+        "Kestrel Freight",
+        "Logistics",
+        "EU (Frankfurt)",
+        "A regional freight carrier with 14 depots. Wants dispatchers to plan in minutes.",
+        80,
+      ),
       members: [member(RIYA, "lead"), member(JONAH, "engineer")],
       stakeholders: [
-        person("stk_k1", "Mara Lindqvist", "Head of operations"),
-        person("stk_k2", "Ines Moreau", "Dispatch lead, Ghent"),
-        person("stk_k3", "Tomas Becker", "Data platform manager"),
-        person("stk_k4", "Lea Novak", "Information security"),
+        person("stk_k1", "Mara Lindqvist", "Head of operations", "sponsor"),
+        person("stk_k2", "Ines Moreau", "Dispatch lead, Ghent", "champion"),
+        person("stk_k3", "Tomas Becker", "Data platform manager", "it"),
+        person("stk_k4", "Lea Novak", "Information security", "security"),
       ],
       systems: [
-        system("sys_k1", "Planning database", "PostgreSQL read replica; nightly refresh."),
-        system("sys_k2", "Depot rules", "One spreadsheet per depot, kept by dispatch."),
-        system("sys_k3", "Telematics", "Vendor API. Refused for now; see decisions."),
+        system("sys_k1", "Planning database", "PostgreSQL", "Read replica only; nightly refresh."),
+        system("sys_k2", "Depot rules", "Spreadsheet", "One sheet per depot, kept by dispatch."),
+        system("sys_k3", "Telematics", "Vendor API", "Refused for now; see decisions."),
       ],
     },
     {
-      company: company("cmp_brightwater", "Brightwater Clinics", 50),
+      company: company(
+        "cmp_brightwater",
+        "Brightwater Clinics",
+        "Healthcare",
+        "UK (London)",
+        "A network of outpatient clinics. Referral intake is slow and done by hand.",
+        50,
+      ),
       members: [member(JONAH, "lead"), member(RIYA, "engineer")],
       stakeholders: [
-        person("stk_b1", "Dr Helen Achebe", "Medical director"),
-        person("stk_b2", "Owen Price", "Integration engineer"),
-        person("stk_b3", "Sana Qureshi", null),
+        person("stk_b1", "Dr Helen Achebe", "Medical director", "sponsor"),
+        person("stk_b2", "Owen Price", "Integration engineer", "it"),
+        person("stk_b3", "Sana Qureshi", null, "security"),
       ],
       systems: [
-        system("sys_b1", "Intake form", "Internal web app. Staging API only in this phase."),
-        system("sys_b2", "Clinic directory", null),
+        system("sys_b1", "Intake form", "Internal web app", "Staging API only in this phase."),
+        system("sys_b2", "Clinic directory", "Export", null),
       ],
     },
     {
-      company: company("cmp_lumen", "Lumen Grocers", 70),
+      company: company(
+        "cmp_lumen",
+        "Lumen Grocers",
+        "Retail",
+        "US (Virginia)",
+        "A grocery chain of 220 stores. Fresh produce waste is the target.",
+        70,
+      ),
       members: [member(RIYA, "lead")],
       stakeholders: [
-        person("stk_l1", "Carlos Mendes", "VP supply chain"),
-        person("stk_l2", "Priya Raman", "Fresh produce buyer"),
-        person("stk_l3", "Wen Zhao", "Analytics engineer"),
+        person("stk_l1", "Carlos Mendes", "VP supply chain", "sponsor"),
+        person("stk_l2", "Priya Raman", "Fresh produce buyer", "champion"),
+        person("stk_l3", "Wen Zhao", "Analytics engineer", "it"),
       ],
       systems: [
-        system("sys_l1", "Sales history", "Data warehouse. Three years, daily, per store."),
-        system("sys_l2", "Weather feed", "Vendor API on the outbound allowlist."),
+        system("sys_l1", "Sales history", "Data warehouse", "Three years, daily, per store."),
+        system("sys_l2", "Weather feed", "Vendor API", "On the outbound allowlist."),
       ],
     },
     {
-      company: company("cmp_atlas", "Atlas Mutual", 20),
+      company: company(
+        "cmp_atlas",
+        "Atlas Mutual",
+        "Insurance",
+        "US (Ohio)",
+        "A mutual insurer. Call handlers miss fields on the first notice of a claim.",
+        20,
+      ),
       members: [member(JONAH, "lead"), member(RIYA, "engineer")],
       stakeholders: [
-        person("stk_a1", "Grace Holm", "Claims director"),
-        person("stk_a2", "Daniel Osei", "Contact centre manager"),
+        person("stk_a1", "Grace Holm", "Claims director", "other"),
+        person("stk_a2", "Daniel Osei", "Contact centre manager", "champion"),
       ],
-      systems: [system("sys_a1", "Call recordings", "Object storage. Redacted copies only.")],
+      systems: [system("sys_a1", "Call recordings", "Object storage", "Redacted copies only.")],
     },
     {
-      company: company("cmp_cobalt", "Cobalt Grid", 150),
-      // An organisation admin reaches it without being a member.
+      company: company(
+        "cmp_cobalt",
+        "Cobalt Grid",
+        "Energy",
+        "India (Mumbai)",
+        "A power distributor. Two projects: one in operation, one rolling out to crews.",
+        150,
+      ),
+      // The organisation admin reaches it without being a member.
       members: [member(JONAH, "lead")],
       stakeholders: [
-        person("stk_c1", "Arjun Nair", "Chief operating officer"),
-        person("stk_c2", "Meera Iyer", "IT operations lead"),
-        person("stk_c3", "Ravi Desai", "Field crew supervisor"),
+        person("stk_c1", "Arjun Nair", "Chief operating officer", "sponsor"),
+        person("stk_c2", "Meera Iyer", "IT operations lead", "it"),
+        person("stk_c3", "Ravi Desai", "Field crew supervisor", "user"),
       ],
       systems: [
-        system("sys_c1", "Outage log", "Internal database. Read only."),
-        system("sys_c2", "Crew phones", "Mobile device management."),
+        system("sys_c1", "Outage log", "Internal database", "Read only."),
+        system("sys_c2", "Crew phones", "Mobile device management", null),
       ],
     },
   ]
 
   const projects: Array<{ project: S["ProjectOut"]; records: Records }> = [
     {
-      project: project("prj_kestrel_dispatch", "cmp_kestrel", "Dispatch copilot", "build", 2),
+      project: project(
+        "prj_kestrel_dispatch",
+        "cmp_kestrel",
+        "Dispatch copilot",
+        "build",
+        2,
+        "Drafts load plans for dispatchers from open orders, driver hours and depot rules.",
+      ),
       records: {
         scope: scope(
           [
@@ -300,18 +378,33 @@ function seed() {
           access("acc_k3", "Telematics export", "sys_k3", "stk_k3", "denied", 9, 5),
         ],
         tasks: [
-          task("tsk_k1", "Load depot rules into the context pack", "in_progress", 1),
-          task("tsk_k2", "Replay last month's orders through the planner", "todo", 2),
-          task("tsk_k3", "Add driver-hours checks to the eval suite", "todo", 3),
-          task(
-            "tsk_k4",
-            "Agree the telematics alternative",
-            "blocked",
-            3,
-            "Telematics export refused by the customer's security team",
-          ),
-          task("tsk_k5", "Dispatcher feedback session", "waiting_on_customer", 4),
-          task("tsk_k6", "Set up the sandbox with sample orders", "done", 12),
+          task("tsk_k1", "Load depot rules into the context pack", "in_progress", 1, {
+            due: 1,
+            assignee: RIYA,
+          }),
+          task("tsk_k2", "Replay last month's orders through the planner", "todo", 2, {
+            due: 0,
+            assignee: RIYA,
+          }),
+          task("tsk_k3", "Add driver-hours checks to the eval suite", "todo", 3, {
+            due: -2,
+            assignee: JONAH,
+          }),
+          task("tsk_k4", "Agree the telematics alternative", "blocked", 3, {
+            due: -1,
+            assignee: RIYA,
+            blocker: "Telematics export refused by the customer's security team",
+          }),
+          task("tsk_k5", "Dispatcher feedback session", "waiting_on_customer", 4, {
+            due: 3,
+            assignee: RIYA,
+            waitingOn: "stk_k1",
+            waitingDays: 4,
+          }),
+          task("tsk_k6", "Set up the sandbox with sample orders", "done", 12, {
+            due: -12,
+            assignee: JONAH,
+          }),
         ],
         decisions: [
           decision(
@@ -332,17 +425,39 @@ function seed() {
       },
     },
     {
-      project: project("prj_kestrel_claims", "cmp_kestrel", "Damage claims triage", "discover", 30),
+      project: project(
+        "prj_kestrel_claims",
+        "cmp_kestrel",
+        "Damage claims triage",
+        "discover",
+        30,
+        "Sort incoming damage claims by likely cause and route them to the right team.",
+      ),
       records: {
         ...NO_RECORDS,
         tasks: [
-          task("tsk_kc1", "Interview the claims team lead", "waiting_on_customer", 2),
-          task("tsk_kc2", "Collect twenty anonymised sample claims", "todo", 1),
+          task("tsk_kc1", "Interview the claims team lead", "waiting_on_customer", 1, {
+            due: 2,
+            assignee: RIYA,
+            waitingOn: "stk_k2",
+            waitingDays: 1,
+          }),
+          task("tsk_kc2", "Collect twenty anonymised sample claims", "todo", 1, {
+            due: 5,
+            assignee: RIYA,
+          }),
         ],
       },
     },
     {
-      project: project("prj_bw_referrals", "cmp_brightwater", "Referral intake", "access", 5),
+      project: project(
+        "prj_bw_referrals",
+        "cmp_brightwater",
+        "Referral intake",
+        "access",
+        5,
+        "Reads referral letters and fills the intake form for the clinic's coordinators.",
+      ),
       records: {
         scope: scope(
           [
@@ -378,15 +493,16 @@ function seed() {
           access("acc_b3", "Clinic directory export", "sys_b2", "stk_b3", "in_progress", 11),
         ],
         tasks: [
-          task("tsk_b1", "Answer the security questionnaire", "in_progress", 1),
-          task("tsk_b2", "Map intake form fields", "todo", 2),
-          task(
-            "tsk_b3",
-            "Staging credentials for the intake API",
-            "blocked",
-            1,
-            "Waiting for the intake API access request",
-          ),
+          task("tsk_b1", "Answer the security questionnaire", "in_progress", 1, {
+            due: 0,
+            assignee: JONAH,
+          }),
+          task("tsk_b2", "Map intake form fields", "todo", 2, { due: -3, assignee: JONAH }),
+          task("tsk_b3", "Staging credentials for the intake API", "blocked", 1, {
+            due: 2,
+            assignee: JONAH,
+            blocker: "Waiting for the intake API access request",
+          }),
         ],
         decisions: [
           decision(
@@ -400,7 +516,14 @@ function seed() {
       },
     },
     {
-      project: project("prj_lumen_forecast", "cmp_lumen", "Store demand forecasts", "evaluate", 1),
+      project: project(
+        "prj_lumen_forecast",
+        "cmp_lumen",
+        "Store demand forecasts",
+        "evaluate",
+        1,
+        "Daily demand forecasts for fresh produce in forty stores, with reasons a buyer reads.",
+      ),
       records: {
         scope: scope(
           [
@@ -434,9 +557,19 @@ function seed() {
           ),
         ],
         tasks: [
-          task("tsk_l1", "Rewrite reasons in buyers' words", "in_progress", 1),
-          task("tsk_l2", "Buyer review of week 3 forecasts", "waiting_on_customer", 7),
-          task("tsk_l3", "Publish eval results to the customer room", "todo", 2),
+          task("tsk_l1", "Rewrite reasons in buyers' words", "in_progress", 1, {
+            due: 1,
+            assignee: RIYA,
+          }),
+          task("tsk_l2", "Buyer review of week 3 forecasts", "waiting_on_customer", 7, {
+            due: -1,
+            waitingOn: "stk_l2",
+            waitingDays: 7,
+          }),
+          task("tsk_l3", "Publish eval results to the customer room", "todo", 2, {
+            due: 0,
+            assignee: RIYA,
+          }),
         ],
         decisions: [
           decision(
@@ -456,6 +589,7 @@ function seed() {
         "First notice of loss assistant",
         "scope",
         50,
+        "Helps call handlers capture a claim's first notice in one pass.",
       ),
       records: {
         scope: scope(
@@ -486,14 +620,29 @@ function seed() {
         ),
         access: [access("acc_a1", "Redacted call recordings", "sys_a1", "stk_a2", "requested", 3)],
         tasks: [
-          task("tsk_a1", "Scope sign-off meeting", "waiting_on_customer", 1),
-          task("tsk_a2", "Draft the loss-type checklist", "in_progress", 2),
+          task("tsk_a1", "Scope sign-off meeting", "waiting_on_customer", 2, {
+            due: 4,
+            assignee: JONAH,
+            waitingOn: "stk_a1",
+            waitingDays: 2,
+          }),
+          task("tsk_a2", "Draft the loss-type checklist", "in_progress", 2, {
+            due: 6,
+            assignee: JONAH,
+          }),
         ],
         decisions: [],
       },
     },
     {
-      project: project("prj_cobalt_outage", "cmp_cobalt", "Outage report summaries", "operate", 20),
+      project: project(
+        "prj_cobalt_outage",
+        "cmp_cobalt",
+        "Outage report summaries",
+        "operate",
+        20,
+        "Summarises overnight outage reports for the morning operations call.",
+      ),
       records: {
         scope: scope(
           [
@@ -525,8 +674,11 @@ function seed() {
           access("acc_c1", "Outage log, read only", "sys_c1", "stk_c2", "granted", 130, 125),
         ],
         tasks: [
-          task("tsk_c1", "Monthly accuracy spot check", "todo", 3),
-          task("tsk_c2", "Handoff notes for the operations team", "done", 30),
+          task("tsk_c1", "Monthly accuracy spot check", "todo", 3, { due: 0, assignee: RIYA }),
+          task("tsk_c2", "Handoff notes for the operations team", "done", 30, {
+            due: -30,
+            assignee: RIYA,
+          }),
         ],
         decisions: [
           decision(
@@ -540,7 +692,14 @@ function seed() {
       },
     },
     {
-      project: project("prj_cobalt_field", "cmp_cobalt", "Field crew handbook search", "deploy", 8),
+      project: project(
+        "prj_cobalt_field",
+        "cmp_cobalt",
+        "Field crew handbook search",
+        "deploy",
+        8,
+        "Lets field crews search safety procedures from a phone, offline-first.",
+      ),
       records: {
         scope: scope(
           [
@@ -573,14 +732,12 @@ function seed() {
           access("acc_f2", "Crew roster export", null, "stk_c3", "revoked", 30, 2),
         ],
         tasks: [
-          task(
-            "tsk_f1",
-            "Roll out to the north depot crews",
-            "blocked",
-            4,
-            "Mobile device management access still in progress",
-          ),
-          task("tsk_f2", "Crew training video", "in_progress", 1),
+          task("tsk_f1", "Roll out to the north depot crews", "blocked", 4, {
+            due: -4,
+            assignee: JONAH,
+            blocker: "Mobile device management access still in progress",
+          }),
+          task("tsk_f2", "Crew training video", "in_progress", 1, { due: 7, assignee: JONAH }),
         ],
         decisions: [],
       },
@@ -626,11 +783,60 @@ const LATENCY_MS = import.meta.env.MODE === "test" ? 0 : 150
 const json = (body: unknown, status = 200) => Response.json(structuredClone(body), { status })
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
 
+const projectsOf = (companyId: string) =>
+  state.projects.filter((p) => p.project.company === companyId)
+
+/** The caller's role at a company: a member's, or `admin` for an organisation admin who is not one. */
+function roleAt(c: CompanySeed): S["CallerRole"] | null {
+  const own = c.members.find((m) => m.user === state.me.user.id)?.role
+  return own ?? (state.me.role === "admin" ? "admin" : null)
+}
+
+/** `GET /v1/companies`: each company with the caller's role and its project summaries. */
+function companyList(): Array<S["CompanySummaryOut"]> {
+  return state.companies.map((c) => ({
+    ...c.company,
+    role: roleAt(c),
+    projects: projectsOf(c.company.id).map(({ project: p }) => ({
+      id: p.id,
+      name: p.name,
+      stage: p.stage,
+    })),
+  }))
+}
+
+/** `GET /v1/today`: tasks not done and access not granted, with names to show them by. */
+function today(): S["TodayOut"] {
+  const items = state.companies.flatMap((c) =>
+    projectsOf(c.company.id).flatMap(({ project: p, records }) => {
+      const where = {
+        company: { id: c.company.id, name: c.company.name },
+        project: { id: p.id, name: p.name },
+      }
+      const name = (id: string | null | undefined) =>
+        c.stakeholders.find((s) => s.id === id)?.name ?? null
+      return [
+        ...records.tasks
+          .filter((t) => t.status !== "done")
+          .map((t): S["TodayItemOut"] => ({ kind: "task", task: t, ...where })),
+        ...records.access
+          .filter((a) => a.status !== "granted")
+          .map((a): S["TodayItemOut"] => ({
+            kind: "access_request",
+            access: a,
+            owner: name(a.owner),
+            ...where,
+          })),
+      ]
+    }),
+  )
+  return { items }
+}
+
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record] = parts
-  if (companyId === undefined)
-    return method === "GET" ? json(state.companies.map((c) => c.company)) : null
+  if (companyId === undefined) return method === "GET" ? json(companyList()) : null
   // The API checks permission before it looks: anything not the FDE's is a 403.
   const found = state.companies.find((c) => c.company.id === companyId)
   if (!found) return refuse(403, "forbidden")
@@ -639,16 +845,11 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (collection === "members") return json(found.members)
     if (collection === "stakeholders") return json(found.stakeholders)
     if (collection === "systems") return json(found.systems)
-    if (collection === "projects")
-      return json(
-        state.projects.filter((p) => p.project.company === companyId).map((p) => p.project),
-      )
+    if (collection === "projects") return json(projectsOf(companyId).map((p) => p.project))
     return null
   }
   if (collection !== "projects" || projectId === undefined) return null
-  const p = state.projects.find(
-    (x) => x.project.id === projectId && x.project.company === companyId,
-  )
+  const p = projectsOf(companyId).find((x) => x.project.id === projectId)
   if (!p) return refuse(403, "forbidden")
   if (method === "GET") {
     if (record === undefined) return json(p.project)
@@ -684,7 +885,8 @@ async function answer(request: Request): Promise<Response> {
   if (!pathname.startsWith("/api/v1/")) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
   const [root, ...parts] = pathname.slice("/api/v1/".length).split("/")
-  if (root === "me" && parts.length === 0 && method === "GET") return json(state.me)
+  if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
+  if (method === "GET" && parts.length === 0 && root === "today") return json(today())
   const answered = root === "companies" ? await companyRoutes(method, parts, request) : null
   return answered ?? refuse(404, "not_found")
 }

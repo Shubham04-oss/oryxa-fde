@@ -26,8 +26,8 @@ describe("api on the mock", () => {
       ["Brightwater Clinics", "engineer"],
       ["Lumen Grocers", "lead"],
       ["Atlas Mutual", "engineer"],
-      // An organisation admin who is not a member has no part there.
-      ["Cobalt Grid", null],
+      // An organisation admin who is not a member reaches it as an admin.
+      ["Cobalt Grid", "admin"],
     ])
     for (const c of companies) {
       const detail = await api.company(c.id)
@@ -112,26 +112,47 @@ describe("api over the network", () => {
   }
 
   it("calls the spec's paths on this origin, with the CSRF header on every call", async () => {
+    const kestrel = { id: "cmp_1", name: "Kestrel", created_at: at, updated_at: at }
     const { seen, net } = stub({
       "GET /api/v1/me": () => Response.json(me),
       "GET /api/v1/companies": () =>
-        Response.json([{ id: "cmp_1", name: "Kestrel", created_at: at, updated_at: at }]),
-      "GET /api/v1/companies/cmp_1/projects": () => Response.json([]),
-      "GET /api/v1/companies/cmp_1/members": () =>
-        Response.json([{ user: "user_01", role: "engineer", added_at: at }]),
+        Response.json([
+          { ...kestrel, role: "engineer", projects: [{ id: "prj_1", name: "D", stage: "build" }] },
+        ]),
+      "GET /api/v1/today": () =>
+        Response.json({
+          items: [
+            {
+              kind: "access_request",
+              access: {
+                id: "acc_1",
+                description: "Read replica",
+                status: "requested",
+                requested_at: at,
+                status_changed_at: at,
+                days_waiting: 3,
+              },
+              owner: "Tomas Becker",
+              company: { id: "cmp_1", name: "Kestrel" },
+              project: { id: "prj_1", name: "D" },
+            },
+          ],
+        }),
     })
 
+    expect((await net.me()).user.name).toBe("Riya Kapoor")
     const { companies } = await net.companies()
+    expect(companies.map((c) => [c.role, c.projects.map((p) => p.id)])).toEqual([
+      ["engineer", ["prj_1"]],
+    ])
+    const { items } = await net.today()
+    expect(items[0]?.kind === "access_request" && items[0].owner).toBe("Tomas Becker")
 
-    expect(companies).toEqual([
-      {
-        id: "cmp_1",
-        name: "Kestrel",
-        created_at: at,
-        updated_at: at,
-        role: "engineer",
-        projects: [],
-      },
+    // One call each: the API serves the whole view.
+    expect(seen.map((r) => `${r.method} ${new URL(r.url).pathname}`)).toEqual([
+      "GET /api/v1/me",
+      "GET /api/v1/companies",
+      "GET /api/v1/today",
     ])
     for (const request of seen) {
       expect(new URL(request.url).origin).toBe(window.location.origin)
@@ -141,23 +162,23 @@ describe("api over the network", () => {
   })
 
   it("turns a refusal into an ApiError with the API's code, whatever its body", async () => {
-    const { net } = stub({
-      "GET /api/v1/me": () => Response.json(me),
-      "GET /api/v1/companies": () => Response.json({ error: "unauthorized" }, { status: 401 }),
-      "GET /api/v1/companies/cmp_1": () =>
-        new Response("<html>bad gateway</html>", { status: 502 }),
+    const signedOut = stub({
+      "GET /api/v1/me": () => Response.json({ error: "unauthorized" }, { status: 401 }),
     })
-
-    const unauthorized = await refusal(net.companies())
+    const unauthorized = await refusal(signedOut.net.me())
     expect([unauthorized.status, unauthorized.code]).toEqual([401, "unauthorized"])
-    const gateway = await refusal(net.company(CompanyId.parse("cmp_1")))
+
+    const down = stub({
+      "GET /api/v1/today": () => new Response("<html>bad gateway</html>", { status: 502 }),
+    })
+    const gateway = await refusal(down.net.today())
     expect([gateway.status, gateway.code]).toEqual([502, "http_502"])
   })
 
   it("fails loudly on an answer that drifts from the spec", async () => {
     const { net } = stub({
-      "GET /api/v1/me": () => Response.json(me),
-      "GET /api/v1/companies": () => Response.json([{ id: "cmp_1", name: "Kestrel" }]),
+      "GET /api/v1/companies": () =>
+        Response.json([{ id: "cmp_1", name: "Kestrel", role: "lead", projects: [] }]),
     })
 
     await expect(net.companies()).rejects.toThrow(/created_at/)
@@ -183,16 +204,16 @@ describe("api over the network", () => {
       [`${p}/tasks`]: () => Response.json([]),
       [`${p}/decisions`]: () => Response.json([]),
       [`${p}/stakeholders`]: () =>
-        Response.json([{ id: "stk_1", name: "Mara Lindqvist", updated_at: at }]),
+        Response.json([{ id: "stk_1", name: "Mara Lindqvist", role: "sponsor", updated_at: at }]),
       [`${p}/systems`]: () => Response.json([]),
     })
 
-    const project = await net.project({
+    const found = await net.project({
       company: CompanyId.parse("cmp_1"),
       project: ProjectId.parse("prj_1"),
     })
 
-    expect(project.stakeholders.map((s) => s.name)).toEqual(["Mara Lindqvist"])
+    expect(found.stakeholders.map((s) => s.name)).toEqual(["Mara Lindqvist"])
     const paths = seen.map((r) => new URL(r.url).pathname)
     expect(paths).toContain("/api/v1/companies/cmp_1/projects/prj_1/stakeholders")
     expect(paths).not.toContain("/api/v1/companies/cmp_1/stakeholders")

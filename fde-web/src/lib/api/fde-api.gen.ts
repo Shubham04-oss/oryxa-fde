@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+    "/auth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Finish sign-in: sets the session cookie and redirects to where sign-in started. */
+        get: operations["sign_in_callback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Start sign-in: redirects to WorkOS AuthKit. */
+        get: operations["sign_in"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign out: ends the WorkOS session and clears the cookie. */
+        post: operations["sign_out"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies": {
         parameters: {
             query?: never;
@@ -11,7 +62,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The companies the caller works on. */
+        /** The companies the caller works on, each with the caller's role and its projects. */
         get: operations["list_companies"];
         put?: never;
         /** Create a company; the caller becomes its lead. */
@@ -36,8 +87,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Rename a company. */
-        patch: operations["rename_company"];
+        /** Change some of a company's fields. */
+        patch: operations["update_company"];
         trace?: never;
     };
     "/v1/companies/{company}/members": {
@@ -107,8 +158,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Rename a project. */
-        patch: operations["rename_project"];
+        /** Change some of a project's fields. */
+        patch: operations["update_project"];
         trace?: never;
     };
     "/v1/companies/{company}/projects/{project}/access-requests": {
@@ -465,6 +516,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Who is signed in. */
+        get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/security-answers": {
         parameters: {
             query?: never;
@@ -493,6 +561,23 @@ export interface paths {
         put: operations["update_security_answer"];
         post?: never;
         delete: operations["remove_security_answer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/today": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What needs the caller across their projects: open tasks and unsettled access requests. */
+        get: operations["get_today"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -532,11 +617,41 @@ export interface components {
             /** @description WorkOS user id. */
             user: string;
         };
+        /**
+         * @description The caller's role at a company: a member's role, or `admin` for a WorkOS admin who is not a
+         *     member.
+         * @enum {string}
+         */
+        CallerRole: "lead" | "engineer" | "admin";
+        CompanyBody: {
+            industry?: string | null;
+            /** @description 1 to 200 characters, no control characters. */
+            name: string;
+            region?: string | null;
+            /** @description Up to 4000 characters. */
+            summary?: string | null;
+        };
         CompanyOut: {
             created_at: string;
             id: string;
+            industry?: string | null;
             name: string;
+            /** @description Where the company is, e.g. "UK" or "EMEA". */
+            region?: string | null;
+            summary?: string | null;
             updated_at: string;
+        };
+        /** @description A change to some of a company's fields: a field left out stays as it is, `null` clears it. */
+        CompanyPatch: {
+            industry?: string | null;
+            name?: string | null;
+            region?: string | null;
+            summary?: string | null;
+        };
+        /** @description A company in the caller's list: the company, the caller's role and its projects. */
+        CompanySummaryOut: components["schemas"]["CompanyOut"] & {
+            projects: components["schemas"]["ProjectSummaryOut"][];
+            role?: components["schemas"]["CallerRole"] | null;
         };
         CriterionBody: {
             comparator: components["schemas"]["TargetComparator"];
@@ -583,6 +698,12 @@ export interface components {
         };
         /** @enum {string} */
         ItemKind: "in" | "out";
+        MeOut: {
+            organisation: components["schemas"]["NamedOut"];
+            /** @description The caller's WorkOS role in the organisation. */
+            role: components["schemas"]["OrgRole"];
+            user: components["schemas"]["NamedOut"];
+        };
         MemberIn: {
             role: components["schemas"]["MemberRole"];
         };
@@ -594,9 +715,17 @@ export interface components {
         };
         /** @enum {string} */
         MemberRole: "lead" | "engineer";
-        NameIn: {
+        NamedOut: {
+            id: string;
+            name: string;
+        };
+        /** @enum {string} */
+        OrgRole: "admin" | "member";
+        ProjectBody: {
             /** @description 1 to 200 characters, no control characters. */
             name: string;
+            /** @description Up to 4000 characters. */
+            summary?: string | null;
         };
         ProjectOut: {
             company: string;
@@ -604,10 +733,22 @@ export interface components {
             id: string;
             name: string;
             stage: components["schemas"]["ProjectStage"];
+            summary?: string | null;
             updated_at: string;
+        };
+        /** @description A change to some of a project's fields: a field left out stays as it is, `null` clears it. */
+        ProjectPatch: {
+            name?: string | null;
+            summary?: string | null;
         };
         /** @enum {string} */
         ProjectStage: "discover" | "scope" | "access" | "build" | "evaluate" | "deploy" | "handoff" | "operate";
+        /** @description A project in a company list. */
+        ProjectSummaryOut: {
+            id: string;
+            name: string;
+            stage: components["schemas"]["ProjectStage"];
+        };
         ScopeChangeOut: {
             action: string;
             actor: string;
@@ -670,43 +811,84 @@ export interface components {
         };
         StakeholderBody: {
             name: string;
-            /** @description Their role at the customer, e.g. "VP Engineering". */
+            /** @description Their part in the engagement; `other` if left out. */
+            role?: components["schemas"]["StakeholderPart"];
+            /** @description Their job at the customer, e.g. "VP Engineering". */
             title?: string | null;
         };
         StakeholderOut: {
             id: string;
             name: string;
+            role: components["schemas"]["StakeholderPart"];
             title?: string | null;
             updated_at: string;
         };
+        /**
+         * @description The part a stakeholder plays in the engagement.
+         * @enum {string}
+         */
+        StakeholderPart: "sponsor" | "champion" | "user" | "it" | "security" | "other";
         SystemBody: {
             description?: string | null;
+            /** @description What sort of system, e.g. "CRM" or "data warehouse". */
+            kind?: string | null;
             name: string;
         };
         SystemOut: {
             description?: string | null;
             id: string;
+            kind?: string | null;
             name: string;
             updated_at: string;
         };
         /** @enum {string} */
         TargetComparator: "at_least" | "at_most";
         TaskBody: {
+            /** @description The WorkOS user who works it. */
+            assignee?: string | null;
             /** @description What blocks the task; required when the status is `blocked`. */
             blocker?: string | null;
+            /** @description Due date, `YYYY-MM-DD`. */
+            due_on?: string | null;
             status: components["schemas"]["TaskState"];
             title: string;
+            /** @description The stakeholder at the customer it waits on. */
+            waiting_on?: string | null;
         };
         TaskOut: {
+            assignee?: string | null;
             blocker?: string | null;
             created_at: string;
+            /** @description `YYYY-MM-DD`. */
+            due_on?: string | null;
             id: string;
             status: components["schemas"]["TaskState"];
             title: string;
             updated_at: string;
+            waiting_on?: string | null;
+            /** @description When it started waiting on the customer; set while the status is `waiting_on_customer`. */
+            waiting_since?: string | null;
         };
         /** @enum {string} */
         TaskState: "todo" | "in_progress" | "waiting_on_customer" | "blocked" | "done";
+        /** @description Something that needs the FDE, tagged by `kind`. */
+        TodayItemOut: {
+            company: components["schemas"]["NamedOut"];
+            /** @enum {string} */
+            kind: "task";
+            project: components["schemas"]["NamedOut"];
+            task: components["schemas"]["TaskOut"];
+        } | {
+            access: components["schemas"]["AccessRequestOut"];
+            company: components["schemas"]["NamedOut"];
+            /** @enum {string} */
+            kind: "access_request";
+            owner?: string | null;
+            project: components["schemas"]["NamedOut"];
+        };
+        TodayOut: {
+            items: components["schemas"]["TodayItemOut"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -716,6 +898,138 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    sign_in_callback: {
+        parameters: {
+            query: {
+                code: string;
+                state: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed in; to the page sign-in started from */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in: {
+        parameters: {
+            query?: {
+                /** @description Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`. */
+                return_to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description To WorkOS AuthKit */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_out: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed out */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_companies: {
         parameters: {
             query?: never;
@@ -731,7 +1045,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CompanyOut"][];
+                    "application/json": components["schemas"]["CompanySummaryOut"][];
                 };
             };
             /** @description Unauthorized */
@@ -754,7 +1068,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NameIn"];
+                "application/json": components["schemas"]["CompanyBody"];
             };
         };
         responses: {
@@ -828,7 +1142,7 @@ export interface operations {
             };
         };
     };
-    rename_company: {
+    update_company: {
         parameters: {
             query?: never;
             header?: never;
@@ -840,7 +1154,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NameIn"];
+                "application/json": components["schemas"]["CompanyPatch"];
             };
         };
         responses: {
@@ -1044,7 +1358,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NameIn"];
+                "application/json": components["schemas"]["ProjectBody"];
             };
         };
         responses: {
@@ -1129,7 +1443,7 @@ export interface operations {
             };
         };
     };
-    rename_project: {
+    update_project: {
         parameters: {
             query?: never;
             header?: never;
@@ -1143,7 +1457,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NameIn"];
+                "application/json": components["schemas"]["ProjectPatch"];
             };
         };
         responses: {
@@ -2770,6 +3084,44 @@ export interface operations {
             };
         };
     };
+    get_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeOut"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_security_answers: {
         parameters: {
             query?: never;
@@ -2925,6 +3277,35 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_today: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TodayOut"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

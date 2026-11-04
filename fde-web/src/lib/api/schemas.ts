@@ -50,9 +50,10 @@ export const Stage = z.enum(STAGES)
 export type Stage = z.infer<typeof Stage>
 
 const instant = z.iso.datetime({ offset: true })
+const day = z.iso.date()
 const optionalText = z.string().nullish()
 
-// ponytail: `/v1/me` is not in the spec yet (#24 comment); this is the shape asked of the API.
+/** Who is signed in: `GET /v1/me` (the spec's `MeOut`). */
 export const Me = z.object({
   user: z.object({ id: UserId, name: z.string() }),
   organisation: z.object({ id: TenantId, name: z.string() }),
@@ -63,6 +64,9 @@ export type Me = z.infer<typeof Me>
 export const CompanyOut = z.object({
   id: CompanyId,
   name: z.string(),
+  industry: optionalText,
+  region: optionalText,
+  summary: optionalText,
   created_at: instant,
   updated_at: instant,
 })
@@ -73,20 +77,34 @@ export const ProjectOut = z.object({
   company: CompanyId,
   name: z.string(),
   stage: Stage,
+  summary: optionalText,
   created_at: instant,
   updated_at: instant,
 })
 export type ProjectOut = z.infer<typeof ProjectOut>
 
-/** The FDE's part at a company (`fde_company` in ADR 0002; the spec's `MemberRole`). */
-export const CompanyRole = z.enum(["lead", "engineer"])
+export const ProjectSummaryOut = z.object({ id: ProjectId, name: z.string(), stage: Stage })
+export type ProjectSummaryOut = z.infer<typeof ProjectSummaryOut>
+
+/** The FDE's part at a company: a member's role, or `admin` for an organisation admin who is not one. */
+export const CompanyRole = z.enum(["lead", "engineer", "admin"])
 export type CompanyRole = z.infer<typeof CompanyRole>
 
-export const MemberOut = z.object({ user: UserId, role: CompanyRole, added_at: instant })
+/** A company in the FDE's list, with their part there and its projects (`GET /v1/companies`). */
+export const CompanySummaryOut = CompanyOut.extend({
+  role: CompanyRole.nullish(),
+  projects: z.array(ProjectSummaryOut),
+})
+export type CompanySummary = z.infer<typeof CompanySummaryOut>
+
+/** The part a stakeholder plays in the engagement (the spec's `StakeholderPart`). */
+export const StakeholderPart = z.enum(["sponsor", "champion", "user", "it", "security", "other"])
+export type StakeholderPart = z.infer<typeof StakeholderPart>
 
 export const StakeholderOut = z.object({
   id: StakeholderId,
   name: z.string(),
+  role: StakeholderPart,
   title: optionalText,
   updated_at: instant,
 })
@@ -95,6 +113,7 @@ export type StakeholderOut = z.infer<typeof StakeholderOut>
 export const SystemOut = z.object({
   id: SystemId,
   name: z.string(),
+  kind: optionalText,
   description: optionalText,
   updated_at: instant,
 })
@@ -163,6 +182,12 @@ export const TaskOut = z.object({
   title: z.string(),
   status: TaskState,
   blocker: optionalText,
+  due_on: day.nullish(),
+  /** A WorkOS user id. */
+  assignee: UserId.nullish(),
+  /** The stakeholder it waits on, and since when, while it waits on the customer. */
+  waiting_on: StakeholderId.nullish(),
+  waiting_since: instant.nullish(),
   created_at: instant,
   updated_at: instant,
 })
@@ -180,12 +205,33 @@ export const DecisionOut = z.object({
 })
 export type DecisionOut = z.infer<typeof DecisionOut>
 
-// What the screens read, composed by `api` (client.ts) from the answers above.
+const Named = <T extends z.ZodType<string>>(ref: T) => z.object({ id: ref, name: z.string() })
 
-/** A company in lists: its projects, and the FDE's part there (null when not a member). */
-export type CompanySummary = CompanyOut & { role: CompanyRole | null; projects: Array<ProjectOut> }
+/** Open work across every project the FDE is on (`GET /v1/today`), tagged by `kind`. */
+export const TodayItemOut = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("task"),
+    task: TaskOut,
+    company: Named(CompanyId),
+    project: Named(ProjectId),
+  }),
+  z.object({
+    kind: z.literal("access_request"),
+    access: AccessRequestOut,
+    /** The name of the stakeholder who can grant it. */
+    owner: optionalText,
+    company: Named(CompanyId),
+    project: Named(ProjectId),
+  }),
+])
+export type TodayItem = z.infer<typeof TodayItemOut>
+export const TodayOut = z.object({ items: z.array(TodayItemOut) })
 
-export type Company = CompanySummary & {
+// What the company and project screens read, gathered by `api` (client.ts) from the answers above.
+
+export type Company = CompanyOut & {
+  role: CompanyRole | null
+  projects: Array<ProjectOut>
   stakeholders: Array<StakeholderOut>
   systems: Array<SystemOut>
 }
@@ -200,13 +246,3 @@ export type Project = Omit<ProjectOut, "company"> & {
   stakeholders: Array<StakeholderOut>
   systems: Array<SystemOut>
 }
-
-type Where = {
-  company: { id: CompanyId; name: string }
-  project: { id: ProjectId; name: string }
-}
-
-/** Open work across every company the FDE is on: tasks and access requests not yet settled. */
-export type TodayItem =
-  | ({ kind: "task"; task: TaskOut } & Where)
-  | ({ kind: "access_request"; access: AccessRequestOut; owner: string | null } & Where)
