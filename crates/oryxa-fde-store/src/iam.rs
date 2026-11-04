@@ -58,7 +58,7 @@ fn rds_ca_bundle() -> Result<&'static [u8], StoreError> {
 pub enum Tls {
     /// `verify-full` against the RDS CA bundle: the only choice outside tests.
     // ponytail: sqlx adds the bundle to webpki's public roots rather than replacing them, so a
-    // publicly trusted certificate for the RDS host name would also be accepted.
+    // publicly trusted certificate for the RDS host name would also be accepted (#59).
     Rds,
     /// No TLS, against the local test server only.
     #[cfg(test)]
