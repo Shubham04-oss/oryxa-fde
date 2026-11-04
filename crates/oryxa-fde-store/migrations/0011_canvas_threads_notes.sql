@@ -23,7 +23,11 @@ create table canvas_versions (
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)
 );
 
--- One link per shape on a canvas, to exactly one record; removing the record removes the link.
+-- One link per shape on a canvas, to exactly one record of the same company; removing the record
+-- removes the link. Ids are unique per tenant, so these keys add no constraint, only the company
+-- for the foreign keys below.
+alter table scope_items add unique (tenant_id, company_id, item_id);
+alter table access_requests add unique (tenant_id, company_id, access_request_id);
 create table canvas_links (
     tenant_id         text not null,
     company_id        text not null,
@@ -40,9 +44,10 @@ create table canvas_links (
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id),
     foreign key (tenant_id, company_id, stakeholder_id)
         references stakeholders (tenant_id, company_id, stakeholder_id) on delete cascade,
-    foreign key (tenant_id, scope_item_id) references scope_items (tenant_id, item_id) on delete cascade,
-    foreign key (tenant_id, access_request_id)
-        references access_requests (tenant_id, access_request_id) on delete cascade
+    foreign key (tenant_id, company_id, scope_item_id)
+        references scope_items (tenant_id, company_id, item_id) on delete cascade,
+    foreign key (tenant_id, company_id, access_request_id)
+        references access_requests (tenant_id, company_id, access_request_id) on delete cascade
 );
 
 -- A thread is about one subject (a record or a canvas shape) and keeps its comments when the
@@ -137,4 +142,5 @@ grant select, insert on canvas_versions, thread_comments to oryxa_fde_app;
 grant select, insert, delete on canvas_links, meeting_note_stakeholders to oryxa_fde_app;
 grant select, insert on threads to oryxa_fde_app;
 grant update (decision_id) on threads to oryxa_fde_app;
-grant select, insert, update, delete on meeting_notes to oryxa_fde_app;
+grant select, insert, delete on meeting_notes to oryxa_fde_app;
+grant update (title, held_on, body, attendees, updated_at) on meeting_notes to oryxa_fde_app;

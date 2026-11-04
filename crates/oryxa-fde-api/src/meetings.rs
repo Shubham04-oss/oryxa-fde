@@ -94,14 +94,14 @@ fn note_id(raw: String) -> Result<MeetingNoteId, ApiError> {
     MeetingNoteId::new(raw).map_err(|_| ApiError::Invalid("note"))
 }
 
-/// Each attendee must work on the place, as a task's assignee must work on its project.
+/// Each attendee must work on the place, as a task's assignee must work on its project. One bulk
+/// check, made before any transaction opens.
 async fn check_attendees(app: &App, who: &Principal, at: &Place, v: &MeetingNoteIn) -> Result<(), ApiError> {
-    for a in &v.attendees {
-        if !app.works_at(who, a, at.resource()).await? {
-            return Err(ApiError::Invalid("attendees"));
-        }
+    if app.all_work_at(who, &v.attendees, at.resource()).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid("attendees"))
     }
-    Ok(())
 }
 
 async fn list(app: &App, who: &Principal, at: Place) -> Result<Vec<MeetingNoteOut>, ApiError> {
@@ -113,8 +113,9 @@ async fn list(app: &App, who: &Principal, at: Place) -> Result<Vec<MeetingNoteOu
 
 async fn add(app: &App, who: &Principal, at: Place, body: MeetingNoteBody) -> Result<MeetingNoteOut, ApiError> {
     let v = body.parse()?;
-    let mut tx = at.enter(app, who).await?;
+    at.require(app, who).await?;
     check_attendees(app, who, &at, &v).await?;
+    let mut tx = at.open(app).await?;
     let id = new("mtg", MeetingNoteId::new)?;
     let added = tx
         .add_meeting_note(&id, &v, &who.actor())
@@ -141,8 +142,9 @@ async fn update(
 ) -> Result<MeetingNoteOut, ApiError> {
     let id = note_id(raw)?;
     let v = body.parse()?;
-    let mut tx = at.enter(app, who).await?;
+    at.require(app, who).await?;
     check_attendees(app, who, &at, &v).await?;
+    let mut tx = at.open(app).await?;
     let updated = tx
         .update_meeting_note(&id, &v, &who.actor())
         .await?

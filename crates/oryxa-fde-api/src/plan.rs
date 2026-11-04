@@ -40,8 +40,14 @@ impl Place {
 
     /// Checks the caller's `work` on the place, then opens its transaction.
     pub(crate) async fn enter(&self, app: &App, who: &Principal) -> Result<PlanTx, ApiError> {
-        app.require(who, self.resource(), "work").await?;
+        self.require(app, who).await?;
         self.open(app).await
+    }
+
+    /// Checks the caller's `work` on the place, for a handler with more to check before it opens
+    /// the transaction.
+    pub(crate) async fn require(&self, app: &App, who: &Principal) -> Result<(), ApiError> {
+        app.require(who, self.resource(), "work").await
     }
 
     /// Opens the place's transaction, for a caller already checked. A project must be in the

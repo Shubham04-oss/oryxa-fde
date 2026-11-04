@@ -30,7 +30,7 @@ oryxa-fde-store.workspace = true
 # Jitter for WorkOS retries; already in the tree.
 rand = "0.8"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true

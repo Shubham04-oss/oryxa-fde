@@ -13,7 +13,7 @@ use oryxa_fde_store::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, ShapeId, ShapeLink, Snapshot, SnapshotBody, SnapshotId, SnapshotIn, SnapshotMeta,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
@@ -21,16 +21,19 @@ use crate::plan::Place;
 use crate::records::new;
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
-/// Largest snapshot accepted, as stored (compact JSON).
+/// Largest snapshot accepted, as sent.
 pub const MAX_CANVAS_BYTES: usize = 8 * 1024 * 1024;
+/// Deepest nesting a scene may have; a canvas library's scene is a handful of levels.
+pub const MAX_CANVAS_DEPTH: usize = 64;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CanvasBody {
     /// The version this save was made on: the latest, or 0 for a canvas never saved.
     pub base_version: u32,
-    /// The canvas library's scene, a JSON object; stored as is.
+    /// The canvas library's scene, a JSON object of at most 8 MiB and 64 levels; stored as sent.
+    /// Never parsed into a tree: a body of millions of tiny values would cost many times its size.
     #[schema(value_type = Object)]
-    pub content: Value,
+    pub content: Box<RawValue>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -39,7 +42,7 @@ pub struct CanvasOut {
     pub version: u32,
     /// The scene; null for a canvas never saved.
     #[schema(value_type = Option<Object>)]
-    pub content: Option<Value>,
+    pub content: Option<Box<RawValue>>,
     pub saved_by: Option<String>,
     pub saved_at: Option<String>,
 }
@@ -136,7 +139,9 @@ async fn content(app: &App, s: Snapshot) -> Result<CanvasOut, ApiError> {
         tracing::error!(snapshot = %s.meta.id, "canvas snapshot does not match its checksum");
         return Err(ApiError::Internal);
     }
-    let content: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::Internal)?;
+    // Returned as stored, never parsed into a tree.
+    let text = String::from_utf8(bytes).map_err(|_| ApiError::Internal)?;
+    let content = RawValue::from_string(text).map_err(|_| ApiError::Internal)?;
     Ok(CanvasOut {
         version: s.meta.version,
         content: Some(content),
@@ -160,14 +165,55 @@ async fn load(app: &App, who: &Principal, at: Place) -> Result<CanvasOut, ApiErr
     }
 }
 
-async fn save(app: &App, who: &Principal, at: Place, body: CanvasBody) -> Result<CanvasVersionOut, ApiError> {
-    if !body.content.is_object() {
-        return Err(ApiError::Invalid("content"));
-    }
-    let bytes = serde_json::to_vec(&body.content).map_err(|_| ApiError::Invalid("content"))?;
-    if bytes.len() > MAX_CANVAS_BYTES {
+/// The scene's bytes, if it is a JSON object within the size and nesting limits. Checked on the
+/// raw text the body parser kept, so nothing the size of a tree is ever built.
+fn scene_bytes(content: &RawValue) -> Result<Vec<u8>, ApiError> {
+    let raw = content.get().as_bytes();
+    if raw.len() > MAX_CANVAS_BYTES {
         return Err(ApiError::Invalid("content_too_large"));
     }
+    if raw.first() != Some(&b'{') {
+        return Err(ApiError::Invalid("content"));
+    }
+    if !nests_within(raw, MAX_CANVAS_DEPTH) {
+        return Err(ApiError::Invalid("content_too_deep"));
+    }
+    Ok(raw.to_vec())
+}
+
+/// Whether `json`, already known to be valid JSON, nests no deeper than `max`. One pass over the
+/// bytes, allocating nothing.
+fn nests_within(json: &[u8], max: usize) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in json {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > max {
+                    return false;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    true
+}
+
+async fn save(app: &App, who: &Principal, at: Place, body: CanvasBody) -> Result<CanvasVersionOut, ApiError> {
+    let bytes = scene_bytes(&body.content)?;
+    drop(body.content);
     let mut tx = at.enter(app, who).await?;
     let id = new("cnv", SnapshotId::new)?;
     let mut v = SnapshotIn {
@@ -435,7 +481,111 @@ pub(crate) async fn unlink_project_shape(
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
     use super::*;
+
+    thread_local! {
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts the bytes each test thread has allocated, and its peak, so a test can show what one
+    /// request body costs to parse.
+    struct Counting;
+
+    fn grew(n: usize) {
+        let _ = LIVE.try_with(|l| {
+            l.set(l.get() + n);
+            let _ = PEAK.try_with(|p| p.set(p.get().max(l.get())));
+        });
+    }
+
+    fn shrank(n: usize) {
+        let _ = LIVE.try_with(|l| l.set(l.get().saturating_sub(n)));
+    }
+
+    // SAFETY: every call goes to the system allocator unchanged; only the counters are added.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                grew(layout.size());
+            }
+            p
+        }
+        unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(p, layout) };
+            shrank(layout.size());
+        }
+        unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let q = unsafe { System.realloc(p, layout, new_size) };
+            if !q.is_null() {
+                shrank(layout.size());
+                grew(new_size);
+            }
+            q
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// The most this thread had allocated at once while `f` ran, beyond what it held before.
+    fn peak_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|p| p.set(before));
+        let out = f();
+        (out, PEAK.with(Cell::get) - before)
+    }
+
+    /// What the save handler does with a body: parse it as axum's `Json` does, then check it.
+    fn parse_and_check(body: &[u8]) -> Result<usize, ApiError> {
+        let parsed: CanvasBody = serde_json::from_slice(body).map_err(|_| ApiError::Invalid("json"))?;
+        scene_bytes(&parsed.content).map(|b| b.len())
+    }
+
+    #[test]
+    fn a_huge_array_or_deep_nesting_is_refused_without_building_a_tree() {
+        // The reviewer's shape: 9 MiB of tiny values, which as a tree would take about 176 MB.
+        let mut huge = br#"{"base_version":1,"content":{"a":["#.to_vec();
+        while huge.len() < 9 << 20 {
+            huge.extend_from_slice(b"0,");
+        }
+        huge.extend_from_slice(b"0]}}");
+        let (refused, peak) = peak_during(|| parse_and_check(&huge));
+        assert!(matches!(refused, Err(ApiError::Invalid("content_too_large"))));
+        assert!(peak < 2 * huge.len(), "peak {peak} for a {}-byte body", huge.len());
+        // Nested a million levels: refused, at about a byte of parser state per level.
+        let levels = 1_000_000;
+        let mut deep = br#"{"base_version":1,"content":{"a":"#.to_vec();
+        deep.extend(std::iter::repeat_n(b'[', levels));
+        deep.extend(std::iter::repeat_n(b']', levels));
+        deep.extend_from_slice(b"}}");
+        let (refused, peak) = peak_during(|| parse_and_check(&deep));
+        assert!(matches!(refused, Err(ApiError::Invalid("content_too_deep"))));
+        assert!(peak < 3 * deep.len(), "peak {peak} for a {}-byte body", deep.len());
+        // A real scene goes through as sent.
+        let scene =
+            br#"{"base_version":0,"content":{"elements":[{"id":"s1","text":"a [quoted] \"{\" x"}],"files":{}}}"#;
+        assert_eq!(
+            parse_and_check(scene).unwrap(),
+            scene.len() - r#"{"base_version":0,"content":}"#.len()
+        );
+    }
+
+    #[test]
+    fn nesting_is_counted_outside_strings_only() {
+        assert!(nests_within(br#"{"a":[{"b":[]}]}"#, 4));
+        assert!(!nests_within(br#"{"a":[{"b":[]}]}"#, 3));
+        // Brackets inside strings, escaped quotes included, are text.
+        assert!(nests_within(br#"{"a":"[[[[\"{{{{"}"#, 1));
+        assert!(matches!(
+            scene_bytes(&RawValue::from_string("[1,2]".into()).unwrap()),
+            Err(ApiError::Invalid("content"))
+        ));
+    }
 
     #[test]
     fn a_link_body_names_one_valid_record() {

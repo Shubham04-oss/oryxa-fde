@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oryxa_authz::{AuthzError, CheckItem, Consistency, ObjectRef, Relationship, SubjectRef, Write};
+use oryxa_authz::{AuthzError, CheckItem, Consistency, Decision, ObjectRef, Relationship, SubjectRef, Write};
 use oryxa_core::{TenantId, UserId};
 use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
 use oryxa_fde_store::{Grant, GrantRow};
@@ -211,6 +211,39 @@ impl App {
     /// per tenant, so a user of another tenant never does.
     pub(crate) async fn works_on(&self, who: &Principal, other: &UserId, s: &ProjectScope) -> Result<bool, ApiError> {
         self.works_at(who, other, project(s)).await
+    }
+
+    /// Whether every one of `others`, users of the caller's tenant, has `work` on the company or
+    /// project: one bulk check. An item SpiceDB could not answer is unavailable, never an allow.
+    pub(crate) async fn all_work_at(
+        &self,
+        who: &Principal,
+        others: &[UserId],
+        resource: ObjectRef,
+    ) -> Result<bool, ApiError> {
+        if others.is_empty() {
+            return Ok(true);
+        }
+        let items: Vec<CheckItem> = others
+            .iter()
+            .map(|u| CheckItem {
+                resource: resource.clone(),
+                permission: "work",
+                subject: user(&who.tenant, u),
+                context: None,
+            })
+            .collect();
+        match self.authz.check_bulk(&who.tenant, &items, &CONSISTENCY).await {
+            Ok(decisions) if decisions.iter().any(|d| matches!(d, Decision::Error(_))) => {
+                tracing::error!("authz bulk check had an item error");
+                Err(ApiError::Unavailable)
+            }
+            Ok(decisions) => Ok(decisions.iter().all(Decision::allowed)),
+            Err(e) => {
+                tracing::error!(error = %e, "authz bulk check failed");
+                Err(ApiError::Unavailable)
+            }
+        }
     }
 
     /// Whether `other`, a user of the caller's tenant, has `work` on the company or project.
