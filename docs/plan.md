@@ -96,9 +96,14 @@ Every item is one issue, one branch, one PR. The lead reviews and merges.
 | Agent | `agent:agent` | Sandbox gateway and outbound handler; harness adapter and context pack |
 | Infra | `agent:infra` | Dev environment in OpenTofu for AWS and Cloudflare |
 
-**Wave 2 (after the API stream's first two PRs merge):** context and MCP, lifecycle engine and
-drafted updates, canvas and discussion, customer room, evals, billing, GitHub and Slack links, the
-web app on the real API.
+**Wave 2 (after wave 1 merges): finish P0.** Each stream works its issues in order.
+
+| Stream | Label | Issues, in order |
+| --- | --- | --- |
+| API | `agent:api` | Context and MCP server; lifecycle engine and drafted updates; customer room API and weekly digest; GitHub and Slack links; billing |
+| Web | `agent:web` | Web app on the real API; customer room screens; canvas and discussion with the `realtime/` Worker; agent run review screen |
+| Agent | `agent:agent` | Agent runs end to end (orchestration, approvals, budgets); evals; Bedrock IAM signing in the outbound handler |
+| Infra | `agent:infra` | Build and deploy pipelines for the API, Workers and web app |
 
 ## 7. Open decisions
 

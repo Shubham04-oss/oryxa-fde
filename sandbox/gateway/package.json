@@ -1,0 +1,24 @@
+{
+  "name": "@oryxa-fde/sandbox-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "prettier --check . && tsc --noEmit",
+    "fmt": "prettier --write .",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "1.0.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.1",
+    "@cloudflare/workers-types": "5.20261103.1",
+    "prettier": "3.6.2",
+    "typescript": "6.0.3",
+    "vitest": "5.1.0",
+    "wrangler": "4.157.0"
+  }
+}
