@@ -25,6 +25,8 @@ If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the iss
 5. Address review comments on your open PRs before starting new work.
 6. Do not merge your own PR. The lead merges after adding `lead-approved`.
 7. Stay inside the paths your role owns. Need a change elsewhere? Comment on the issue.
+8. A PR that changes `crates/oryxa-fde-api/openapi.json` also runs `pnpm api:generate` in `fde-web/` and commits
+   `fde-web/src/lib/api/fde-api.gen.ts` (the one web file every role may change), so `main`'s `web` job stays green.
 
 ## Hands off without lead review
 
