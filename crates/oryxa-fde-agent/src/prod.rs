@@ -28,12 +28,12 @@ use crate::gateway::GatewayClient;
 use crate::live::{LiveError, LiveOutput, Offline, RealtimeClient};
 use crate::project_context::StoreContext;
 use crate::service::{Deps, Pricing, Runs, RunsConfig};
-use crate::store::{Budget, InMemoryRuns};
+use crate::store::Budget;
 
 pub struct Production<K>(PhantomData<fn() -> K>);
 
 impl<K: KeySource + 'static> Deps for Production<K> {
-    type Store = InMemoryRuns;
+    type Store = Store;
     type Sandbox = GatewayClient;
     type Live = Live;
     type Context = StoreContext;
@@ -154,12 +154,13 @@ pub fn router_from_env<K: KeySource + 'static>(
             spend_usd_micros: dollars("AGENT_BUDGET_USD", 100)?,
         },
         max_run: Duration::from_secs(60 * number::<u64>("AGENT_RUN_MAX_MINUTES", 60)?),
-        grant_ttl: Duration::from_secs(15 * 60),
+        // The backstop: a grant closes when its approved call returns.
+        grant_ttl: Duration::from_secs(5 * 60),
         grace: Duration::from_secs(60),
         poll: Duration::from_secs(1),
     };
     let runs = Runs::<Production<K>>::new(
-        InMemoryRuns::default(),
+        store.clone(),
         sandbox,
         live,
         StoreContext::new(store, agent, Vec::new()),

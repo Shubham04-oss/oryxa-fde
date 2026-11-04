@@ -12,20 +12,21 @@
 //! Everything fails closed: a store, gateway or digest failure stops the run, and a harness that does not stop
 //! when told to has its sandbox destroyed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use oryxa_fde_core::{AgentRunId, CompanyScope, ProjectScope};
-use oryxa_fde_events::{AgentRunFinished, RunOutcome};
+use oryxa_fde_events::RunOutcome;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::context::ContextPack;
-use crate::event::{ApprovalOutcome, HarnessEvent, HarnessInput, parse_line};
+use crate::event::{ApprovalOutcome, HarnessEvent, HarnessInput, ToolStatus, parse_line};
 use crate::gateway::{Exec, HarnessProcess, ProcessEvent, Sandbox};
 use crate::git::{self, Delivery};
+use crate::ids::{ApprovalId, ToolCallId};
 use crate::live::LiveOutput;
 use crate::run::{Applied, FailReason, RunState, StopReason};
 use crate::service::{Deps, Remaining, Runs, remaining};
@@ -50,7 +51,8 @@ pub(crate) async fn drive<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, id: 
         scope,
         record,
         exec: None,
-        grants: BTreeSet::new(),
+        actions: BTreeSet::new(),
+        grants: BTreeMap::new(),
         started: None,
     };
     driver.run().await;
@@ -70,8 +72,10 @@ struct Driver<D: Deps> {
     record: RunRecord,
     /// The harness's exec id, for its stdin.
     exec: Option<String>,
-    /// Actions whose hosts an approval opened during this run.
-    grants: BTreeSet<String>,
+    /// The actions on the run's approval list.
+    actions: BTreeSet<String>,
+    /// Hosts opened for an approved tool call, by that call: closed as soon as it returns.
+    grants: BTreeMap<ToolCallId, (String, ApprovalId)>,
     started: Option<Instant>,
 }
 
@@ -132,9 +136,19 @@ impl<D: Deps> Driver<D> {
             self.record.task.clone(),
         )
         .await
-        .map_err(|_| "context")?
-        .encode()
         .map_err(|_| "context")?;
+        self.actions = pack.config.approvals.iter().map(|r| r.action.clone()).collect();
+        // Every action on the approval list must have its hosts held at the gateway, or approving it would gate
+        // nothing an obfuscated command or a background process could not reach anyway.
+        let held = runs
+            .sandbox
+            .held_actions(&company)
+            .await
+            .map_err(|_| "outbound policy")?;
+        if !self.actions.is_subset(&held) {
+            return Err("approval action without a held host");
+        }
+        let pack = pack.encode().map_err(|_| "context")?;
         runs.sandbox.start(&company).await.map_err(|_| "sandbox")?;
         for step in git::prepare(&self.record.repository) {
             let out = runs.sandbox.exec(&company, step).await.map_err(|_| "checkout")?;
@@ -241,6 +255,20 @@ impl<D: Deps> Driver<D> {
         let _ = live.try_send(raw.to_owned());
         let mut save = self.record.run.state() != &before;
         match line.event {
+            // Only actions on the run's own approval list can ever be granted.
+            HarnessEvent::ApprovalRequest { ref action, .. } if !self.actions.contains(action) => {
+                return self.stop(Stop::Reason(StopReason::BadOutput)).await;
+            }
+            HarnessEvent::ToolCall {
+                ref id,
+                status: ToolStatus::Completed | ToolStatus::Failed,
+                ..
+            } if self.grants.contains_key(id) => {
+                // The approved call returned: its hosts close now, so nothing after it can use them.
+                if let Some((action, approval)) = self.grants.remove(id) {
+                    self.close_grant(&action, &approval).await;
+                }
+            }
             HarnessEvent::ApprovalRequest {
                 id,
                 tool_call_id,
@@ -307,17 +335,28 @@ impl<D: Deps> Driver<D> {
         };
         let company = self.company().clone();
         if decided.outcome == ApprovalOutcome::Approved {
+            if !self.actions.contains(&pending.action) {
+                let _ = self.record.run.undelivered(&approval);
+                return self.hard_stop().await;
+            }
             let opened = self
                 .runs
                 .sandbox
-                .open_grant(&company, &pending.action, &approval, self.runs.config.grant_ttl)
+                .open_grant(
+                    &company,
+                    &pending.action,
+                    &approval,
+                    self.id(),
+                    self.runs.config.grant_ttl,
+                )
                 .await;
             if opened.is_err() {
                 // Without its hosts the approved action would fail half-way; refuse it instead.
                 let _ = self.record.run.undelivered(&approval);
                 return self.hard_stop().await;
             }
-            self.grants.insert(pending.action);
+            self.grants
+                .insert(pending.tool_call_id, (pending.action, approval.clone()));
         }
         if self.deliver_input(input).await {
             let _ = self.record.run.delivered(&approval);
@@ -370,12 +409,16 @@ impl<D: Deps> Driver<D> {
         }
     }
 
+    async fn close_grant(&self, action: &str, approval: &ApprovalId) {
+        if let Err(e) = self.runs.sandbox.close_grant(self.company(), action, approval).await {
+            tracing::warn!(error = %e, run = %self.id(), "could not close a grant; it expires on its own");
+        }
+    }
+
     async fn finish(&mut self) {
-        let company = self.company().clone();
-        for action in std::mem::take(&mut self.grants) {
-            if let Err(e) = self.runs.sandbox.close_grant(&company, &action).await {
-                tracing::warn!(error = %e, run = %self.id(), "could not close a grant; it expires on its own");
-            }
+        // Calls that never returned (the run was stopped) lose their hosts too.
+        for (action, approval) in std::mem::take(&mut self.grants).into_values() {
+            self.close_grant(&action, &approval).await;
         }
         if self.record.run.state() == &RunState::Finished {
             self.record.delivery = self.deliver().await;
@@ -389,24 +432,8 @@ impl<D: Deps> Driver<D> {
             seconds,
             usd_micros: self.runs.config.pricing.cost(self.record.usage),
         };
-        let outcome = match (self.record.run.state(), &self.record.delivery) {
-            (RunState::Finished, Delivery::Failed) => RunOutcome::Failed,
-            (RunState::Finished, _) => RunOutcome::Succeeded,
-            (
-                RunState::Failed {
-                    reason: FailReason::Cancelled,
-                },
-                _,
-            ) => RunOutcome::Cancelled,
-            _ => RunOutcome::Failed,
-        };
-        let event = AgentRunFinished {
-            company: self.scope.company.company.clone(),
-            project: self.scope.project.clone(),
-            agent_run: self.id().clone(),
-            outcome,
-        };
-        if let Err(e) = self.runs.store.finish(&self.record, used, &event).await {
+        let outcome = outcome(self.record.run.state(), &self.record.delivery);
+        if let Err(e) = self.runs.store.finish(&self.record, used, outcome).await {
             tracing::error!(error = %e, run = %self.id(), "could not record the run's end");
         }
     }
@@ -457,6 +484,28 @@ impl<D: Deps> Driver<D> {
             Some(pr) => Delivery::PullRequest(pr),
             None => fail("pull request"),
         }
+    }
+}
+
+/// How a run ended, in `agent-run.finished`'s terms: a rejected approval is `Rejected`; a run an FDE or its budget
+/// stopped is `Cancelled`; a finished run whose work could not be delivered `Failed`.
+fn outcome(state: &RunState, delivery: &Delivery) -> RunOutcome {
+    match (state, delivery) {
+        (RunState::Finished, Delivery::Failed) => RunOutcome::Failed,
+        (RunState::Finished, _) => RunOutcome::Succeeded,
+        (
+            RunState::Failed {
+                reason: FailReason::ApprovalRejected,
+            },
+            _,
+        ) => RunOutcome::Rejected,
+        (
+            RunState::Failed {
+                reason: FailReason::Cancelled | FailReason::OverBudget,
+            },
+            _,
+        ) => RunOutcome::Cancelled,
+        _ => RunOutcome::Failed,
     }
 }
 

@@ -363,7 +363,7 @@ pub async fn cancel<D: Deps>(
     if record.run.is_ended() {
         return Err(RunsError::Rejected("ended"));
     }
-    if !runs.store.request_cancel(&scope, &run).await? {
+    if !runs.store.request_cancel(&scope, &run, &caller.user).await? {
         return Err(RunsError::NotFound);
     }
     runs.changed();
@@ -504,7 +504,7 @@ pub async fn set_budget<D: Deps>(
     if body.minutes > MAX_BUDGET_MINUTES || body.spend_usd_micros > MAX_BUDGET_USD_MICROS {
         return Err(RunsError::Invalid("budget"));
     }
-    runs.store.set_budget(&scope, body).await?;
+    runs.store.set_budget(&scope, body, &caller.user).await?;
     let (budget, used) = runs.budget(&scope).await?;
     Ok(Json(BudgetOut { budget, used }))
 }
@@ -519,6 +519,41 @@ pub async fn set_budget<D: Deps>(
     tags((name = "agent-runs", description = "Coding agent runs in the company's sandbox, approvals and budgets"))
 )]
 pub struct RunsDoc;
+
+/// The run API's spec, with the status's reason phrase on every response that has no description, as OpenAPI 3.1
+/// requires (the same rule as `oryxa_fde_api::openapi`).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    let mut api = RunsDoc::openapi();
+    describe_responses(&mut api);
+    api
+}
+
+pub(crate) fn describe_responses(api: &mut utoipa::openapi::OpenApi) {
+    for item in api.paths.paths.values_mut() {
+        let ops = [
+            &mut item.get,
+            &mut item.put,
+            &mut item.post,
+            &mut item.delete,
+            &mut item.patch,
+        ];
+        for op in ops.into_iter().flatten() {
+            for (code, response) in &mut op.responses.responses {
+                if let utoipa::openapi::RefOr::T(r) = response
+                    && r.description.is_empty()
+                {
+                    r.description = code
+                        .parse::<u16>()
+                        .ok()
+                        .and_then(|c| StatusCode::from_u16(c).ok())
+                        .and_then(|c| c.canonical_reason())
+                        .unwrap_or("Response")
+                        .to_owned();
+                }
+            }
+        }
+    }
+}
 
 struct Bearer;
 
@@ -546,7 +581,7 @@ mod tests {
     #[test]
     fn openapi_spec_is_committed_and_current() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SPEC);
-        let spec = RunsDoc::openapi().to_pretty_json().unwrap() + "\n";
+        let spec = openapi().to_pretty_json().unwrap() + "\n";
         if std::env::var_os("UPDATE_OPENAPI").is_some() {
             std::fs::write(&path, &spec).unwrap();
         }

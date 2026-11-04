@@ -2,7 +2,7 @@
 //! write a run's context pack, start the harness and talk to it, and open approved hosts. `GatewayClient` calls the
 //! Worker's internal API; tests stand in a fake.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Duration;
 
@@ -91,19 +91,43 @@ pub trait Sandbox: Send + Sync + 'static {
         exec: &str,
         line: String,
     ) -> impl Future<Output = Result<(), SandboxError>> + Send;
-    /// Opens the hosts the company's outbound policy holds for `action`, after an FDE approved `approval`.
+    /// The approval actions the company's outbound policy holds hosts for.
+    fn held_actions(
+        &self,
+        company: &CompanyScope,
+    ) -> impl Future<Output = Result<BTreeSet<String>, SandboxError>> + Send;
+    /// Opens the hosts the company's outbound policy holds for `action`, while `run` makes the call an FDE approved
+    /// (`approval`).
     fn open_grant(
         &self,
         company: &CompanyScope,
         action: &str,
         approval: &ApprovalId,
+        run: &AgentRunId,
         ttl: Duration,
     ) -> impl Future<Output = Result<(), SandboxError>> + Send;
+    /// Closes `action`'s hosts if `approval` opened them.
     fn close_grant(
         &self,
         company: &CompanyScope,
         action: &str,
+        approval: &ApprovalId,
     ) -> impl Future<Output = Result<(), SandboxError>> + Send;
+}
+
+/// An approval action as it may appear in a gateway path: the approval list's own rule (`[A-Za-z0-9_-]`, at most
+/// 128). The harness reports it, so it is checked again here rather than trusted.
+pub fn action_segment(action: &str) -> Result<&str, SandboxError> {
+    let ok = !action.is_empty()
+        && action.len() <= 128
+        && action
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(action)
+    } else {
+        Err(SandboxError::Invalid { route: "grant" })
+    }
 }
 
 /// Splits a byte stream into lines, refusing one longer than `max` before it is all in memory.
@@ -233,6 +257,17 @@ struct Digest {
     sha256: String,
 }
 
+#[derive(Deserialize)]
+struct Policy {
+    hosts: Vec<PolicyHost>,
+}
+
+#[derive(Deserialize)]
+struct PolicyHost {
+    #[serde(default)]
+    approval: Option<String>,
+}
+
 impl Sandbox for GatewayClient {
     async fn start(&self, company: &CompanyScope) -> Result<(), SandboxError> {
         self.send(self.http.post(self.url(company, "start")), "start").await?;
@@ -328,24 +363,40 @@ impl Sandbox for GatewayClient {
         Ok(())
     }
 
+    async fn held_actions(&self, company: &CompanyScope) -> Result<BTreeSet<String>, SandboxError> {
+        let response = self
+            .send(self.http.get(self.url(company, "outbound-policy")), "outbound-policy")
+            .await?;
+        let policy: Policy = response.json().await.map_err(|_| SandboxError::Invalid {
+            route: "outbound-policy",
+        })?;
+        Ok(policy.hosts.into_iter().filter_map(|h| h.approval).collect())
+    }
+
     async fn open_grant(
         &self,
         company: &CompanyScope,
         action: &str,
         approval: &ApprovalId,
+        run: &AgentRunId,
         ttl: Duration,
     ) -> Result<(), SandboxError> {
-        let request = self
-            .http
-            .put(self.url(company, &format!("grants/{action}")))
-            .json(&serde_json::json!({ "approval": approval, "ttlMs": ttl.as_millis() as u64 }));
-        self.send(request, "grant").await?;
+        let route = format!("grants/{}", action_segment(action)?);
+        let body = serde_json::json!({ "approval": approval, "run": run, "ttlMs": ttl.as_millis() as u64 });
+        self.send(self.http.put(self.url(company, &route)).json(&body), "grant")
+            .await?;
         Ok(())
     }
 
-    async fn close_grant(&self, company: &CompanyScope, action: &str) -> Result<(), SandboxError> {
-        let request = self.http.delete(self.url(company, &format!("grants/{action}")));
-        self.send(request, "grant").await?;
+    async fn close_grant(
+        &self,
+        company: &CompanyScope,
+        action: &str,
+        approval: &ApprovalId,
+    ) -> Result<(), SandboxError> {
+        // Approval ids are [A-Za-z0-9_-], so the query needs no escaping either.
+        let route = format!("grants/{}?approval={approval}", action_segment(action)?);
+        self.send(self.http.delete(self.url(company, &route)), "grant").await?;
         Ok(())
     }
 }
@@ -409,6 +460,22 @@ mod tests {
         assert_eq!(lines.push(b"123456789"), vec![Line::Invalid]);
         let mut binary = Lines::new(8);
         assert_eq!(binary.push(b"\xff\xfe\n"), vec![Line::Invalid]);
+    }
+
+    #[test]
+    fn an_action_reaches_a_path_only_as_the_approval_list_writes_one() {
+        assert_eq!(action_segment("customer_send").unwrap(), "customer_send");
+        for bad in [
+            "",
+            "de/ploy",
+            "../stop",
+            "deploy?approval=x",
+            "de ploy",
+            "dé",
+            &"a".repeat(129),
+        ] {
+            assert!(action_segment(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

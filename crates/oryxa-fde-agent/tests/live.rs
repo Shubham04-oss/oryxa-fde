@@ -15,7 +15,9 @@ use oryxa_fde_agent::access::{Access, AccessError, Caller, Permission, PlatformA
 use oryxa_fde_agent::project_context::StoreContext;
 use oryxa_fde_agent::{AgentConfig, ContextError, ContextSource};
 use oryxa_fde_core::{CompanyId, CompanyScope, CriterionId, DecisionId, ProjectId, ScopeItemId};
-use oryxa_fde_store::{Actor, Comparator, CriterionIn, DecisionIn, Name, ScopeItemIn, ScopeKind, Store, Text, new_id};
+use oryxa_fde_store::{
+    Actor, CompanyIn, Comparator, CriterionIn, DecisionIn, Name, ProjectIn, ScopeItemIn, ScopeKind, Store, Text, new_id,
+};
 use oryxa_spicedb_proto::v1::{WriteSchemaRequest, schema_service_client::SchemaServiceClient};
 use workos::helpers::JwkSet;
 
@@ -44,12 +46,9 @@ async fn spicedb() -> SpiceDb {
     SpiceDb::connect(&endpoint, &key, Duration::from_secs(2)).await.unwrap()
 }
 
+/// The store on a fresh runtime login, after the migrations ran as the owner (`DATABASE_URL`).
 async fn store() -> Store {
-    let url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:oryxa@localhost:55432/oryxa_fde".into());
-    let store = Store::connect(&url).await.unwrap();
-    store.migrate().await.unwrap();
-    store
+    oryxa_fde_store::testing::store().await
 }
 
 fn rel(resource: ObjectRef, relation: &'static str, subject: ObjectRef) -> Write {
@@ -118,13 +117,20 @@ async fn the_pack_reads_the_projects_scope_criteria_and_decisions() {
         request_id: new_id("req"),
     };
     let mut tx = store.company(&company).await.unwrap();
-    tx.create(&Name::new("Sample company").unwrap(), &by).await.unwrap();
+    let input = CompanyIn {
+        name: Name::new("Sample company").unwrap(),
+        industry: None,
+        region: None,
+        summary: None,
+    };
+    tx.create(&input, &by).await.unwrap();
     tx.commit().await.unwrap();
     let mut tx = store.project(&project).await.unwrap();
-    tx.create(&Name::new("Status page").unwrap(), &by)
-        .await
-        .unwrap()
-        .unwrap();
+    let input = ProjectIn {
+        name: Name::new("Status page").unwrap(),
+        summary: None,
+    };
+    tx.create(&input, &by).await.unwrap().unwrap();
     let item = ScopeItemIn {
         kind: ScopeKind::In,
         description: Text::new("A status page for the sample API.").unwrap(),

@@ -14,6 +14,7 @@ pub mod git;
 pub mod ids;
 pub mod live;
 mod orchestrate;
+pub mod pg;
 pub mod prod;
 pub mod project_context;
 pub mod run;

@@ -48,7 +48,8 @@ pub struct RunsConfig {
     pub default_budget: Budget,
     /// The longest one run may take, whatever is left of the budget.
     pub max_run: Duration,
-    /// How long an FDE's approval keeps the action's hosts open.
+    /// The longest an FDE's approval keeps the action's hosts open; the run closes them as soon as the approved
+    /// call returns.
     pub grant_ttl: Duration,
     /// How long a harness that was told to stop gets before its sandbox is destroyed.
     pub grace: Duration,

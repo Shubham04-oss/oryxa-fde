@@ -1,7 +1,7 @@
-//! Where runs, their approvals, transcripts and the project's budget live. `RunStore` is what runs need;
-//! `InMemoryRuns` implements it until the store crate does on Postgres (with `finish` writing the outbox in the
-//! same transaction). Every lookup takes the full `ProjectScope`, so a run of one company is never found through
-//! another's.
+//! Where runs, their approvals, transcripts and the project's budget live. `RunStore` is what runs need; the FDE
+//! store implements it on Postgres (`pg.rs`), with `finish` writing `agent-run.finished` to the outbox in the same
+//! transaction. `InMemoryRuns` is for tests. Every lookup takes the full `ProjectScope`, so a run of one company is
+//! never found through another's.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{AgentRunId, ProjectScope};
-use oryxa_fde_events::AgentRunFinished;
+use oryxa_fde_events::{AgentRunFinished, RunOutcome};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -144,6 +144,7 @@ pub trait RunStore: Send + Sync + 'static {
         &self,
         scope: &ProjectScope,
         run: &AgentRunId,
+        by: &UserId,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send;
     fn cancel_requested(
         &self,
@@ -151,14 +152,20 @@ pub trait RunStore: Send + Sync + 'static {
         run: &AgentRunId,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send;
     fn budget(&self, scope: &ProjectScope) -> impl Future<Output = Result<Option<Budget>, StoreError>> + Send;
-    fn set_budget(&self, scope: &ProjectScope, budget: Budget) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn set_budget(
+        &self,
+        scope: &ProjectScope,
+        budget: Budget,
+        by: &UserId,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn spend(&self, scope: &ProjectScope) -> impl Future<Output = Result<Spend, StoreError>> + Send;
-    /// Saves the ended run, adds its use to the project's spend and enqueues `event`, all or nothing.
+    /// Saves the ended run, adds its use to the project's spend and enqueues `agent-run.finished` with `outcome`,
+    /// all or nothing.
     fn finish(
         &self,
         run: &RunRecord,
         used: Spend,
-        event: &AgentRunFinished,
+        outcome: RunOutcome,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -179,9 +186,7 @@ struct Inner {
     next: u64,
 }
 
-/// Runs held in the API process.
-// ponytail: in memory until the store crate implements `RunStore` on Postgres. One API task only, and a restart
-// loses runs (each fails closed: its harness waits until the gateway's time limit) and the projects' budget use.
+/// Runs held in memory, for tests; production uses the FDE store.
 #[derive(Default)]
 pub struct InMemoryRuns {
     inner: Mutex<Inner>,
@@ -295,7 +300,7 @@ impl RunStore for InMemoryRuns {
             .unwrap_or(DecideResult::NotFound))
     }
 
-    async fn request_cancel(&self, scope: &ProjectScope, run: &AgentRunId) -> Result<bool, StoreError> {
+    async fn request_cancel(&self, scope: &ProjectScope, run: &AgentRunId, _: &UserId) -> Result<bool, StoreError> {
         Ok(self.with(scope, run, |e| e.cancel = true).is_some())
     }
 
@@ -307,7 +312,7 @@ impl RunStore for InMemoryRuns {
         Ok(self.lock().budgets.get(scope).copied())
     }
 
-    async fn set_budget(&self, scope: &ProjectScope, budget: Budget) -> Result<(), StoreError> {
+    async fn set_budget(&self, scope: &ProjectScope, budget: Budget, _: &UserId) -> Result<(), StoreError> {
         self.lock().budgets.insert(scope.clone(), budget);
         Ok(())
     }
@@ -316,14 +321,15 @@ impl RunStore for InMemoryRuns {
         Ok(self.lock().spend.get(scope).copied().unwrap_or_default())
     }
 
-    async fn finish(&self, run: &RunRecord, used: Spend, event: &AgentRunFinished) -> Result<(), StoreError> {
+    async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {
         let mut inner = self.lock();
         let (scope, id) = key(run);
+        let event = AgentRunFinished::new(&scope, id.clone(), outcome);
         let entry = inner.runs.get_mut(&(scope.clone(), id)).ok_or(StoreError::NotFound)?;
         entry.record = run.clone();
         let total = inner.spend.entry(scope).or_default();
         *total = total.plus(used);
-        inner.outbox.push(event.clone());
+        inner.outbox.push(event);
         Ok(())
     }
 }

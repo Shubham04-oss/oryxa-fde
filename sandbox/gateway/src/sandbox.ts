@@ -87,7 +87,7 @@ export class CompanySandbox extends DurableObject<Env> {
     const container = this.container();
     if (container.running) await container.destroy();
     // Approvals belong to the runs in this container; a new container starts with none.
-    for (const [key] of this.ctx.storage.kv.list({ prefix: GRANT_PREFIX })) this.ctx.storage.kv.delete(key);
+    this.#closeAllGrants();
     return { running: false };
   }
 
@@ -112,22 +112,37 @@ export class CompanySandbox extends DurableObject<Env> {
     return { sha256: await sha256Hex(await written.arrayBuffer()) };
   }
 
-  /** Starts the harness as root on a written pack; it starts the agent as `agent` and then drops root itself. */
+  /**
+   * Starts the harness as root on a written pack; it starts the agent as `agent` and then drops root itself. A new
+   * run inherits no grant from an earlier one.
+   */
   startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
     this.#bind(scope);
+    this.#closeAllGrants();
     return this.#stream(harnessCommand(run, req), ROOT_USER);
   }
 
-  /** Opens the hosts the outbound policy holds for `action` until the grant expires or is closed. */
+  /**
+   * Opens the hosts the outbound policy holds for `action` until the grant expires or is closed. An action no host
+   * holds is refused: approving it would gate nothing at the network.
+   */
   openGrant(scope: CompanyScope, action: string, req: GrantRequest): Grant {
     this.#bind(scope);
-    const grant = { action, approval: req.approval, expiresAt: Date.now() + req.ttlMs };
+    if (!this.outboundPolicy().hosts.some((h) => h.approval === action))
+      throw new GatewayError(409, "no host in the outbound policy is held for this action");
+    const grant = { action, approval: req.approval, run: req.run, expiresAt: Date.now() + req.ttlMs };
     this.ctx.storage.kv.put(`${GRANT_PREFIX}${action}`, grant);
     return grant;
   }
 
-  closeGrant(action: string): void {
-    this.ctx.storage.kv.delete(`${GRANT_PREFIX}${action}`);
+  /** Closes `action`'s grant if `approval` opened it; a later approval's grant stays open. */
+  closeGrant(action: string, approval: string): void {
+    const grant = this.ctx.storage.kv.get<Grant>(`${GRANT_PREFIX}${action}`);
+    if (grant?.approval === approval) this.ctx.storage.kv.delete(`${GRANT_PREFIX}${action}`);
+  }
+
+  #closeAllGrants(): void {
+    for (const [key] of this.ctx.storage.kv.list({ prefix: GRANT_PREFIX })) this.ctx.storage.kv.delete(key);
   }
 
   /** Whether an FDE's approval currently opens `action`'s hosts. */

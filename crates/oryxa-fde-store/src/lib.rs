@@ -25,6 +25,7 @@ mod org;
 mod projects;
 mod records;
 pub mod relay;
+mod runs;
 mod scope;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -38,6 +39,7 @@ pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use projects::{Assignee, Project, ProjectIn, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, StakeholderRole, System, SystemIn};
+pub use runs::{AgentApprovalRow, AgentBudget, AgentDecided, AgentDecision, AgentRunRow, AgentSpend};
 pub use scope::{
     Comparator, Criterion, CriterionIn, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
 };

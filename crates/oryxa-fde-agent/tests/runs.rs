@@ -2,7 +2,7 @@
 //! in place of the Worker and the SDK. Also the isolation of runs and approvals between companies and tenants, and
 //! the fail-closed paths.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use oryxa_fde_agent::{
     ProjectContext, ToolCallId, ToolKind, ToolStatus,
 };
 use oryxa_fde_core::{AgentRunId, CompanyId, CompanyScope, ProjectId, ProjectScope};
-use oryxa_fde_events::{AgentRunFinished, RunOutcome};
+use oryxa_fde_events::RunOutcome;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -80,6 +80,10 @@ enum Step {
     AwaitDecision,
     /// Wait for a cancel, as a harness stuck on a slow model would.
     Hang,
+    /// Record whether a deploy request would pass the outbound handler now.
+    Probe,
+    /// Wait (up to two seconds) for the deploy grant to close, then record whether a deploy would pass.
+    ProbeAfterClose,
 }
 
 #[derive(Default)]
@@ -89,11 +93,19 @@ struct SandboxLog {
     execs: Vec<Vec<String>>,
 }
 
+/// The gateway's open grants, by action, with the approval that opened each.
+type Grants = Arc<Mutex<HashMap<String, String>>>;
+
 struct FakeSandbox {
     log: Mutex<SandboxLog>,
     script: Mutex<Vec<Step>>,
     stdin: Mutex<Option<mpsc::UnboundedSender<String>>>,
     harness_out: Mutex<Option<mpsc::Sender<ProcessEvent>>>,
+    /// Approval actions the outbound policy holds hosts for.
+    held: BTreeSet<String>,
+    grants: Grants,
+    /// What the harness's probes saw: would a deploy have passed?
+    probes: Arc<Mutex<Vec<bool>>>,
     tamper_pack: bool,
     stdin_down: bool,
     grants_down: bool,
@@ -106,6 +118,9 @@ impl FakeSandbox {
             script: Mutex::new(script),
             stdin: Mutex::new(None),
             harness_out: Mutex::new(None),
+            held: BTreeSet::from(["deploy".to_owned()]),
+            grants: Arc::default(),
+            probes: Arc::default(),
             tamper_pack: false,
             stdin_down: false,
             grants_down: false,
@@ -184,7 +199,15 @@ impl Sandbox for FakeSandbox {
         *self.stdin.lock().unwrap() = Some(in_tx);
         *self.harness_out.lock().unwrap() = Some(out_tx.clone());
         let script = std::mem::take(&mut *self.script.lock().unwrap());
-        tokio::spawn(fake_harness(script, out_tx, in_rx));
+        // A new harness inherits no grant, as at the gateway.
+        self.grants.lock().unwrap().clear();
+        tokio::spawn(fake_harness(
+            script,
+            out_tx,
+            in_rx,
+            self.grants.clone(),
+            self.probes.clone(),
+        ));
         Ok(HarnessProcess {
             exec: "0b7a2f62-8f58-4d2e-a2a9-3d1b1f3c9e10".into(),
             output: out_rx,
@@ -203,25 +226,35 @@ impl Sandbox for FakeSandbox {
         Ok(())
     }
 
+    async fn held_actions(&self, _: &CompanyScope) -> Result<BTreeSet<String>, SandboxError> {
+        Ok(self.held.clone())
+    }
+
     async fn open_grant(
         &self,
         _: &CompanyScope,
         action: &str,
         approval: &ApprovalId,
+        run: &AgentRunId,
         _: Duration,
     ) -> Result<(), SandboxError> {
-        if self.grants_down {
+        if self.grants_down || !self.held.contains(action) {
             return Err(SandboxError::Status {
-                status: 503,
+                status: 409,
                 route: "grant",
             });
         }
-        self.call(format!("grant {action} {approval}"));
+        self.call(format!("grant {action} {approval} {run}"));
+        self.grants.lock().unwrap().insert(action.into(), approval.to_string());
         Ok(())
     }
 
-    async fn close_grant(&self, _: &CompanyScope, action: &str) -> Result<(), SandboxError> {
-        self.call(format!("close {action}"));
+    async fn close_grant(&self, _: &CompanyScope, action: &str, approval: &ApprovalId) -> Result<(), SandboxError> {
+        self.call(format!("close {action} {approval}"));
+        let mut grants = self.grants.lock().unwrap();
+        if grants.get(action).is_some_and(|a| a == approval.as_str()) {
+            grants.remove(action);
+        }
         Ok(())
     }
 }
@@ -231,7 +264,14 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Plays a script like the real harness: numbered lines on stdout, decisions and cancel on stdin.
-async fn fake_harness(script: Vec<Step>, out: mpsc::Sender<ProcessEvent>, mut stdin: mpsc::UnboundedReceiver<String>) {
+async fn fake_harness(
+    script: Vec<Step>,
+    out: mpsc::Sender<ProcessEvent>,
+    mut stdin: mpsc::UnboundedReceiver<String>,
+    grants: Grants,
+    probes: Arc<Mutex<Vec<bool>>>,
+) {
+    let deploy_open = || grants.lock().unwrap().contains_key("deploy");
     let mut seq = 0;
     let mut emit = async |event: HarnessEvent| {
         let line = serde_json::to_string(&EventLine {
@@ -255,6 +295,16 @@ async fn fake_harness(script: Vec<Step>, out: mpsc::Sender<ProcessEvent>, mut st
             Step::Emit(event) => emit(event).await,
             Step::Garbage => {
                 let _ = out.send(ProcessEvent::Line("{\"not\":\"an event\"}".into())).await;
+            }
+            Step::Probe => probes.lock().unwrap().push(deploy_open()),
+            Step::ProbeAfterClose => {
+                for _ in 0..400 {
+                    if !deploy_open() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                probes.lock().unwrap().push(deploy_open());
             }
             Step::AwaitDecision | Step::Hang => {
                 let Some(line) = stdin.recv().await else { break };
@@ -330,8 +380,8 @@ impl<S: RunStore> RunStore for Failing<S> {
     ) -> Result<DecideResult, StoreError> {
         self.0.decide(scope, run, approval, decided).await
     }
-    async fn request_cancel(&self, scope: &ProjectScope, run: &AgentRunId) -> Result<bool, StoreError> {
-        self.0.request_cancel(scope, run).await
+    async fn request_cancel(&self, scope: &ProjectScope, run: &AgentRunId, by: &UserId) -> Result<bool, StoreError> {
+        self.0.request_cancel(scope, run, by).await
     }
     async fn cancel_requested(&self, scope: &ProjectScope, run: &AgentRunId) -> Result<bool, StoreError> {
         self.0.cancel_requested(scope, run).await
@@ -339,14 +389,14 @@ impl<S: RunStore> RunStore for Failing<S> {
     async fn budget(&self, scope: &ProjectScope) -> Result<Option<Budget>, StoreError> {
         self.0.budget(scope).await
     }
-    async fn set_budget(&self, scope: &ProjectScope, budget: Budget) -> Result<(), StoreError> {
-        self.0.set_budget(scope, budget).await
+    async fn set_budget(&self, scope: &ProjectScope, budget: Budget, by: &UserId) -> Result<(), StoreError> {
+        self.0.set_budget(scope, budget, by).await
     }
     async fn spend(&self, scope: &ProjectScope) -> Result<Spend, StoreError> {
         self.0.spend(scope).await
     }
-    async fn finish(&self, run: &RunRecord, used: Spend, event: &AgentRunFinished) -> Result<(), StoreError> {
-        self.0.finish(run, used, event).await
+    async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {
+        self.0.finish(run, used, outcome).await
     }
 }
 
@@ -578,7 +628,11 @@ async fn a_run_goes_end_to_end_through_an_approval_to_a_pull_request() {
         usage(1200, 180),
         deploy_request(),
         Step::AwaitDecision,
+        // During the approved call, a deploy passes the gateway.
+        Step::Probe,
         tool_call("toolu_d1", "Run: npx wrangler deploy"),
+        // Once it returned, a second deploy is refused.
+        Step::ProbeAfterClose,
         usage(2400, 360),
         result(Outcome::Success),
     ]));
@@ -631,9 +685,12 @@ async fn a_run_goes_end_to_end_through_an_approval_to_a_pull_request() {
     assert!(pos("start cmp_1") < pos("exec rm"));
     assert!(pos("exec git") < pos(&format!("pack {run}")));
     assert!(pos(&format!("pack {run}")) < pos(&format!("harness {run}")));
-    assert!(pos(&format!("harness {run}")) < pos("grant deploy apr_1"));
-    assert!(pos("grant deploy apr_1") < pos("close deploy"));
-    assert!(pos("close deploy") < pos("exec curl"));
+    assert!(pos(&format!("harness {run}")) < pos(&format!("grant deploy apr_1 {run}")));
+    assert!(pos("grant deploy apr_1") < pos("close deploy apr_1"));
+    assert!(pos("close deploy apr_1") < pos("exec curl"));
+    // The grant held for the approved call only: open during it, closed straight after, never reopened.
+    assert_eq!(*runs.sandbox.probes.lock().unwrap(), [true, false]);
+    assert_eq!(calls.iter().filter(|c| c.starts_with("grant ")).count(), 1);
     {
         let log = runs.sandbox.log.lock().unwrap();
         assert_eq!(
@@ -705,7 +762,7 @@ async fn a_rejection_ends_the_run_with_no_grant_and_no_branch() {
         !calls.iter().any(|c| c.starts_with("grant") || c == "exec curl"),
         "{calls:?}"
     );
-    assert_eq!(runs.store.outbox()[0].outcome, RunOutcome::Failed);
+    assert_eq!(runs.store.outbox()[0].outcome, RunOutcome::Rejected);
 }
 
 #[tokio::test]
@@ -1010,6 +1067,41 @@ async fn an_approval_request_the_store_cannot_keep_stops_the_run() {
 }
 
 #[tokio::test]
+async fn a_run_whose_approval_list_has_an_action_with_no_held_host_never_starts() {
+    let mut sandbox = FakeSandbox::new(vec![result(Outcome::Success)]);
+    sandbox.held = BTreeSet::new();
+    let runs = runs_with(sandbox);
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "setup_failed");
+    // Refused before the sandbox was even started.
+    assert!(runs.sandbox.calls().is_empty(), "{:?}", runs.sandbox.calls());
+}
+
+#[tokio::test]
+async fn an_approval_request_for_an_action_off_the_list_stops_the_run() {
+    let runs = runs_with(FakeSandbox::new(vec![
+        Step::Emit(HarnessEvent::ApprovalRequest {
+            id: ApprovalId::new("apr_1").unwrap(),
+            tool_call_id: ToolCallId::new("toolu_x").unwrap(),
+            action: "customer_send".into(),
+            title: "Send".into(),
+            tool: "Bash".into(),
+            input: json!({ "command": "curl https://hooks.example.com" }),
+        }),
+        Step::Hang,
+    ]));
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "bad_output");
+    let (_, approvals) = call(&app, "GET", &format!("{RUNS_1}/{run}/approvals"), "lead", None).await;
+    assert_eq!(approvals, json!([]));
+    assert!(!runs.sandbox.calls().iter().any(|c| c.starts_with("grant")));
+}
+
+#[tokio::test]
 async fn output_that_is_not_a_harness_event_stops_the_run() {
     let runs = runs_with(FakeSandbox::new(vec![message("ok"), Step::Garbage, Step::Hang]));
     let app = api::router(runs.clone());
@@ -1035,4 +1127,152 @@ async fn runs_in_one_company_take_turns_on_its_sandbox() {
     assert_eq!(done["failure"], "harness_exited");
     let (_, list) = call(&app, "GET", RUNS_1, "lead", None).await;
     assert_eq!(list[0]["id"], second.as_str());
+}
+
+// ---- On Postgres ----------------------------------------------------------------------------------------------
+
+struct OnPostgres;
+impl Deps for OnPostgres {
+    type Store = oryxa_fde_store::Store;
+    type Sandbox = FakeSandbox;
+    type Live = FakeLive;
+    type Context = InMemoryContext;
+    type Access = FakeAccess;
+}
+
+/// A fresh tenant with org_a's sample company and project, in Postgres and in the fakes.
+async fn postgres_world(store: &oryxa_fde_store::Store) -> (ProjectScope, FakeAccess, InMemoryContext) {
+    use oryxa_fde_store::{Actor, CompanyIn, Name, ProjectIn, new_id};
+    let tenant = new_id("org");
+    let scope = scope(&tenant, "cmp_1", "prj_1");
+    let by = Actor {
+        user: UserId::new("usr_lead").unwrap(),
+        request_id: new_id("req"),
+    };
+    let mut tx = store.company(&scope.company).await.unwrap();
+    let company = CompanyIn {
+        name: Name::new("Sample company").unwrap(),
+        industry: None,
+        region: None,
+        summary: None,
+    };
+    tx.create(&company, &by).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = store.project(&scope).await.unwrap();
+    let project = ProjectIn {
+        name: Name::new("Status page").unwrap(),
+        summary: None,
+    };
+    tx.create(&project, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+
+    let mut a = FakeAccess::default();
+    a.tokens.insert("lead", caller(&tenant, "usr_lead"));
+    a.projects.insert(
+        (scope.tenant().clone(), scope.project.clone()),
+        scope.company.company.clone(),
+    );
+    a.grants
+        .insert((UserId::new("usr_lead").unwrap(), scope.project.clone(), "work"));
+    let mut source = context();
+    let sample = source_context();
+    source.insert(scope.clone(), sample);
+    (scope, a, source)
+}
+
+fn source_context() -> ProjectContext {
+    ProjectContext {
+        scope_of_work: "Sample scope: a status page for the sample customer.".into(),
+        success_criteria: vec![],
+        decisions: vec![],
+        conventions: vec![],
+        config: AgentConfig {
+            model: "anthropic.claude-opus-5-5".into(),
+            region: "eu-west-1".into(),
+            max_turns: 40,
+            approvals: vec![ApprovalRule {
+                action: "deploy".into(),
+                tool: "Bash".into(),
+                pattern: Some("deploy".into()),
+            }],
+        },
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_decision_made_on_another_api_task_reaches_the_run() {
+    let store = oryxa_fde_store::testing::store().await;
+    let (scope, access_a, context_a) = postgres_world(&store).await;
+    let (access_b, context_b) = {
+        let a = FakeAccess {
+            tokens: access_a.tokens.clone(),
+            projects: access_a.projects.clone(),
+            grants: access_a.grants.clone(),
+            down: false,
+        };
+        let mut c = context();
+        c.insert(scope.clone(), source_context());
+        (a, c)
+    };
+    // Two API tasks on one database: the run is driven by A, the FDE's decision lands on B.
+    let a = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![
+            deploy_request(),
+            Step::AwaitDecision,
+            tool_call("toolu_d1", "Run: deploy"),
+            result(Outcome::Success),
+        ]),
+        FakeLive::default(),
+        context_a,
+        access_a,
+        config(),
+    );
+    let b = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![]),
+        FakeLive::default(),
+        context_b,
+        access_b,
+        config(),
+    );
+    let (app_a, app_b) = (api::router(a.clone()), api::router(b));
+    let path = format!(
+        "/v1/companies/{}/projects/{}/agent-runs",
+        scope.company.company, scope.project
+    );
+    let (status, created) = call(&app_a, "POST", &path, "lead", Some(new_run())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    let run = created["id"].as_str().unwrap().to_owned();
+
+    let state = async |app: &Router| call(app, "GET", &format!("{path}/{run}"), "lead", None).await.1;
+    for _ in 0..2000 {
+        if state(&app_b).await["state"] == "waiting_for_approval" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let (status, decided) = call(
+        &app_b,
+        "POST",
+        &format!("{path}/{run}/approvals/apr_1/approve"),
+        "lead",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    for _ in 0..2000 {
+        if !state(&app_b).await["ended_at"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let done = state(&app_b).await;
+    assert_eq!(done["state"], "finished", "{done}");
+    assert_eq!(done["delivery"]["status"], "pull_request");
+    // Its use counts against the project's budget, in Postgres.
+    let mut tx = store.project(&scope).await.unwrap();
+    assert!(tx.agent_budget().await.unwrap().1.usd_micros > 0);
+    tx.commit().await.unwrap();
 }

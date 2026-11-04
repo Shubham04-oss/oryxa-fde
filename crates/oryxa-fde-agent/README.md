@@ -12,13 +12,19 @@ Agent runs: the run model, the context pack, the harness event format, and the r
 3. **Prepare.** The run service:
    - builds the context pack from the store (scope, criteria, decisions) and service config (model, region, turns,
      approval list);
+   - refuses to start if an action on the approval list has no host held for it in the company's outbound policy,
+     since approving it would gate nothing at the network;
    - starts the sandbox and checks out a fresh copy of the base branch in `/workspace/repo`;
    - writes the pack through the gateway and compares the digest it reads back;
    - then starts the harness on it. Any failure here ends the run with `setup_failed`.
 4. **Run.** Each harness line is applied to the run model, stored in the transcript and posted to live output.
    - An `approval_request` is stored and the run waits.
+   - An approval request whose action is not on the run's approval list stops the run.
    - `approve` or `reject` records the FDE's decision. The run's task then opens the action's hosts at the
      gateway (on approval), writes the decision to the harness's stdin, and only then changes state.
+   - Those hosts are open for that run and that one approved tool call: the run closes them as soon as the call
+     returns (its `tool_call` completes or fails), and a five-minute limit is the backstop. A second deploy, from
+     the agent or anything it left running, needs a new approval.
    - `usage` events count against the spend budget, and the time limit is the lower of what is left of the
      budget's minutes and the longest one run may take.
    - Cancel, a time limit or a used-up budget sends the harness a `cancel` line.
@@ -46,11 +52,16 @@ In `oryxa-fde-api`'s environment (`src/prod.rs`): without `SANDBOX_GATEWAY_URL` 
 mounted. `AGENT_MODEL` and `AGENT_REGION` are then required; budgets, prices, the approval list and the longest run
 have defaults.
 
+## Storage
+
+Runs, their transcripts and approvals, and each project's budget and use are in `oryxa-fde-store`'s agent run
+tables (migration `0006_agent_runs.sql`, `src/runs.rs`), with forced row-level security. `pg.rs` implements
+`RunStore` on them: every call is one transaction scoped to the project, and a run's end commits with its use and
+`agent-run.finished`. Decisions and cancels are read from there, so any API task can take them. `InMemoryRuns` is
+for tests.
+
 ## Contracts with other streams
 
-- **Store (API stream).** `RunStore` is implemented in memory (`InMemoryRuns`) until the store crate implements it
-  on Postgres, with `finish` writing the outbox in the same transaction. Until then a restart loses runs and budget
-  use, and only one API task can serve runs.
 - **Live output (web stream).** The API posts harness lines as NDJSON to
   `{REALTIME_URL}/internal/v1/tenants/<tenant>/companies/<company>/projects/<project>/agent-runs/<run>/events`,
   with `Authorization: Bearer <REALTIME_TOKEN>`. It is best effort; the transcript is the record.
