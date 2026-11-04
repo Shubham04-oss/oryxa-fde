@@ -141,6 +141,17 @@ function connect(transport: Transport) {
       read(z.array(SystemOut), client.GET("/v1/companies/{company}/systems", company(id))),
     project: (s: ProjectScope) =>
       read(ProjectOut, client.GET("/v1/companies/{company}/projects/{project}", project(s))),
+    // Through the project, so an assignee who is not on the company may read them too.
+    projectStakeholders: (s: ProjectScope) =>
+      read(
+        z.array(StakeholderOut),
+        client.GET("/v1/companies/{company}/projects/{project}/stakeholders", project(s)),
+      ),
+    projectSystems: (s: ProjectScope) =>
+      read(
+        z.array(SystemOut),
+        client.GET("/v1/companies/{company}/projects/{project}/systems", project(s)),
+      ),
     scope: (s: ProjectScope) =>
       read(ScopeOut, client.GET("/v1/companies/{company}/projects/{project}/scope", project(s))),
     access: (s: ProjectScope) =>
@@ -204,8 +215,8 @@ function connect(transport: Transport) {
           get.access(scope),
           get.tasks(scope),
           get.decisions(scope),
-          get.stakeholders(scope.company),
-          get.systems(scope.company),
+          get.projectStakeholders(scope),
+          get.projectSystems(scope),
         ])
       // The path already scopes it; an answer about another company is never shown.
       if (p.company !== c.id) throw new ApiError(404, "not_found")

@@ -656,6 +656,9 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "access-requests") return json(p.records.access)
     if (record === "tasks") return json(p.records.tasks)
     if (record === "decisions") return json(p.records.decisions)
+    // The company's lists, read through the project, as assignees do.
+    if (record === "stakeholders") return json(found.stakeholders)
+    if (record === "systems") return json(found.systems)
     return null
   }
   if (method === "PUT" && record === "stage") {

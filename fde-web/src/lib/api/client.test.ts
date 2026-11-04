@@ -163,6 +163,42 @@ describe("api over the network", () => {
     await expect(net.companies()).rejects.toThrow(/created_at/)
   })
 
+  it("reads a project's people and systems through the project, as an assignee may", async () => {
+    const base = "GET /api/v1/companies/cmp_1"
+    const p = `${base}/projects/prj_1`
+    const { seen, net } = stub({
+      [base]: () => Response.json({ id: "cmp_1", name: "Kestrel", created_at: at, updated_at: at }),
+      [p]: () =>
+        Response.json({
+          id: "prj_1",
+          company: "cmp_1",
+          name: "Dispatch",
+          stage: "build",
+          created_at: at,
+          updated_at: at,
+        }),
+      [`${p}/scope`]: () =>
+        Response.json({ version: 0, signed_off: false, sign_off: null, items: [], criteria: [] }),
+      [`${p}/access-requests`]: () => Response.json([]),
+      [`${p}/tasks`]: () => Response.json([]),
+      [`${p}/decisions`]: () => Response.json([]),
+      [`${p}/stakeholders`]: () =>
+        Response.json([{ id: "stk_1", name: "Mara Lindqvist", updated_at: at }]),
+      [`${p}/systems`]: () => Response.json([]),
+    })
+
+    const project = await net.project({
+      company: CompanyId.parse("cmp_1"),
+      project: ProjectId.parse("prj_1"),
+    })
+
+    expect(project.stakeholders.map((s) => s.name)).toEqual(["Mara Lindqvist"])
+    const paths = seen.map((r) => new URL(r.url).pathname)
+    expect(paths).toContain("/api/v1/companies/cmp_1/projects/prj_1/stakeholders")
+    expect(paths).not.toContain("/api/v1/companies/cmp_1/stakeholders")
+    expect(paths).not.toContain("/api/v1/companies/cmp_1/systems")
+  })
+
   it("signs out through the API, which ends the session and clears its cookie", async () => {
     const { seen, net } = stub({ "POST /auth/logout": () => new Response(null, { status: 204 }) })
 
