@@ -232,10 +232,24 @@ async fn companies_projects_and_members_end_to_end() {
     w.ok(&dana, "PATCH", &company, Some(json!({"name": "Acme"})), StatusCode::OK)
         .await;
 
-    // Removal takes effect at once.
+    // Removal takes effect at once, and takes the member's project assignments with it.
+    let bob_on_project = format!("{project}/assignees/{}", bob.id);
+    w.ok(&alice, "PUT", &bob_on_project, None, StatusCode::NO_CONTENT).await;
     w.ok(&alice, "DELETE", &bob_member, None, StatusCode::NO_CONTENT).await;
     assert_eq!(w.status(&bob, "GET", &company, None).await, StatusCode::FORBIDDEN);
     assert_eq!(w.status(&bob, "GET", &project, None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        w.status(&bob, "PATCH", &project, Some(json!({"name": "Mine now"})))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    let left = w
+        .ok(&alice, "GET", &format!("{project}/assignees"), None, StatusCode::OK)
+        .await;
+    assert!(
+        left.as_array().unwrap().iter().all(|a| a["user"] != bob.id.as_str()),
+        "a removed member must not stay assigned: {left}"
+    );
     w.ok(&alice, "DELETE", &carol_on_project, None, StatusCode::NO_CONTENT)
         .await;
     assert_eq!(w.status(&carol, "GET", &project, None).await, StatusCode::FORBIDDEN);

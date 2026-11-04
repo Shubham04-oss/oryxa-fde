@@ -13,7 +13,7 @@ use oryxa_fde_store::{Company, Member, Name, Role, new_id};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::authz::{company, rel, user, workspace};
+use crate::authz::{company, project, rel, user, workspace};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -232,13 +232,20 @@ pub(crate) async fn remove_member(
     let scope = who.company(id);
     app.require(&who, company(&scope), "manage").await?;
     let mut tx = app.store.company(&scope).await?;
-    if !tx.remove_member(&member, &who.actor()).await? {
+    let Some(assigned) = tx.remove_member(&member, &who.actor()).await? else {
         return Err(ApiError::NotFound);
-    }
+    };
     let t = &who.tenant;
+    // Revoke the project assignments too: `fde_project.work` includes `assignee`, so a leftover
+    // assignment would keep a removed member working on that project.
     let writes: Vec<Write> = Role::ALL
         .into_iter()
         .map(|r| Write::Delete(rel(company(&scope), r.as_str(), user(t, &member))))
+        .chain(
+            assigned
+                .into_iter()
+                .map(|p| Write::Delete(rel(project(&scope.project(p)), "assignee", user(t, &member)))),
+        )
         .collect();
     app.write(t, &writes).await?;
     tx.commit().await?;
