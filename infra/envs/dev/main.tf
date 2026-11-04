@@ -234,7 +234,8 @@ data "aws_iam_policy_document" "api" {
 }
 
 # Reached only through the internal ALB. Env names match crates/oryxa-fde-api/src/main.rs, except
-# the database: DB_* are the inputs for IAM auth, where the API reads DATABASE_URL (README).
+# the database: IAM database auth (lead decision on #37), so DB_* replace the DATABASE_URL that local
+# and test runs use; the API stream adds the token support (README).
 module "api" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-api"
@@ -389,9 +390,9 @@ data "aws_iam_policy_document" "migrate" {
   }
 }
 
-# The store's migrations: the API image as `oryxa-fde-api migrate`, connected as the migrator, which
-# owns the tables. Only this task's role may connect as the migrator, so the running API can never
-# take the owner's place and turn row-level security off.
+# The store's migrations: `oryxa-fde-ops migrate` from the API's image, connected as the migrator,
+# which owns the tables. Only this task's role may connect as the migrator, so the running API can
+# never take the owner's place and turn row-level security off.
 module "migrate" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-migrate"
@@ -400,6 +401,7 @@ module "migrate" {
   container_name      = "migrate"
   image               = local.api_image
   ecr_repository_arns = [aws_ecr_repository.api.arn]
+  entry_point         = ["/usr/local/bin/oryxa-fde-ops"]
   command             = ["migrate"]
   environment = {
     ORYXA_ENV  = var.env

@@ -2,7 +2,7 @@
 # One-off Fargate tasks in the environment's private subnets: the database has no public endpoint
 # and there is no bastion. The owner runs this with admin credentials for the account; CI never does.
 #   infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql   # psql as the RDS master (db-admin task)
-#   infra/scripts/run-task.sh migrate                          # oryxa-fde-api migrate, as the migrator
+#   infra/scripts/run-task.sh migrate                          # oryxa-fde-ops migrate, as the migrator
 #   infra/scripts/run-task.sh spicedb-migrate                  # spicedb datastore migrate head
 #   infra/scripts/run-task.sh spicedb-schema schema/fde.zed    # zed schema write
 # Region, cluster, task definitions and network come from `tofu output` in infra/envs/dev (or $TOFU_DIR).

@@ -39,7 +39,8 @@ are bound to the VPC service reach it, through the tunnel.
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
-| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the roles the API's transactions take, the `spicedb` database, and a check that the API cannot act as the owner |
+| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
+| `sql/02-api-owns-nothing.sql` | Once, only on a database the first bootstrap let `oryxa_fde_api` own: hands its objects to the migrator and drops its old grants |
 
 Names: the ECS service is `oryxa-fde-api` and its ECR repository is `oryxa-fde-api`. Everything
 else is `oryxa-fde-<env>-…`: the cluster `oryxa-fde-dev`, SpiceDB `oryxa-fde-dev-spicedb`, the
@@ -106,15 +107,31 @@ database auth, as `oryxa_fde_api`, `oryxa_fde_migrator` and `spicedb`, and each 
 
 | Login | Used by | May |
 | --- | --- | --- |
-| `oryxa_fde_migrator` | the one-off migrate task (`oryxa-fde-api migrate`) | own and change the FDE tables; nothing else connects as it |
-| `oryxa_fde_api` | the API service | `SET LOCAL ROLE` to `oryxa_fde_app` or `oryxa_fde_relay` per transaction, inheriting neither; owns nothing, creates nothing |
+| `oryxa_fde_migrator` | the one-off migrate task (`oryxa-fde-ops migrate`) | own and change the FDE tables; grant `oryxa_fde_app`, `oryxa_fde_relay` and `oryxa_fde_grants` onward (admin option), no CREATEROLE; nothing else connects as it |
+| `oryxa_fde_api` | the API service | member of `oryxa_fde_runtime` only: `SET LOCAL ROLE` to `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants` per transaction, inheriting none; `connect` and `usage` only; owns nothing, creates nothing |
 | `spicedb` | SpiceDB | its own `spicedb` database only |
 | RDS master | the db-admin task | the bootstrap SQL |
 
-The API can never become the table owner: its login is not a member of the migrator (or the
-master), and its task role cannot connect as the migrator (`tests/plan.tftest.hcl` pins both IAM
-sides). The bootstrap ends with a check that fails if the API login could act as an owner. A query
-the API runs outside a scoped transaction is refused, because it inherits no table rights.
+The NOLOGIN roles come from the bootstrap, so no login needs CREATEROLE: `oryxa_fde_app` and
+`oryxa_fde_relay` (each transaction's role), `oryxa_fde_grants` (the SpiceDB grant reconciler's) and
+`oryxa_fde_runtime`, which migration 0003 makes a member of the other three without inheritance.
+
+The API can never reach table ownership, CREATEROLE or BYPASSRLS: its login is not a member of the
+migrator or the master, and its task role cannot connect as the migrator (`tests/plan.tftest.hcl`
+pins both IAM sides). The bootstrap ends with a check over the API login and every role it can
+reach by `SET ROLE` or inheritance, and stops if any of them is a superuser, may create roles or
+databases, bypasses row-level security, is the migrator, the master or a predefined role, owns a
+relation, a schema or the database, may create in `public`, or holds an admin option. A query the
+API runs outside a scoped transaction is refused, because it inherits no table rights.
+
+**A database the first bootstrap set up** (the API owned its tables because it migrated at
+startup) needs this once, before the first deploy of the non-owner API (#39):
+1. `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`: creates the new logins and roles, then
+   stops at the check, naming what the API still holds.
+2. `infra/scripts/run-task.sh sql infra/sql/02-api-owns-nothing.sql`: as the master,
+   `reassign owned by oryxa_fde_api to oryxa_fde_migrator`, then revokes the API's `create` on
+   `public` and its direct grants of `oryxa_fde_app` and `oryxa_fde_relay`.
+3. `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql` again: the check passes.
 
 ## Apply order
 
@@ -133,8 +150,8 @@ Tunnel, Access: Apps and Policies, Workers VPC (Connectivity Directory), and Zon
    10 minutes), the empty secrets, ECR, the ALB, the cluster with every service at 0 tasks, queues,
    CloudTrail, and on Cloudflare the DNS records, the tunnel, the VPC service and Access.
 4. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
-   pgvector, the IAM logins, the API's transaction roles and the `spicedb` database, and is safe to
-   re-run. It stops with an error if the API login could act as the table owner.
+   pgvector, the IAM logins, the API's roles and the `spicedb` database, and is safe to re-run. It
+   stops with an error if anything the API can reach has owner powers (Database logins).
 5. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
@@ -243,10 +260,9 @@ These could not be checked without an account. Each one is flagged at the place 
   does not verify the CA. Prod adds TLS on each hop and the RDS CA bundle.
 - Tasks may reach any host on 443 through the NAT. The application's outbound allowlist
   (CLAUDE.md) is the control; a network firewall is a prod decision.
-- **Per-company KMS keys** (ADR 0003) are not created here. The bucket encrypts with the
-  environment key, and the API's role is limited to `tenants/*/companies/*`. The proposed decision,
-  for the lead to record in ADR 0003, is on #34: keep the environment key while P0 holds sample data
-  only, and add a key per company, made by a provisioning step, before real customer data arrives.
+- **No per-company KMS keys in P0** (ADR 0003, amendment of 4 November). The bucket encrypts with
+  the environment key, and the API's role is limited to `tenants/*/companies/*`. A provisioning step
+  adds a key per company before the first real customer data (P1).
 - ECR lives in the dev stack until a second environment needs it.
 
 ## Contracts with other streams
@@ -255,19 +271,18 @@ These could not be checked without an account. Each one is flagged at the place 
   `SPICEDB_ENDPOINT`, `SPICEDB_PRESHARED_KEY`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
   `EVENT_SIGNING_KID`, `EVENT_SIGNING_KEY` and `EVENT_BUS_ARN`, plus `AWS_REGION`, `ORYXA_ENV`,
   `DATA_BUCKET` and `WEB_ORIGIN`. `tests/plan.tftest.hcl` pins the list.
-  - **Open: the database.** The API reads one `DATABASE_URL`. Issue #7 asks for IAM database auth,
-    whose password is a 15-minute token, so infra provides `DB_HOST`, `DB_PORT`, `DB_NAME` and
-    `DB_USER` instead, and the API's role may connect only as `oryxa_fde_api`. Until the API builds
-    its connection from those with a token (as the platform's services do), it cannot start here.
-    The alternative, a password login with `DATABASE_URL` in Secrets Manager, needs no API change
-    but brings back a database password. The lead decides.
-  - **Migrations run as a one-off task, never at startup** (#32). The migrate task runs the API image
-    with the argument `migrate`: `oryxa-fde-api migrate` connects as `DB_USER` (`oryxa_fde_migrator`)
-    from `DB_HOST`, `DB_PORT`, `DB_NAME` and `AWS_REGION`, runs the store's migrations and exits 0.
-    The service connects as `oryxa_fde_api`, which owns nothing and inherits no table rights, so
-    every query must run inside a transaction that took `oryxa_fde_app` or `oryxa_fde_relay`. The
-    bootstrap creates those two roles, so neither login needs CREATEROLE, and the migrator holds
-    them with admin option, so migration 0001's re-grant to itself still works.
+  - **The database: IAM authentication** (lead decision on #37), no stored passwords. Infra gives the
+    service and the migrate task `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` (`oryxa_fde_api` and
+    `oryxa_fde_migrator`), and each task role may `rds-db:connect` as its own login only. The API
+    stream adds IAM token support to both binaries in a follow-up; local and test runs keep
+    `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). Until then, neither task can connect here.
+  - **Migrations run as a one-off task, never at startup** (#32, #39). The migrate task runs
+    `oryxa-fde-ops migrate` from the API's image (`/usr/local/bin/oryxa-fde-ops`, beside
+    `/usr/local/bin/oryxa-fde-api`), connected as `oryxa_fde_migrator`, and exits 0 when done. The
+    service connects as `oryxa_fde_api`, a member of `oryxa_fde_runtime` only, so every query runs
+    inside a transaction that took `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants`. The
+    bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
+    migrator holds the first three with admin option for migrations 0001 and 0003.
   - It serves `GET /healthz` without auth (it does), keeps files under
     `tenants/<tenant>/companies/<company>/`, and ships a `linux/arm64` image that writes nothing to
     its root filesystem, which is read-only.

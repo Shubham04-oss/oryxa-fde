@@ -91,7 +91,7 @@ run "dev_plans_without_credentials" {
   }
 
   # The env names crates/oryxa-fde-api/src/main.rs reads, plus DB_* for IAM database auth in place of
-  # its DATABASE_URL (infra/README.md). Secrets arrive by reference only.
+  # the DATABASE_URL of local and test runs (infra/README.md). Secrets arrive by reference only.
   assert {
     condition = length(setsubtract([
       "LISTEN_ADDR", "SPICEDB_ENDPOINT", "SPICEDB_PRESHARED_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID",
