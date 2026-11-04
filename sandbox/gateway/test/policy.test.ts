@@ -45,6 +45,15 @@ describe("outbound policy", () => {
     expect(parse({ host: "a.example.com", value: "a raw secret" })).toBe(false);
   });
 
+  it("adds secrets only for exact hosts", () => {
+    const inject = [{ header: "authorization", secret: "aws", prefix: "Bearer " }];
+    expect(() => OutboundPolicy.parse({ hosts: [{ host: "*.amazonaws.com", inject }] })).toThrow(/exact hosts/);
+    expect(
+      OutboundPolicy.parse({ hosts: [{ host: "bedrock-runtime.us-east-1.amazonaws.com", inject }] }).hosts,
+    ).toHaveLength(1);
+    expect(OutboundPolicy.parse({ hosts: [{ host: "*.npmjs.org" }] }).hosts).toHaveLength(1);
+  });
+
   it("refuses the same host twice", () => {
     expect(OutboundPolicy.safeParse({ hosts: [{ host: "a.example.com" }, { host: "a.example.com" }] }).success).toBe(
       false,

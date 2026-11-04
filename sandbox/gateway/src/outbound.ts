@@ -63,6 +63,10 @@ export async function handleOutbound(request: Request, scope: CompanyScope, deps
   if (rule.inject.length > 0) {
     // The Worker fetches with the sandbox's scheme; a secret added to plain HTTP would cross the internet in clear.
     if (url.protocol !== "https:") return deny(403, "secret_over_http", "secrets are only added over https");
+    // Redaction reads the response bytes, so the upstream must answer in an encoding it can read: ask for none,
+    // and refuse a partial response that could cut a secret short of the redactor.
+    headers.set("accept-encoding", "identity");
+    headers.delete("range");
     for (const injection of rule.inject) {
       try {
         const value = await deps.secrets.resolve(scope, injection.secret);
@@ -91,5 +95,16 @@ export async function handleOutbound(request: Request, scope: CompanyScope, deps
     status: response.status,
     injected: rule.inject.length,
   });
-  return secrets.length === 0 ? response : redactResponse(response, secrets);
+  if (secrets.length === 0) return response;
+  // The runtime decodes gzip and br before the redactor sees the body; any other encoding (deflate, zstd) would
+  // reach the sandbox with the secret still inside, so refuse it.
+  const encoding = (response.headers.get("content-encoding") ?? "identity").trim().toLowerCase();
+  if (!READABLE_ENCODINGS.has(encoding)) {
+    await response.body?.cancel();
+    return deny(502, "unreadable_encoding", `${url.hostname} answered in an encoding the gateway cannot check`);
+  }
+  return redactResponse(response, secrets);
 }
+
+/** Response encodings the redactor can scan: none, or ones the Workers runtime decodes before the body is read. */
+const READABLE_ENCODINGS = new Set(["", "identity", "gzip", "br"]);

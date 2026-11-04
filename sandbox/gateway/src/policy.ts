@@ -32,10 +32,14 @@ const Injection = z.strictObject({
     .default(""),
 });
 
-const HostRule = z.strictObject({
-  host: HostPattern,
-  inject: z.array(Injection).max(4).default([]),
-});
+const HostRule = z
+  .strictObject({
+    host: HostPattern,
+    inject: z.array(Injection).max(4).default([]),
+  })
+  // A wildcard covers hosts nobody has checked (`*.amazonaws.com` includes anyone's API Gateway), so secrets go
+  // only to exact hosts.
+  .refine((r) => r.inject.length === 0 || !r.host.startsWith("*."), "secrets are only added for exact hosts");
 export type HostRule = z.infer<typeof HostRule>;
 
 /** A company's outbound rules. Hosts not listed are refused. */
