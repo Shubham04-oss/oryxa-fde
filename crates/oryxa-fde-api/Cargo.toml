@@ -22,6 +22,7 @@ oryxa-authn.workspace = true
 oryxa-authz.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
+oryxa-fde-agent = { path = "../oryxa-fde-agent" }
 oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true

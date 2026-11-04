@@ -3137,13 +3137,27 @@ dependencies = [
 name = "oryxa-fde-agent"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "http-body-util",
+ "oryxa-authn",
+ "oryxa-authz",
  "oryxa-core",
  "oryxa-fde-core",
+ "oryxa-fde-events",
+ "oryxa-fde-store",
+ "oryxa-spicedb-proto",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
+ "time",
  "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "utoipa",
+ "workos",
 ]
 
 [[package]]
@@ -3158,6 +3172,7 @@ dependencies = [
  "oryxa-authz",
  "oryxa-core",
  "oryxa-events",
+ "oryxa-fde-agent",
  "oryxa-fde-context",
  "oryxa-fde-core",
  "oryxa-fde-events",

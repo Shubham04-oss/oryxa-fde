@@ -22,6 +22,9 @@ export class Adapter {
   readonly #calls = new Map<string, Call>();
   readonly #ids = new IdMap();
   readonly #plan = new Map<string, { content: string; status: PlanStatus }>();
+  // Model use of the responses that ended, and of the one streaming now.
+  readonly #used = { input_tokens: 0, output_tokens: 0 };
+  #response: { input: number; output: number } | undefined;
 
   /** The id the review screen knows this tool call by, the same one its `tool_call` events use. */
   toolCallId(raw: string): string {
@@ -34,6 +37,8 @@ export class Adapter {
         return message.message.content.flatMap((block) => this.#assistantBlock(block));
       case "user":
         return this.#toolResults(message.message.content, message.tool_use_result);
+      case "stream_event":
+        return this.#usage(message.event);
       case "result":
         return [
           message.subtype === "success"
@@ -57,6 +62,25 @@ export class Adapter {
       default:
         return [];
     }
+  }
+
+  // An assistant message carries only the usage known when its response started; the stream's message_delta has the
+  // final output count. One `usage` event per finished response, so the API can stop a run at its spend budget.
+  #usage(event: unknown): HarnessEvent[] {
+    if (!isRecord(event)) return [];
+    if (event["type"] === "message_start" && isRecord(event["message"])) {
+      const usage = event["message"]["usage"];
+      this.#response = { input: inputTokens(usage), output: count(usage, "output_tokens") };
+    } else if (event["type"] === "message_delta" && this.#response !== undefined) {
+      this.#response.output = Math.max(this.#response.output, count(event["usage"], "output_tokens"));
+      this.#response.input = Math.max(this.#response.input, inputTokens(event["usage"]));
+    } else if (event["type"] === "message_stop" && this.#response !== undefined) {
+      this.#used.input_tokens += this.#response.input;
+      this.#used.output_tokens += this.#response.output;
+      this.#response = undefined;
+      return [{ type: "usage", usage: { ...this.#used } }];
+    }
+    return [];
   }
 
   #assistantBlock(block: AssistantBlock): HarnessEvent[] {
@@ -162,6 +186,18 @@ function usage(u: { input_tokens: number; output_tokens: number }) {
 function truncate(text: string): string {
   const line = text.replace(/\s+/g, " ").trim();
   return line.length > MAX_TITLE ? `${line.slice(0, MAX_TITLE - 1)}…` : line;
+}
+
+function count(usage: unknown, key: string): number {
+  const value = isRecord(usage) ? usage[key] : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+// Cache reads and writes count in full: a budget may stop a run early, never late.
+function inputTokens(usage: unknown): number {
+  return (
+    count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens") + count(usage, "cache_read_input_tokens")
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

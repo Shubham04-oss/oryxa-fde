@@ -19,6 +19,7 @@ const HARNESS_HOME = "/home/harness";
 
 const Id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, "must be 1..=128 chars of [A-Za-z0-9_-]");
 export const RunId = Id;
+export const ApprovalId = Id;
 /** The name on the approval list (`deploy`, `customer_send`), as `oryxa_fde_agent::ApprovalRule::action`. */
 export const ApprovalAction = Id;
 
@@ -43,12 +44,16 @@ export function harnessCommand(run: string, req: HarnessRequest) {
   };
 }
 
-const DEFAULT_GRANT_MS = 15 * 60 * 1_000;
-const MAX_GRANT_MS = 60 * 60 * 1_000;
+const DEFAULT_GRANT_MS = 5 * 60 * 1_000;
+const MAX_GRANT_MS = 30 * 60 * 1_000;
 
-/** Opens the hosts the outbound policy holds for `action`, after an FDE approved request `approval`. */
+/**
+ * Opens the hosts the outbound policy holds for `action` while run `run` makes the one tool call an FDE approved
+ * (`approval`). The API closes it when that call returns; the time limit is the backstop.
+ */
 export const GrantRequest = z.strictObject({
   approval: Id,
+  run: RunId,
   ttlMs: z.int().min(1_000).max(MAX_GRANT_MS).default(DEFAULT_GRANT_MS),
 });
 export type GrantRequest = z.infer<typeof GrantRequest>;
@@ -56,6 +61,7 @@ export type GrantRequest = z.infer<typeof GrantRequest>;
 export interface Grant {
   action: string;
   approval: string;
+  run: string;
   expiresAt: number;
 }
 

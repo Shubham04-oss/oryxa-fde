@@ -38,6 +38,29 @@ pub enum FailReason {
     Cancelled,
     /// The run reached its time limit.
     TimedOut,
+    /// The project's agent minutes or model spend ran out.
+    OverBudget,
+    /// The harness sent output that does not parse or skips a line; nothing after it can be trusted.
+    BadOutput,
+    /// The sandbox, the checkout or the context pack could not be prepared.
+    SetupFailed,
+    /// The run store could not keep the transcript or an approval request, so no approval could be decided; or it
+    /// could not keep the run's hold on the company's sandbox.
+    StoreUnavailable,
+    /// The hosts opened for an approved action could not be closed, so the sandbox was destroyed rather than leave
+    /// them open, and nothing was delivered from it.
+    GrantNotClosed,
+    /// The API task driving the run stopped (a deploy) before the run ended.
+    Interrupted,
+}
+
+/// Why the API ends a run itself, besides a cancel or the time limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    OverBudget,
+    BadOutput,
+    SetupFailed,
+    StoreUnavailable,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -217,6 +240,35 @@ impl AgentRun {
     /// The run reached its time limit; ends it like `cancel`.
     pub fn time_out(&mut self) -> Result<HarnessInput, RunError> {
         self.end(FailReason::TimedOut)
+    }
+
+    /// Ends the run for `reason`, like `cancel`.
+    pub fn stop(&mut self, reason: StopReason) -> Result<HarnessInput, RunError> {
+        self.end(match reason {
+            StopReason::OverBudget => FailReason::OverBudget,
+            StopReason::BadOutput => FailReason::BadOutput,
+            StopReason::SetupFailed => FailReason::SetupFailed,
+            StopReason::StoreUnavailable => FailReason::StoreUnavailable,
+        })
+    }
+
+    /// An approved action's hosts could not be closed. The run fails even if the harness had finished, since
+    /// nothing may be delivered from that sandbox; a run that already failed keeps its reason.
+    pub fn grant_not_closed(&mut self) {
+        if !matches!(self.state, RunState::Failed { .. }) {
+            self.set(RunState::Failed {
+                reason: FailReason::GrantNotClosed,
+            });
+        }
+    }
+
+    /// The API task driving the run stopped before it ended; nothing will drive it again.
+    pub fn interrupted(&mut self) {
+        if !self.is_ended() {
+            self.set(RunState::Failed {
+                reason: FailReason::Interrupted,
+            });
+        }
     }
 
     /// The harness process ended. Without a result first, the run failed.
@@ -470,6 +522,17 @@ mod tests {
                 }
             );
         }
+        for (reason, failed) in [
+            (StopReason::OverBudget, FailReason::OverBudget),
+            (StopReason::BadOutput, FailReason::BadOutput),
+            (StopReason::SetupFailed, FailReason::SetupFailed),
+            (StopReason::StoreUnavailable, FailReason::StoreUnavailable),
+        ] {
+            let mut r = waiting();
+            assert_eq!(r.stop(reason), Ok(HarnessInput::Cancel));
+            assert_eq!(r.state(), &RunState::Failed { reason: failed });
+            assert_eq!(r.stop(reason), Err(RunError::Ended));
+        }
         // A cancelled queued run never starts, and a cancelled one ignores what the harness sends while stopping.
         let mut r = queued();
         r.cancel().unwrap();
@@ -493,6 +556,25 @@ mod tests {
         r.apply(&result(0, Outcome::Success)).unwrap();
         assert_eq!(r.cancel(), Err(RunError::Ended));
         assert_eq!(r.state(), &RunState::Finished);
+    }
+
+    #[test]
+    fn a_grant_that_cannot_close_fails_even_a_finished_run_but_keeps_an_earlier_failure() {
+        let mut r = run();
+        r.apply(&result(0, Outcome::Success)).unwrap();
+        r.interrupted();
+        assert_eq!(r.state(), &RunState::Finished);
+        r.grant_not_closed();
+        let failed = |reason| RunState::Failed { reason };
+        assert_eq!(r.state(), &failed(FailReason::GrantNotClosed));
+        let mut cancelled = run();
+        cancelled.cancel().unwrap();
+        cancelled.grant_not_closed();
+        cancelled.interrupted();
+        assert_eq!(cancelled.state(), &failed(FailReason::Cancelled));
+        let mut running = run();
+        running.interrupted();
+        assert_eq!(running.state(), &failed(FailReason::Interrupted));
     }
 
     #[test]

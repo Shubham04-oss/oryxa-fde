@@ -27,6 +27,8 @@ export type HarnessEvent =
       tool: string;
       input: Record<string, unknown>;
     }
+  // The run's model use so far, after each model response; input counts cache reads and writes in full.
+  | { type: "usage"; usage: Usage }
   | { type: "result"; outcome: Outcome; reason?: string; text: string; turns: number; usage: Usage };
 
 export const EVENT_VERSION = 1;

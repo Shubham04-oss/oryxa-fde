@@ -52,7 +52,13 @@ async fn main() -> Result<(), Error> {
         .timeout(Duration::from_secs(10))
         .build();
     let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
-    let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
+    let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer.clone());
+    // Agent runs (crates/oryxa-fde-agent): off unless SANDBOX_GATEWAY_URL is set.
+    let agent_runs = oryxa_fde_agent::prod::router_from_env(
+        store.clone(),
+        authz.clone(),
+        AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer),
+    )?;
     let mut sign_in = SignIn::new(
         env("WEB_ORIGIN")?,
         env("SESSION_PASSWORD")?,
@@ -73,6 +79,6 @@ async fn main() -> Result<(), Error> {
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "listening");
-    axum::serve(listener, router(app)).await?;
+    axum::serve(listener, router(app).merge(agent_runs)).await?;
     Ok(())
 }

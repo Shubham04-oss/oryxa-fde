@@ -32,6 +32,7 @@ fn recorded_session_replays_into_a_finished_run() {
             HarnessEvent::FileChange { .. } => "file_change",
             HarnessEvent::Command { .. } => "command",
             HarnessEvent::ApprovalRequest { .. } => "approval_request",
+            HarnessEvent::Usage { .. } => "usage",
             HarnessEvent::Result { .. } => "result",
         })
         .collect();

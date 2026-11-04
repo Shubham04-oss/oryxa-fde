@@ -242,6 +242,33 @@ describe("runs", () => {
     expect((await api(stdin, { method: "POST", body: "bye\n" })).status).toBe(204);
   });
 
+  it("never start a harness while another may still run, even one nobody reads any more", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const harness = () => run("harness", post({ sha256: SHA, timeoutMs: 60_000 }));
+    // The reader goes away, as an API task does in a deploy; the harness itself keeps running.
+    const reader = (await harness()).body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    expect((await harness()).status).toBe(409);
+    expect(fake.execs).toHaveLength(1);
+    // A stopped sandbox has no harness left: the next one may start.
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const second = await harness();
+    expect(second.status).toBe(200);
+    const next = await lineReader(second)();
+    const stdin = `/v1/sandboxes/org_a/cmp_1/exec/${next.exec}/stdin`;
+    expect((await api(stdin, { method: "POST", body: "bye\n" })).status).toBe(204);
+    // Its process exited: a third may start without a stop.
+    await vi.waitFor(async () => {
+      const third = await harness();
+      expect(third.status).toBe(200);
+      await third.body?.cancel();
+    });
+  });
+
   it("refuse a harness start without a well-formed digest and time limit", async () => {
     const fake = await attachFake("org_a", "cmp_1");
     await api("/v1/sandboxes/org_a/cmp_1/start", post());
@@ -261,54 +288,123 @@ describe("approval grants", () => {
   const deployPolicy = { hosts: [{ host: "api.cloudflare.com", approval: "deploy" }] };
   const grant = (tenant: string, init: RequestInit) => api(`/v1/sandboxes/${tenant}/cmp_1/grants/deploy`, init);
 
+  /** Starts `run`'s harness once no other runs there, and returns what ends it. */
+  const startHarness = async (tenant: string, run: string): Promise<() => Promise<void>> => {
+    const harness = await vi.waitFor(async () => {
+      const response = await api(
+        `/v1/sandboxes/${tenant}/cmp_1/runs/${run}/harness`,
+        post({ sha256: "a".repeat(64), timeoutMs: 60_000 }),
+      );
+      if (response.status !== 200) throw new Error(await response.text());
+      return response;
+    });
+    const { exec } = await lineReader(harness)();
+    return async () => {
+      await api(`/v1/sandboxes/${tenant}/cmp_1/exec/${exec}/stdin`, { method: "POST", body: "bye\n" });
+    };
+  };
+
   async function setUp() {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("ok"));
     const fakeA = await attachFake("org_a", "cmp_1");
     const fakeB = await attachFake("org_b", "cmp_1");
+    const ends: (() => Promise<void>)[] = [];
     for (const tenant of ["org_a", "org_b"]) {
       await api(`/v1/sandboxes/${tenant}/cmp_1/outbound-policy`, json(deployPolicy));
+      // As a run does: a fresh container, whatever an earlier test left running in this one.
+      await api(`/v1/sandboxes/${tenant}/cmp_1/stop`, post());
       await api(`/v1/sandboxes/${tenant}/cmp_1/start`, post());
+      ends.push(await startHarness(tenant, "run_1"));
     }
     return {
+      endA: ends[0]!,
       fromA: () => viaIntercept("org_a:cmp_1", fakeA, "https://api.cloudflare.com/client/v4/accounts"),
       fromB: () => viaIntercept("org_b:cmp_1", fakeB, "https://api.cloudflare.com/client/v4/accounts"),
     };
   }
 
-  it("open an approved action's hosts for that company until closed", async () => {
+  const close = (approval: string) =>
+    api(`/v1/sandboxes/org_a/cmp_1/grants/deploy?approval=${approval}`, { method: "DELETE" });
+
+  it("open an approved action's hosts for that company and run until that approval closes them", async () => {
     const { fromA, fromB } = await setUp();
     expect((await fromA()).status).toBe(403);
-    const opened = await grant("org_a", json({ approval: "apr_1" }));
-    expect(await opened.json()).toMatchObject({ action: "deploy", approval: "apr_1" });
+    const opened = await grant("org_a", json({ approval: "apr_1", run: "run_1" }));
+    expect(await opened.json()).toMatchObject({ action: "deploy", approval: "apr_1", run: "run_1" });
     expect((await fromA()).status).toBe(200);
     // Another company's sandbox stays closed.
     expect((await fromB()).status).toBe(403);
-    expect((await grant("org_a", { method: "DELETE" })).status).toBe(204);
+    // Only the approval that opened it closes it.
+    expect((await close("apr_0")).status).toBe(204);
+    expect((await fromA()).status).toBe(200);
+    expect((await close("apr_1")).status).toBe(204);
     expect((await fromA()).status).toBe(403);
+    expect((await api("/v1/sandboxes/org_a/cmp_1/grants/deploy", { method: "DELETE" })).status).toBe(400);
   });
 
-  it("close when the grant expires or the sandbox stops", async () => {
-    const { fromA } = await setUp();
-    await grant("org_a", json({ approval: "apr_1", ttlMs: 1_000 }));
+  it("close when the grant expires, a new harness starts or the sandbox stops", async () => {
+    const { fromA, endA } = await setUp();
+    await grant("org_a", json({ approval: "apr_1", run: "run_1", ttlMs: 1_000 }));
     expect((await fromA()).status).toBe(200);
     const now = Date.now();
     vi.spyOn(Date, "now").mockReturnValue(now + 1_001);
     expect((await fromA()).status).toBe(403);
     vi.spyOn(Date, "now").mockReturnValue(now);
 
-    await grant("org_a", json({ approval: "apr_2" }));
+    // The next run's harness inherits nothing from the last run.
+    await grant("org_a", json({ approval: "apr_2", run: "run_1" }));
+    await endA();
+    await startHarness("org_a", "run_2");
+    expect((await fromA()).status).toBe(403);
+
+    await grant("org_a", json({ approval: "apr_3", run: "run_2" }));
     await api("/v1/sandboxes/org_a/cmp_1/stop", post());
     await runInDurableObject(env.SANDBOX.getByName("org_a:cmp_1"), (sandbox: CompanySandbox) => {
       expect(sandbox.grantOpen("deploy")).toBe(false);
     });
   });
 
-  it("refuse malformed grants", async () => {
+  it("refuse a grant for any run but the one whose harness is running", async () => {
+    const { fromA, endA } = await setUp();
+    expect((await grant("org_a", json({ approval: "apr_1", run: "run_9" }))).status).toBe(409);
+    await endA();
+    await startHarness("org_a", "run_2");
+    expect((await grant("org_a", json({ approval: "apr_1", run: "run_1" }))).status).toBe(409);
+    expect((await grant("org_a", json({ approval: "apr_1", run: "run_2" }))).status).toBe(200);
+    // A stopped sandbox runs no harness, so nothing can be granted until the next one starts.
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    expect((await grant("org_a", json({ approval: "apr_2", run: "run_2" }))).status).toBe(409);
+    expect((await fromA()).status).toBe(403);
+  });
+
+  it("last at most half an hour, five minutes unless asked", async () => {
     await setUp();
-    for (const body of [{}, { approval: "a b" }, { approval: "apr_1", ttlMs: 2 * 60 * 60 * 1_000 }]) {
+    const opened = await (
+      await grant("org_a", json({ approval: "apr_1", run: "run_1" }))
+    ).json<{ expiresAt: number }>();
+    expect(opened.expiresAt - Date.now()).toBeLessThanOrEqual(5 * 60 * 1_000);
+    expect(opened.expiresAt - Date.now()).toBeGreaterThan(4 * 60 * 1_000);
+    const long = json({ approval: "apr_1", run: "run_1", ttlMs: 31 * 60 * 1_000 });
+    expect((await grant("org_a", long)).status).toBe(400);
+  });
+
+  it("refuse an action no host is held for, and malformed grants", async () => {
+    await setUp();
+    const unheld = await api(
+      "/v1/sandboxes/org_a/cmp_1/grants/customer_send",
+      json({ approval: "apr_1", run: "run_1" }),
+    );
+    expect(unheld.status).toBe(409);
+    for (const body of [
+      {},
+      { approval: "apr_1" },
+      { approval: "a b", run: "run_1" },
+      { approval: "apr_1", run: "r|1" },
+    ]) {
       expect((await grant("org_a", json(body))).status, JSON.stringify(body)).toBe(400);
     }
-    expect((await api("/v1/sandboxes/org_a/cmp_1/grants/de%20ploy", json({ approval: "apr_1" }))).status).toBe(400);
+    const encoded = api("/v1/sandboxes/org_a/cmp_1/grants/de%20ploy", json({ approval: "apr_1", run: "run_1" }));
+    expect((await encoded).status).toBe(400);
   });
 });
 

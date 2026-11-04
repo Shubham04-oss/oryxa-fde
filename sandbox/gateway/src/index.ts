@@ -6,7 +6,7 @@ import type { Env } from "./env.js";
 import { isGatewayError } from "./errors.js";
 import { ExecRequest, ExecStreamRequest, WorkspacePath } from "./exec.js";
 import { OutboundPolicy } from "./policy.js";
-import { ApprovalAction, GrantRequest, HarnessRequest, MAX_PACK_BYTES, RunId } from "./runs.js";
+import { ApprovalAction, ApprovalId, GrantRequest, HarnessRequest, MAX_PACK_BYTES, RunId } from "./runs.js";
 import { defaultInstance, InstanceType } from "./sandbox.js";
 import { companyScope, type CompanyScope, sandboxName, ScopeError } from "./scope.js";
 
@@ -101,7 +101,7 @@ async function dispatch(request: Request, url: URL, route: string, scope: Compan
     if (request.method === "PUT")
       return Response.json(await sandbox.openGrant(scope, name, await parseBody(request, GrantRequest)));
     if (request.method === "DELETE") {
-      await sandbox.closeGrant(name);
+      await sandbox.closeGrant(name, ApprovalId.parse(url.searchParams.get("approval")));
       return new Response(null, { status: 204 });
     }
   }
