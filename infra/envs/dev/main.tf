@@ -39,8 +39,8 @@ locals {
   }
   secret_arn = { for k, s in aws_secretsmanager_secret.this : k => s.arn }
 
-  # The API service and the one-off migrate task run the same image.
-  api_image = "${aws_ecr_repository.api.repository_url}:${var.api_image_tag}"
+  # The API service and the one-off migrate task run the same image, at the sha last deployed (deploy.tf).
+  api_image = "${aws_ecr_repository.api.repository_url}:${data.aws_ssm_parameter.api_image_tag.insecure_value}"
 }
 
 # ---------------------------------------------------------------- keys and secrets

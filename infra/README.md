@@ -36,7 +36,8 @@ are bound to the VPC service reach it, through the tunnel.
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
 | `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the ALB, Access on `admin.` |
-| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` |
+| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl`; `deploy.tf` holds the GitHub deploy role and the deploy parameters |
+| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
 | `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
@@ -66,7 +67,9 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `event_signing_kid` | `k1` | Key id of the API's event signing key (`EVENT_SIGNING_KID`); change it when the key rotates |
 | `data_bucket_name` | required | Globally unique name for the customer data bucket |
 | `cloudtrail_bucket_name` | required | Globally unique name for the CloudTrail log bucket |
-| `api_image_tag` | required | Git sha of the `oryxa-fde-api` image in ECR (tags are immutable); the API service and the migrate task run it |
+| `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
+| `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
+| `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
 | `start_services` | `false` | `false`: every service runs 0 tasks. Set `true` once the image and every secret value exist |
 | `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue |
 | `api_port` | `8080` | Port `oryxa-fde-api` listens on (`LISTEN_ADDR`) |
@@ -136,50 +139,119 @@ startup) needs this once, before the first deploy of the non-owner API (#39):
 ## Apply order
 
 The owner needs an admin AWS login for the dev account, OpenTofu 1.11 or newer (CI uses 1.12.6),
-AWS CLI 2.37.3 or newer (for `aws eventsv2`), `jq`, Docker with buildx for ARM64 images, and
-`CLOUDFLARE_API_TOKEN` scoped to the account and zone with these permissions, all Edit: Cloudflare
-Tunnel, Access: Apps and Policies, Workers VPC (Connectivity Directory), and Zone DNS.
+AWS CLI 2.37.3 or newer (for `aws eventsv2`), `jq`, and `CLOUDFLARE_API_TOKEN` scoped to the account
+and zone with these permissions, all Edit: Cloudflare Tunnel, Access: Apps and Policies, Workers VPC
+(Connectivity Directory), and Zone DNS. Images and Workers are built and deployed by the two deploy
+workflows (Deploys, below), not from the owner's machine.
 
 1. **State.** Create a versioned, encrypted, private S3 bucket by hand, then run
    `tofu -chdir=infra/envs/dev init -backend-config="bucket=<state bucket>" -backend-config="region=us-west-2"`.
 2. **Bus.** Run `infra/scripts/create-event-bus.sh dev <account id> us-west-2`, with the region you
    set as `aws_region`. It refuses any other account and prints the ARN for `event_bus_arn`.
-3. **First apply, nothing running.** Fill `terraform.tfvars` with `start_services = false` and any
+3. **The protected `dev` environment, before the deploy role exists.** In GitHub, Settings,
+   Environments, New environment `dev`: deployment branches, selected branches, `main` only. Add the
+   `CLOUDFLARE_API_TOKEN` environment secret now or before step 12 (Deploys, below).
+4. **First apply, nothing running.** Fill `terraform.tfvars` with `start_services = false` and any
    `api_image_tag`, then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
    `tofu -chdir=infra/envs/dev apply dev.tfplan`. This creates the network, keys, the database (about
    10 minutes), the empty secrets, ECR, the ALB, the cluster with every service at 0 tasks, queues,
-   CloudTrail, and on Cloudflare the DNS records, the tunnel, the VPC service and Access.
-4. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
+   CloudTrail, the GitHub deploy role and its two SSM parameters (and the account's GitHub OIDC
+   provider unless `github_oidc_provider_arn` is set), and on Cloudflare the DNS records, the
+   tunnel, the VPC service and Access.
+5. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
    pgvector, the IAM logins, the API's roles and the `spicedb` database, and is safe to re-run. It
    stops with an error if anything the API can reach has owner powers (Database logins).
-5. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
+6. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
    WorkOS key comes from the WorkOS dashboard, and the event signing key is an Ed25519 PEM
    (`openssl genpkey -algorithm ed25519`). Copy the tunnel token from the Cloudflare dashboard
    (Zero Trust, Networks, Tunnels, `oryxa-fde-dev-api`; output `tunnel_id`).
-6. **SpiceDB datastore.** Run `infra/scripts/run-task.sh spicedb-migrate` (`datastore migrate head`,
+7. **SpiceDB datastore.** Run `infra/scripts/run-task.sh spicedb-migrate` (`datastore migrate head`,
    IAM auth).
-7. **API image.** Build `oryxa-fde-api` for `linux/arm64`, push it to
-   `$(tofu output -raw ecr_repository_url):<git sha>`, set `api_image_tag` to that sha, then plan and
-   apply (services still at 0) so the migrate task runs that image.
-8. **Migrations.** Run `infra/scripts/run-task.sh migrate`. The store's migrations run as
-   `oryxa_fde_migrator` and the task exits; re-run it for every image that adds a migration, before
-   the service runs that image.
-9. **Start.** Set `start_services = true`, then plan and apply. SpiceDB, cloudflared and the API
-   each start one task. The API registers with the ALB once `/healthz` answers 200.
-10. **SpiceDB schema.** Run `infra/scripts/run-task.sh spicedb-schema schema/fde.zed`. Until this
+8. **`dev` variables.** Add the six variables to the `dev` environment (Deploys, below).
+9. **API image and migrations.** Run the `deploy-api` workflow on `main`. It pushes the image, runs
+   the store's migrations as `oryxa_fde_migrator` in the migrate task, points the service (still at
+   0 tasks) at the image, and records the sha for OpenTofu.
+10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB, cloudflared and the API
+    each start one task, the API on the sha `deploy-api` recorded. The API registers with the ALB
+    once `/healthz` answers 200.
+11. **SpiceDB schema.** Run `infra/scripts/run-task.sh spicedb-schema schema/fde.zed`. Until this
     runs, every permission check fails closed.
-11. **fde-web.** Bind the API in fde-web's wrangler config as
-    `vpc_services: [{ binding: "API", service_id: <tofu output api_vpc_service_id> }]`, route
-    `app.<domain>/*` as a zone route (OpenTofu owns that DNS record), then `wrangler deploy`.
-12. **Smoke test.** The ALB target is healthy, `https://app.<domain>` reaches the API through the
+12. **Workers.** Run the `deploy-workers` workflow on `main`. Then set the gateway's Worker secrets
+    once, from `sandbox/gateway` (`npx wrangler secret put SERVICE_TOKEN`, and `DEV_SECRETS` per its
+    README); until then the gateway refuses every call. Secrets survive later deploys.
+13. **Smoke test.** The ALB target is healthy, `https://app.<domain>` reaches the API through the
     binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
 
 When a consumer lands (wave 2), create its FIFO subscriber into `oryxa-fde-dev-<consumer>.fifo`,
 with the `-undelivered` queue as its on-failure target and `tofu output eventbus_delivery_role_arn`
 as its role (`aws eventsv2 create-subscriber`, or the platform kit's `provision` with env
 `fde-dev`). Grant its service `ReceiveMessage` on that queue only; nothing reads the queues yet.
+
+## Deploys
+
+Two manual workflows, `workflow_dispatch` only, from `main` only, for `dev` only: every job that
+deploys runs in the GitHub environment `dev`, and nothing else can use its credentials. Run them
+from the Actions tab on `main`; on any other branch their jobs are skipped.
+
+| Workflow | Does | Uses from `dev` |
+| --- | --- | --- |
+| `deploy-api` | Builds `oryxa-fde-api` for `linux/arm64`, pushes it to ECR, runs migrations as the one-off migrate task, rolls the service onto it | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
+| `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID` |
+
+**What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
+apply (Apply order, step 3):
+- **Deployment branches:** selected branches, `main`. Required reviewers are optional.
+- **Variables** (none is a secret; none goes in the repository):
+
+  | Variable | Value |
+  | --- | --- |
+  | `AWS_REGION` | `aws_region` from tfvars |
+  | `AWS_DEPLOY_ROLE_ARN` | `tofu output -raw github_deploy_role_arn` |
+  | `CLOUDFLARE_ACCOUNT_ID` | `cloudflare_account_id` from tfvars |
+  | `CLOUDFLARE_ZONE_ID` | `cloudflare_zone_id` from tfvars |
+  | `WEB_HOSTNAME` | `tofu output -raw web_hostname` |
+  | `API_VPC_SERVICE_ID` | `tofu output -raw api_vpc_service_id` |
+- **Environment secret** `CLOUDFLARE_API_TOKEN`, on `dev` only, never a repository secret: a token
+  for this account and zone only, with Account: Workers Scripts Edit and Containers Edit (the
+  gateway's sandbox image), and Zone: Workers Routes Edit. Not the OpenTofu token. Only the
+  `wrangler deploy` steps see it; installs (`npm ci --ignore-scripts`) and builds run without it.
+
+There is no AWS key anywhere. The `deploy` job of `deploy-api` gets a one-hour session for
+`oryxa-fde-dev-github-deploy` through GitHub OIDC. Its trust needs both claims to match exactly:
+`sub` is `repo:<github_repository>:environment:dev`, and `job_workflow_ref` is
+`<github_repository>/.github/workflows/deploy-api.yml@refs/heads/main`. So no other workflow, branch
+or environment gets in, even before the environment's branch rule exists. `deploy-workers` needs no
+AWS access and cannot assume it. The role may push to the `oryxa-fde-api` repository, register task
+definitions that run as the API's or the migrate task's roles only, run the migrate task, update the
+`oryxa-fde-api` service, and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it).
+
+**deploy-api, step by step**
+1. `build`, a release build, so never on a1 and never with shared caches (`docs/ci.md`): on a clean
+   GitHub-hosted runner, with the toolchain `rust-toolchain.toml` pins, no sccache and a fresh
+   `CARGO_HOME`, it cross-compiles `oryxa-fde-api` and `oryxa-fde-ops` for
+   `aarch64-unknown-linux-gnu`. It fails if either needs a newer glibc than the image's base (2.41).
+2. `deploy`, hosted, in `dev`: reads `/oryxa-fde-dev/deploy` (names, subnets, the migrate task's
+   security group; written by OpenTofu) and pushes the image tagged with the commit sha. Tags are
+   immutable: a sha already in ECR is reused.
+3. Registers new revisions of `oryxa-fde-dev-migrate` and `oryxa-fde-dev-api` that differ from the
+   current ones only in the image, so env, secrets and roles stay as OpenTofu set them.
+4. Runs the migrate task and stops on a non-zero exit, before the service changes. Migrations must
+   therefore work with the image still running (add first, remove in a later deploy).
+5. Updates the service, waits for it to settle, and fails if the circuit breaker rolled it back.
+6. Writes the sha to `/oryxa-fde-dev/api-image-tag`. OpenTofu reads that parameter on every plan,
+   so a later apply keeps the deployed image instead of rolling it back. To roll back, revert the
+   change on `main` and run `deploy-api` again.
+
+Without the workflow, the same steps by hand: push an image, put its sha in
+`/oryxa-fde-dev/api-image-tag`, apply, and run `infra/scripts/run-task.sh migrate`.
+
+**deploy-workers.** Each Worker deploys with the `wrangler` its own lockfile pins. `fde-web`'s
+`wrangler.jsonc` stays local-only: after `pnpm build`, the workflow adds dev's settings to the built
+config: the zone route `<WEB_HOSTNAME>/*` (OpenTofu owns that DNS record), the `API` binding to the
+Workers VPC service, and `workers_dev` and preview URLs off, so `app.<domain>` is its only address.
+Worker secrets are set by hand with `wrangler secret put` and are never in the workflow.
 
 **Teardown.**
 
@@ -251,6 +323,15 @@ These could not be checked without an account. Each one is flagged at the place 
   did not apply.
 - **Docker Hub pulls** (SpiceDB, cloudflared, zed) are anonymous and rate-limited per NAT IP. An ECR
   pull-through cache fixes it if it bites. Images are pinned by tag, not digest.
+- **Deploy role.** `ecs:RegisterTaskDefinition` and `ecs:DescribeTaskDefinition` take `*` (not
+  scoped to a family); `iam:PassRole` on four roles is what limits a new revision. If the account
+  already has a GitHub OIDC provider, set `github_oidc_provider_arn` or the first apply fails on it.
+  The trust's `job_workflow_ref` condition relies on STS validating that GitHub claim (supported for
+  GitHub since 2025). If the first `deploy-api` run is refused at `AssumeRoleWithWebIdentity`, check
+  that claim first; the failure is closed, never open.
+- **Cloudflare token for deploys.** The permission names (Containers Edit for the sandbox image, and
+  whether binding a Workers VPC service needs a Connectivity Directory permission too) are from the
+  docs; the first `deploy-workers` run confirms them.
 
 ## Known limits (dev only)
 
@@ -284,12 +365,17 @@ These could not be checked without an account. Each one is flagged at the place 
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - It serves `GET /healthz` without auth (it does), keeps files under
-    `tenants/<tenant>/companies/<company>/`, and ships a `linux/arm64` image that writes nothing to
-    its root filesystem, which is read-only.
-- **Web (`fde-web/`)** uses the `vpc_services` binding (output `api_vpc_service_id`) and a zone route
-  on `app.<domain>`, not a custom domain.
-- **Agent (`sandbox/`)** has nothing here yet. Its gateway's hostname and an AWS identity for the
-  outbound handler's Bedrock calls are follow-ups when that stream needs them.
+    `tenants/<tenant>/companies/<company>/`, and writes nothing to its root filesystem, which is
+    read-only. Infra builds the image (`deploy-api`) from the `oryxa-fde-api` package's two binaries:
+    `oryxa-fde-api` is the entrypoint, and the migrate task runs `/usr/local/bin/oryxa-fde-ops migrate`.
+- **Web (`fde-web/`, `realtime/`).** `deploy-workers` adds the `API` binding (`env.API`, the Workers
+  VPC service) and the zone route on `app.<domain>` to the built config at deploy time, so
+  `wrangler.jsonc` keeps no dev values. `realtime/` deploys like the gateway: `npm ci` with a
+  `package-lock.json`, `wrangler` in its devDependencies and `wrangler deploy` from its directory,
+  before `fde-web`.
+- **Agent (`sandbox/`)** The gateway deploys as its `wrangler.jsonc` says; its Worker secrets are set
+  by hand. Its hostname and an AWS identity for the outbound handler's Bedrock calls are follow-ups
+  when that stream needs them.
 
 ## Checks
 
@@ -299,4 +385,5 @@ tofu -chdir=infra/envs/dev init -backend=false
 tofu -chdir=infra/envs/dev validate
 tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls
 shellcheck infra/scripts/*.sh
+actionlint                            # the deploy workflows
 ```

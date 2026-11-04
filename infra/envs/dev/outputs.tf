@@ -1,3 +1,8 @@
+output "github_deploy_role_arn" {
+  description = "Set as AWS_DEPLOY_ROLE_ARN on the GitHub environment named after env (infra/README.md, Deploys)."
+  value       = aws_iam_role.github_deploy.arn
+}
+
 output "ecr_repository_url" {
   description = "Push oryxa-fde-api images here, tagged with the git sha (api_image_tag)."
   value       = aws_ecr_repository.api.repository_url
