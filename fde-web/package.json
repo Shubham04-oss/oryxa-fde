@@ -13,8 +13,8 @@
     "format": "prettier --write .",
     "check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "api:generate": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts",
-    "api:check": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts --check"
+    "api:generate": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts && openapi-typescript ../crates/oryxa-fde-agent/openapi.json -o src/lib/api/agent-runs.gen.ts --empty-objects-unknown",
+    "api:check": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts --check && openapi-typescript ../crates/oryxa-fde-agent/openapi.json -o src/lib/api/agent-runs.gen.ts --empty-objects-unknown --check"
   },
   "dependencies": {
     "@base-ui/react": "1.8.0",

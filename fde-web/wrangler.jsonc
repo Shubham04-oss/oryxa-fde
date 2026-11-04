@@ -13,5 +13,8 @@
     // reaches the API only through an `API` binding in `vpc_services` (infra `api_vpc_service_id`).
     "API_URL": "http://localhost:8080",
   },
+  // Live run output (src/live.ts): the realtime Worker, reached only through this binding. Its token is
+  // the secret REALTIME_SUBSCRIBE_TOKEN (`wrangler secret put`), never here.
+  "services": [{ "binding": "REALTIME", "service": "oryxa-fde-realtime" }],
   "observability": { "enabled": true },
 }

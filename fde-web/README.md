@@ -4,7 +4,8 @@ The FDE workspace's web app: TanStack Start on Cloudflare Workers, with the plat
 stack and versions. Read [DESIGN.md](DESIGN.md) before changing a screen.
 
 ```bash
-corepack enable    # pnpm at the version and hash package.json pins
+corepack enable    # pnpm at the version and hash package.json pins. Node 25 and later ship no corepack:
+                   # run `npm install --global corepack` first.
 pnpm install --frozen-lockfile
 pnpm dev:mock      # every screen on invented sample data, no backend: http://localhost:3000
 pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm build

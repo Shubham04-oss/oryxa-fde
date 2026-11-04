@@ -128,7 +128,7 @@ export function Failed({
 }
 
 /** A company or project that is not the FDE's, or does not exist: one answer for both. */
-export function NotFound({ what }: { what: "company" | "project" }) {
+export function NotFound({ what }: { what: "company" | "project" | "run" }) {
   return (
     <Page>
       <div className="rounded-[15px] border border-dashed border-strong p-5">

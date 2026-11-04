@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Card, Failed, Loading, Page, Quiet, Row, Rows, Status } from "./page"
+import { ActiveRunsCard } from "./runs"
 import type { Tone } from "./page"
 import { queries } from "@/lib/api/client"
 import type { TodayItem } from "@/lib/api/schemas"
@@ -106,6 +107,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
           )}
         </Card>
       ))}
+      <ActiveRunsCard />
     </Page>
   )
 }

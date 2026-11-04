@@ -4,3 +4,4 @@ node_modules
 pnpm-lock.yaml
 src/routeTree.gen.ts
 src/lib/api/fde-api.gen.ts
+src/lib/api/agent-runs.gen.ts

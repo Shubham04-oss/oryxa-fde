@@ -1,0 +1,20 @@
+{
+  "name": "oryxa-fde-realtime",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  // One object per agent run. It keeps recent lines in memory only: nothing goes to its storage.
+  "durable_objects": {
+    "bindings": [{ "name": "RUNS", "class_name": "RunChannel" }],
+  },
+  "exports": {
+    "RunChannel": { "type": "durable-object", "storage": "sqlite" },
+  },
+  // Paths carry ids only, but run output does not go to logs either.
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false },
+  },
+}

@@ -66,9 +66,12 @@ export function Avatar({ name }: { name: string }) {
 
 /** The header's title: the screen, or the company or project it shows. */
 function useTitle(companies: Array<CompanySummary> | undefined) {
-  const params: { companyId?: string; projectId?: string } = useParams({ strict: false })
+  const params: { companyId?: string; projectId?: string; runId?: string } = useParams({
+    strict: false,
+  })
   const pathname = useLocation({ select: (location) => location.pathname })
   const company = companies?.find((c) => c.id === params.companyId)
+  if (params.runId) return "Agent run"
   if (params.projectId)
     return company?.projects.find((p) => p.id === params.projectId)?.name ?? "Project"
   if (params.companyId) return company?.name ?? "Company"
