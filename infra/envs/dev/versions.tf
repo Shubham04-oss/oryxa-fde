@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.10" # S3 native state locking (use_lockfile)
+  required_version = ">= 1.11" # as modules/cloudflare; 1.10 brought S3 native state locking (use_lockfile)
 
   required_providers {
     aws = {

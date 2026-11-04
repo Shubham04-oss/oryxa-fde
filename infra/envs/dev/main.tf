@@ -13,10 +13,11 @@ locals {
   subnets = module.network.private_subnet_ids
   desired = var.start_services ? 1 : 0
 
-  # IAM database auth: each service connects as its own Postgres user (infra/sql/01-bootstrap.sql),
+  # IAM database auth: each task connects as its own Postgres user (infra/sql/01-bootstrap.sql),
   # and its task role may connect as that user only. No database password exists for services.
+  # The migrator owns the tables; only the one-off migrate task may connect as it, never the API.
   db_name = "oryxa_fde"
-  db_user = { api = "oryxa_fde_api", spicedb = "spicedb" }
+  db_user = { api = "oryxa_fde_api", migrate = "oryxa_fde_migrator", spicedb = "spicedb" }
   db_user_arn = {
     for k, u in local.db_user : k => "arn:aws:rds-db:${local.region}:${local.account}:dbuser:${module.db.resource_id}/${u}"
   }
@@ -37,6 +38,9 @@ locals {
     "cloudflared/tunnel-token"     = "Cloudflare Tunnel token: cloudflared"
   }
   secret_arn = { for k, s in aws_secretsmanager_secret.this : k => s.arn }
+
+  # The API service and the one-off migrate task run the same image.
+  api_image = "${aws_ecr_repository.api.repository_url}:${var.api_image_tag}"
 }
 
 # ---------------------------------------------------------------- keys and secrets
@@ -74,6 +78,7 @@ module "network" {
     spicedb     = module.spicedb.security_group_id
     cloudflared = module.cloudflared.security_group_id
     db_admin    = module.db_admin.security_group_id
+    migrate     = module.migrate.security_group_id
     zed         = module.zed.security_group_id
   }
   nat_tunnel_clients = { cloudflared = module.cloudflared.security_group_id }
@@ -102,12 +107,13 @@ resource "aws_service_discovery_service" "spicedb" {
 # One prefix per company: tenants/<tenant id>/companies/<company id>/. The API's role can touch
 # objects under that shape only; which company a request may reach is the API's CompanyScope check.
 module "data_bucket" {
-  source      = "../../modules/s3"
-  name        = var.data_bucket_name
-  kms_key_arn = aws_kms_key.this.arn
+  source        = "../../modules/s3"
+  name          = var.data_bucket_name
+  kms_key_arn   = aws_kms_key.this.arn
+  force_destroy = var.allow_destroy
 }
 
-# Private subnets. 5432 only from the API, SpiceDB and the one-off db-admin task.
+# Private subnets. 5432 only from the API, SpiceDB and the one-off db-admin and migrate tasks.
 module "db" {
   source              = "../../modules/postgres"
   name                = local.prefix
@@ -116,11 +122,12 @@ module "db" {
   kms_key_arn         = aws_kms_key.this.arn
   vpc_id              = module.network.vpc_id
   subnet_ids          = local.subnets
-  deletion_protection = var.db_deletion_protection
+  deletion_protection = !var.allow_destroy
   allowed_security_groups = {
     api      = module.api.security_group_id
     spicedb  = module.spicedb.security_group_id
     db_admin = module.db_admin.security_group_id
+    migrate  = module.migrate.security_group_id
   }
 }
 
@@ -158,6 +165,7 @@ resource "aws_ecs_cluster" "this" {
 resource "aws_ecr_repository" "api" {
   name                 = "oryxa-fde-api"
   image_tag_mutability = "IMMUTABLE"
+  force_delete         = var.allow_destroy
 
   image_scanning_configuration {
     scan_on_push = true
@@ -226,14 +234,15 @@ data "aws_iam_policy_document" "api" {
 }
 
 # Reached only through the internal ALB. Env names match crates/oryxa-fde-api/src/main.rs, except
-# the database: DB_* are the inputs for IAM auth, where the API reads DATABASE_URL (README).
+# the database: IAM database auth (lead decision on #37), so DB_* replace the DATABASE_URL that local
+# and test runs use; the API stream adds the token support (README).
 module "api" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-api"
   service_name        = "oryxa-fde-api"
   cluster_arn         = aws_ecs_cluster.this.arn
   container_name      = "api"
-  image               = "${aws_ecr_repository.api.repository_url}:${var.api_image_tag}"
+  image               = local.api_image
   ecr_repository_arns = [aws_ecr_repository.api.arn]
   cpu                 = var.api_cpu
   memory              = var.api_memory
@@ -344,7 +353,7 @@ module "cloudflared" {
 }
 
 # One-off tasks the owner starts with infra/scripts/run-task.sh: the database and SpiceDB have no
-# public endpoint and there is no bastion. Each reads its input from a base64 env override.
+# public endpoint and there is no bastion. db-admin and zed read their input from a base64 env override.
 
 # psql for the bootstrap SQL. The only thing that reads the RDS master secret.
 module "db_admin" {
@@ -370,6 +379,43 @@ module "db_admin" {
   vpc_id             = module.network.vpc_id
   subnet_ids         = local.subnets
   egress             = merge(local.https_out, local.db_out)
+  log_retention_days = var.log_retention_days
+}
+
+data "aws_iam_policy_document" "migrate" {
+  statement {
+    sid       = "ConnectAsOwnUser"
+    actions   = ["rds-db:connect"]
+    resources = [local.db_user_arn["migrate"]]
+  }
+}
+
+# The store's migrations: `oryxa-fde-ops migrate` from the API's image, connected as the migrator,
+# which owns the tables. Only this task's role may connect as the migrator, so the running API can
+# never take the owner's place and turn row-level security off.
+module "migrate" {
+  source              = "../../modules/fargate_service"
+  name                = "${local.prefix}-migrate"
+  run_as_service      = false
+  cluster_arn         = aws_ecs_cluster.this.arn
+  container_name      = "migrate"
+  image               = local.api_image
+  ecr_repository_arns = [aws_ecr_repository.api.arn]
+  entry_point         = ["/usr/local/bin/oryxa-fde-ops"]
+  command             = ["migrate"]
+  environment = {
+    ORYXA_ENV  = var.env
+    AWS_REGION = local.region
+    DB_HOST    = module.db.address
+    DB_PORT    = tostring(module.db.port)
+    DB_NAME    = local.db_name
+    DB_USER    = local.db_user["migrate"]
+  }
+  kms_key_arn        = aws_kms_key.this.arn
+  vpc_id             = module.network.vpc_id
+  subnet_ids         = local.subnets
+  egress             = merge(local.https_out, local.db_out)
+  task_policies      = { migrate = data.aws_iam_policy_document.migrate.json }
   log_retention_days = var.log_retention_days
 }
 
@@ -403,6 +449,7 @@ module "cloudtrail" {
   name             = local.prefix
   bucket_name      = var.cloudtrail_bucket_name
   data_bucket_arns = [module.data_bucket.arn]
+  force_destroy    = var.allow_destroy
 }
 
 # ---------------------------------------------------------------- cloudflare

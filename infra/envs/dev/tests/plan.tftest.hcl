@@ -8,6 +8,13 @@ mock_provider "aws" {
   mock_data "aws_iam_policy_document" {
     defaults = { json = "{}" }
   }
+  # The account and region the provider would report; the bus precondition compares against them.
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "000000000000" }
+  }
+  mock_data "aws_region" {
+    defaults = { region = "us-west-2" }
+  }
   mock_data "aws_availability_zones" {
     defaults = { names = ["us-west-2a", "us-west-2b"] }
   }
@@ -84,7 +91,7 @@ run "dev_plans_without_credentials" {
   }
 
   # The env names crates/oryxa-fde-api/src/main.rs reads, plus DB_* for IAM database auth in place of
-  # its DATABASE_URL (infra/README.md). Secrets arrive by reference only.
+  # the DATABASE_URL of local and test runs (infra/README.md). Secrets arrive by reference only.
   assert {
     condition = length(setsubtract([
       "LISTEN_ADDR", "SPICEDB_ENDPOINT", "SPICEDB_PRESHARED_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID",
@@ -98,6 +105,55 @@ run "dev_plans_without_credentials" {
       output.web_hostname == "app.fde-dev.example.com" && output.admin_hostname == "admin.fde-dev.example.com"
     )
     error_message = "hostnames hang off var.domain"
+  }
+
+  assert {
+    condition     = aws_ecr_repository.api.force_delete == false
+    error_message = "destroy may empty nothing until allow_destroy is set"
+  }
+}
+
+run "allow_destroy_lets_teardown_empty_what_holds_data" {
+  command = plan
+  variables {
+    allow_destroy = true
+  }
+
+  assert {
+    condition     = aws_ecr_repository.api.force_delete
+    error_message = "teardown deletes the images with the repository"
+  }
+}
+
+# The API must never become the table owner (#34): only the one-off migrate task's role may connect
+# as oryxa_fde_migrator, and the API's role may connect as oryxa_fde_api alone.
+run "only_the_migrate_task_connects_as_the_table_owner" {
+  command = plan
+
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.api.statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_api"]
+    error_message = "the API's role may connect as oryxa_fde_api only"
+  }
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.migrate.statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_migrator"]
+    error_message = "the migrate task's role may connect as oryxa_fde_migrator only"
+  }
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.spicedb.statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["spicedb"]
+    error_message = "SpiceDB's role may connect as spicedb only"
+  }
+  assert {
+    condition     = module.migrate.service_name == null && contains(module.migrate.env_names, "DB_USER")
+    error_message = "migrations run as a one-off task, never as a service"
   }
 }
 
@@ -170,11 +226,82 @@ run "postgres_is_private_encrypted_and_iam_only" {
     error_message = "PostgreSQL 17 (ADR 0003)"
   }
   assert {
+    condition = (
+      aws_db_instance.this.deletion_protection && !aws_db_instance.this.skip_final_snapshot
+      && can(regex("^oryxa-fde-test-final-[0-9]{14}$", aws_db_instance.this.final_snapshot_identifier))
+    )
+    error_message = "deletion protection on by default, and each teardown keeps a final snapshot under its own name"
+  }
+  assert {
     condition = alltrue([
       for r in aws_vpc_security_group_ingress_rule.pg : r.cidr_ipv4 == null && r.referenced_security_group_id != null
     ])
     error_message = "5432 only from named security groups, never a CIDR"
   }
+}
+
+# The bus comes from a script, so its ARN must name this env's bus in this account and region.
+run "bus_must_be_this_envs_in_this_account_and_region" {
+  command = plan
+  module {
+    source = "../../modules/eventbridge"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name                = "oryxa-fde-dev"
+    bus_arn             = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+    consumer_queue_arns = ["arn:aws:sqs:us-west-2:000000000000:mock"]
+  }
+}
+
+run "rejects_a_bus_in_another_region" {
+  command = plan
+  module {
+    source = "../../modules/eventbridge"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name                = "oryxa-fde-dev"
+    bus_arn             = "arn:aws:events:us-east-1:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+    consumer_queue_arns = []
+  }
+  expect_failures = [data.aws_iam_policy_document.publish]
+}
+
+run "rejects_a_bus_in_another_account" {
+  command = plan
+  module {
+    source = "../../modules/eventbridge"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name                = "oryxa-fde-dev"
+    bus_arn             = "arn:aws:events:us-west-2:111111111111:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+    consumer_queue_arns = []
+  }
+  expect_failures = [data.aws_iam_policy_document.publish]
+}
+
+run "rejects_another_envs_bus" {
+  command = plan
+  module {
+    source = "../../modules/eventbridge"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name                = "oryxa-fde-dev"
+    bus_arn             = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-prod/abcdefghij0123456789abcde"
+    consumer_queue_arns = []
+  }
+  expect_failures = [data.aws_iam_policy_document.publish]
 }
 
 run "alb_is_internal_and_reached_only_by_named_groups" {

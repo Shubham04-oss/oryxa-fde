@@ -21,6 +21,10 @@ output "admin_hostname" {
   value = module.cloudflare.admin_hostname
 }
 
+output "region" {
+  value = local.region
+}
+
 output "cluster" {
   value = aws_ecs_cluster.this.name
 }
@@ -32,6 +36,8 @@ output "run_task_network" {
     db_admin_security_group  = module.db_admin.security_group_id
     spicedb_security_group   = module.spicedb.security_group_id
     db_admin_task_definition = module.db_admin.task_family
+    migrate_security_group   = module.migrate.security_group_id
+    migrate_task_definition  = module.migrate.task_family
     spicedb_task_definition  = module.spicedb.task_family
     zed_security_group       = module.zed.security_group_id
     zed_task_definition      = module.zed.task_family

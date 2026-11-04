@@ -136,9 +136,10 @@ variable "db_instance_class" {
   default = "db.t4g.micro"
 }
 
-variable "db_deletion_protection" {
-  type    = bool
-  default = true
+variable "allow_destroy" {
+  description = "true only to tear the environment down: lifts RDS deletion protection and lets destroy empty the buckets and ECR."
+  type        = bool
+  default     = false
 }
 
 variable "vpc_cidr" {

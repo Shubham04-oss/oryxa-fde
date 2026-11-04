@@ -129,7 +129,13 @@ resource "aws_db_instance" "this" {
   copy_tags_to_snapshot      = true
   deletion_protection        = var.deletion_protection
   skip_final_snapshot        = false
-  final_snapshot_identifier  = "${var.name}-final"
+  # Named when the instance is created and kept, so each teardown leaves its own snapshot instead of
+  # failing on the last one's name.
+  final_snapshot_identifier = "${var.name}-final-${formatdate("YYYYMMDDhhmmss", plantimestamp())}"
+
+  lifecycle {
+    ignore_changes = [final_snapshot_identifier]
+  }
 }
 
 output "address" {
