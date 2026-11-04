@@ -1,7 +1,7 @@
 //! Companies and their members.
 
 use oryxa_core::{TenantId, UserId};
-use oryxa_fde_core::{CompanyId, CompanyScope};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId};
 use oryxa_fde_events::CompanyCreated;
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
@@ -171,10 +171,12 @@ impl CompanyTx {
         Ok(true)
     }
 
-    /// Removes `user` from the company. `false` if the company does not exist.
-    pub async fn remove_member(&mut self, user: &UserId, by: &Actor) -> Result<bool, StoreError> {
+    /// Removes `user` from the company and from every project in it, so no project assignment
+    /// outlives the membership. `None` if the company does not exist; otherwise the projects the user
+    /// was assigned to, so the caller revokes those grants too.
+    pub async fn remove_member(&mut self, user: &UserId, by: &Actor) -> Result<Option<Vec<ProjectId>>, StoreError> {
         if !self.exists().await? {
-            return Ok(false);
+            return Ok(None);
         }
         let s = &self.scope;
         sqlx::query("delete from company_members where tenant_id = $1 and company_id = $2 and user_id = $3")
@@ -183,8 +185,31 @@ impl CompanyTx {
             .bind(user.as_str())
             .execute(&mut *self.tx)
             .await?;
+        let raw: Vec<String> = sqlx::query_scalar(
+            "delete from project_assignees where tenant_id = $1 and company_id = $2 and user_id = $3
+             returning project_id",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(user.as_str())
+        .fetch_all(&mut *self.tx)
+        .await?;
+        let mut projects = Vec::with_capacity(raw.len());
+        for r in raw {
+            let project = id("project id", ProjectId::new, r)?;
+            audit(
+                &mut self.tx,
+                s,
+                Some(&project),
+                by,
+                "assignee.removed",
+                Some(user.as_str()),
+            )
+            .await?;
+            projects.push(project);
+        }
         audit(&mut self.tx, s, None, by, "member.removed", Some(user.as_str())).await?;
-        Ok(true)
+        Ok(Some(projects))
     }
 
     pub async fn projects(&mut self) -> Result<Vec<Project>, StoreError> {
