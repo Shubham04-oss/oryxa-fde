@@ -6,10 +6,10 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use oryxa_authz::{SubjectRef, Write};
+use oryxa_authz::Write;
 use oryxa_core::UserId;
 use oryxa_fde_core::CompanyId;
-use oryxa_fde_store::{Company, Member, Name, Role, new_id};
+use oryxa_fde_store::{Company, GrantRow, Member, Name, Role, new_id};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -119,16 +119,9 @@ pub(crate) async fn create(
     let scope = who.company(CompanyId::new(new_id("cmp")).map_err(|_| ApiError::Internal)?);
     let mut tx = app.store.company(&scope).await?;
     let created = tx.create(&name, &who.actor()).await?;
-    let t = &who.tenant;
-    app.write(
-        t,
-        &[
-            Write::Touch(rel(company(&scope), "workspace", SubjectRef::object(workspace(t)))),
-            Write::Touch(rel(company(&scope), "lead", user(t, &who.user))),
-        ],
-    )
-    .await?;
     tx.commit().await?;
+    app.grant(GrantRow::Company(scope.clone())).await;
+    app.grant(GrantRow::Member(scope, who.user.clone())).await;
     Ok((StatusCode::CREATED, Json(created.into())))
 }
 
@@ -207,16 +200,11 @@ pub(crate) async fn set_member(
         Role::Lead => Role::Engineer,
         Role::Engineer => Role::Lead,
     };
-    let t = &who.tenant;
-    app.write(
-        t,
-        &[
-            Write::Touch(rel(company(&scope), role.as_str(), user(t, &member))),
-            Write::Delete(rel(company(&scope), other.as_str(), user(t, &member))),
-        ],
-    )
-    .await?;
+    // The other role goes before commit, while the membership row is locked; the new one after.
+    let revoke = Write::Delete(rel(company(&scope), other.as_str(), user(&who.tenant, &member)));
+    app.write(&who.tenant, &[revoke]).await?;
     tx.commit().await?;
+    app.grant(GrantRow::Member(scope, member)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

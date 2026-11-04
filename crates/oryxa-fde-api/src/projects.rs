@@ -7,10 +7,10 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use oryxa_authz::{SubjectRef, Write};
+use oryxa_authz::Write;
 use oryxa_core::UserId;
 use oryxa_fde_core::{CompanyId, ProjectId, ProjectScope, Stage};
-use oryxa_fde_store::{Assignee, Project, new_id};
+use oryxa_fde_store::{Assignee, GrantRow, Project, new_id};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -123,9 +123,8 @@ pub(crate) async fn create(
     let s = cs.project(ProjectId::new(new_id("prj")).map_err(|_| ApiError::Internal)?);
     let mut tx = app.store.project(&s).await?;
     let created = tx.create(&name, &who.actor()).await?.ok_or(ApiError::NotFound)?;
-    let write = Write::Touch(rel(project(&s), "company", SubjectRef::object(company(&cs))));
-    app.write(&who.tenant, &[write]).await?;
     tx.commit().await?;
+    app.grant(GrantRow::Project(s)).await;
     Ok((StatusCode::CREATED, Json(created.into())))
 }
 
@@ -201,9 +200,8 @@ pub(crate) async fn assign(
     if !tx.assign(&assignee, &who.actor()).await? {
         return Err(ApiError::NotFound);
     }
-    let write = Write::Touch(rel(project(&s), "assignee", user(&who.tenant, &assignee)));
-    app.write(&who.tenant, &[write]).await?;
     tx.commit().await?;
+    app.grant(GrantRow::Assignee(s, assignee)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

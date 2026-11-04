@@ -6,11 +6,17 @@
 //! the project or company id, which makes the bus group match `ProjectScope::event_group` and
 //! `CompanyScope::event_group`.
 
+use oryxa_core::TenantId;
 use oryxa_events::Event;
-use oryxa_fde_core::{AccessRequestId, AgentRunId, CompanyId, DocumentId, EvalRunId, ProjectId, Stage};
+use oryxa_fde_core::{
+    AccessRequestId, AgentRunId, CompanyId, CompanyScope, DocumentId, EvalRunId, ProjectId, ProjectScope, Stage,
+};
 use serde::{Deserialize, Serialize};
 
 pub const SOURCE: &str = "oryxa.fde";
+
+// AccessStatus and RunOutcome live here, not in core: they are part of the bus contract, and every
+// producer and consumer of these events already depends on this crate.
 
 /// Where an access request stands with the customer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -23,30 +29,36 @@ pub enum AccessStatus {
     Revoked,
 }
 
-/// How an agent run ended.
+/// How an agent run ended. From the agent's run states (`oryxa-fde-agent`): `finished` is
+/// `Succeeded`, `failed` for a rejected approval is `Rejected`, any other `failed` is `Failed`, and a
+/// run an FDE or a budget stops is `Cancelled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutcome {
     Succeeded,
     Failed,
+    Rejected,
     Cancelled,
 }
 
+// Payloads are built from a scope, never from loose ids, so the company and project in an event
+// always belong together; their scope fields are private and read back through `scope`.
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompanyCreated {
-    pub company: CompanyId,
+    company: CompanyId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectCreated {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectStageChanged {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
     pub from: Stage,
     pub to: Stage,
 }
@@ -54,15 +66,15 @@ pub struct ProjectStageChanged {
 /// The customer signed off a version of the project's scope and success criteria.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeSignedOff {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
     pub version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRequestStatusChanged {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
     pub access_request: AccessRequestId,
     pub from: AccessStatus,
     pub to: AccessStatus,
@@ -70,25 +82,150 @@ pub struct AccessRequestStatusChanged {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentUploaded {
-    pub company: CompanyId,
+    company: CompanyId,
     pub document: DocumentId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRunFinished {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
     pub agent_run: AgentRunId,
     pub outcome: RunOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalRunFinished {
-    pub company: CompanyId,
-    pub project: ProjectId,
+    company: CompanyId,
+    project: ProjectId,
     pub eval_run: EvalRunId,
     pub passed: u32,
     pub failed: u32,
+}
+
+/// `company()` and `scope(tenant)` for a payload about one company.
+macro_rules! company_scoped {
+    ($($ty:ident),*) => {$(
+        impl $ty {
+            pub fn company(&self) -> &CompanyId {
+                &self.company
+            }
+            /// The payload's company in `tenant`, the tenant its envelope was verified for.
+            pub fn scope(&self, tenant: &TenantId) -> CompanyScope {
+                CompanyScope::new(tenant.clone(), self.company.clone())
+            }
+        }
+    )*};
+}
+
+/// `company()`, `project()` and `scope(tenant)` for a payload about one project.
+macro_rules! project_scoped {
+    ($($ty:ident),*) => {$(
+        impl $ty {
+            pub fn company(&self) -> &CompanyId {
+                &self.company
+            }
+            pub fn project(&self) -> &ProjectId {
+                &self.project
+            }
+            /// The payload's project in `tenant`, the tenant its envelope was verified for.
+            pub fn scope(&self, tenant: &TenantId) -> ProjectScope {
+                CompanyScope::new(tenant.clone(), self.company.clone()).project(self.project.clone())
+            }
+        }
+    )*};
+}
+
+company_scoped!(CompanyCreated, DocumentUploaded);
+project_scoped!(
+    ProjectCreated,
+    ProjectStageChanged,
+    ScopeSignedOff,
+    AccessRequestStatusChanged,
+    AgentRunFinished,
+    EvalRunFinished
+);
+
+impl CompanyCreated {
+    pub fn new(s: &CompanyScope) -> Self {
+        Self {
+            company: s.company.clone(),
+        }
+    }
+}
+
+impl DocumentUploaded {
+    pub fn new(s: &CompanyScope, document: DocumentId) -> Self {
+        Self {
+            company: s.company.clone(),
+            document,
+        }
+    }
+}
+
+impl ProjectCreated {
+    pub fn new(s: &ProjectScope) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+        }
+    }
+}
+
+impl ProjectStageChanged {
+    pub fn new(s: &ProjectScope, from: Stage, to: Stage) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            from,
+            to,
+        }
+    }
+}
+
+impl ScopeSignedOff {
+    pub fn new(s: &ProjectScope, version: u32) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            version,
+        }
+    }
+}
+
+impl AccessRequestStatusChanged {
+    pub fn new(s: &ProjectScope, access_request: AccessRequestId, from: AccessStatus, to: AccessStatus) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            access_request,
+            from,
+            to,
+        }
+    }
+}
+
+impl AgentRunFinished {
+    pub fn new(s: &ProjectScope, agent_run: AgentRunId, outcome: RunOutcome) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            agent_run,
+            outcome,
+        }
+    }
+}
+
+impl EvalRunFinished {
+    pub fn new(s: &ProjectScope, eval_run: EvalRunId, passed: u32, failed: u32) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            eval_run,
+            passed,
+            failed,
+        }
+    }
 }
 
 macro_rules! events {
@@ -173,117 +310,70 @@ mod tests {
         }
         let p = project();
         vec![
-            sample(CompanyCreated {
-                company: p.company.company.clone(),
-            }),
-            sample(ProjectCreated {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-            }),
-            sample(ProjectStageChanged {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-                from: Stage::Discover,
-                to: Stage::Scope,
-            }),
-            sample(ScopeSignedOff {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-                version: 3,
-            }),
-            sample(AccessRequestStatusChanged {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-                access_request: AccessRequestId::new("acc_1").unwrap(),
-                from: AccessStatus::Requested,
-                to: AccessStatus::InProgress,
-            }),
-            sample(DocumentUploaded {
-                company: p.company.company.clone(),
-                document: DocumentId::new("doc_1").unwrap(),
-            }),
-            sample(AgentRunFinished {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-                agent_run: AgentRunId::new("run_1").unwrap(),
-                outcome: RunOutcome::Succeeded,
-            }),
-            sample(EvalRunFinished {
-                company: p.company.company.clone(),
-                project: p.project.clone(),
-                eval_run: EvalRunId::new("evr_1").unwrap(),
-                passed: 41,
-                failed: 2,
-            }),
+            sample(CompanyCreated::new(&p.company)),
+            sample(ProjectCreated::new(&p)),
+            sample(ProjectStageChanged::new(&p, Stage::Discover, Stage::Scope)),
+            sample(ScopeSignedOff::new(&p, 3)),
+            sample(AccessRequestStatusChanged::new(
+                &p,
+                AccessRequestId::new("acc_1").unwrap(),
+                AccessStatus::Requested,
+                AccessStatus::InProgress,
+            )),
+            sample(DocumentUploaded::new(&p.company, DocumentId::new("doc_1").unwrap())),
+            sample(AgentRunFinished::new(
+                &p,
+                AgentRunId::new("run_1").unwrap(),
+                RunOutcome::Succeeded,
+            )),
+            sample(EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 41, 2)),
         ]
     }
+
     #[test]
     fn every_event_round_trips_and_groups_by_its_entity() {
         let p = project();
-        let (c, prj) = (p.company.company.clone(), p.project.clone());
         let by_company = p.company.event_group();
         let by_project = p.event_group();
-        round_trip(CompanyCreated { company: c.clone() }, by_company.clone());
+        round_trip(CompanyCreated::new(&p.company), by_company.clone());
+        round_trip(ProjectCreated::new(&p), by_project.clone());
         round_trip(
-            ProjectCreated {
-                company: c.clone(),
-                project: prj.clone(),
-            },
+            ProjectStageChanged::new(&p, Stage::Build, Stage::Evaluate),
+            by_project.clone(),
+        );
+        round_trip(ScopeSignedOff::new(&p, 2), by_project.clone());
+        round_trip(
+            AccessRequestStatusChanged::new(
+                &p,
+                AccessRequestId::new("acc_1").unwrap(),
+                AccessStatus::InProgress,
+                AccessStatus::Granted,
+            ),
             by_project.clone(),
         );
         round_trip(
-            ProjectStageChanged {
-                company: c.clone(),
-                project: prj.clone(),
-                from: Stage::Build,
-                to: Stage::Evaluate,
-            },
-            by_project.clone(),
-        );
-        round_trip(
-            ScopeSignedOff {
-                company: c.clone(),
-                project: prj.clone(),
-                version: 2,
-            },
-            by_project.clone(),
-        );
-        round_trip(
-            AccessRequestStatusChanged {
-                company: c.clone(),
-                project: prj.clone(),
-                access_request: AccessRequestId::new("acc_1").unwrap(),
-                from: AccessStatus::InProgress,
-                to: AccessStatus::Granted,
-            },
-            by_project.clone(),
-        );
-        round_trip(
-            DocumentUploaded {
-                company: c.clone(),
-                document: DocumentId::new("doc_1").unwrap(),
-            },
+            DocumentUploaded::new(&p.company, DocumentId::new("doc_1").unwrap()),
             by_company,
         );
         round_trip(
-            AgentRunFinished {
-                company: c.clone(),
-                project: prj.clone(),
-                agent_run: AgentRunId::new("run_1").unwrap(),
-                outcome: RunOutcome::Failed,
-            },
+            AgentRunFinished::new(&p, AgentRunId::new("run_1").unwrap(), RunOutcome::Failed),
             by_project.clone(),
         );
         round_trip(
-            EvalRunFinished {
-                company: c,
-                project: prj,
-                eval_run: EvalRunId::new("evr_1").unwrap(),
-                passed: 9,
-                failed: 1,
-            },
+            EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 9, 1),
             by_project,
         );
+    }
+
+    #[test]
+    fn a_payload_rebuilds_the_scope_it_was_built_from() {
+        let p = project();
+        let tenant = p.tenant().clone();
+        assert_eq!(ProjectCreated::new(&p).scope(&tenant), p);
+        assert_eq!(ScopeSignedOff::new(&p, 1).scope(&tenant), p);
+        assert_eq!(CompanyCreated::new(&p.company).scope(&tenant), p.company);
+        let e = EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 1, 0);
+        assert_eq!((e.company(), e.project()), (&p.company.company, &p.project));
     }
 
     #[test]
@@ -377,6 +467,7 @@ mod tests {
             r#""in_progress""#
         );
         assert_eq!(serde_json::to_string(&RunOutcome::Cancelled).unwrap(), r#""cancelled""#);
+        assert_eq!(serde_json::to_string(&RunOutcome::Rejected).unwrap(), r#""rejected""#);
         assert!(serde_json::from_str::<AccessStatus>(r#""approved""#).is_err());
     }
 }

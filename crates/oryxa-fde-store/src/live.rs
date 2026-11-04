@@ -1,7 +1,8 @@
 //! Against a real Postgres. Start one, then run:
 //!   docker run --rm -e POSTGRES_PASSWORD=oryxa -e POSTGRES_DB=oryxa_fde -p 55432:5432 pgvector/pgvector:pg17
 //!   DATABASE_URL=postgres://postgres:oryxa@localhost:55432/oryxa_fde cargo test -p oryxa-fde-store -- --ignored
-//! Each test uses fresh tenant ids, so runs never see each other's rows.
+//! Each test uses fresh tenant ids, so runs never see each other's rows. The store connects as a
+//! fresh runtime login (`testing::store`); `DATABASE_URL`'s login is the owner (`testing::admin`).
 
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
@@ -10,17 +11,15 @@ use oryxa_events::{Encoded, MemoryPublisher, PublishError, Publisher, Signer, Ve
 use oryxa_fde_core::{ScopeItemId, SecurityAnswerId};
 use oryxa_fde_events::{CompanyCreated, ProjectCreated};
 use sqlx::Row;
+use sqlx::postgres::PgConnectOptions;
 
 use super::*;
-use crate::relay::{MAX_ATTEMPTS, dispatch_once};
+use crate::relay::{dispatch_once, replay_dead};
+use crate::testing::{self, admin};
 use sqlx::Acquire;
 
 async fn store() -> Store {
-    let url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:oryxa@localhost:55432/oryxa_fde".into());
-    let store = Store::connect(&url).await.unwrap();
-    store.migrate().await.unwrap();
-    store
+    crate::testing::store().await
 }
 
 fn tenant() -> TenantId {
@@ -56,10 +55,9 @@ fn keys() -> (Signer, Verifier) {
     )
 }
 
-/// Outbox rows of one tenant as (id, detail_type, group, published), oldest first. Read as the
-/// pool's login role, which owns the tables and is not limited by the app role's policies.
+/// Outbox rows of one tenant as (id, detail_type, group, published), oldest first, read as the relay.
 async fn outbox(store: &Store, t: &TenantId) -> Vec<(String, String, String, bool)> {
-    let mut tx = store.pool().begin().await.unwrap();
+    let mut tx = store.pool.begin().await.unwrap();
     sqlx::query("set local role oryxa_fde_relay")
         .execute(&mut *tx)
         .await
@@ -134,7 +132,7 @@ async fn row_level_security_limits_every_query_to_the_scope() {
     drop(tx);
 
     // The app role with no scope set sees nothing.
-    let mut tx = store.pool().begin().await.unwrap();
+    let mut tx = store.pool.begin().await.unwrap();
     sqlx::query("set local role oryxa_fde_app")
         .execute(&mut *tx)
         .await
@@ -159,18 +157,19 @@ async fn row_level_security_limits_every_query_to_the_scope() {
 #[ignore = "needs Postgres (DATABASE_URL)"]
 async fn audit_log_is_append_only_even_for_the_owner() {
     let store = store().await;
+    let owner = admin().await;
     let t = tenant();
     create_company(&store, &scope(&t, &new_id("cmp"))).await;
     for sql in [
         "update audit_log set action = 'x' where tenant_id = $1",
         "delete from audit_log where tenant_id = $1",
     ] {
-        let r = sqlx::query(sql).bind(t.as_str()).execute(store.pool()).await;
+        let r = sqlx::query(sql).bind(t.as_str()).execute(&owner).await;
         assert!(r.is_err(), "{sql} must fail");
     }
     let rows: i64 = sqlx::query_scalar("select count(*) from audit_log where tenant_id = $1")
         .bind(t.as_str())
-        .fetch_one(store.pool())
+        .fetch_one(&owner)
         .await
         .unwrap();
     assert_eq!(rows, 1);
@@ -242,22 +241,24 @@ impl Publisher for FailGroup {
     }
 }
 
+/// Rows the relay would send now: due, and not held back by an earlier row of their group.
+const DUE: &str = "select id from outbox o
+     where published_at is null and dead_at is null and available_at <= now()
+       and not exists (
+           select 1 from outbox e
+           where e.group_key = o.group_key and e.seq < o.seq
+             and e.published_at is null and e.dead_at is null and e.available_at > now())";
+
 /// Runs the relay until none of `t`'s rows can go out now (due and not held back by its group).
 async fn drain<P: Publisher>(store: &Store, signer: &Signer, publisher: &P, t: &TenantId) {
+    let owner = admin().await;
     for _ in 0..100 {
-        dispatch_once(store.pool(), signer, publisher, 50).await.unwrap();
-        let due: i64 = sqlx::query_scalar(
-            "select count(*) from outbox o
-             where tenant_id = $1 and published_at is null and dead_at is null and available_at <= now()
-               and not exists (
-                   select 1 from outbox e
-                   where e.group_key = o.group_key and e.seq < o.seq
-                     and e.published_at is null and e.dead_at is null and e.available_at > now())",
-        )
-        .bind(t.as_str())
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+        dispatch_once(store, signer, publisher, 50).await.unwrap();
+        let due: i64 = sqlx::query_scalar(&format!("select count(*) from ({DUE} and tenant_id = $1) due"))
+            .bind(t.as_str())
+            .fetch_one(&owner)
+            .await
+            .unwrap();
         if due == 0 {
             return;
         }
@@ -270,6 +271,7 @@ async fn drain<P: Publisher>(store: &Store, signer: &Signer, publisher: &P, t: &
 async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
     let _turn = RELAY_TESTS.lock().await;
     let store = store().await;
+    let owner = admin().await;
     let (signer, verifier) = keys();
     let t = tenant();
     let c = scope(&t, &new_id("cmp"));
@@ -277,16 +279,9 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
     // Two more events in the company's group, so order within a group is visible.
     let mut tx = store.company(&c).await.unwrap();
     for _ in 0..2 {
-        enqueue(
-            tx.conn(),
-            &c,
-            &actor("alice"),
-            &CompanyCreated {
-                company: c.company.clone(),
-            },
-        )
-        .await
-        .unwrap();
+        enqueue(tx.conn(), &c, &actor("alice"), &CompanyCreated::new(&c))
+            .await
+            .unwrap();
     }
     tx.commit().await.unwrap();
     let p = c.project(ProjectId::new(new_id("prj")).unwrap());
@@ -313,10 +308,10 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].group, p.event_group());
     let got = decode::<ProjectCreated>(&verifier, &sent[0].source, &sent[0].detail_type, &sent[0].detail).unwrap();
-    assert_eq!((got.tenant, got.data.project), (t.clone(), p.project.clone()));
+    assert_eq!(got.data.scope(&got.tenant), p);
     let (attempts, error): (i32, String) = sqlx::query_as("select attempts, last_error from outbox where id = $1")
         .bind(company_rows[0])
-        .fetch_one(store.pool())
+        .fetch_one(&owner)
         .await
         .unwrap();
     assert_eq!((attempts, error.as_str()), (1, "eventbridge: down"));
@@ -325,7 +320,7 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
     // the event id (the bus deduplication id) and a valid signature.
     sqlx::query("update outbox set available_at = now() where tenant_id = $1")
         .bind(t.as_str())
-        .execute(store.pool())
+        .execute(&owner)
         .await
         .unwrap();
     let up = MemoryPublisher::default();
@@ -338,7 +333,7 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
             (got.tenant.as_str(), got.envelope.event_id.as_str()),
             (t.as_str(), e.event_id.as_str())
         );
-        assert_eq!(got.data.company, c.company);
+        assert_eq!(got.data.scope(&got.tenant), c);
     }
     assert!(
         outbox(&store, &t).await.iter().all(|r| r.3),
@@ -352,61 +347,130 @@ async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
 
 #[tokio::test]
 #[ignore = "needs Postgres (DATABASE_URL)"]
-async fn a_row_that_keeps_failing_goes_dead_and_unblocks_its_group() {
+async fn a_row_that_keeps_failing_goes_dead_after_a_day_and_can_be_replayed() {
     let _turn = RELAY_TESTS.lock().await;
     let store = store().await;
+    let owner = admin().await;
     let (signer, _) = keys();
     let t = tenant();
     let c = scope(&t, &new_id("cmp"));
     create_company(&store, &c).await;
     let mut tx = store.company(&c).await.unwrap();
-    enqueue(
-        tx.conn(),
-        &c,
-        &actor("alice"),
-        &CompanyCreated {
-            company: c.company.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let rows = outbox(&store, &t).await;
-    sqlx::query("update outbox set attempts = $2 where id = $1")
-        .bind(&rows[0].0)
-        .bind(MAX_ATTEMPTS - 1)
-        .execute(store.pool())
+    enqueue(tx.conn(), &c, &actor("alice"), &CompanyCreated::new(&c))
         .await
         .unwrap();
-
+    tx.commit().await.unwrap();
+    let rows = outbox(&store, &t).await;
     let down = FailGroup {
         group: c.event_group(),
         ok: MemoryPublisher::default(),
     };
-    drain(&store, &signer, &down, &t).await;
-    let dead: bool = sqlx::query_scalar("select dead_at is not null from outbox where id = $1")
+    let dead = |id: String| {
+        let owner = owner.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("select dead_at is not null from outbox where id = $1")
+                .bind(id)
+                .fetch_one(&owner)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Many failures within a day: still retried, never dead.
+    sqlx::query("update outbox set attempts = 500, retry_since = now() - interval '23 hours' where id = $1")
         .bind(&rows[0].0)
-        .fetch_one(store.pool())
+        .execute(&owner)
         .await
         .unwrap();
-    assert!(dead);
+    drain(&store, &signer, &down, &t).await;
+    assert!(!dead(rows[0].0.clone()).await);
+    let wait: f64 =
+        sqlx::query_scalar("select extract(epoch from available_at - now())::float8 from outbox where id = $1")
+            .bind(&rows[0].0)
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert!(wait <= relay::MAX_BACKOFF.as_secs_f64() + 1.0, "backoff {wait}s");
 
-    // The second row failed once in the same batch; after its backoff, the dead row no longer
-    // holds it back.
+    // Failing for over a day: dead, and its group is no longer held back.
+    sqlx::query("update outbox set available_at = now(), retry_since = now() - interval '25 hours' where id = $1")
+        .bind(&rows[0].0)
+        .execute(&owner)
+        .await
+        .unwrap();
+    drain(&store, &signer, &down, &t).await;
+    assert!(dead(rows[0].0.clone()).await);
     let up = MemoryPublisher::default();
     sqlx::query("update outbox set available_at = now() where tenant_id = $1")
         .bind(t.as_str())
-        .execute(store.pool())
+        .execute(&owner)
         .await
         .unwrap();
     drain(&store, &signer, &up, &t).await;
     let published: Vec<bool> = outbox(&store, &t).await.into_iter().map(|r| r.3).collect();
     assert_eq!(published, [false, true]);
+
+    // A replay puts it back in line with a fresh day of retries, and it goes out.
+    assert_eq!(
+        replay_dead(&store, Some(&tenant())).await.unwrap(),
+        0,
+        "other tenants untouched"
+    );
+    assert_eq!(replay_dead(&store, Some(&t)).await.unwrap(), 1);
+    assert!(!dead(rows[0].0.clone()).await);
+    drain(&store, &signer, &up, &t).await;
+    let published: Vec<bool> = outbox(&store, &t).await.into_iter().map(|r| r.3).collect();
+    assert_eq!(published, [true, true]);
+    assert_eq!(
+        replay_dead(&store, Some(&t)).await.unwrap(),
+        0,
+        "a published row is never replayed"
+    );
+}
+
+/// Never answers.
+struct Hang;
+
+impl Publisher for Hang {
+    async fn send(&self, _: Encoded) -> Result<(), PublishError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_send_that_never_returns_times_out_and_ends_the_batch() {
+    let _turn = RELAY_TESTS.lock().await;
+    let store = store().await;
+    let (signer, _) = keys();
+    let owner = admin().await;
+    for _ in 0..2 {
+        create_company(&store, &scope(&tenant(), &new_id("cmp"))).await;
+    }
+    // The relay serves every tenant, so the row it tries first may be any test's.
+    let first: String = sqlx::query_scalar(&format!("{DUE} order by seq limit 1"))
+        .fetch_one(&owner)
+        .await
+        .unwrap();
+    let stats = relay::dispatch(&store, &signer, &Hang, 50, std::time::Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert_eq!(
+        (stats.published, stats.failed, stats.dead),
+        (0, 1, 0),
+        "one try, then the batch stops"
+    );
+    let error: String = sqlx::query_scalar("select last_error from outbox where id = $1")
+        .bind(&first)
+        .fetch_one(&owner)
+        .await
+        .unwrap();
+    assert_eq!(error, "send timed out after 200ms");
 }
 
 /// Outbox payloads of one tenant with a given detail type, oldest first.
 async fn payloads(store: &Store, t: &TenantId, detail_type: &str) -> Vec<serde_json::Value> {
-    let mut tx = store.pool().begin().await.unwrap();
+    let mut tx = store.pool.begin().await.unwrap();
     sqlx::query("set local role oryxa_fde_relay")
         .execute(&mut *tx)
         .await
@@ -570,6 +634,24 @@ async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transact
             (3, "criterion_removed".into())
         ]
     );
+    // The log keeps what each change set, so the signed version can be rebuilt after it changed.
+    let changes = tx.scope_changes().await.unwrap();
+    let signed = changes[2].content.clone().unwrap();
+    assert_eq!(signed["stakeholder"], sam.as_str());
+    assert_eq!(signed["items"][0]["description"], "Answer tier-1 support tickets");
+    assert_eq!(
+        (
+            signed["criteria"][0]["metric"].as_str(),
+            signed["criteria"][0]["target"].as_f64()
+        ),
+        (Some("accuracy"), Some(90.0))
+    );
+    let removed = changes[3].content.clone().unwrap();
+    assert_eq!(
+        (removed["id"].as_str(), removed["unit"].as_str()),
+        (Some(crit.as_str()), Some("%"))
+    );
+    assert_eq!(changes[0].content.clone().unwrap()["kind"], "in");
     tx.commit().await.unwrap();
 
     // A stakeholder who signed cannot be deleted.
@@ -598,6 +680,17 @@ async fn access_status_changes_write_their_event_in_the_same_transaction() {
     };
 
     let mut tx = store.project(&p).await.unwrap();
+    // A request starts open: created settled, it would never report its status change.
+    for settled in [AccessStatus::Granted, AccessStatus::Denied, AccessStatus::Revoked] {
+        let early = AccessRequestIn {
+            status: settled,
+            ..v.clone()
+        };
+        assert!(matches!(
+            tx.add_access_request(&id, &early, &by).await,
+            Err(StoreError::Rejected("initial_status"))
+        ));
+    }
     let ghost = AccessRequestIn {
         owner: Some(oryxa_fde_core::StakeholderId::new("stk_ghost").unwrap()),
         ..v.clone()
@@ -624,7 +717,7 @@ async fn access_status_changes_write_their_event_in_the_same_transaction() {
         "update access_requests set requested_at = now() - interval '3 days 1 hour' where access_request_id = $1",
     )
     .bind(id.as_str())
-    .execute(store.pool())
+    .execute(&admin().await)
     .await
     .unwrap();
     v.status = AccessStatus::Granted;
@@ -804,4 +897,147 @@ async fn row_level_security_covers_every_lifecycle_table() {
 
     let mut org = store.organisation(&t2).await.unwrap();
     assert_eq!(org.security_answers().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_runtime_login_owns_nothing_and_holds_nothing_outside_a_role() {
+    let owner = admin().await;
+    // The owner (here the container's superuser) is refused as the runtime login.
+    assert!(matches!(
+        Store::connect(&testing::database_url()).await,
+        Err(StoreError::Privileged("a superuser"))
+    ));
+
+    let store = store().await;
+    create_company(&store, &scope(&tenant(), &new_id("cmp"))).await;
+    let mut conn = store.pool.acquire().await.unwrap();
+    // Outside a transaction's role it can read nothing...
+    for sql in [
+        "select count(*) from companies",
+        "select count(*) from outbox",
+        "select count(*) from audit_log",
+        "select count(*) from company_members",
+    ] {
+        assert!(sqlx::query(sql).execute(&mut *conn).await.is_err(), "{sql}");
+    }
+    // ...and it can neither become the owner nor make a role.
+    let table_owner: String =
+        sqlx::query_scalar("select tableowner::text from pg_tables where tablename = 'companies'")
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert!(
+        sqlx::query(&format!("set role \"{table_owner}\""))
+            .execute(&mut *conn)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("create role fde_should_not_exist")
+            .execute(&mut *conn)
+            .await
+            .is_err()
+    );
+    drop(conn);
+
+    // A login that could switch to the owner is refused, even with no other power.
+    let login = new_id("fde_rt");
+    let password = new_id("pw");
+    for sql in [
+        format!("create role {login} login password '{password}'"),
+        format!("grant oryxa_fde_runtime to {login}"),
+        format!("grant \"{table_owner}\" to {login}"),
+    ] {
+        sqlx::query(&sql).execute(&owner).await.unwrap();
+    }
+    let options = testing::database_url()
+        .parse::<PgConnectOptions>()
+        .unwrap()
+        .username(&login)
+        .password(&password);
+    assert!(matches!(
+        Store::connect_with(options).await,
+        Err(StoreError::Privileged("the database owner" | "a table owner"))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_grant_waits_for_a_revocation_in_flight_and_then_finds_nothing() {
+    let store = store().await;
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let bob = UserId::new("bob").unwrap();
+    let row = GrantRow::Member(c.clone(), bob.clone());
+    let mut tx = store.company(&c).await.unwrap();
+    tx.set_member(&bob, Role::Engineer, &actor("alice")).await.unwrap();
+    // Not committed yet: there is nothing to grant.
+    assert!(store.lock_grant(&row).await.unwrap().is_none());
+    tx.commit().await.unwrap();
+    // The grant follows the row as it is now.
+    let mut tx = store.company(&c).await.unwrap();
+    tx.set_member(&bob, Role::Lead, &actor("alice")).await.unwrap();
+    tx.commit().await.unwrap();
+    let pending = store.lock_grant(&row).await.unwrap().unwrap();
+    assert_eq!(pending.grant(), &Grant::Member(c.clone(), bob.clone(), Role::Lead));
+    pending.done().await.unwrap();
+
+    // A revocation in flight holds the row, so a grant waits for it...
+    let mut revoke = store.company(&c).await.unwrap();
+    revoke.remove_member(&bob, &actor("alice")).await.unwrap();
+    let waiting = {
+        let (store, row) = (store.clone(), row.clone());
+        tokio::spawn(async move { store.lock_grant(&row).await.unwrap().map(|g| g.grant().clone()) })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the grant must wait for the revocation");
+    revoke.commit().await.unwrap();
+    // ...and once the revocation commits it finds no row, so it grants nothing.
+    assert_eq!(waiting.await.unwrap(), None);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn grants_stay_pending_for_the_reconciler_until_written() {
+    let store = store().await;
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let p = c.project(ProjectId::new(new_id("prj")).unwrap());
+    let carol = UserId::new("carol").unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    tx.create(&Name::new("RAG").unwrap(), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
+    tx.assign(&carol, &actor("alice")).await.unwrap();
+    tx.commit().await.unwrap();
+    // Leftovers of other runs come first, so take plenty and keep this tenant's.
+    let mine = |grants: &[Grant]| -> Vec<Grant> { grants.iter().filter(|g| g.tenant() == &t).cloned().collect() };
+
+    // A grant the API is writing right now is skipped, not waited for.
+    let held = store.lock_grant(&GrantRow::Company(c.clone())).await.unwrap().unwrap();
+    let pending = store.pending_grants(10_000).await.unwrap();
+    assert_eq!(
+        mine(pending.grants()),
+        [
+            Grant::Member(c.clone(), UserId::new("alice").unwrap(), Role::Lead),
+            Grant::ProjectCompany(p.clone()),
+            Grant::Assignee(p.clone(), carol.clone()),
+        ]
+    );
+    drop(pending);
+    held.done().await.unwrap();
+
+    // Marked grants are done; the rest stay until marked.
+    let mut pending = store.pending_grants(10_000).await.unwrap();
+    let left = mine(pending.grants());
+    assert_eq!(left.len(), 3);
+    pending.mark(&left[0]).await.unwrap();
+    pending.mark(&left[2]).await.unwrap();
+    pending.commit().await.unwrap();
+    let pending = store.pending_grants(10_000).await.unwrap();
+    assert_eq!(mine(pending.grants()), [Grant::ProjectCompany(p.clone())]);
 }

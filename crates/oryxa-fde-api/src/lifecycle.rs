@@ -25,10 +25,15 @@ use crate::projects::{ProjectOut, ProjectStage};
 use crate::records::{name, new, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
-async fn project_tx(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Result<ProjectTx, ApiError> {
+pub(crate) async fn project_tx(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Result<ProjectTx, ApiError> {
     let s = who.company(c).project(p);
     app.require(who, project(&s), "work").await?;
-    Ok(app.store.project(&s).await?)
+    let mut tx = app.store.project(&s).await?;
+    // The permission is on the project, so the path's company must be the project's own.
+    if !tx.exists().await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(tx)
 }
 
 /// Maps between an API enum and the store's, both ways, by variant name.
@@ -227,6 +232,10 @@ pub struct ScopeChangeOut {
     pub actor: String,
     pub action: String,
     pub target: String,
+    /// What the change set: the item or criterion, or for `signed_off` the whole signed scope
+    /// (`stakeholder`, `items`, `criteria`). Null for changes logged before content was kept.
+    #[schema(value_type = Option<Object>)]
+    pub content: Option<serde_json::Value>,
     pub at: String,
 }
 
@@ -237,6 +246,7 @@ impl From<ScopeChange> for ScopeChangeOut {
             actor: c.actor.to_string(),
             action: c.action,
             target: c.target,
+            content: c.content,
             at: ts(c.at),
         }
     }

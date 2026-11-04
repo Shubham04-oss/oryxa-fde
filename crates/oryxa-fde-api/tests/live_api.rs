@@ -3,11 +3,13 @@
 //!   docker run --rm -e POSTGRES_PASSWORD=oryxa -e POSTGRES_DB=oryxa_fde -p 55432:5432 pgvector/pgvector:pg17
 //!   DATABASE_URL=postgres://postgres:oryxa@localhost:55432/oryxa_fde SPICEDB_ENDPOINT=http://localhost:50051 \
 //!     cargo test -p oryxa-fde-api -- --ignored
-//! Every test uses fresh tenants and its own SpiceDB datastore.
+//! Every test uses fresh tenants and its own SpiceDB datastore. The API connects as a fresh runtime
+//! login; `DATABASE_URL`'s login is the owner, used only to read the outbox.
 
 mod support;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -15,26 +17,24 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use oryxa_authz::SpiceDb;
-use oryxa_fde_api::{ApiDoc, App, router};
-use oryxa_fde_store::{Store, new_id};
+use oryxa_fde_api::{App, openapi, reconcile_grants, router};
+use oryxa_fde_store::{Store, new_id, testing};
 use oryxa_spicedb_proto::v1::{WriteSchemaRequest, schema_service_client::SchemaServiceClient};
 use serde_json::{Value, json};
 use sqlx::Row;
 use tower::ServiceExt;
-use utoipa::OpenApi;
 
 const SCHEMA: &str = include_str!("../../../schema/fde.zed");
 
 struct World {
     router: Router,
+    app: Arc<App>,
     store: Store,
+    authz: SpiceDb,
 }
 
 async fn world() -> World {
-    let url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:oryxa@localhost:55432/oryxa_fde".into());
-    let store = Store::connect(&url).await.unwrap();
-    store.migrate().await.unwrap();
+    let store = testing::store().await;
 
     let endpoint = std::env::var("SPICEDB_ENDPOINT").unwrap_or_else(|_| "http://localhost:50051".into());
     // serve-testing gives each preshared key its own empty datastore.
@@ -45,15 +45,30 @@ async fn world() -> World {
         .insert("authorization", format!("Bearer {key}").parse().unwrap());
     schema.write_schema(req).await.unwrap();
     let authz = SpiceDb::connect(&endpoint, &key, Duration::from_secs(2)).await.unwrap();
+    let app = App::new(store.clone(), authz.clone(), support::verifier());
 
     World {
-        router: router(App::new(store.clone(), authz, support::verifier())),
+        router: router(app.clone()),
+        app,
         store,
+        authz,
     }
 }
 
 impl World {
-    async fn call(&self, token: Option<&str>, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    /// Another replica of the API: same database and SpiceDB, its own caches.
+    fn replica(&self) -> Router {
+        router(App::new(self.store.clone(), self.authz.clone(), support::verifier()))
+    }
+
+    async fn call_on(
+        &self,
+        router: &Router,
+        token: Option<&str>,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(path);
         if let Some(t) = token {
             req = req.header("authorization", format!("Bearer {t}"));
@@ -65,10 +80,14 @@ impl World {
             None => req.body(Body::empty()),
         }
         .unwrap();
-        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn call(&self, token: Option<&str>, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_on(&self.router, token, method, path, body).await
     }
 
     /// Calls as `who` and requires `want`; returns the body.
@@ -82,16 +101,12 @@ impl World {
         self.call(Some(&who.token), method, path, body).await.0
     }
 
-    /// Outbox detail types for one tenant, oldest first.
+    /// Outbox detail types for one tenant, oldest first, read as the owner.
     async fn events(&self, tenant: &str) -> Vec<String> {
-        let mut tx = self.store.pool().begin().await.unwrap();
-        sqlx::query("set local role oryxa_fde_relay")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        let owner = testing::admin().await;
         sqlx::query("select detail_type from outbox where tenant_id = $1 order by seq")
             .bind(tenant)
-            .fetch_all(&mut *tx)
+            .fetch_all(&owner)
             .await
             .unwrap()
             .into_iter()
@@ -310,9 +325,10 @@ async fn bad_tokens_and_bad_input_are_refused() {
     );
 }
 
-/// Every route in the OpenAPI spec as (method, path template).
+/// Every route in the OpenAPI spec as (method, path template). The router is built from the same
+/// list (`oryxa_fde_api::routes`), so these are the routes it serves.
 fn spec_routes() -> BTreeSet<(String, String)> {
-    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let spec = serde_json::to_value(openapi()).unwrap();
     let mut out = BTreeSet::new();
     for (path, item) in spec["paths"].as_object().unwrap() {
         for method in item.as_object().unwrap().keys() {
@@ -382,6 +398,8 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         Some(r#"{"name":"pwned"}"#),
     ),
     ("DELETE", "/v1/companies/{company}/systems/{system}", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/stakeholders", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/systems", None),
     (
         "PUT",
         "/v1/companies/{company}/projects/{project}/stage",
@@ -432,7 +450,7 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     (
         "POST",
         "/v1/companies/{company}/projects/{project}/access-requests",
-        Some(r#"{"description":"pwned","status":"granted","owner":"{stakeholder}","system":"{system}"}"#),
+        Some(r#"{"description":"pwned","status":"requested","owner":"{stakeholder}","system":"{system}"}"#),
     ),
     (
         "PUT",
@@ -482,12 +500,16 @@ const RECORDS: &[&str] = &[
 ];
 
 /// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
-/// every lifecycle record.
+/// every lifecycle record, plus a WorkOS admin of `org`. Every record is open to the change an
+/// attack would make, so a missing permission check cannot hide behind a refusal from the data:
+/// `{stakeholder}` has signed nothing and can be deleted, and the scope's current version is
+/// unsigned (a signer signed an earlier one).
 struct Tenant {
     org: String,
     lead: User,
     engineer: User,
     assignee: User,
+    admin: User,
     company: String,
     project: String,
     /// Placeholder -> id of this company's record.
@@ -498,6 +520,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     let lead = user(org, &format!("{name}_lead"), "member");
     let engineer = user(org, &format!("{name}_eng"), "member");
     let assignee = user(org, &format!("{name}_asg"), "member");
+    let admin = user(org, &format!("{name}_admin"), "admin");
     let c = w
         .ok(
             &lead,
@@ -536,7 +559,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         let made = w.ok(&lead, "POST", &path, Some(body), StatusCode::CREATED).await;
         made["id"].as_str().map(str::to_owned).unwrap_or_default()
     };
-    let stakeholder = add(format!("{base}/stakeholders"), json!({"name": "Sam", "title": "CTO"})).await;
+    let signer = add(format!("{base}/stakeholders"), json!({"name": "Sam", "title": "CTO"})).await;
     let system = add(format!("{base}/systems"), json!({"name": "Zendesk"})).await;
     let item = add(
         format!("{pbase}/scope/items"),
@@ -548,7 +571,18 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         json!({"description": "Correct", "metric": "accuracy", "comparator": "at_least", "target": 90, "unit": "%"}),
     )
     .await;
-    add(format!("{pbase}/scope/sign-offs"), json!({"stakeholder": stakeholder})).await;
+    add(format!("{pbase}/scope/sign-offs"), json!({"stakeholder": signer})).await;
+    // Changed since it was signed, so the current version is open to a sign-off.
+    add(
+        format!("{pbase}/scope/items"),
+        json!({"kind": "in", "description": "Escalations"}),
+    )
+    .await;
+    let stakeholder = add(
+        format!("{base}/stakeholders"),
+        json!({"name": "Pat", "title": "Head of Support"}),
+    )
+    .await;
     let access_request = add(
         format!("{pbase}/access-requests"),
         json!({"description": "API token", "status": "requested", "owner": stakeholder, "system": system}),
@@ -574,6 +608,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         lead,
         engineer,
         assignee,
+        admin,
         company,
         project,
         records: vec![
@@ -601,6 +636,8 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{base}/systems"),
         project.clone(),
         format!("{project}/assignees"),
+        format!("{project}/stakeholders"),
+        format!("{project}/systems"),
         format!("{project}/scope"),
         format!("{project}/scope/changes"),
         format!("{project}/access-requests"),
@@ -636,6 +673,8 @@ enum Kind {
     Victim,
     /// The attacker's own company with the victim's project.
     OwnCompany,
+    /// The victim's company with the attacker's own project (which the attacker may work on).
+    OwnProjectInVictimCompany,
     /// The attacker's own company and project with the victim's records.
     OwnProject,
 }
@@ -652,7 +691,7 @@ impl Attack<'_> {
         }
         match self.kind {
             Kind::Victim => true,
-            Kind::OwnCompany => template.contains("{project}"),
+            Kind::OwnCompany | Kind::OwnProjectInVictimCompany => template.contains("{project}"),
             Kind::OwnProject => names_record,
         }
     }
@@ -690,15 +729,20 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
     let before = [snapshot(&w, &a).await, snapshot(&w, &b).await, snapshot(&w, &c).await];
     let events_before = [w.events(&org1).await, w.events(&org2).await];
 
-    // Everyone at A attacks B (same tenant) and C (other tenant); everyone at C attacks A.
+    // Everyone at A attacks B (same tenant) and C (other tenant); everyone at C attacks A. A WorkOS
+    // admin manages every company of their own tenant, so they attack the other tenant only.
     let mut attacks = Vec::new();
     for (own, victims) in [(&a, vec![&b, &c]), (&c, vec![&a])] {
-        for who in [&own.lead, &own.engineer, &own.assignee] {
+        for who in [&own.lead, &own.engineer, &own.assignee, &own.admin] {
             for v in &victims {
                 let cross_tenant = v.org != own.org;
+                if who.id == own.admin.id && !cross_tenant {
+                    continue;
+                }
                 for (kind, company, project) in [
                     (Kind::Victim, &v.company, &v.project),
                     (Kind::OwnCompany, &own.company, &v.project),
+                    (Kind::OwnProjectInVictimCompany, &v.company, &own.project),
                     (Kind::OwnProject, &own.company, &own.project),
                 ] {
                     attacks.push(Attack {
@@ -751,6 +795,21 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+    // An admin sees every company of their own tenant and none of another's.
+    for (admin, own, others) in [
+        (&a.admin, vec![&a.company, &b.company], vec![&c.company]),
+        (&c.admin, vec![&c.company], vec![&a.company, &b.company]),
+    ] {
+        let list = w.ok(admin, "GET", "/v1/companies", None, StatusCode::OK).await;
+        let seen: BTreeSet<&str> = ids(&list).into_iter().collect();
+        assert_eq!(
+            seen,
+            own.iter().map(|c| c.as_str()).collect(),
+            "{} sees {list}",
+            admin.id
+        );
+        assert!(others.iter().all(|o| !seen.contains(o.as_str())));
+    }
     let answers = w.ok(&c.lead, "GET", "/v1/security-answers", None, StatusCode::OK).await;
     assert_eq!(
         ids(&answers),
@@ -767,7 +826,7 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
         )
         .await;
     let made = made["id"].as_str().unwrap();
-    for who in [&a.lead, &b.lead] {
+    for who in [&a.lead, &b.lead, &a.admin] {
         let list = w.ok(who, "GET", "/v1/companies", None, StatusCode::OK).await;
         assert!(!ids(&list).contains(&made));
         let path = format!("/v1/companies/{made}");
@@ -824,12 +883,16 @@ async fn lifecycle_records_end_to_end() {
     w.ok(eng, "PUT", &stage, Some(json!({"stage": "discover"})), StatusCode::OK)
         .await;
 
-    // The scope was signed off at version 2 by the company setup; a change makes it stale and a
-    // new sign-off covers the new version.
+    // The company setup signed version 2 and changed the scope after; a further change bumps the
+    // version again and a new sign-off covers it.
     let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
     assert_eq!(
-        (scope["version"].as_u64(), scope["signed_off"].as_bool()),
-        (Some(2), Some(true))
+        (
+            scope["version"].as_u64(),
+            scope["sign_off"]["version"].as_u64(),
+            scope["signed_off"].as_bool()
+        ),
+        (Some(3), Some(2), Some(false))
     );
     let item = w
         .ok(
@@ -843,9 +906,9 @@ async fn lifecycle_records_end_to_end() {
     let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
     assert_eq!(
         (scope["version"].as_u64(), scope["signed_off"].as_bool()),
-        (Some(3), Some(false))
+        (Some(4), Some(false))
     );
-    assert_eq!(scope["items"][1]["kind"], "out");
+    assert_eq!(scope["items"][2]["kind"], "out");
     let sign = format!("{p}/scope/sign-offs");
     let signed = w
         .ok(
@@ -856,7 +919,7 @@ async fn lifecycle_records_end_to_end() {
             StatusCode::CREATED,
         )
         .await;
-    assert_eq!(signed["version"], 3);
+    assert_eq!(signed["version"], 4);
     let (status, _) = w
         .call(
             Some(&eng.token),
@@ -896,10 +959,38 @@ async fn lifecycle_records_end_to_end() {
             (2, "criterion_added"),
             (2, "signed_off"),
             (3, "item_added"),
-            (3, "signed_off"),
-            (4, "item_removed")
+            (4, "item_added"),
+            (4, "signed_off"),
+            (5, "item_removed")
         ]
     );
+    // Each change keeps what it set, so a signed version can be read back after later changes.
+    let signed = &changes[5]["content"];
+    assert_eq!(signed["stakeholder"], stakeholder.as_str());
+    let descriptions: Vec<&str> = signed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["description"].as_str().unwrap())
+        .collect();
+    assert_eq!(descriptions, ["Tier-1 tickets", "Escalations", "Voice"]);
+    assert_eq!(signed["criteria"][0]["metric"], "accuracy");
+    assert_eq!(
+        changes[6]["content"]["description"], "Voice",
+        "a removal keeps what was removed"
+    );
+
+    // An assignee reads the company's stakeholders and systems through the project, to sign off
+    // and name owners, but not through the company, which they do not work on.
+    let listed = w
+        .ok(asg, "GET", &format!("{p}/stakeholders"), None, StatusCode::OK)
+        .await;
+    assert!(ids(&listed).contains(&stakeholder.as_str()));
+    let systems = w.ok(asg, "GET", &format!("{p}/systems"), None, StatusCode::OK).await;
+    assert_eq!(ids(&systems), [t.records[1].1.as_str()]);
+    for path in [format!("{base}/stakeholders"), format!("{base}/systems")] {
+        assert_eq!(w.status(asg, "GET", &path, None).await, StatusCode::FORBIDDEN, "{path}");
+    }
     // A stakeholder who signed cannot be deleted.
     let (status, _) = w
         .call(
@@ -910,6 +1001,20 @@ async fn lifecycle_records_end_to_end() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
+
+    // Access requests start open: one created settled would never report its change.
+    let (status, body) = w
+        .call(
+            Some(&eng.token),
+            "POST",
+            &format!("{p}/access-requests"),
+            Some(json!({"description": "VPN", "status": "granted"})),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_initial_status"))
+    );
 
     // Access requests: owner at the customer, status changes published, days waiting.
     let access = format!("{p}/access-requests/{}", t.records[4].1);
@@ -996,4 +1101,88 @@ async fn lifecycle_records_end_to_end() {
             "fde.access-request.status-changed.v1",
         ]
     );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn every_documented_route_is_served() {
+    let w = world().await;
+    // Without a token every route answers 401; a route the router lacked would answer 404 or 405.
+    for (method, template) in spec_routes() {
+        let path = template.replace('{', "x").replace('}', "");
+        let (status, _) = w.call(None, &method, &path, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {template}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_grant_left_pending_after_commit_is_written_by_the_reconciler() {
+    use oryxa_core::{TenantId, UserId};
+    use oryxa_fde_core::{CompanyId, CompanyScope};
+    use oryxa_fde_store::{Actor, Name};
+
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    // A company that committed while SpiceDB was down: its row is there, its grants are not.
+    let c = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(new_id("cmp")).unwrap());
+    let by = Actor {
+        user: UserId::new(&alice.id).unwrap(),
+        request_id: new_id("req"),
+    };
+    let mut tx = w.store.company(&c).await.unwrap();
+    tx.create(&Name::new("Acme").unwrap(), &by).await.unwrap();
+    tx.commit().await.unwrap();
+    let path = format!("/v1/companies/{}", c.company);
+    assert_eq!(w.status(&alice, "GET", &path, None).await, StatusCode::FORBIDDEN);
+
+    // Pending grants of other tests come first; run until none is left.
+    for _ in 0..100 {
+        if reconcile_grants(&w.app).await.unwrap() == 0 {
+            break;
+        }
+    }
+    w.ok(&alice, "GET", &path, None, StatusCode::OK).await;
+    let listed = w.ok(&alice, "GET", "/v1/companies", None, StatusCode::OK).await;
+    assert_eq!(ids(&listed), [c.company.as_str()]);
+    // Written once: nothing of it is pending any more.
+    assert_eq!(reconcile_grants(&w.app).await.unwrap(), 0);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_demoted_admin_changes_nothing_on_any_replica() {
+    let w = world().await;
+    let other = w.replica();
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    let created = w
+        .ok(
+            &alice,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Acme"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let company = format!("/v1/companies/{}", created["id"].as_str().unwrap());
+    let dana = format!("user_dana_{}", new_id("u"));
+    let (member, admin) = (
+        support::token(Some(&org), &dana, "member"),
+        support::token(Some(&org), &dana, "admin"),
+    );
+    let rename = || Some(json!({"name": "Renamed"}));
+
+    // The other replica mirrors Dana as a member first.
+    let (status, _) = w.call_on(&other, Some(&member), "GET", "/v1/companies", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // Promoted, Dana manages every company of the organisation, here through this replica.
+    let (status, _) = w.call(Some(&admin), "PATCH", &company, rename()).await;
+    assert_eq!(status, StatusCode::OK);
+    // Demoted: the other replica's last mirror says member already, but a change re-mirrors it.
+    let (status, _) = w.call_on(&other, Some(&member), "PATCH", &company, rename()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = w.call(Some(&member), "GET", &company, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

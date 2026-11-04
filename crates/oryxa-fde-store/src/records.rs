@@ -1,11 +1,13 @@
 //! Records on the company: its stakeholders (people at the customer) and its systems.
 
-use oryxa_fde_core::{StakeholderId, SystemId};
-use sqlx::Row;
+use oryxa_fde_core::{CompanyScope, StakeholderId, SystemId};
 use sqlx::postgres::PgRow;
+use sqlx::{PgConnection, Row};
 use time::OffsetDateTime;
 
-use crate::{Actor, CompanyTx, Name, StoreError, Text, audit, id, in_use, name, opt, text, unique_violation};
+use crate::{
+    Actor, CompanyTx, Name, ProjectTx, StoreError, Text, audit, id, in_use, name, opt, text, unique_violation,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stakeholder {
@@ -38,18 +40,7 @@ pub struct SystemIn {
 
 impl CompanyTx {
     pub async fn stakeholders(&mut self) -> Result<Vec<Stakeholder>, StoreError> {
-        let s = &self.scope;
-        sqlx::query(
-            "select stakeholder_id, name, title, updated_at from stakeholders
-             where tenant_id = $1 and company_id = $2 order by name, stakeholder_id",
-        )
-        .bind(s.tenant.as_str())
-        .bind(s.company.as_str())
-        .fetch_all(&mut *self.tx)
-        .await?
-        .into_iter()
-        .map(stakeholder)
-        .collect()
+        stakeholders(&mut self.tx, &self.scope).await
     }
 
     pub async fn add_stakeholder(
@@ -129,18 +120,7 @@ impl CompanyTx {
     }
 
     pub async fn systems(&mut self) -> Result<Vec<System>, StoreError> {
-        let s = &self.scope;
-        sqlx::query(
-            "select system_id, name, description, updated_at from systems
-             where tenant_id = $1 and company_id = $2 order by name, system_id",
-        )
-        .bind(s.tenant.as_str())
-        .bind(s.company.as_str())
-        .fetch_all(&mut *self.tx)
-        .await?
-        .into_iter()
-        .map(system)
-        .collect()
+        systems(&mut self.tx, &self.scope).await
     }
 
     pub async fn add_system(&mut self, id: &SystemId, v: &SystemIn, by: &Actor) -> Result<Option<System>, StoreError> {
@@ -212,6 +192,54 @@ impl CompanyTx {
         audit(&mut self.tx, s, None, by, "system.removed", Some(id.as_str())).await?;
         Ok(true)
     }
+}
+
+/// Read-only views of the company's records for whoever works on one of its projects: an assignee
+/// signs off with a stakeholder and names owners and systems on access requests.
+impl ProjectTx {
+    /// `None` if the project is not in this company.
+    pub async fn company_stakeholders(&mut self) -> Result<Option<Vec<Stakeholder>>, StoreError> {
+        if !self.exists().await? {
+            return Ok(None);
+        }
+        stakeholders(&mut self.tx, &self.scope.company).await.map(Some)
+    }
+
+    /// `None` if the project is not in this company.
+    pub async fn company_systems(&mut self) -> Result<Option<Vec<System>>, StoreError> {
+        if !self.exists().await? {
+            return Ok(None);
+        }
+        systems(&mut self.tx, &self.scope.company).await.map(Some)
+    }
+}
+
+async fn stakeholders(conn: &mut PgConnection, s: &CompanyScope) -> Result<Vec<Stakeholder>, StoreError> {
+    sqlx::query(
+        "select stakeholder_id, name, title, updated_at from stakeholders
+         where tenant_id = $1 and company_id = $2 order by name, stakeholder_id",
+    )
+    .bind(s.tenant.as_str())
+    .bind(s.company.as_str())
+    .fetch_all(conn)
+    .await?
+    .into_iter()
+    .map(stakeholder)
+    .collect()
+}
+
+async fn systems(conn: &mut PgConnection, s: &CompanyScope) -> Result<Vec<System>, StoreError> {
+    sqlx::query(
+        "select system_id, name, description, updated_at from systems
+         where tenant_id = $1 and company_id = $2 order by name, system_id",
+    )
+    .bind(s.tenant.as_str())
+    .bind(s.company.as_str())
+    .fetch_all(conn)
+    .await?
+    .into_iter()
+    .map(system)
+    .collect()
 }
 
 fn stakeholder(r: PgRow) -> Result<Stakeholder, StoreError> {

@@ -5,6 +5,7 @@
 use oryxa_core::UserId;
 use oryxa_fde_core::{CriterionId, ScopeItemId, StakeholderId};
 use oryxa_fde_events::ScopeSignedOff;
+use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::OffsetDateTime;
@@ -116,6 +117,10 @@ pub struct ScopeChange {
     pub action: String,
     /// The item, criterion or signing stakeholder id.
     pub target: String,
+    /// What the change set: the item or criterion as added, updated or removed, or for a sign-off
+    /// the whole signed scope (`stakeholder`, `items`, `criteria`). `None` on rows logged before
+    /// content was kept.
+    pub content: Option<Value>,
     pub at: OffsetDateTime,
 }
 
@@ -153,30 +158,7 @@ impl ProjectTx {
             })
         })
         .transpose()?;
-        let items = sqlx::query(&format!(
-            "select {ITEM} from scope_items where tenant_id = $1 and company_id = $2 and project_id = $3
-             order by created_at, item_id"
-        ))
-        .bind(&t)
-        .bind(&c)
-        .bind(&p)
-        .fetch_all(&mut *self.tx)
-        .await?
-        .into_iter()
-        .map(item)
-        .collect::<Result<_, _>>()?;
-        let criteria = sqlx::query(&format!(
-            "select {CRITERION} from criteria where tenant_id = $1 and company_id = $2 and project_id = $3
-             order by created_at, criterion_id"
-        ))
-        .bind(&t)
-        .bind(&c)
-        .bind(&p)
-        .fetch_all(&mut *self.tx)
-        .await?
-        .into_iter()
-        .map(criterion)
-        .collect::<Result<_, _>>()?;
+        let (items, criteria) = self.items_and_criteria().await?;
         Ok(Some(ScopeOfWork {
             version: version_of(version)?,
             sign_off,
@@ -215,8 +197,10 @@ impl ProjectTx {
                 e.into()
             }
         })?;
-        self.log_change(version, "item_added", id.as_str(), by).await?;
-        item(row).map(Some)
+        let added = item(row)?;
+        self.log_change(version, "item_added", id.as_str(), item_json(&added), by)
+            .await?;
+        Ok(Some(added))
     }
 
     pub async fn update_scope_item(
@@ -240,27 +224,29 @@ impl ProjectTx {
         .await?;
         let Some(row) = row else { return Ok(None) };
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
-        self.log_change(version, "item_updated", id.as_str(), by).await?;
-        item(row).map(Some)
+        let updated = item(row)?;
+        self.log_change(version, "item_updated", id.as_str(), item_json(&updated), by)
+            .await?;
+        Ok(Some(updated))
     }
 
     pub async fn remove_scope_item(&mut self, id: &ScopeItemId, by: &Actor) -> Result<bool, StoreError> {
         let (t, c, p) = self.keys();
-        let n = sqlx::query(
-            "delete from scope_items where tenant_id = $1 and company_id = $2 and project_id = $3 and item_id = $4",
-        )
+        let row = sqlx::query(&format!(
+            "delete from scope_items where tenant_id = $1 and company_id = $2 and project_id = $3 and item_id = $4
+             returning {ITEM}"
+        ))
         .bind(&t)
         .bind(&c)
         .bind(&p)
         .bind(id.as_str())
-        .execute(&mut *self.tx)
-        .await?
-        .rows_affected();
-        if n == 0 {
-            return Ok(false);
-        }
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(false) };
+        let removed = item(row)?;
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
-        self.log_change(version, "item_removed", id.as_str(), by).await?;
+        self.log_change(version, "item_removed", id.as_str(), item_json(&removed), by)
+            .await?;
         Ok(true)
     }
 
@@ -299,8 +285,10 @@ impl ProjectTx {
                 e.into()
             }
         })?;
-        self.log_change(version, "criterion_added", id.as_str(), by).await?;
-        criterion(row).map(Some)
+        let added = criterion(row)?;
+        self.log_change(version, "criterion_added", id.as_str(), criterion_json(&added), by)
+            .await?;
+        Ok(Some(added))
     }
 
     pub async fn update_criterion(
@@ -329,27 +317,29 @@ impl ProjectTx {
         .await?;
         let Some(row) = row else { return Ok(None) };
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
-        self.log_change(version, "criterion_updated", id.as_str(), by).await?;
-        criterion(row).map(Some)
+        let updated = criterion(row)?;
+        self.log_change(version, "criterion_updated", id.as_str(), criterion_json(&updated), by)
+            .await?;
+        Ok(Some(updated))
     }
 
     pub async fn remove_criterion(&mut self, id: &CriterionId, by: &Actor) -> Result<bool, StoreError> {
         let (t, c, p) = self.keys();
-        let n = sqlx::query(
-            "delete from criteria where tenant_id = $1 and company_id = $2 and project_id = $3 and criterion_id = $4",
-        )
+        let row = sqlx::query(&format!(
+            "delete from criteria where tenant_id = $1 and company_id = $2 and project_id = $3 and criterion_id = $4
+             returning {CRITERION}"
+        ))
         .bind(&t)
         .bind(&c)
         .bind(&p)
         .bind(id.as_str())
-        .execute(&mut *self.tx)
-        .await?
-        .rows_affected();
-        if n == 0 {
-            return Ok(false);
-        }
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(false) };
+        let removed = criterion(row)?;
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
-        self.log_change(version, "criterion_removed", id.as_str(), by).await?;
+        self.log_change(version, "criterion_removed", id.as_str(), criterion_json(&removed), by)
+            .await?;
         Ok(true)
     }
 
@@ -409,15 +399,17 @@ impl ProjectTx {
                 e.into()
             }
         })?;
-        self.log_change(version, "signed_off", stakeholder.as_str(), by).await?;
+        let (items, criteria) = self.items_and_criteria().await?;
+        let signed = json!({
+            "stakeholder": stakeholder.as_str(),
+            "items": items.iter().map(item_json).collect::<Vec<_>>(),
+            "criteria": criteria.iter().map(criterion_json).collect::<Vec<_>>(),
+        });
+        self.log_change(version, "signed_off", stakeholder.as_str(), signed, by)
+            .await?;
         let version = version_of(version)?;
         let s = self.scope.clone();
-        let event = ScopeSignedOff {
-            company: s.company.company.clone(),
-            project: s.project.clone(),
-            version,
-        };
-        enqueue(&mut self.tx, &s.company, by, &event).await?;
+        enqueue(&mut self.tx, &s.company, by, &ScopeSignedOff::new(&s, version)).await?;
         Ok(Some(SignOff {
             version,
             stakeholder: stakeholder.clone(),
@@ -430,7 +422,7 @@ impl ProjectTx {
     pub async fn scope_changes(&mut self) -> Result<Vec<ScopeChange>, StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(
-            "select version, actor, action, target, at from scope_changes
+            "select version, actor, action, target, content, at from scope_changes
              where tenant_id = $1 and company_id = $2 and project_id = $3 order by id",
         )
         .bind(&t)
@@ -445,10 +437,40 @@ impl ProjectTx {
                 actor: id("user id", UserId::new, r.try_get("actor")?)?,
                 action: r.try_get("action")?,
                 target: r.try_get("target")?,
+                content: r.try_get("content")?,
                 at: r.try_get("at")?,
             })
         })
         .collect()
+    }
+
+    async fn items_and_criteria(&mut self) -> Result<(Vec<ScopeItem>, Vec<Criterion>), StoreError> {
+        let (t, c, p) = self.keys();
+        let items = sqlx::query(&format!(
+            "select {ITEM} from scope_items where tenant_id = $1 and company_id = $2 and project_id = $3
+             order by created_at, item_id"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(item)
+        .collect::<Result<_, _>>()?;
+        let criteria = sqlx::query(&format!(
+            "select {CRITERION} from criteria where tenant_id = $1 and company_id = $2 and project_id = $3
+             order by created_at, criterion_id"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(criterion)
+        .collect::<Result<_, _>>()?;
+        Ok((items, criteria))
     }
 
     /// Bumps the scope version; `None` if the project is not in this company.
@@ -471,12 +493,13 @@ impl ProjectTx {
         version: i32,
         action: &'static str,
         target: &str,
+        content: Value,
         by: &Actor,
     ) -> Result<(), StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(
-            "insert into scope_changes (tenant_id, company_id, project_id, version, actor, action, target)
-             values ($1, $2, $3, $4, $5, $6, $7)",
+            "insert into scope_changes (tenant_id, company_id, project_id, version, actor, action, target, content)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&t)
         .bind(&c)
@@ -485,6 +508,7 @@ impl ProjectTx {
         .bind(by.user.as_str())
         .bind(action)
         .bind(target)
+        .bind(content)
         .execute(&mut *self.tx)
         .await?;
         let s = self.scope.clone();
@@ -510,6 +534,21 @@ fn audit_action(change: &'static str) -> &'static str {
         "criterion_removed" => "scope.criterion_removed",
         _ => "scope.signed_off",
     }
+}
+
+fn item_json(i: &ScopeItem) -> Value {
+    json!({"id": i.id.as_str(), "kind": i.kind.as_str(), "description": i.description.as_str()})
+}
+
+fn criterion_json(c: &Criterion) -> Value {
+    json!({
+        "id": c.id.as_str(),
+        "description": c.description.as_str(),
+        "metric": c.metric.as_str(),
+        "comparator": c.comparator.as_str(),
+        "target": c.target,
+        "unit": c.unit.as_ref().map(Name::as_str),
+    })
 }
 
 fn finite(target: f64) -> Result<(), StoreError> {

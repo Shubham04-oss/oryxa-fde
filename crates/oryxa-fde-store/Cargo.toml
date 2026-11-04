@@ -12,6 +12,7 @@ oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
@@ -19,7 +20,10 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+[features]
+# Live-test helpers (an owner pool and a store on a fresh runtime login); never in a release build.
+testing = []
+
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 rand = "0.8"
-serde_json.workspace = true
