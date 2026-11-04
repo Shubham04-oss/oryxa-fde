@@ -55,7 +55,13 @@ pub fn verifier() -> AccessTokenVerifier<TestKeys> {
 
 /// An access token as AuthKit issues it. `org` is the WorkOS organization (the tenant).
 pub fn token(org: Option<&str>, user: &str, role: &str) -> String {
-    let exp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 300;
+    token_for(org, user, role, 300)
+}
+
+/// A token that expires `secs` from now (in the past when negative).
+pub fn token_for(org: Option<&str>, user: &str, role: &str, secs: i64) -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let exp = (now + secs) as u64;
     let mut claims = json!({ "sub": user, "sid": "session_1", "role": role, "iss": ISS, "exp": exp });
     if let Some(org) = org {
         claims["org_id"] = json!(org);
@@ -63,4 +69,84 @@ pub fn token(org: Option<&str>, user: &str, role: &str) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KID.into());
     encode(&header, &claims, &keys().encoding).unwrap()
+}
+
+/// AuthKit without WorkOS: checks the PKCE verifier against the challenge it was given, and signs
+/// in whoever `who` names next.
+#[derive(Default)]
+pub struct FakeAuthKit {
+    /// (organization, user, role) the next code exchange signs in.
+    pub who: std::sync::Mutex<(Option<String>, String, String)>,
+    pub refresh_fails: std::sync::atomic::AtomicBool,
+    pub revoked: std::sync::Mutex<Vec<String>>,
+    challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+type Fut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+impl oryxa_fde_api::AuthKit for FakeAuthKit {
+    fn authorization_url(&self, state: &str, code_challenge: &str, redirect_uri: &str) -> Result<String, String> {
+        self.challenges
+            .lock()
+            .unwrap()
+            .insert(state.to_owned(), code_challenge.to_owned());
+        Ok(format!(
+            "https://auth.fake/authorize?state={state}&redirect_uri={redirect_uri}"
+        ))
+    }
+
+    fn exchange_code<'a>(
+        &'a self,
+        code: &'a str,
+        code_verifier: &'a str,
+    ) -> Fut<'a, Result<oryxa_fde_api::Tokens, String>> {
+        Box::pin(async move {
+            let state = code.strip_prefix("code-").ok_or("bad code")?;
+            let challenge = self.challenges.lock().unwrap().remove(state).ok_or("unknown code")?;
+            if workos::helpers::pkce::generate_code_challenge(code_verifier) != challenge {
+                return Err("PKCE verifier does not match".into());
+            }
+            let (org, user, role) = self.who.lock().unwrap().clone();
+            Ok(oryxa_fde_api::Tokens {
+                access_token: token(org.as_deref(), &user, &role),
+                refresh_token: format!("refresh|{}|{user}|{role}", org.unwrap_or_default()),
+            })
+        })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        refresh_token: &'a str,
+        organisation: &'a str,
+    ) -> Fut<'a, Result<oryxa_fde_api::Tokens, String>> {
+        Box::pin(async move {
+            if self.refresh_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("refresh token revoked".into());
+            }
+            let parts: Vec<&str> = refresh_token.split('|').collect();
+            let [_, org, user, role] = parts[..] else {
+                return Err("bad refresh token".into());
+            };
+            assert_eq!(org, organisation, "refresh names the session's organisation");
+            Ok(oryxa_fde_api::Tokens {
+                access_token: token(Some(org), user, role),
+                refresh_token: refresh_token.to_owned(),
+            })
+        })
+    }
+
+    fn revoke<'a>(&'a self, session_id: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.revoked.lock().unwrap().push(session_id.to_owned());
+            Ok(())
+        })
+    }
+
+    fn user_name<'a>(&'a self, user: &'a str) -> Fut<'a, Result<String, String>> {
+        Box::pin(async move { Ok(format!("Name of {user}")) })
+    }
+
+    fn organisation_name<'a>(&'a self, organisation: &'a str) -> Fut<'a, Result<String, String>> {
+        Box::pin(async move { Ok(format!("Org {organisation}")) })
+    }
 }

@@ -9,12 +9,53 @@ use crate::{
     Actor, CompanyTx, Name, ProjectTx, StoreError, Text, audit, id, in_use, name, opt, text, unique_violation,
 };
 
+/// The part a stakeholder plays in the engagement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StakeholderRole {
+    Sponsor,
+    Champion,
+    User,
+    It,
+    Security,
+    Other,
+}
+
+impl StakeholderRole {
+    pub const ALL: [StakeholderRole; 6] = [
+        StakeholderRole::Sponsor,
+        StakeholderRole::Champion,
+        StakeholderRole::User,
+        StakeholderRole::It,
+        StakeholderRole::Security,
+        StakeholderRole::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StakeholderRole::Sponsor => "sponsor",
+            StakeholderRole::Champion => "champion",
+            StakeholderRole::User => "user",
+            StakeholderRole::It => "it",
+            StakeholderRole::Security => "security",
+            StakeholderRole::Other => "other",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, StoreError> {
+        Self::ALL
+            .into_iter()
+            .find(|r| r.as_str() == s)
+            .ok_or(StoreError::Corrupt("stakeholder role"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stakeholder {
     pub id: StakeholderId,
     pub name: Name,
-    /// Their role at the customer, e.g. "VP Engineering".
+    /// Their job at the customer, e.g. "VP Engineering".
     pub title: Option<Name>,
+    pub role: StakeholderRole,
     pub updated_at: OffsetDateTime,
 }
 
@@ -22,12 +63,15 @@ pub struct Stakeholder {
 pub struct StakeholderIn {
     pub name: Name,
     pub title: Option<Name>,
+    pub role: StakeholderRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct System {
     pub id: SystemId,
     pub name: Name,
+    /// What sort of system, e.g. "CRM" or "data warehouse".
+    pub kind: Option<Name>,
     pub description: Option<Text>,
     pub updated_at: OffsetDateTime,
 }
@@ -35,8 +79,12 @@ pub struct System {
 #[derive(Debug, Clone)]
 pub struct SystemIn {
     pub name: Name,
+    pub kind: Option<Name>,
     pub description: Option<Text>,
 }
+
+const STAKEHOLDER: &str = "stakeholder_id, name, title, role, updated_at";
+const SYSTEM: &str = "system_id, name, kind, description, updated_at";
 
 impl CompanyTx {
     pub async fn stakeholders(&mut self) -> Result<Vec<Stakeholder>, StoreError> {
@@ -50,17 +98,18 @@ impl CompanyTx {
         by: &Actor,
     ) -> Result<Option<Stakeholder>, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "insert into stakeholders (tenant_id, company_id, stakeholder_id, name, title, created_by)
-             select $1, $2, $3, $4, $5, $6
+        let row = sqlx::query(&format!(
+            "insert into stakeholders (tenant_id, company_id, stakeholder_id, name, title, role, created_by)
+             select $1, $2, $3, $4, $5, $6, $7
              where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
-             returning stakeholder_id, name, title, updated_at",
-        )
+             returning {STAKEHOLDER}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(v.name.as_str())
         .bind(v.title.as_ref().map(Name::as_str))
+        .bind(v.role.as_str())
         .bind(by.user.as_str())
         .fetch_optional(&mut *self.tx)
         .await
@@ -83,16 +132,16 @@ impl CompanyTx {
         by: &Actor,
     ) -> Result<Option<Stakeholder>, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "update stakeholders set name = $4, title = $5, updated_at = now()
-             where tenant_id = $1 and company_id = $2 and stakeholder_id = $3
-             returning stakeholder_id, name, title, updated_at",
-        )
+        let row = sqlx::query(&format!(
+            "update stakeholders set name = $4, title = $5, role = $6, updated_at = now()
+             where tenant_id = $1 and company_id = $2 and stakeholder_id = $3 returning {STAKEHOLDER}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(v.name.as_str())
         .bind(v.title.as_ref().map(Name::as_str))
+        .bind(v.role.as_str())
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -125,16 +174,17 @@ impl CompanyTx {
 
     pub async fn add_system(&mut self, id: &SystemId, v: &SystemIn, by: &Actor) -> Result<Option<System>, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "insert into systems (tenant_id, company_id, system_id, name, description, created_by)
-             select $1, $2, $3, $4, $5, $6
+        let row = sqlx::query(&format!(
+            "insert into systems (tenant_id, company_id, system_id, name, kind, description, created_by)
+             select $1, $2, $3, $4, $5, $6, $7
              where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
-             returning system_id, name, description, updated_at",
-        )
+             returning {SYSTEM}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(v.name.as_str())
+        .bind(v.kind.as_ref().map(Name::as_str))
         .bind(v.description.as_ref().map(Text::as_str))
         .bind(by.user.as_str())
         .fetch_optional(&mut *self.tx)
@@ -158,15 +208,15 @@ impl CompanyTx {
         by: &Actor,
     ) -> Result<Option<System>, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "update systems set name = $4, description = $5, updated_at = now()
-             where tenant_id = $1 and company_id = $2 and system_id = $3
-             returning system_id, name, description, updated_at",
-        )
+        let row = sqlx::query(&format!(
+            "update systems set name = $4, kind = $5, description = $6, updated_at = now()
+             where tenant_id = $1 and company_id = $2 and system_id = $3 returning {SYSTEM}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(v.name.as_str())
+        .bind(v.kind.as_ref().map(Name::as_str))
         .bind(v.description.as_ref().map(Text::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
@@ -215,10 +265,9 @@ impl ProjectTx {
 }
 
 async fn stakeholders(conn: &mut PgConnection, s: &CompanyScope) -> Result<Vec<Stakeholder>, StoreError> {
-    sqlx::query(
-        "select stakeholder_id, name, title, updated_at from stakeholders
-         where tenant_id = $1 and company_id = $2 order by name, stakeholder_id",
-    )
+    sqlx::query(&format!(
+        "select {STAKEHOLDER} from stakeholders where tenant_id = $1 and company_id = $2 order by name, stakeholder_id"
+    ))
     .bind(s.tenant.as_str())
     .bind(s.company.as_str())
     .fetch_all(conn)
@@ -229,10 +278,9 @@ async fn stakeholders(conn: &mut PgConnection, s: &CompanyScope) -> Result<Vec<S
 }
 
 async fn systems(conn: &mut PgConnection, s: &CompanyScope) -> Result<Vec<System>, StoreError> {
-    sqlx::query(
-        "select system_id, name, description, updated_at from systems
-         where tenant_id = $1 and company_id = $2 order by name, system_id",
-    )
+    sqlx::query(&format!(
+        "select {SYSTEM} from systems where tenant_id = $1 and company_id = $2 order by name, system_id"
+    ))
     .bind(s.tenant.as_str())
     .bind(s.company.as_str())
     .fetch_all(conn)
@@ -247,6 +295,7 @@ fn stakeholder(r: PgRow) -> Result<Stakeholder, StoreError> {
         id: id("stakeholder id", StakeholderId::new, r.try_get("stakeholder_id")?)?,
         name: name(r.try_get("name")?, "name")?,
         title: opt(r.try_get("title")?, "title", name)?,
+        role: StakeholderRole::parse(r.try_get("role")?)?,
         updated_at: r.try_get("updated_at")?,
     })
 }
@@ -255,6 +304,7 @@ fn system(r: PgRow) -> Result<System, StoreError> {
     Ok(System {
         id: id("system id", SystemId::new, r.try_get("system_id")?)?,
         name: name(r.try_get("name")?, "name")?,
+        kind: opt(r.try_get("kind")?, "kind", name)?,
         description: opt(r.try_get("description")?, "description", text)?,
         updated_at: r.try_get("updated_at")?,
     })

@@ -8,15 +8,40 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
 use crate::projects::{self, Project};
-use crate::{Actor, Name, StoreError, audit, enqueue, id, unique_violation};
+use crate::{Actor, Name, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Company {
     pub id: CompanyId,
     pub name: Name,
+    pub industry: Option<Name>,
+    pub region: Option<Name>,
+    pub summary: Option<Text>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
+
+/// A company's editable fields.
+#[derive(Debug, Clone)]
+pub struct CompanyIn {
+    pub name: Name,
+    pub industry: Option<Name>,
+    pub region: Option<Name>,
+    pub summary: Option<Text>,
+}
+
+impl From<Company> for CompanyIn {
+    fn from(c: Company) -> Self {
+        Self {
+            name: c.name,
+            industry: c.industry,
+            region: c.region,
+            summary: c.summary,
+        }
+    }
+}
+
+const COLUMNS: &str = "company_id, name, industry, region, summary, created_at, updated_at";
 
 /// A user's role at a company; it is also the SpiceDB relation on `fde_company`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,15 +98,18 @@ impl CompanyTx {
 
     /// Creates the company with `by` as its lead, and queues `company.created`. Both grants
     /// (`GrantRow::Company` and the lead's `GrantRow::Member`) are pending until written.
-    pub async fn create(&mut self, name: &Name, by: &Actor) -> Result<Company, StoreError> {
+    pub async fn create(&mut self, v: &CompanyIn, by: &Actor) -> Result<Company, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "insert into companies (tenant_id, company_id, name, created_by) values ($1, $2, $3, $4)
-             returning company_id, name, created_at, updated_at",
-        )
+        let row = sqlx::query(&format!(
+            "insert into companies (tenant_id, company_id, name, industry, region, summary, created_by)
+             values ($1, $2, $3, $4, $5, $6, $7) returning {COLUMNS}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
-        .bind(name.as_str())
+        .bind(v.name.as_str())
+        .bind(v.industry.as_ref().map(Name::as_str))
+        .bind(v.region.as_ref().map(Name::as_str))
+        .bind(v.summary.as_ref().map(Text::as_str))
         .bind(by.user.as_str())
         .fetch_one(&mut *self.tx)
         .await
@@ -101,9 +129,9 @@ impl CompanyTx {
 
     pub async fn get(&mut self) -> Result<Option<Company>, StoreError> {
         let s = &self.scope;
-        sqlx::query(
-            "select company_id, name, created_at, updated_at from companies where tenant_id = $1 and company_id = $2",
-        )
+        sqlx::query(&format!(
+            "select {COLUMNS} from companies where tenant_id = $1 and company_id = $2"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .fetch_optional(&mut *self.tx)
@@ -112,19 +140,23 @@ impl CompanyTx {
         .transpose()
     }
 
-    pub async fn rename(&mut self, name: &Name, by: &Actor) -> Result<Option<Company>, StoreError> {
+    /// Replaces the company's editable fields.
+    pub async fn update(&mut self, v: &CompanyIn, by: &Actor) -> Result<Option<Company>, StoreError> {
         let s = &self.scope;
-        let row = sqlx::query(
-            "update companies set name = $3, updated_at = now() where tenant_id = $1 and company_id = $2
-             returning company_id, name, created_at, updated_at",
-        )
+        let row = sqlx::query(&format!(
+            "update companies set name = $3, industry = $4, region = $5, summary = $6, updated_at = now()
+             where tenant_id = $1 and company_id = $2 returning {COLUMNS}"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
-        .bind(name.as_str())
+        .bind(v.name.as_str())
+        .bind(v.industry.as_ref().map(Name::as_str))
+        .bind(v.region.as_ref().map(Name::as_str))
+        .bind(v.summary.as_ref().map(Text::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
-        audit(&mut self.tx, s, None, by, "company.renamed", Some(s.company.as_str())).await?;
+        audit(&mut self.tx, s, None, by, "company.updated", Some(s.company.as_str())).await?;
         company(row).map(Some)
     }
 
@@ -229,10 +261,9 @@ pub(crate) async fn list(
     ids: &[&CompanyId],
 ) -> Result<Vec<Company>, StoreError> {
     let ids: Vec<&str> = ids.iter().map(|c| c.as_str()).collect();
-    let rows = sqlx::query(
-        "select company_id, name, created_at, updated_at from companies
-         where tenant_id = $1 and company_id = any ($2) order by name, company_id",
-    )
+    let rows = sqlx::query(&format!(
+        "select {COLUMNS} from companies where tenant_id = $1 and company_id = any ($2) order by name, company_id"
+    ))
     .bind(tenant.as_str())
     .bind(ids)
     .fetch_all(conn)
@@ -261,10 +292,13 @@ async fn upsert_member(
     Ok(())
 }
 
-fn company(r: PgRow) -> Result<Company, StoreError> {
+pub(crate) fn company(r: PgRow) -> Result<Company, StoreError> {
     Ok(Company {
         id: id("company id", CompanyId::new, r.try_get("company_id")?)?,
-        name: Name::new(r.try_get::<String, _>("name")?).map_err(|_| StoreError::Corrupt("name"))?,
+        name: name(r.try_get("name")?, "name")?,
+        industry: opt(r.try_get("industry")?, "industry", name)?,
+        region: opt(r.try_get("region")?, "region", name)?,
+        summary: opt(r.try_get("summary")?, "summary", text)?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })

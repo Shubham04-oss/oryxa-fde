@@ -10,12 +10,13 @@ use axum::http::StatusCode;
 use oryxa_authz::Write;
 use oryxa_core::UserId;
 use oryxa_fde_core::{CompanyId, ProjectId, ProjectScope, Stage};
-use oryxa_fde_store::{Assignee, GrantRow, Project, new_id};
+use oryxa_fde_store::{Assignee, GrantRow, Project, ProjectIn, new_id};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::authz::{company, project, rel, user};
-use crate::companies::NameIn;
+use crate::companies::{merge, patch};
+use crate::records::{name, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -51,6 +52,7 @@ pub struct ProjectOut {
     pub id: String,
     pub company: String,
     pub name: String,
+    pub summary: Option<String>,
     pub stage: ProjectStage,
     pub created_at: String,
     pub updated_at: String,
@@ -62,11 +64,49 @@ impl From<Project> for ProjectOut {
             id: p.id.to_string(),
             company: p.company.to_string(),
             name: p.name.as_str().to_owned(),
+            summary: p.summary.map(|s| s.as_str().to_owned()),
             stage: p.stage.into(),
             created_at: ts(p.created_at),
             updated_at: ts(p.updated_at),
         }
     }
+}
+
+/// A project in a company list.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProjectSummaryOut {
+    pub id: String,
+    pub name: String,
+    pub stage: ProjectStage,
+}
+
+impl From<Project> for ProjectSummaryOut {
+    fn from(p: Project) -> Self {
+        Self {
+            id: p.id.to_string(),
+            name: p.name.as_str().to_owned(),
+            stage: p.stage.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectBody {
+    /// 1 to 200 characters, no control characters.
+    pub name: String,
+    /// Up to 4000 characters.
+    pub summary: Option<String>,
+}
+
+/// A change to some of a project's fields: a field left out stays as it is, `null` clears it.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectPatch {
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "patch")]
+    #[schema(value_type = Option<String>)]
+    pub summary: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -107,7 +147,7 @@ pub(crate) async fn list(
 }
 
 /// Create a project in the discover stage.
-#[utoipa::path(post, operation_id = "create_project", path = "/v1/companies/{company}/projects", tag = "projects", request_body = NameIn,
+#[utoipa::path(post, operation_id = "create_project", path = "/v1/companies/{company}/projects", tag = "projects", request_body = ProjectBody,
     params(("company" = String, Path, description = "Company id")),
     responses((status = 201, body = ProjectOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 404, body = ErrorBody)))]
@@ -115,14 +155,17 @@ pub(crate) async fn create(
     State(app): State<Arc<App>>,
     who: Principal,
     Path(c): Path<CompanyId>,
-    Json(body): Json<NameIn>,
+    Json(body): Json<ProjectBody>,
 ) -> Result<(StatusCode, Json<ProjectOut>), ApiError> {
     let cs = who.company(c);
     app.require(&who, company(&cs), "manage").await?;
-    let name = body.parse()?;
+    let v = ProjectIn {
+        name: name(body.name, "name")?,
+        summary: body.summary.map(|v| text(v, "summary")).transpose()?,
+    };
     let s = cs.project(ProjectId::new(new_id("prj")).map_err(|_| ApiError::Internal)?);
     let mut tx = app.store.project(&s).await?;
-    let created = tx.create(&name, &who.actor()).await?.ok_or(ApiError::NotFound)?;
+    let created = tx.create(&v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     app.grant(GrantRow::Project(s)).await;
     Ok((StatusCode::CREATED, Json(created.into())))
@@ -145,24 +188,31 @@ pub(crate) async fn get(
     Ok(Json(found.into()))
 }
 
-/// Rename a project.
-#[utoipa::path(patch, operation_id = "rename_project", path = "/v1/companies/{company}/projects/{project}", tag = "projects", request_body = NameIn,
+/// Change some of a project's fields.
+#[utoipa::path(patch, operation_id = "update_project", path = "/v1/companies/{company}/projects/{project}", tag = "projects", request_body = ProjectPatch,
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
     responses((status = 200, body = ProjectOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 404, body = ErrorBody)))]
-pub(crate) async fn rename(
+pub(crate) async fn update(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
-    Json(body): Json<NameIn>,
+    Json(body): Json<ProjectPatch>,
 ) -> Result<Json<ProjectOut>, ApiError> {
     let s = scope(&who, c, p);
     app.require(&who, project(&s), "work").await?;
-    let name = body.parse()?;
     let mut tx = app.store.project(&s).await?;
-    let renamed = tx.rename(&name, &who.actor()).await?.ok_or(ApiError::NotFound)?;
+    let current = tx.get().await?.ok_or(ApiError::NotFound)?;
+    let v = ProjectIn {
+        name: match body.name {
+            Some(n) => name(n, "name")?,
+            None => current.name,
+        },
+        summary: merge(body.summary, current.summary, |v| text(v, "summary"))?,
+    };
+    let updated = tx.update(&v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(renamed.into()))
+    Ok(Json(updated.into()))
 }
 
 /// Users assigned to the project.

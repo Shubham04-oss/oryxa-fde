@@ -9,17 +9,23 @@ use axum::http::StatusCode;
 use oryxa_authz::Write;
 use oryxa_core::UserId;
 use oryxa_fde_core::CompanyId;
-use oryxa_fde_store::{Company, GrantRow, Member, Name, Role, new_id};
-use serde::{Deserialize, Serialize};
+use oryxa_fde_store::{Company, CompanyIn, CompanySummary, GrantRow, Member, Role, new_id};
+use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 
 use crate::authz::{company, project, rel, user, workspace};
+use crate::projects::ProjectSummaryOut;
+use crate::records::{name, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CompanyOut {
     pub id: String,
     pub name: String,
+    pub industry: Option<String>,
+    /// Where the company is, e.g. "UK" or "EMEA".
+    pub region: Option<String>,
+    pub summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -29,22 +35,121 @@ impl From<Company> for CompanyOut {
         Self {
             id: c.id.to_string(),
             name: c.name.as_str().to_owned(),
+            industry: c.industry.map(|v| v.as_str().to_owned()),
+            region: c.region.map(|v| v.as_str().to_owned()),
+            summary: c.summary.map(|v| v.as_str().to_owned()),
             created_at: ts(c.created_at),
             updated_at: ts(c.updated_at),
         }
     }
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NameIn {
-    /// 1 to 200 characters, no control characters.
-    pub name: String,
+/// The caller's role at a company: a member's role, or `admin` for a WorkOS admin who is not a
+/// member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallerRole {
+    Lead,
+    Engineer,
+    Admin,
 }
 
-impl NameIn {
-    pub(crate) fn parse(self) -> Result<Name, ApiError> {
-        Name::new(self.name).map_err(|_| ApiError::Invalid("name"))
+/// A company in the caller's list: the company, the caller's role and its projects.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CompanySummaryOut {
+    #[serde(flatten)]
+    pub company: CompanyOut,
+    pub role: Option<CallerRole>,
+    pub projects: Vec<ProjectSummaryOut>,
+}
+
+impl CompanySummaryOut {
+    fn new(s: CompanySummary, admin: bool) -> Self {
+        let role = match s.role {
+            Some(Role::Lead) => Some(CallerRole::Lead),
+            Some(Role::Engineer) => Some(CallerRole::Engineer),
+            None if admin => Some(CallerRole::Admin),
+            None => None,
+        };
+        Self {
+            company: s.company.into(),
+            role,
+            projects: s.projects.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// For PATCH bodies: a missing field is `None` (unchanged), `null` is `Some(None)` (cleared).
+pub(crate) fn patch<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Applies a PATCH field: unchanged, cleared or set (validated with `parse`).
+pub(crate) fn merge<T>(
+    field: Option<Option<String>>,
+    current: Option<T>,
+    parse: impl FnOnce(String) -> Result<T, ApiError>,
+) -> Result<Option<T>, ApiError> {
+    match field {
+        None => Ok(current),
+        Some(None) => Ok(None),
+        Some(Some(v)) => parse(v).map(Some),
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompanyBody {
+    /// 1 to 200 characters, no control characters.
+    pub name: String,
+    pub industry: Option<String>,
+    pub region: Option<String>,
+    /// Up to 4000 characters.
+    pub summary: Option<String>,
+}
+
+impl CompanyBody {
+    fn parse(self) -> Result<CompanyIn, ApiError> {
+        Ok(CompanyIn {
+            name: name(self.name, "name")?,
+            industry: self.industry.map(|v| name(v, "industry")).transpose()?,
+            region: self.region.map(|v| name(v, "region")).transpose()?,
+            summary: self.summary.map(|v| text(v, "summary")).transpose()?,
+        })
+    }
+}
+
+/// A change to some of a company's fields: a field left out stays as it is, `null` clears it.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompanyPatch {
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "patch")]
+    #[schema(value_type = Option<String>)]
+    pub industry: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch")]
+    #[schema(value_type = Option<String>)]
+    pub region: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch")]
+    #[schema(value_type = Option<String>)]
+    pub summary: Option<Option<String>>,
+}
+
+impl CompanyPatch {
+    fn apply(self, current: Company) -> Result<CompanyIn, ApiError> {
+        Ok(CompanyIn {
+            name: match self.name {
+                Some(n) => name(n, "name")?,
+                None => current.name,
+            },
+            industry: merge(self.industry, current.industry, |v| name(v, "industry"))?,
+            region: merge(self.region, current.region, |v| name(v, "region"))?,
+            summary: merge(self.summary, current.summary, |v| text(v, "summary"))?,
+        })
     }
 }
 
@@ -97,28 +202,33 @@ impl From<Member> for MemberOut {
     }
 }
 
-/// The companies the caller works on.
+/// The companies the caller works on, each with the caller's role and its projects.
 #[utoipa::path(get, operation_id = "list_companies", path = "/v1/companies", tag = "companies",
-    responses((status = 200, body = [CompanyOut]), (status = 401, body = ErrorBody)))]
-pub(crate) async fn list(State(app): State<Arc<App>>, who: Principal) -> Result<Json<Vec<CompanyOut>>, ApiError> {
+    responses((status = 200, body = [CompanySummaryOut]), (status = 401, body = ErrorBody)))]
+pub(crate) async fn list(
+    State(app): State<Arc<App>>,
+    who: Principal,
+) -> Result<Json<Vec<CompanySummaryOut>>, ApiError> {
     let scopes = app.companies_for(&who).await?;
-    let list = app.store.companies(&scopes).await?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    let list = app.store.company_summaries(&scopes, &who.user).await?;
+    Ok(Json(
+        list.into_iter().map(|s| CompanySummaryOut::new(s, who.admin)).collect(),
+    ))
 }
 
 /// Create a company; the caller becomes its lead.
-#[utoipa::path(post, operation_id = "create_company", path = "/v1/companies", tag = "companies", request_body = NameIn,
+#[utoipa::path(post, operation_id = "create_company", path = "/v1/companies", tag = "companies", request_body = CompanyBody,
     responses((status = 201, body = CompanyOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     who: Principal,
-    Json(body): Json<NameIn>,
+    Json(body): Json<CompanyBody>,
 ) -> Result<(StatusCode, Json<CompanyOut>), ApiError> {
     app.require(&who, workspace(&who.tenant), "access").await?;
-    let name = body.parse()?;
+    let v = body.parse()?;
     let scope = who.company(CompanyId::new(new_id("cmp")).map_err(|_| ApiError::Internal)?);
     let mut tx = app.store.company(&scope).await?;
-    let created = tx.create(&name, &who.actor()).await?;
+    let created = tx.create(&v, &who.actor()).await?;
     tx.commit().await?;
     app.grant(GrantRow::Company(scope.clone())).await;
     app.grant(GrantRow::Member(scope, who.user.clone())).await;
@@ -142,24 +252,25 @@ pub(crate) async fn get(
     Ok(Json(found.into()))
 }
 
-/// Rename a company.
-#[utoipa::path(patch, operation_id = "rename_company", path = "/v1/companies/{company}", tag = "companies", request_body = NameIn,
-    params(("company" = String, Path, description = "Company id")),
+/// Change some of a company's fields.
+#[utoipa::path(patch, operation_id = "update_company", path = "/v1/companies/{company}", tag = "companies",
+    request_body = CompanyPatch, params(("company" = String, Path, description = "Company id")),
     responses((status = 200, body = CompanyOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 404, body = ErrorBody)))]
-pub(crate) async fn rename(
+pub(crate) async fn update(
     State(app): State<Arc<App>>,
     who: Principal,
     Path(id): Path<CompanyId>,
-    Json(body): Json<NameIn>,
+    Json(body): Json<CompanyPatch>,
 ) -> Result<Json<CompanyOut>, ApiError> {
     let scope = who.company(id);
     app.require(&who, company(&scope), "manage").await?;
-    let name = body.parse()?;
     let mut tx = app.store.company(&scope).await?;
-    let renamed = tx.rename(&name, &who.actor()).await?.ok_or(ApiError::NotFound)?;
+    let current = tx.get().await?.ok_or(ApiError::NotFound)?;
+    let v = body.apply(current)?;
+    let updated = tx.update(&v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(renamed.into()))
+    Ok(Json(updated.into()))
 }
 
 /// The company's leads and engineers.

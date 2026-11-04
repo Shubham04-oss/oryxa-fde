@@ -27,17 +27,19 @@ pub mod relay;
 mod scope;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+mod views;
 mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
-pub use companies::{Company, CompanyTx, Member, Role};
+pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
-pub use projects::{Assignee, Project, ProjectTx};
-pub use records::{Stakeholder, StakeholderIn, System, SystemIn};
+pub use projects::{Assignee, Project, ProjectIn, ProjectTx};
+pub use records::{Stakeholder, StakeholderIn, StakeholderRole, System, SystemIn};
 pub use scope::{
     Comparator, Criterion, CriterionIn, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
 };
+pub use views::{CompanySummary, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Task, TaskIn, TaskStatus};
 
 #[derive(Debug, thiserror::Error)]

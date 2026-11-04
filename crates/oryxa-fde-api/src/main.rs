@@ -3,6 +3,9 @@
 //! event signing key) from Secrets Manager. The only third-party host it calls is WorkOS, for the
 //! JWKS of `WORKOS_ISSUER`.
 //!
+//! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
+//! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie.
+//!
 //! `DATABASE_URL` is the runtime login, which owns nothing; the store refuses any other. Migrations
 //! run before a deploy as a one-off task (`oryxa-fde-ops migrate`) with the owner's login.
 
@@ -11,7 +14,9 @@ use std::time::Duration;
 use oryxa_authn::AccessTokenVerifier;
 use oryxa_authz::SpiceDb;
 use oryxa_events::{EventBusPublisher, Signer};
-use oryxa_fde_api::{App, router, run_reconciler};
+use std::sync::Arc;
+
+use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, router, run_reconciler};
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
 use workos::helpers::JwksHelper;
@@ -41,12 +46,17 @@ async fn main() -> Result<(), Error> {
         .build();
     let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
     let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
+    let sign_in = SignIn::new(
+        env("WEB_ORIGIN")?,
+        env("SESSION_PASSWORD")?,
+        Arc::new(WorkOsAuthKit(workos.clone())),
+    )?;
 
     let signer = Signer::from_pkcs8_pem(env("EVENT_SIGNING_KID")?, &env("EVENT_SIGNING_KEY")?)?;
     let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
     tokio::spawn(relay::run(store.clone(), signer, publisher));
 
-    let app = App::new(store, authz, tokens);
+    let app = App::with_sign_in(store, authz, tokens, sign_in);
     tokio::spawn(run_reconciler(app.clone()));
 
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());

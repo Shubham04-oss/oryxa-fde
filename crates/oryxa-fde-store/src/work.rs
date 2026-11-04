@@ -1,10 +1,10 @@
 //! A project's tasks (with blockers and a "waiting on customer" state) and its decisions log.
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{DecisionId, TaskId};
+use oryxa_fde_core::{DecisionId, StakeholderId, TaskId};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 
 use crate::{Actor, Name, ProjectTx, StoreError, Text, audit, id, name, opt, text, unique_violation};
 
@@ -51,6 +51,13 @@ pub struct Task {
     pub status: TaskStatus,
     /// What blocks it; required while the task is blocked.
     pub blocker: Option<Text>,
+    pub due_on: Option<Date>,
+    /// Who works it.
+    pub assignee: Option<UserId>,
+    /// The stakeholder at the customer it waits on.
+    pub waiting_on: Option<StakeholderId>,
+    /// Since when it has waited on the customer; set while the status is `WaitingOnCustomer`.
+    pub waiting_since: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -60,6 +67,9 @@ pub struct TaskIn {
     pub title: Name,
     pub status: TaskStatus,
     pub blocker: Option<Text>,
+    pub due_on: Option<Date>,
+    pub assignee: Option<UserId>,
+    pub waiting_on: Option<StakeholderId>,
 }
 
 impl TaskIn {
@@ -92,7 +102,8 @@ pub struct DecisionIn {
     pub decided_at: OffsetDateTime,
 }
 
-const TASK: &str = "task_id, title, status, blocker, created_at, updated_at";
+pub(crate) const TASK: &str =
+    "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, created_at, updated_at";
 const DECISION: &str = "decision_id, title, rationale, decided_by, decided_at, recorded_by, created_at";
 
 impl ProjectTx {
@@ -115,10 +126,12 @@ impl ProjectTx {
     /// `None` if the project is not in this company.
     pub async fn add_task(&mut self, id: &TaskId, v: &TaskIn, by: &Actor) -> Result<Option<Task>, StoreError> {
         v.check()?;
+        self.check_waiting_on(v).await?;
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
-            "insert into tasks (tenant_id, company_id, project_id, task_id, title, status, blocker, created_by)
-             select $1, $2, $3, $4, $5, $6, $7, $8
+            "insert into tasks (tenant_id, company_id, project_id, task_id, title, status, blocker, due_on, assignee,
+                 waiting_on, waiting_since, created_by)
+             select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $6 = 'waiting_on_customer' then now() end, $11
              where exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)
              returning {TASK}"
         ))
@@ -129,6 +142,9 @@ impl ProjectTx {
         .bind(v.title.as_str())
         .bind(v.status.as_str())
         .bind(v.blocker.as_ref().map(Text::as_str))
+        .bind(v.due_on)
+        .bind(v.assignee.as_ref().map(UserId::as_str))
+        .bind(v.waiting_on.as_ref().map(StakeholderId::as_str))
         .bind(by.user.as_str())
         .fetch_optional(&mut *self.tx)
         .await
@@ -153,11 +169,16 @@ impl ProjectTx {
         task(row).map(Some)
     }
 
+    /// Replaces the task's fields. Waiting on the customer keeps its start time while the status
+    /// stays `WaitingOnCustomer` and clears when it leaves.
     pub async fn update_task(&mut self, id: &TaskId, v: &TaskIn, by: &Actor) -> Result<Option<Task>, StoreError> {
         v.check()?;
+        self.check_waiting_on(v).await?;
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
-            "update tasks set title = $5, status = $6, blocker = $7, updated_at = now()
+            "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
+                 waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
+                 updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4 returning {TASK}"
         ))
         .bind(&t)
@@ -167,6 +188,9 @@ impl ProjectTx {
         .bind(v.title.as_str())
         .bind(v.status.as_str())
         .bind(v.blocker.as_ref().map(Text::as_str))
+        .bind(v.due_on)
+        .bind(v.assignee.as_ref().map(UserId::as_str))
+        .bind(v.waiting_on.as_ref().map(StakeholderId::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -209,6 +233,25 @@ impl ProjectTx {
         )
         .await?;
         Ok(true)
+    }
+
+    /// The stakeholder a task waits on must belong to this company.
+    async fn check_waiting_on(&mut self, v: &TaskIn) -> Result<(), StoreError> {
+        let Some(who) = &v.waiting_on else { return Ok(()) };
+        let (t, c, _) = self.keys();
+        let found: bool = sqlx::query_scalar(
+            "select exists (select 1 from stakeholders where tenant_id = $1 and company_id = $2 and stakeholder_id = $3)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(who.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        if found {
+            Ok(())
+        } else {
+            Err(StoreError::Missing("waiting_on"))
+        }
     }
 
     /// The decisions log, newest decision first.
@@ -277,12 +320,20 @@ impl ProjectTx {
     }
 }
 
-fn task(r: PgRow) -> Result<Task, StoreError> {
+pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
+    let assignee: Option<String> = r.try_get("assignee")?;
+    let waiting_on: Option<String> = r.try_get("waiting_on")?;
     Ok(Task {
         id: id("task id", TaskId::new, r.try_get("task_id")?)?,
         title: name(r.try_get("title")?, "title")?,
         status: TaskStatus::parse(r.try_get("status")?)?,
         blocker: opt(r.try_get("blocker")?, "blocker", text)?,
+        due_on: r.try_get("due_on")?,
+        assignee: assignee.map(|a| id("user id", UserId::new, a)).transpose()?,
+        waiting_on: waiting_on
+            .map(|w| id("stakeholder id", StakeholderId::new, w))
+            .transpose()?,
+        waiting_since: r.try_get("waiting_since")?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })
@@ -310,6 +361,9 @@ mod tests {
             title: Name::new("Get VPN access").unwrap(),
             status: TaskStatus::Blocked,
             blocker: None,
+            due_on: None,
+            assignee: None,
+            waiting_on: None,
         };
         assert!(matches!(t.check(), Err(StoreError::Rejected("blocker_required"))));
         t.blocker = Some(Text::new("Waiting on IT ticket").unwrap());

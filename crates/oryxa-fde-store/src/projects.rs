@@ -7,13 +7,14 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
-use crate::{Actor, Name, StoreError, audit, enqueue, id, unique_violation};
+use crate::{Actor, Name, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub id: ProjectId,
     pub company: CompanyId,
     pub name: Name,
+    pub summary: Option<Text>,
     pub stage: Stage,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -32,7 +33,23 @@ pub struct ProjectTx {
     pub(crate) scope: ProjectScope,
 }
 
-const COLUMNS: &str = "project_id, company_id, name, stage, created_at, updated_at";
+/// A project's editable fields.
+#[derive(Debug, Clone)]
+pub struct ProjectIn {
+    pub name: Name,
+    pub summary: Option<Text>,
+}
+
+impl From<Project> for ProjectIn {
+    fn from(p: Project) -> Self {
+        Self {
+            name: p.name,
+            summary: p.summary,
+        }
+    }
+}
+
+pub(crate) const COLUMNS: &str = "project_id, company_id, name, summary, stage, created_at, updated_at";
 
 impl ProjectTx {
     pub(crate) fn new(tx: Transaction<'static, Postgres>, scope: ProjectScope) -> Self {
@@ -59,18 +76,19 @@ impl ProjectTx {
 
     /// Creates the project in the discover stage and queues `project.created`. `None` if the
     /// company does not exist.
-    pub async fn create(&mut self, name: &Name, by: &Actor) -> Result<Option<Project>, StoreError> {
+    pub async fn create(&mut self, v: &ProjectIn, by: &Actor) -> Result<Option<Project>, StoreError> {
         let s = &self.scope;
         let row = sqlx::query(&format!(
-            "insert into projects (tenant_id, company_id, project_id, name, created_by)
-             select $1, $2, $3, $4, $5
+            "insert into projects (tenant_id, company_id, project_id, name, summary, created_by)
+             select $1, $2, $3, $4, $5, $6
              where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
              returning {COLUMNS}"
         ))
         .bind(s.company.tenant.as_str())
         .bind(s.company.company.as_str())
         .bind(s.project.as_str())
-        .bind(name.as_str())
+        .bind(v.name.as_str())
+        .bind(v.summary.as_ref().map(Text::as_str))
         .bind(by.user.as_str())
         .fetch_optional(&mut *self.tx)
         .await
@@ -109,16 +127,18 @@ impl ProjectTx {
         .transpose()
     }
 
-    pub async fn rename(&mut self, name: &Name, by: &Actor) -> Result<Option<Project>, StoreError> {
+    /// Replaces the project's editable fields.
+    pub async fn update(&mut self, v: &ProjectIn, by: &Actor) -> Result<Option<Project>, StoreError> {
         let s = &self.scope;
         let row = sqlx::query(&format!(
-            "update projects set name = $4, updated_at = now()
+            "update projects set name = $4, summary = $5, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 returning {COLUMNS}"
         ))
         .bind(s.company.tenant.as_str())
         .bind(s.company.company.as_str())
         .bind(s.project.as_str())
-        .bind(name.as_str())
+        .bind(v.name.as_str())
+        .bind(v.summary.as_ref().map(Text::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -127,7 +147,7 @@ impl ProjectTx {
             &s.company,
             Some(&s.project),
             by,
-            "project.renamed",
+            "project.updated",
             Some(s.project.as_str()),
         )
         .await?;
@@ -283,11 +303,12 @@ pub(crate) fn stage(raw: &str) -> Result<Stage, StoreError> {
         .ok_or(StoreError::Corrupt("stage"))
 }
 
-fn project(r: PgRow) -> Result<Project, StoreError> {
+pub(crate) fn project(r: PgRow) -> Result<Project, StoreError> {
     Ok(Project {
         id: id("project id", ProjectId::new, r.try_get("project_id")?)?,
         company: id("company id", CompanyId::new, r.try_get("company_id")?)?,
-        name: Name::new(r.try_get::<String, _>("name")?).map_err(|_| StoreError::Corrupt("name"))?,
+        name: name(r.try_get("name")?, "name")?,
+        summary: opt(r.try_get("summary")?, "summary", text)?,
         stage: stage(r.try_get("stage")?)?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,

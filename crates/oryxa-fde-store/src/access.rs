@@ -58,7 +58,8 @@ fn parse(s: &str) -> Result<AccessStatus, StoreError> {
         .ok_or(StoreError::Corrupt("access status"))
 }
 
-const COLUMNS: &str = "access_request_id, description, system_id, owner_id, status, requested_at, status_changed_at,
+pub(crate) const COLUMNS: &str =
+    "access_request_id, description, system_id, owner_id, status, requested_at, status_changed_at,
     granted_at, floor(extract(epoch from (
         case when status in ('requested', 'in_progress') then now() else coalesce(granted_at, status_changed_at) end
         - requested_at)) / 86400)::bigint as days_waiting";
@@ -232,7 +233,7 @@ impl ProjectTx {
     }
 }
 
-fn access_request(r: PgRow) -> Result<AccessRequest, StoreError> {
+pub(crate) fn access_request(r: PgRow) -> Result<AccessRequest, StoreError> {
     let system: Option<String> = r.try_get("system_id")?;
     let owner: Option<String> = r.try_get("owner_id")?;
     Ok(AccessRequest {

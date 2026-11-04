@@ -33,6 +33,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
+url = "2"
 utoipa-axum.workspace = true
 workos.workspace = true
 

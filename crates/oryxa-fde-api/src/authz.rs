@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use oryxa_authz::{CheckItem, Consistency, ObjectRef, Relationship, SubjectRef, Write};
 use oryxa_core::{TenantId, UserId};
-use oryxa_fde_core::{CompanyId, CompanyScope, ProjectScope};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
 use oryxa_fde_store::{Grant, GrantRow};
 
 use crate::{ApiError, App, Principal};
@@ -138,6 +138,25 @@ impl App {
             tracing::error!(error = %e, "authz write failed");
             ApiError::Unavailable
         })
+    }
+
+    /// The projects the caller can work on, from SpiceDB: through a company or as an assignee.
+    pub(crate) async fn projects_for(&self, who: &Principal) -> Result<Vec<ProjectId>, ApiError> {
+        let ids = self
+            .authz
+            .lookup_resources(
+                &who.tenant,
+                "fde_project",
+                "work",
+                &user(&who.tenant, &who.user),
+                &CONSISTENCY,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "authz lookup failed");
+                ApiError::Unavailable
+            })?;
+        Ok(ids.into_iter().filter_map(|id| ProjectId::new(id).ok()).collect())
     }
 
     /// The companies the caller can work on, from SpiceDB.

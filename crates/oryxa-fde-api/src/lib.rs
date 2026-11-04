@@ -6,9 +6,12 @@
 //! The router and the OpenAPI spec are built from one list of handlers ([`routes`]), so the spec,
 //! and the isolation suite that walks it, name every route the API serves.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::middleware;
 use axum::routing::get;
 use oryxa_authz::SpiceDb;
 use oryxa_fde_store::Store;
@@ -24,25 +27,42 @@ mod error;
 mod lifecycle;
 mod projects;
 mod records;
+pub mod session;
+mod today;
 
 pub use auth::{Principal, VerifyToken};
 pub use authz::{reconcile_grants, run_reconciler};
 pub use error::{ApiError, ErrorBody};
+pub use session::{AuthKit, SignIn, Tokens, WorkOsAuthKit};
+
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub struct App {
     pub store: Store,
     pub authz: SpiceDb,
     tokens: Box<dyn VerifyToken>,
     roles: auth::RoleCache,
+    /// Browser sign-in; without it only bearer tokens are accepted.
+    sign_in: Option<SignIn>,
 }
 
 impl App {
     pub fn new(store: Store, authz: SpiceDb, tokens: impl VerifyToken) -> Arc<Self> {
+        Self::make(store, authz, tokens, None)
+    }
+
+    /// With browser sign-in and the session cookie.
+    pub fn with_sign_in(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: SignIn) -> Arc<Self> {
+        Self::make(store, authz, tokens, Some(sign_in))
+    }
+
+    fn make(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: Option<SignIn>) -> Arc<Self> {
         Arc::new(Self {
             store,
             authz,
             tokens: Box::new(tokens),
             roles: auth::RoleCache::default(),
+            sign_in,
         })
     }
 }
@@ -51,11 +71,11 @@ impl App {
 fn routes() -> OpenApiRouter<Arc<App>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(companies::list, companies::create))
-        .routes(routes!(companies::get, companies::rename))
+        .routes(routes!(companies::get, companies::update))
         .routes(routes!(companies::members))
         .routes(routes!(companies::set_member, companies::remove_member))
         .routes(routes!(projects::list, projects::create))
-        .routes(routes!(projects::get, projects::rename))
+        .routes(routes!(projects::get, projects::update))
         .routes(routes!(projects::assignees))
         .routes(routes!(projects::assign, projects::unassign))
         .routes(routes!(records::stakeholders, records::add_stakeholder))
@@ -82,12 +102,20 @@ fn routes() -> OpenApiRouter<Arc<App>> {
             records::update_security_answer,
             records::remove_security_answer
         ))
+        .routes(routes!(today::today))
+        .routes(routes!(session::me))
+        .routes(routes!(session::login))
+        .routes(routes!(session::callback))
+        .routes(routes!(session::logout))
 }
 
 pub fn router(app: Arc<App>) -> Router {
     let (router, _) = routes().split_for_parts();
     // Load balancer health check; reads nothing, so it is not in the spec.
-    router.route("/healthz", get(|| async { "ok" })).with_state(app)
+    router
+        .route("/healthz", get(|| async { "ok" }))
+        .layer(middleware::from_fn_with_state(app.clone(), session::layer))
+        .with_state(app)
 }
 
 /// The spec of exactly the routes [`router`] serves.
@@ -132,6 +160,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         (name = "projects", description = "Projects and their assignees"),
         (name = "records", description = "Company stakeholders and systems; the organisation's security answers"),
         (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
+        (name = "auth", description = "Browser sign-in, the session cookie and who is signed in"),
     )
 )]
 struct ApiDoc;
