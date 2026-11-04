@@ -43,9 +43,9 @@ from the image. Only the two run routes use root:
   processes then cannot open the harness's stdin, where approval decisions and cancellation arrive, through
   `/proc`, and cannot read its output or signal it.
 - **One harness at a time.** A harness start is refused (`409`) from an earlier harness's start until its process
-  exits or the sandbox stops, even if nobody reads its output any more (its API task is gone). If this object
-  restarts meanwhile, the exit is never seen, so the sandbox must be stopped first. The API destroys the container
-  before every run anyway.
+  is seen to exit or the sandbox stops, even if nobody reads its output any more (its API task is gone). If the
+  exit cannot be confirmed (waiting for it fails, or this object restarts), the sandbox must be stopped first. The
+  API destroys the container before every run anyway.
 
 ## Outbound policy
 

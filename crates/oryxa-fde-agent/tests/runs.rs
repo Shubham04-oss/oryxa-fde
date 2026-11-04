@@ -378,7 +378,11 @@ enum Fail {
     /// Approval requests cannot be kept.
     Approvals,
     /// The run's hold on the sandbox is refused, as if another run had been given it.
-    Renewals,
+    RenewalRefused,
+    /// Renewing the hold never returns.
+    RenewalHangs,
+    /// The store cannot be reached to renew the hold.
+    RenewalErrs,
 }
 
 impl<S: RunStore> RunStore for Failing<S> {
@@ -437,10 +441,12 @@ impl<S: RunStore> RunStore for Failing<S> {
         self.0.take_sandbox(scope, run, lease).await
     }
     async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
-        if self.1 == Fail::Renewals {
-            return Ok(false);
+        match self.1 {
+            Fail::RenewalRefused => Ok(false),
+            Fail::RenewalHangs => std::future::pending().await,
+            Fail::RenewalErrs => Err(StoreError::Unavailable),
+            Fail::Approvals => self.0.renew_sandbox(scope, run, lease).await,
         }
-        self.0.renew_sandbox(scope, run, lease).await
     }
     async fn reserve(
         &self,
@@ -1129,10 +1135,10 @@ async fn a_grant_that_cannot_close_after_its_call_fails_the_run_and_destroys_the
     assert!(!calls.iter().any(|c| c == "exec curl"), "{calls:?}");
 }
 
-#[tokio::test]
-async fn a_run_that_loses_the_sandbox_destroys_it_and_ends() {
-    let runs = Runs::<TestFailingStore>::new(
-        Failing(InMemoryRuns::default(), Fail::Renewals),
+/// A run on a store whose renewals `fail`, with a short lease; the harness works until told to stop.
+fn losing(fail: Fail) -> Arc<Runs<TestFailingStore>> {
+    Runs::new(
+        Failing(InMemoryRuns::default(), fail),
         FakeSandbox::new(vec![message("Working."), Step::Hang]),
         FakeLive::default(),
         context(),
@@ -1141,7 +1147,33 @@ async fn a_run_that_loses_the_sandbox_destroys_it_and_ends() {
             lease: Duration::from_millis(200),
             ..config()
         },
-    );
+    )
+}
+
+#[tokio::test]
+async fn a_run_whose_hold_is_someone_elses_ends_and_leaves_the_sandbox_alone() {
+    for fail in [Fail::RenewalRefused, Fail::RenewalHangs] {
+        let runs = losing(fail);
+        let app = api::router(runs.clone());
+        let run = create(&app).await;
+        let started = std::time::Instant::now();
+        let done = wait(&app, &run, ended).await;
+        assert_eq!(done["failure"], "store_unavailable");
+        // A hung renewal never outlasts the hold: the run ends within about one lease.
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        // The sandbox may be the next run's by now: it is not stopped, and the harness is only told to stop.
+        assert!(
+            !stopped_after_harness(&runs.sandbox.calls()),
+            "{:?}",
+            runs.sandbox.calls()
+        );
+        assert_eq!(runs.sandbox.log.lock().unwrap().stdin, ["{\"type\":\"cancel\"}\n"]);
+    }
+}
+
+#[tokio::test]
+async fn a_run_that_cannot_renew_while_it_holds_the_sandbox_destroys_it() {
+    let runs = losing(Fail::RenewalErrs);
     let app = api::router(runs.clone());
     let run = create(&app).await;
     let done = wait(&app, &run, ended).await;
@@ -1422,6 +1454,59 @@ async fn a_run_whose_api_task_stopped_is_swept_and_the_next_run_gets_a_fresh_con
         ]),
         "{calls:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_swept_run_that_finished_but_delivered_nothing_fails_and_its_grants_close() {
+    let runs = runs_with(FakeSandbox::new(vec![]));
+    let scope = scope("org_a", "cmp_1", "prj_1");
+    // Its harness had finished, with a deploy approved, when its API task stopped: nothing was delivered.
+    let mut record = stored_run("run_done", &scope);
+    runs.store.create(&record).await.unwrap();
+    record.run.start().unwrap();
+    record.started_at = Some(time::OffsetDateTime::now_utc());
+    let approval = ApprovalId::new("apr_1").unwrap();
+    record
+        .run
+        .apply(&EventLine {
+            v: EVENT_VERSION,
+            seq: 0,
+            event: HarnessEvent::Result {
+                outcome: Outcome::Success,
+                reason: None,
+                text: String::new(),
+                turns: 1,
+                usage: Usage::default(),
+            },
+        })
+        .unwrap();
+    runs.store.update(&record).await.unwrap();
+    let request = ApprovalRecord {
+        id: approval.clone(),
+        run: record.run.id().clone(),
+        tool_call_id: ToolCallId::new("toolu_d1").unwrap(),
+        action: "deploy".into(),
+        title: "Run: npx wrangler deploy".into(),
+        tool: "Bash".into(),
+        input: json!({ "command": "npx wrangler deploy" }),
+        requested_at: time::OffsetDateTime::now_utc(),
+        decision: None,
+    };
+    runs.store.add_approval(&scope, &request).await.unwrap();
+    let approved = Decided {
+        outcome: oryxa_fde_agent::ApprovalOutcome::Approved,
+        by: UserId::new("usr_lead").unwrap(),
+        at: time::OffsetDateTime::now_utc(),
+    };
+    runs.store
+        .decide(&scope, record.run.id(), &approval, &approved)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(runs.sweep().await, 1);
+    assert_eq!(runs.store.outbox()[0].outcome, RunOutcome::Failed);
+    assert_eq!(runs.sandbox.calls(), ["close deploy apr_1"]);
 }
 
 #[tokio::test(start_paused = true)]

@@ -269,6 +269,26 @@ describe("runs", () => {
     });
   });
 
+  it("keep a harness marked running when its exit cannot be confirmed, until the sandbox stops", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    fake.exitLost = true;
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const harness = () => run("harness", post({ sha256: SHA, timeoutMs: 60_000 }));
+    const reader = (await harness()).body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    // Waiting for its exit failed; it may still run, so no second harness joins it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await harness()).status).toBe(409);
+    fake.exitLost = false;
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const next = await harness();
+    expect(next.status).toBe(200);
+    await next.body?.cancel();
+  });
+
   it("refuse a harness start without a well-formed digest and time limit", async () => {
     const fake = await attachFake("org_a", "cmp_1");
     await api("/v1/sandboxes/org_a/cmp_1/start", post());

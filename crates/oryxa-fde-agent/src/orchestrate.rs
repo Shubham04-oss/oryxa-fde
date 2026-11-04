@@ -2,9 +2,9 @@
 //! single order (as `AgentRun` requires):
 //!
 //! 1. Wait for the company's sandbox (one run at a time, across API tasks), then reserve the run's part of the
-//!    project's budget. A heartbeat keeps both until the run's end is recorded. A run that loses its hold on the
-//!    sandbox (the store refuses a renewal, or cannot be reached before the hold lapses) destroys the sandbox and
-//!    ends, since another run may already have been given it.
+//!    project's budget. A heartbeat keeps both until the run's end is recorded. A run that cannot renew its hold
+//!    while it still has it destroys the sandbox and ends; one whose hold has lapsed, or is someone else's, ends
+//!    and leaves the sandbox alone, since another run may already have been given it.
 //! 2. Build the context pack, destroy whatever container the sandbox still has and start a fresh one, check out the
 //!    repository, write the pack and check the digest read back, then start the harness on it.
 //! 3. Apply the harness's lines; store the transcript and approval requests, and stream lines live. Decisions and
@@ -26,7 +26,7 @@ use oryxa_fde_events::RunOutcome;
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use crate::context::ContextPack;
 use crate::event::{ApprovalOutcome, HarnessEvent, HarnessInput, ToolStatus, parse_line};
@@ -62,7 +62,7 @@ pub(crate) async fn drive<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, id: 
         grants: BTreeMap::new(),
         started: None,
         heartbeat: None,
-        lost: watch::channel(false).1,
+        hold: watch::channel(Hold::Held).1,
     };
     driver.run().await;
     // Runs on this task that wait for the sandbox try again now.
@@ -79,35 +79,59 @@ impl Drop for Heartbeat {
     }
 }
 
-/// Keeps the run's hold on the company's sandbox and its budget reservation while the driver works. If the store
-/// refuses a renewal, or cannot be reached until the hold is about to lapse, another run may be given the sandbox:
-/// it is destroyed, and `lost` is set.
+/// What became of a run's hold on the company's sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    Held,
+    /// It could not be renewed while still held, so the run destroyed the sandbox.
+    Destroyed,
+    /// It lapsed or is someone else's: the sandbox may be another run's now, so the run leaves it alone.
+    Gone,
+}
+
+/// Keeps the run's hold on the company's sandbox and its budget reservation while the driver works. A renewal
+/// never outlasts the hold it would extend. If the store cannot renew it while it is still held, the sandbox is
+/// destroyed (bounded by the same time); once it has lapsed or the store says it is someone else's, the sandbox is
+/// left alone.
 fn hold_sandbox<D: Deps>(
     runs: Arc<Runs<D>>,
     scope: ProjectScope,
     run: AgentRunId,
     mut until: Instant,
-    lost: watch::Sender<bool>,
+    hold: watch::Sender<Hold>,
 ) -> Heartbeat {
     Heartbeat(tokio::spawn(async move {
         let lease = runs.config.lease;
         loop {
             sleep(lease / 4).await;
             let asked = Instant::now();
-            match runs.store.renew_sandbox(&scope, &run, lease).await {
-                Ok(true) => {
+            let left = until.saturating_duration_since(asked);
+            let renewed = if left.is_zero() {
+                None
+            } else {
+                timeout(left, runs.store.renew_sandbox(&scope, &run, lease)).await.ok()
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            match renewed {
+                Some(Ok(true)) => {
                     until = asked + lease;
                     continue;
                 }
-                Ok(false) => {}
-                Err(_) if until.saturating_duration_since(Instant::now()) > lease / 4 => continue,
-                Err(_) => {}
+                Some(Err(_)) if left > lease / 4 => continue,
+                Some(Err(_)) | None if !left.is_zero() => {
+                    tracing::error!(run = %run, "could not renew the company's sandbox; destroying it");
+                    let _ = hold.send(Hold::Destroyed);
+                    match timeout(left, runs.sandbox.stop(&scope.company)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::error!(error = %e, run = %run, "could not stop the sandbox"),
+                        Err(_) => tracing::error!(run = %run, "stopping the sandbox outlasted the hold"),
+                    }
+                    return;
+                }
+                _ => {}
             }
-            tracing::error!(run = %run, "lost the company's sandbox; destroying it");
-            let _ = lost.send(true);
-            if let Err(e) = runs.sandbox.stop(&scope.company).await {
-                tracing::error!(error = %e, run = %run, "could not stop the sandbox");
-            }
+            tracing::error!(run = %run, "lost the company's sandbox; leaving it alone");
+            let _ = hold.send(Hold::Gone);
             return;
         }
     }))
@@ -144,6 +168,7 @@ pub(crate) async fn sweep<D: Deps>(runs: &Runs<D>) -> usize {
         match runs.store.settle_lapsed(&record, usd_micros, outcome).await {
             Ok(true) => {
                 tracing::warn!(run = %id, "ended a run whose API task stopped");
+                close_grants(runs, &scope, &id).await;
                 ended += 1;
             }
             Ok(false) => {}
@@ -154,6 +179,28 @@ pub(crate) async fn sweep<D: Deps>(runs: &Runs<D>) -> usize {
         runs.changed();
     }
     ended
+}
+
+/// Closes the grants an ended run's approved actions may have left open. Each closes only the grant its own
+/// approval opened, so another run's is never touched; one that will not close expires on its own.
+async fn close_grants<D: Deps>(runs: &Runs<D>, scope: &ProjectScope, run: &AgentRunId) {
+    let approvals = match runs.store.approvals(scope, run).await {
+        Ok(approvals) => approvals,
+        Err(e) => {
+            tracing::error!(error = %e, run = %run, "could not read an interrupted run's approvals");
+            return;
+        }
+    };
+    let approved = approvals.iter().filter(|a| {
+        a.decision
+            .as_ref()
+            .is_some_and(|d| d.outcome == ApprovalOutcome::Approved)
+    });
+    for a in approved {
+        if let Err(e) = runs.sandbox.close_grant(&scope.company, &a.action, &a.id).await {
+            tracing::error!(error = %e, run = %run, "could not close an interrupted run's grant");
+        }
+    }
 }
 
 /// How the run's own task ends it, besides the harness's result.
@@ -177,8 +224,8 @@ struct Driver<D: Deps> {
     started: Option<Instant>,
     /// Renews the run's hold on the sandbox from when it is given until its end is recorded.
     heartbeat: Option<Heartbeat>,
-    /// Set when that hold was lost and the sandbox destroyed.
-    lost: watch::Receiver<bool>,
+    /// What became of that hold.
+    hold: watch::Receiver<Hold>,
 }
 
 impl<D: Deps> Driver<D> {
@@ -247,8 +294,8 @@ impl<D: Deps> Driver<D> {
             let asked = Instant::now();
             match self.runs.store.take_sandbox(&self.scope, self.id(), lease).await {
                 Ok(true) => {
-                    let (tx, rx) = watch::channel(false);
-                    self.lost = rx;
+                    let (tx, rx) = watch::channel(Hold::Held);
+                    self.hold = rx;
                     self.heartbeat = Some(hold_sandbox(
                         self.runs.clone(),
                         self.scope.clone(),
@@ -330,7 +377,7 @@ impl<D: Deps> Driver<D> {
         let deadline = sleep_until(started + limit);
         tokio::pin!(deadline);
         let mut changes = self.runs.watch();
-        let mut lost = self.lost.clone();
+        let mut hold = self.hold.clone();
         let mut poll = tokio::time::interval(self.runs.config.poll);
         let mut stopping: Option<Instant> = None;
         loop {
@@ -346,20 +393,20 @@ impl<D: Deps> Driver<D> {
                     Some(ProcessEvent::Line(line)) => self.line(&line, &live, left).await,
                     Some(ProcessEvent::Invalid) => self.stop(Stop::Reason(StopReason::BadOutput)).await,
                     Some(ProcessEvent::Exited { .. }) => {
-                        self.sandbox_lost(&lost).await;
+                        self.sandbox_lost(&hold).await;
                         self.record.run.harness_exited();
                         break;
                     }
                     None => {
                         // The stream was lost and the harness may still run: stop it the hard way.
                         tracing::warn!(run = %self.id(), "lost the harness's output");
-                        self.sandbox_lost(&lost).await;
+                        self.sandbox_lost(&hold).await;
                         self.record.run.harness_exited();
                         self.hard_stop().await;
                         break;
                     }
                 },
-                Ok(()) = lost.changed() => self.sandbox_lost(&lost).await,
+                Ok(()) = hold.changed() => self.sandbox_lost(&hold).await,
                 () = &mut deadline, if !self.record.run.is_ended() => {
                     let why = if over_budget { Stop::Reason(StopReason::OverBudget) } else { Stop::TimeLimit };
                     self.stop(why).await;
@@ -556,14 +603,27 @@ impl<D: Deps> Driver<D> {
         self.hard_stop().await;
     }
 
-    /// If the heartbeat lost the sandbox (and destroyed it), the run ends for that reason.
-    async fn sandbox_lost(&mut self, lost: &watch::Receiver<bool>) {
-        if *lost.borrow() && !self.record.run.is_ended() {
-            let _ = self.record.run.stop(StopReason::StoreUnavailable);
-            self.save().await;
-            self.exec = None;
-            self.grants.clear();
+    /// If the heartbeat lost the sandbox, the run ends for that reason. A destroyed sandbox took the harness and the
+    /// grants with it; a sandbox that may be another run's is left alone, and the harness is only told to stop.
+    async fn sandbox_lost(&mut self, hold: &watch::Receiver<Hold>) {
+        let hold = *hold.borrow();
+        if self.record.run.is_ended() {
+            return;
         }
+        match hold {
+            Hold::Held => {}
+            Hold::Destroyed => {
+                let _ = self.record.run.stop(StopReason::StoreUnavailable);
+                self.save().await;
+                self.exec = None;
+                self.grants.clear();
+            }
+            Hold::Gone => self.stop(Stop::Reason(StopReason::StoreUnavailable)).await,
+        }
+    }
+
+    fn holds_sandbox(&self) -> bool {
+        *self.hold.borrow() == Hold::Held
     }
 
     /// Destroys the company's sandbox: the harness and everything the agent left running go with it. Retried a few
@@ -571,6 +631,11 @@ impl<D: Deps> Driver<D> {
     /// take the sandbox destroys it before starting, or does not start.
     async fn hard_stop(&mut self) {
         self.exec = None;
+        if *self.hold.borrow() == Hold::Gone {
+            // The sandbox may be another run's by now: its next holder destroys it before starting.
+            tracing::warn!(run = %self.id(), "not stopping a sandbox this run no longer holds");
+            return;
+        }
         let mut wait = self.runs.config.poll;
         for attempt in 1..=STOP_ATTEMPTS {
             match self.runs.sandbox.stop(self.company()).await {
@@ -613,7 +678,7 @@ impl<D: Deps> Driver<D> {
         if !closed {
             self.grant_not_closed().await;
         }
-        if closed && self.record.run.state() == &RunState::Finished && !*self.lost.borrow() {
+        if closed && self.record.run.state() == &RunState::Finished && self.holds_sandbox() {
             self.record.delivery = self.deliver().await;
         }
         // The end lets the sandbox go, so the heartbeat stops before it is recorded.
@@ -683,10 +748,11 @@ impl<D: Deps> Driver<D> {
 }
 
 /// How a run ended, in `agent-run.finished`'s terms: a rejected approval is `Rejected`; a run an FDE or its budget
-/// stopped is `Cancelled`; a finished run whose work could not be delivered `Failed`.
+/// stopped is `Cancelled`; a finished run whose work was not delivered `Failed`.
 fn outcome(state: &RunState, delivery: &Delivery) -> RunOutcome {
     match (state, delivery) {
-        (RunState::Finished, Delivery::Failed) => RunOutcome::Failed,
+        // Finished but never delivered (its sandbox was lost, or its API task stopped): nothing came of it.
+        (RunState::Finished, Delivery::Failed | Delivery::None) => RunOutcome::Failed,
         (RunState::Finished, _) => RunOutcome::Succeeded,
         (
             RunState::Failed {
@@ -722,4 +788,37 @@ fn live_forwarder<D: Deps>(runs: Arc<Runs<D>>, scope: ProjectScope, run: AgentRu
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finished_run_succeeds_only_once_delivered() {
+        let pr = Delivery::PullRequest(crate::git::PullRequest {
+            number: 7,
+            url: "https://github.com/sample-org/status-page/pull/7".into(),
+        });
+        assert_eq!(outcome(&RunState::Finished, &pr), RunOutcome::Succeeded);
+        assert_eq!(
+            outcome(&RunState::Finished, &Delivery::NoChanges),
+            RunOutcome::Succeeded
+        );
+        assert_eq!(outcome(&RunState::Finished, &Delivery::Failed), RunOutcome::Failed);
+        assert_eq!(outcome(&RunState::Finished, &Delivery::None), RunOutcome::Failed);
+        let failed = |reason| RunState::Failed { reason };
+        assert_eq!(
+            outcome(&failed(FailReason::ApprovalRejected), &Delivery::None),
+            RunOutcome::Rejected
+        );
+        assert_eq!(
+            outcome(&failed(FailReason::OverBudget), &Delivery::None),
+            RunOutcome::Cancelled
+        );
+        assert_eq!(
+            outcome(&failed(FailReason::Interrupted), &Delivery::None),
+            RunOutcome::Failed
+        );
+    }
 }

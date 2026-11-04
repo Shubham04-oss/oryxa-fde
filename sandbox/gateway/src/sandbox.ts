@@ -31,9 +31,10 @@ const GRANT_PREFIX = "grant:";
 /** The run whose harness this sandbox last started: only it may be granted anything. */
 const HARNESS_RUN_KEY = "harness-run";
 /**
- * Set from a harness's start until its process exits or the container stops. While set, no other harness starts:
- * a harness whose API task is gone (a deploy) keeps running until then, and a second one must never join it. If
- * this object restarts while a harness runs, the exit is never seen, so the sandbox must be stopped first.
+ * Set from a harness's start until its process is seen to exit or the container stops. While set, no other harness
+ * starts: a harness whose API task is gone (a deploy) keeps running until then, and a second one must never join
+ * it. If the exit cannot be confirmed (waiting for it fails, or this object restarts), the sandbox must be stopped
+ * first.
  */
 const HARNESS_LIVE_KEY = "harness-live";
 const MAX_STDIN_WRITE = 1024 * 1024;
@@ -190,8 +191,9 @@ export class CompanySandbox extends DurableObject<Env> {
       throw cause;
     }
     if (process.stdin !== null) this.#stdin.set(execId, process.stdin.getWriter());
-    // The process may outlive its reader: only its own exit says it has ended.
-    if (exited !== undefined) void process.exitCode.then(exited, exited);
+    // The process may outlive its reader: only its own, confirmed exit says it has ended. If waiting for it fails
+    // (a dropped connection), it may still run, so it stays marked until the sandbox stops.
+    if (exited !== undefined) void process.exitCode.then(exited, () => {});
     return streamLines(
       execId,
       process,
