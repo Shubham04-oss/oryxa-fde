@@ -24,3 +24,4 @@ sqs = ["dep:aws-sdk-sqs", "dep:tokio", "dep:tracing"]
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 rand = "0.8"
+tokio = { workspace = true, features = ["test-util"] }

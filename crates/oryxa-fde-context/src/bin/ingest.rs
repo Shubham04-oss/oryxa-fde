@@ -2,7 +2,8 @@
 //! each document. `DATABASE_URL` is the runtime login (the store refuses an owner);
 //! `INGEST_QUEUE_URL` the queue; `EVENT_SIGNING_KID` and `EVENT_PUBLIC_KEY` the key FDE events are
 //! signed with; `DOCUMENTS_BUCKET` and `EMBEDDING_*` as `Context::from_env` reads them. It calls
-//! AWS only (S3, SQS, Bedrock).
+//! AWS only (S3, SQS, Bedrock). Each document's text is extracted by this same binary run as
+//! `extract <content-type>` in a child process with hard limits and no environment.
 
 use oryxa_events::Verifier;
 use oryxa_fde_context::{Context, ingest};
@@ -16,8 +17,20 @@ fn env(key: &str) -> Result<String, Error> {
     std::env::var(key).map_err(|_| format!("{key} is not set").into())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
+    // `extract <content-type>`: one document's extraction, run by the worker in a child with
+    // hard limits (see `oryxa_fde_context::child`).
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("extract") {
+        std::process::exit(oryxa_fde_context::child::child_main(args.next().as_deref()));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))

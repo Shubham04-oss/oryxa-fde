@@ -1,6 +1,6 @@
 //! A remote MCP server for coding agents, on `rmcp`'s streamable HTTP transport, stateless. Four
 //! read-only tools over one project: `search_context`, `get_scope`, `list_decisions` and
-//! `list_tasks`. Callers present the FDE tokens the API accepts; each tool takes a company and a
+//! `list_tasks` (both paged, at most 100 items a page). Callers present the FDE tokens the API accepts; each tool takes a company and a
 //! project, checks `oryxa-authz` before it reads (`work` on the project; for `search_context`,
 //! `work` on the company, as for the document list) and reads under that project's `ProjectScope`
 //! (`oryxa_fde_api::reads`). No tool writes anything.
@@ -10,13 +10,13 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::{Request, State};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use oryxa_fde_api::{ApiError, App, Principal, reads};
 use oryxa_fde_context::SearchQuery;
-use oryxa_fde_core::{CompanyId, ProjectId};
+use oryxa_fde_core::{CompanyId, DecisionId, ProjectId, TaskId};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
@@ -53,10 +53,11 @@ pub fn router(app: Arc<App>, allowed_hosts: Vec<String>) -> Router {
 }
 
 /// Verifies the token as the API does and hands the caller to the tools; anything else is
-/// refused before MCP sees the request.
+/// refused before MCP sees the request. Every MCP request is a POST, but every tool only reads,
+/// so the caller's role mirror is refreshed as for an API read, not rewritten on each call.
 async fn authenticate(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
     let (mut parts, body) = req.into_parts();
-    match Principal::from_request_parts(&mut parts, &app).await {
+    match Principal::from_bearer(&parts.headers, &app, false).await {
         Ok(who) => {
             parts.extensions.insert(who);
             next.run(Request::from_parts(parts, body)).await
@@ -84,6 +85,21 @@ pub struct SearchArgs {
     /// At most this many passages, 1 to 50 (default 8).
     pub limit: Option<u32>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PageArgs {
+    /// The company's id.
+    pub company: String,
+    /// The project's id, in that company.
+    pub project: String,
+    /// At most this many items, 1 to 100 (default 50).
+    pub limit: Option<u32>,
+    /// The `next` value of the previous page; leave it out for the first page.
+    pub after: Option<String>,
+}
+
+/// Items per page when the caller does not say.
+const DEFAULT_PAGE: u32 = 50;
 
 #[derive(Clone)]
 pub struct Tools {
@@ -164,34 +180,50 @@ impl Tools {
         }
     }
 
-    #[tool(description = "The project's decisions log, newest first: what was decided, why, by whom and when.")]
+    #[tool(
+        description = "The project's decisions log, newest first: what was decided, why, by whom and when. \
+        Paged: pass the answer's `next` as `after` for the following page; `next` is null on the last."
+    )]
     async fn list_decisions(
         &self,
-        Parameters(a): Parameters<ProjectArgs>,
+        Parameters(a): Parameters<PageArgs>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let (who, c, p) = match caller(&parts, &a.company, &a.project) {
             Ok(v) => v,
             Err(e) => return Ok(refused(e)),
         };
-        match reads::decisions(&self.app, who, c, p).await {
-            Ok(list) => answer(json!({ "decisions": list })),
+        let after = match a.after.map(DecisionId::new).transpose() {
+            Ok(v) => v,
+            Err(_) => return Ok(refused(ApiError::Invalid("after"))),
+        };
+        let limit = a.limit.unwrap_or(DEFAULT_PAGE);
+        match reads::decisions(&self.app, who, c, p, after, limit).await {
+            Ok(page) => answer(json!({ "decisions": page.items, "next": page.next })),
             Err(e) => Ok(refused(e)),
         }
     }
 
-    #[tool(description = "The project's tasks with their status and blockers.")]
+    #[tool(
+        description = "The project's tasks with their status and blockers, oldest first. Paged: pass the \
+        answer's `next` as `after` for the following page; `next` is null on the last."
+    )]
     async fn list_tasks(
         &self,
-        Parameters(a): Parameters<ProjectArgs>,
+        Parameters(a): Parameters<PageArgs>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let (who, c, p) = match caller(&parts, &a.company, &a.project) {
             Ok(v) => v,
             Err(e) => return Ok(refused(e)),
         };
-        match reads::tasks(&self.app, who, c, p).await {
-            Ok(list) => answer(json!({ "tasks": list })),
+        let after = match a.after.map(TaskId::new).transpose() {
+            Ok(v) => v,
+            Err(_) => return Ok(refused(ApiError::Invalid("after"))),
+        };
+        let limit = a.limit.unwrap_or(DEFAULT_PAGE);
+        match reads::tasks(&self.app, who, c, p, after, limit).await {
+            Ok(page) => answer(json!({ "tasks": page.items, "next": page.next })),
             Err(e) => Ok(refused(e)),
         }
     }

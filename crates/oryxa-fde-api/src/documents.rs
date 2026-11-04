@@ -38,7 +38,7 @@ pub struct DocumentOut {
     pub size_bytes: i64,
     pub sha256: String,
     pub status: IngestState,
-    /// Why ingestion gave up: `unreadable`, `empty`, `too_large` or `checksum`.
+    /// Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`.
     pub failure: Option<String>,
     pub chunks: u32,
     pub uploaded_by: String,

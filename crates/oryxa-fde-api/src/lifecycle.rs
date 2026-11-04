@@ -729,7 +729,10 @@ pub(crate) async fn tasks(
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
 ) -> Result<Json<Vec<TaskOut>>, ApiError> {
-    Ok(Json(crate::reads::tasks(&app, &who, c, p).await?))
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let list = tx.tasks().await?;
+    tx.commit().await?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(post, operation_id = "add_task", path = "/v1/companies/{company}/projects/{project}/tasks", tag = "lifecycle",
@@ -800,7 +803,10 @@ pub(crate) async fn decisions(
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
 ) -> Result<Json<Vec<DecisionOut>>, ApiError> {
-    Ok(Json(crate::reads::decisions(&app, &who, c, p).await?))
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let list = tx.decisions().await?;
+    tx.commit().await?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
 /// Record a decision: what, who decided, when and why. The log is append-only.

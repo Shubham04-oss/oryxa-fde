@@ -45,7 +45,7 @@ pub use scope::{
     Comparator, Criterion, CriterionIn, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
 };
 pub use views::{CompanySummary, Named, TodayItem};
-pub use work::{Decision, DecisionIn, Task, TaskIn, TaskStatus};
+pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

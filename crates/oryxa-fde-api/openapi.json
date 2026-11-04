@@ -4094,7 +4094,7 @@
               "string",
               "null"
             ],
-            "description": "Why ingestion gave up: `unreadable`, `empty`, `too_large` or `checksum`."
+            "description": "Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`."
           },
           "id": {
             "type": "string"

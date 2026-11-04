@@ -152,6 +152,19 @@ impl World {
         body: Option<Value>,
         same_site: bool,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let body = body.map(|b| ("application/json", b.to_string().into_bytes()));
+        self.with_cookie_body(cookie, method, path, body, same_site).await
+    }
+
+    /// [`World::with_cookie`] with any body: its content type and bytes.
+    async fn with_cookie_body(
+        &self,
+        cookie: &str,
+        method: &str,
+        path: &str,
+        body: Option<(&str, Vec<u8>)>,
+        same_site: bool,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
@@ -160,9 +173,7 @@ impl World {
             req = req.header("x-oryxa-request", "1").header("origin", WEB);
         }
         let req = match body {
-            Some(b) => req
-                .header("content-type", "application/json")
-                .body(Body::from(b.to_string())),
+            Some((content_type, bytes)) => req.header("content-type", content_type).body(Body::from(bytes)),
             None => req.body(Body::empty()),
         }
         .unwrap();
@@ -192,6 +203,23 @@ impl World {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8_lossy(&bytes).into_owned();
         (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// Sends one JSON-RPC request to the MCP server as `token`: the HTTP status and the response.
+    async fn mcp_rpc(&self, token: &str, body: &Value) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(oryxa_fde_mcp::PATH)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = self.mcp.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
     /// Sends `bytes` as the body with `content_type`, not as JSON.
@@ -1041,9 +1069,12 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     at.who.id, at.kind
                 ));
             }
-            // Uploads take a raw body, which the cookie helper does not send.
-            if raw.is_none() && matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
-                let (status, _, resp) = w.with_cookie(&cookie_of(at.who), method, &path, body, true).await;
+            if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
+                let body = match raw {
+                    Some(raw) => Some(("text/plain", raw.as_bytes().to_vec())),
+                    None => body.map(|b| ("application/json", b.to_string().into_bytes())),
+                };
+                let (status, _, resp) = w.with_cookie_body(&cookie_of(at.who), method, &path, body, true).await;
                 calls += 1;
                 if status.is_success() {
                     leaks.push(format!(
@@ -1173,6 +1204,13 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+    // The same cookie upload works where it is allowed, so the refusals above are the API's.
+    let own = format!("/v1/companies/{}/documents?name=ours", a.company);
+    let upload = Some(("text/plain", b"our runbook".to_vec()));
+    let (status, _, body) = w
+        .with_cookie_body(&cookie_of(&a.lead), "POST", &own, upload, true)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 #[tokio::test]
@@ -2029,6 +2067,38 @@ async fn mcp_tools_read_one_project_for_whoever_works_on_it() {
         resp["result"]["structuredContent"]["tasks"][0]["title"],
         "Index tickets"
     );
+    assert_eq!(resp["result"]["structuredContent"]["next"], Value::Null);
+    // The lists are paged: one more task makes two pages of one, joined by `next`.
+    let tasks = format!("/v1/companies/{}/projects/{}/tasks", t.company, t.project);
+    let body = Some(json!({"title": "Second task", "status": "todo"}));
+    w.ok(&t.lead, "POST", &tasks, body, StatusCode::CREATED).await;
+    let mut paged = args.clone();
+    paged["limit"] = json!(1);
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+    let first = &resp["result"]["structuredContent"];
+    assert_eq!(
+        (
+            first["tasks"][0]["title"].as_str(),
+            first["tasks"].as_array().unwrap().len()
+        ),
+        (Some("Index tickets"), 1)
+    );
+    paged["after"] = first["next"].clone();
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+    let second = &resp["result"]["structuredContent"];
+    assert_eq!(second["tasks"][0]["title"], "Second task");
+    assert_eq!(second["next"], Value::Null);
+    // A cursor that is not one of this project's tasks, or not an id at all, reads nothing.
+    for bad in [json!(new_id("tsk")), json!("a|b")] {
+        paged["after"] = bad;
+        let (status, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+        assert!(!mcp_succeeded(status, &resp), "{resp}");
+        assert_eq!(resp["result"]["content"][0]["text"], "invalid_after");
+    }
+    let mut decisions = args.clone();
+    decisions["limit"] = json!(1);
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_decisions", decisions).await;
+    assert_eq!(resp["result"]["structuredContent"]["next"], Value::Null);
     // Company documents need work on the company: the engineer searches them, the assignee cannot.
     let mut search = args.clone();
     search["query"] = json!("who approves refunds?");
@@ -2294,4 +2364,97 @@ async fn a_task_assignee_must_work_on_the_project() {
     for who in [&t.engineer, &t.assignee] {
         w.ok(&t.lead, "POST", &tasks, task(&who.id), StatusCode::CREATED).await;
     }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn mcp_calls_are_reads_and_do_not_rewrite_the_role_mirror() {
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    let created = w
+        .ok(
+            &alice,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Acme"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let company = format!("/v1/companies/{}", created["id"].as_str().unwrap());
+    let dana = user(&org, "dana", "admin");
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+    // The first call mirrors Dana's admin role, as any first request does.
+    assert_eq!(w.mcp_rpc(&dana.token, &list).await.0, StatusCode::OK);
+    // Take the mirror away behind the API's back: only a write to SpiceDB would bring it back.
+    let tenant = TenantId::new(&org).unwrap();
+    let mirror = oryxa_authz::Relationship {
+        resource: oryxa_authz::ObjectRef::new(&tenant, "workspace", "root"),
+        relation: "admin",
+        subject: oryxa_authz::SubjectRef::object(oryxa_authz::ObjectRef::new(&tenant, "user", &dana.id)),
+        caveat: None,
+        expires_at: None,
+    };
+    w.authz
+        .write(&tenant, &[oryxa_authz::Write::Delete(mirror)], &[])
+        .await
+        .unwrap();
+
+    // Every MCP request is a POST, but none of them writes: the mirror stays gone.
+    assert_eq!(w.mcp_rpc(&dana.token, &list).await.0, StatusCode::OK);
+    assert_eq!(w.status(&dana, "GET", &company, None).await, StatusCode::FORBIDDEN);
+    // A real change still re-mirrors the role first.
+    let rename = Some(json!({"name": "Renamed"}));
+    assert_eq!(w.status(&dana, "PATCH", &company, rename).await, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn uploads_take_up_to_20_mib_of_a_known_type_and_other_routes_keep_2_mb() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let upload = format!("/v1/companies/{}/documents?name=big", t.company);
+    let limit = oryxa_fde_context::MAX_DOCUMENT_BYTES;
+
+    let (status, body) = w
+        .send_raw(&t.lead.token, "POST", &upload, "text/plain", &vec![b'a'; limit])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "exactly 20 MiB: {body}");
+    let (status, _) = w
+        .send_raw(&t.lead.token, "POST", &upload, "text/plain", &vec![b'a'; limit + 1])
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    for unsupported in ["text/html", "application/zip", "application/octet-stream", ""] {
+        let (status, body) = w
+            .send_raw(&t.lead.token, "POST", &upload, unsupported, b"<p>hello</p>")
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, Some("unsupported_media_type")),
+            "{unsupported:?}"
+        );
+    }
+    // Only the upload route takes a large body: a JSON body over axum's 2 MB default is refused.
+    let big = json!({"name": "a".repeat(2 * 1024 * 1024)});
+    let tasks = format!("/v1/companies/{}/projects/{}/tasks", t.company, t.project);
+    for path in ["/v1/companies", tasks.as_str()] {
+        assert_eq!(
+            w.status(&t.lead, "POST", path, Some(big.clone())).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{path}"
+        );
+    }
+    // Refused uploads stored nothing: only the 20 MiB file and the fixture's document are listed.
+    let docs = w
+        .ok(
+            &t.lead,
+            "GET",
+            &format!("/v1/companies/{}/documents", t.company),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(docs.as_array().unwrap().len(), 2, "{docs}");
 }

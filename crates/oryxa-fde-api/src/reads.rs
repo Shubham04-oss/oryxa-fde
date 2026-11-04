@@ -4,7 +4,7 @@
 //! returns what the matching route returns.
 
 use oryxa_fde_context::SearchQuery;
-use oryxa_fde_core::{CompanyId, ProjectId};
+use oryxa_fde_core::{CompanyId, DecisionId, ProjectId, TaskId};
 
 use crate::documents::{SearchHitOut, project_search};
 use crate::lifecycle::{DecisionOut, ScopeOut, TaskOut, project_tx};
@@ -18,20 +18,52 @@ pub async fn scope(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Re
     Ok(scope.into())
 }
 
-/// The project's decisions log, newest first.
-pub async fn decisions(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Result<Vec<DecisionOut>, ApiError> {
-    let mut tx = project_tx(app, who, c, p).await?;
-    let list = tx.decisions().await?;
-    tx.commit().await?;
-    Ok(list.into_iter().map(Into::into).collect())
+/// Most items one page of a list holds.
+pub const MAX_PAGE: u32 = 100;
+
+/// One page of a list, and the cursor for the next page if there is one.
+pub struct Paged<T> {
+    pub items: Vec<T>,
+    /// The id to pass as `after` for the next page.
+    pub next: Option<String>,
 }
 
-/// The project's tasks.
-pub async fn tasks(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Result<Vec<TaskOut>, ApiError> {
+/// One page of the project's decisions log, newest first, after decision `after`.
+pub async fn decisions(
+    app: &App,
+    who: &Principal,
+    c: CompanyId,
+    p: ProjectId,
+    after: Option<DecisionId>,
+    limit: u32,
+) -> Result<Paged<DecisionOut>, ApiError> {
     let mut tx = project_tx(app, who, c, p).await?;
-    let list = tx.tasks().await?;
+    let page = tx.decisions_page(after.as_ref(), limit.clamp(1, MAX_PAGE)).await?;
     tx.commit().await?;
-    Ok(list.into_iter().map(Into::into).collect())
+    let next = page.more.then(|| page.items.last().map(|d| d.id.to_string())).flatten();
+    Ok(Paged {
+        items: page.items.into_iter().map(Into::into).collect(),
+        next,
+    })
+}
+
+/// One page of the project's tasks, oldest first, after task `after`.
+pub async fn tasks(
+    app: &App,
+    who: &Principal,
+    c: CompanyId,
+    p: ProjectId,
+    after: Option<TaskId>,
+    limit: u32,
+) -> Result<Paged<TaskOut>, ApiError> {
+    let mut tx = project_tx(app, who, c, p).await?;
+    let page = tx.tasks_page(after.as_ref(), limit.clamp(1, MAX_PAGE)).await?;
+    tx.commit().await?;
+    let next = page.more.then(|| page.items.last().map(|t| t.id.to_string())).flatten();
+    Ok(Paged {
+        items: page.items.into_iter().map(Into::into).collect(),
+        next,
+    })
 }
 
 /// Passages from the documents of the project's company; needs `work` on the company.

@@ -47,3 +47,8 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["default-htt
 aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 sha2 = "0.10"
+
+# An arithmetic overflow anywhere fails closed instead of wrapping, release builds included (lead
+# decision on #57).
+[profile.release]
+overflow-checks = true

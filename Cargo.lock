@@ -3208,6 +3208,7 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-smithy-http-client",
  "ed25519-dalek",
+ "libc",
  "lopdf",
  "oryxa-core",
  "oryxa-events",
