@@ -23,6 +23,9 @@ pub enum ApiError {
     NotFound,
     #[error("invalid {0}")]
     Invalid(&'static str),
+    /// An upload of a kind the context layer cannot read.
+    #[error("unsupported media type")]
+    UnsupportedType,
     #[error("already exists")]
     Conflict,
     /// The change breaks a rule of the record, e.g. a stage skipped or an empty scope signed off.
@@ -50,6 +53,7 @@ impl ApiError {
             ApiError::Csrf => (StatusCode::FORBIDDEN, "csrf"),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
+            ApiError::UnsupportedType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
             ApiError::Conflict => (StatusCode::CONFLICT, "conflict"),
             ApiError::Rejected(_) => (StatusCode::CONFLICT, "rejected"),
             ApiError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
@@ -58,14 +62,21 @@ impl ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = self.status();
-        let error = match self {
+impl ApiError {
+    /// The short code a response body carries, e.g. `forbidden` or `invalid_name`.
+    pub fn code(&self) -> String {
+        let (_, code) = self.status();
+        match self {
             ApiError::Invalid(what) | ApiError::Rejected(what) => format!("{code}_{what}"),
             _ => code.to_owned(),
-        };
-        (status, Json(ErrorBody { error })).into_response()
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, _) = self.status();
+        (status, Json(ErrorBody { error: self.code() })).into_response()
     }
 }
 

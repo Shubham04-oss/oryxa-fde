@@ -1,0 +1,40 @@
+[package]
+name = "oryxa-fde-context"
+version = "0.1.0"
+description = "Company documents: upload storage, ingestion to text and chunks, embeddings and hybrid search"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "oryxa-fde-ingest"
+path = "src/bin/ingest.rs"
+
+[dependencies]
+aws-config.workspace = true
+aws-sdk-bedrockruntime.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-sqs.workspace = true
+lopdf = { version = "0.47", default-features = false }
+oryxa-core.workspace = true
+oryxa-events.workspace = true
+oryxa-fde-core.workspace = true
+oryxa-fde-events = { workspace = true, features = ["sqs"] }
+oryxa-fde-store.workspace = true
+quick-xml = "0.42"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+oryxa-fde-store = { workspace = true, features = ["testing"] }
+rand = "0.8"
+sqlx.workspace = true

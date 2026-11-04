@@ -17,7 +17,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use oryxa_authz::SpiceDb;
+use oryxa_core::TenantId;
 use oryxa_fde_api::{App, SignIn, openapi, reconcile_grants, router};
+use oryxa_fde_context::Context;
+use oryxa_fde_core::{CompanyId, CompanyScope, DocumentId};
 use oryxa_fde_store::{Store, new_id, testing};
 use oryxa_spicedb_proto::v1::{WriteSchemaRequest, schema_service_client::SchemaServiceClient};
 use serde_json::{Value, json};
@@ -30,9 +33,13 @@ const WEB: &str = "https://fde.test";
 
 struct World {
     router: Router,
+    /// The MCP server on the same app.
+    mcp: Router,
     app: Arc<App>,
     store: Store,
     authz: SpiceDb,
+    /// Files in memory and the fake embedder, shared with ingestion.
+    context: Context,
     /// AuthKit for browser sign-in.
     authkit: Arc<support::FakeAuthKit>,
     /// Seals session cookies; random per world.
@@ -55,20 +62,24 @@ async fn world() -> World {
         .insert("authorization", format!("Bearer {key}").parse().unwrap());
     schema.write_schema(req).await.unwrap();
     let authz = SpiceDb::connect(&endpoint, &key, Duration::from_secs(2)).await.unwrap();
+    let context = Context::fake();
     let authkit = Arc::new(support::FakeAuthKit::default());
     let password = format!("{}{}", new_id("x").replace("x_", ""), new_id("x").replace("x_", ""));
     let app = App::with_sign_in(
         store.clone(),
         authz.clone(),
         support::verifier(),
+        context.clone(),
         sign_in_config(&authkit, &password),
     );
 
     World {
         router: router(app.clone()),
+        mcp: oryxa_fde_mcp::router(app.clone(), Vec::new()),
         app,
         store,
         authz,
+        context,
         authkit,
         password,
     }
@@ -81,6 +92,7 @@ impl World {
             self.store.clone(),
             self.authz.clone(),
             support::verifier(),
+            self.context.clone(),
             sign_in_config(&self.authkit, &self.password),
         ))
     }
@@ -155,6 +167,68 @@ impl World {
         }
         .unwrap();
         self.send(req).await
+    }
+
+    /// Calls an MCP tool as `token`: the HTTP status and the JSON-RPC response.
+    async fn tool(&self, token: Option<&str>, tool: &str, arguments: Value) -> (StatusCode, Value) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}});
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(oryxa_fde_mcp::PATH)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let resp = self
+            .mcp
+            .clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// Sends `bytes` as the body with `content_type`, not as JSON.
+    async fn send_raw(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", content_type)
+            .body(Body::from(bytes.to_vec()))
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// Uploads a text document as `who` and ingests it; returns its id.
+    async fn document(&self, who: &User, org: &str, company: &str, name: &str, text: &str) -> String {
+        let path = format!("/v1/companies/{company}/documents?name={name}");
+        let (status, body) = self
+            .send_raw(&who.token, "POST", &path, "text/plain", text.as_bytes())
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let scope = CompanyScope::new(TenantId::new(org).unwrap(), CompanyId::new(company).unwrap());
+        oryxa_fde_context::ingest::ingest(&self.context, &self.store, &scope, &DocumentId::new(&id).unwrap())
+            .await
+            .unwrap();
+        id
     }
 
     async fn call_on(
@@ -513,6 +587,11 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         Some(r#"{"name":"pwned"}"#),
     ),
     ("DELETE", "/v1/companies/{company}/systems/{system}", None),
+    ("GET", "/v1/companies/{company}/documents", None),
+    ("POST", "/v1/companies/{company}/documents", Some(RAW_UPLOAD)),
+    ("GET", "/v1/companies/{company}/documents/{document}", None),
+    ("GET", "/v1/companies/{company}/search", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/search", None),
     ("GET", "/v1/companies/{company}/projects/{project}/stakeholders", None),
     ("GET", "/v1/companies/{company}/projects/{project}/systems", None),
     (
@@ -602,9 +681,25 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("DELETE", "/v1/security-answers/{answer}", None),
 ];
 
+/// Every MCP tool; each takes a company and a project.
+const MCP_TOOLS: &[&str] = &["search_context", "get_scope", "list_decisions", "list_tasks"];
+
+/// The body of an upload attack: sent as text/plain, not JSON.
+const RAW_UPLOAD: &str = "RAW:pwned";
+
+/// The query string an attack adds to a route that needs one.
+fn query_for(method: &str, template: &str) -> &'static str {
+    match (method, template.rsplit('/').next()) {
+        ("POST", Some("documents")) => "?name=pwned",
+        ("GET", Some("search")) => "?q=refunds",
+        _ => "",
+    }
+}
+
 /// Placeholders that name one record; a route or body using one can be aimed at another company's
 /// record from the attacker's own project.
 const RECORDS: &[&str] = &[
+    "{document}",
     "{stakeholder}",
     "{system}",
     "{item}",
@@ -631,6 +726,17 @@ struct Tenant {
     records: Vec<(&'static str, String)>,
     /// Each user's session cookie, by user id.
     sessions: Vec<(String, String)>,
+}
+
+impl Tenant {
+    /// The id of this company's record for `placeholder`.
+    fn record(&self, placeholder: &str) -> &str {
+        self.records
+            .iter()
+            .find(|(p, _)| *p == placeholder)
+            .map(|(_, id)| id.as_str())
+            .unwrap()
+    }
 }
 
 async fn company(w: &World, org: &str, name: &str) -> Tenant {
@@ -731,6 +837,15 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         assert_eq!(status, StatusCode::FOUND, "{body}");
         sessions.push((who.id.clone(), set_cookie(&headers, "__Host-fde_session").unwrap()));
     }
+    let document = w
+        .document(
+            &lead,
+            org,
+            &company,
+            "policy.txt",
+            &format!("{name} refunds over 500 need approval from the support lead"),
+        )
+        .await;
     Tenant {
         org: org.to_owned(),
         lead,
@@ -742,6 +857,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         project,
         records: vec![
             ("{stakeholder}", stakeholder),
+            ("{document}", document),
             ("{system}", system),
             ("{item}", item),
             ("{criterion}", criterion),
@@ -763,6 +879,8 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{base}/projects"),
         format!("{base}/stakeholders"),
         format!("{base}/systems"),
+        format!("{base}/documents"),
+        format!("{base}/search?q=refunds"),
         project.clone(),
         format!("{project}/assignees"),
         format!("{project}/stakeholders"),
@@ -902,9 +1020,19 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
     let mut calls = 0;
     for (method, template, body) in TARGETED {
         for at in attacks.iter().filter(|at| at.applies(template, *body)) {
-            let path = at.fill(template);
-            let body: Option<Value> = body.map(|b| serde_json::from_str(&at.fill(b)).unwrap());
-            let (status, resp) = w.call(Some(&at.who.token), method, &path, body.clone()).await;
+            let path = at.fill(template) + query_for(method, template);
+            let raw = body.and_then(|b| b.strip_prefix("RAW:"));
+            let body: Option<Value> = match raw {
+                Some(_) => None,
+                None => body.map(|b| serde_json::from_str(&at.fill(b)).unwrap()),
+            };
+            let (status, resp) = match raw {
+                Some(raw) => {
+                    w.send_raw(&at.who.token, method, &path, "text/plain", raw.as_bytes())
+                        .await
+                }
+                None => w.call(Some(&at.who.token), method, &path, body.clone()).await,
+            };
             calls += 1;
             tried.insert((*method, *template));
             if status.is_success() {
@@ -913,7 +1041,8 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     at.who.id, at.kind
                 ));
             }
-            if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
+            // Uploads take a raw body, which the cookie helper does not send.
+            if raw.is_none() && matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
                 let (status, _, resp) = w.with_cookie(&cookie_of(at.who), method, &path, body, true).await;
                 calls += 1;
                 if status.is_success() {
@@ -925,12 +1054,33 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             }
         }
     }
+    // Every MCP tool, aimed the same ways: the victim's project, the victim's project under the
+    // attacker's company, and the attacker's own project under the victim's company.
+    let mut tools_tried = BTreeSet::new();
+    for tool in MCP_TOOLS {
+        for at in attacks.iter().filter(|at| at.kind != Kind::OwnProject) {
+            let mut args = json!({"company": at.company, "project": at.project});
+            if *tool == "search_context" {
+                args["query"] = json!("refunds");
+            }
+            let (status, resp) = w.tool(Some(&at.who.token), tool, args).await;
+            calls += 1;
+            tools_tried.insert(*tool);
+            if mcp_succeeded(status, &resp) {
+                leaks.push(format!(
+                    "{} ({:?}) mcp {tool} {}/{} -> {resp}",
+                    at.who.id, at.kind, at.company, at.project
+                ));
+            }
+        }
+    }
     assert!(
         leaks.is_empty(),
         "cross-company access succeeded:\n{}",
         leaks.join("\n")
     );
     assert_eq!(tried.len(), TARGETED.len(), "every targeted route was attacked");
+    assert_eq!(tools_tried.len(), MCP_TOOLS.len(), "every MCP tool was attacked");
     assert!(calls > 500, "only {calls} attempts");
 
     // Listing shows only the caller's own companies and tenant; creating stays in the caller's tenant.
@@ -984,11 +1134,7 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
         assert!(others.iter().all(|o| !seen.contains(o.as_str())));
     }
     let answers = w.ok(&c.lead, "GET", "/v1/security-answers", None, StatusCode::OK).await;
-    assert_eq!(
-        ids(&answers),
-        [c.records[6].1.as_str()],
-        "only the tenant's own answers"
-    );
+    assert_eq!(ids(&answers), [c.record("{answer}")], "only the tenant's own answers");
     let made = w
         .ok(
             &c.lead,
@@ -1038,7 +1184,7 @@ async fn lifecycle_records_end_to_end() {
     let (lead, eng, asg) = (&t.lead, &t.engineer, &t.assignee);
     let base = format!("/v1/companies/{}", t.company);
     let p = format!("{base}/projects/{}", t.project);
-    let stakeholder = t.records[0].1.clone();
+    let stakeholder = t.record("{stakeholder}").to_owned();
 
     // Stages move one forward or back, never skip, and an assignee may move them.
     let stage = format!("{p}/stage");
@@ -1160,7 +1306,7 @@ async fn lifecycle_records_end_to_end() {
         .await;
     assert!(ids(&listed).contains(&stakeholder.as_str()));
     let systems = w.ok(asg, "GET", &format!("{p}/systems"), None, StatusCode::OK).await;
-    assert_eq!(ids(&systems), [t.records[1].1.as_str()]);
+    assert_eq!(ids(&systems), [t.record("{system}")]);
     for path in [format!("{base}/stakeholders"), format!("{base}/systems")] {
         assert_eq!(w.status(asg, "GET", &path, None).await, StatusCode::FORBIDDEN, "{path}");
     }
@@ -1190,7 +1336,7 @@ async fn lifecycle_records_end_to_end() {
     );
 
     // Access requests: owner at the customer, status changes published, days waiting.
-    let access = format!("{p}/access-requests/{}", t.records[4].1);
+    let access = format!("{p}/access-requests/{}", t.record("{access_request}"));
     let granted = w
         .ok(
             eng,
@@ -1207,7 +1353,7 @@ async fn lifecycle_records_end_to_end() {
     assert!(granted["granted_at"].is_string());
 
     // Tasks: blocked needs a blocker; waiting on the customer is its own state.
-    let task = format!("{p}/tasks/{}", t.records[5].1);
+    let task = format!("{p}/tasks/{}", t.record("{task}"));
     let (status, body) = w
         .call(
             Some(&eng.token),
@@ -1268,6 +1414,7 @@ async fn lifecycle_records_end_to_end() {
             "fde.company.created.v1",
             "fde.project.created.v1",
             "fde.scope.signed-off.v1",
+            "fde.document.uploaded.v1",
             "fde.project.stage-changed.v1",
             "fde.project.stage-changed.v1",
             "fde.scope.signed-off.v1",
@@ -1549,6 +1696,11 @@ async fn start_sign_in(w: &World) -> (String, String) {
     (state, set_cookie(&headers, "__Host-fde_signin").unwrap())
 }
 
+/// Whether an MCP call returned data: HTTP 200 and a result that is not a tool error.
+fn mcp_succeeded(status: StatusCode, resp: &Value) -> bool {
+    status == StatusCode::OK && resp["result"]["isError"] == json!(false)
+}
+
 #[tokio::test]
 #[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn sign_in_refuses_bad_return_paths_states_and_codes() {
@@ -1772,4 +1924,136 @@ async fn screens_get_their_fields_and_today_in_one_call() {
     let other = user(&org, "other", "member");
     let today = w.ok(&other, "GET", "/v1/today", None, StatusCode::OK).await;
     assert_eq!(today["items"], json!([]));
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn mcp_tools_read_one_project_for_whoever_works_on_it() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let args = json!({"company": t.company, "project": t.project});
+
+    // An assignee, who works on this one project, can use every tool.
+    let (status, resp) = w.tool(Some(&t.assignee.token), "get_scope", args.clone()).await;
+    assert!(mcp_succeeded(status, &resp), "{resp}");
+    let scope = &resp["result"]["structuredContent"]["scope"];
+    assert_eq!(
+        (scope["version"].as_u64(), scope["items"][0]["description"].as_str()),
+        (Some(3), Some("Tier-1 tickets"))
+    );
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_decisions", args.clone()).await;
+    assert_eq!(
+        resp["result"]["structuredContent"]["decisions"][0]["title"],
+        "Use Bedrock"
+    );
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_tasks", args.clone()).await;
+    assert_eq!(
+        resp["result"]["structuredContent"]["tasks"][0]["title"],
+        "Index tickets"
+    );
+    // Company documents need work on the company: the engineer searches them, the assignee cannot.
+    let mut search = args.clone();
+    search["query"] = json!("who approves refunds?");
+    let (status, resp) = w.tool(Some(&t.engineer.token), "search_context", search.clone()).await;
+    assert!(mcp_succeeded(status, &resp), "{resp}");
+    let hits = &resp["result"]["structuredContent"]["results"];
+    assert_eq!(hits[0]["document"], t.record("{document}"));
+    assert!(hits[0]["text"].as_str().unwrap().contains("refunds over 500"));
+
+    // Only the four read-only tools exist.
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let req = Request::builder()
+        .method("POST")
+        .uri(oryxa_fde_mcp::PATH)
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", format!("Bearer {}", t.assignee.token))
+        .body(Body::from(list.to_string()))
+        .unwrap();
+    let resp = w.mcp.clone().oneshot(req).await.unwrap();
+    let body: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let names: BTreeSet<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["get_scope", "list_decisions", "list_tasks", "search_context"])
+    );
+
+    // No token, a bad one, or bad input: refused, and no data.
+    assert_eq!(
+        w.tool(None, "get_scope", args.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        w.tool(Some("not.a.jwt"), "get_scope", args.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, resp) = w
+        .tool(
+            Some(&t.lead.token),
+            "get_scope",
+            json!({"company": "a|b", "project": t.project}),
+        )
+        .await;
+    assert!(!mcp_succeeded(status, &resp), "{resp}");
+    let mut empty = search.clone();
+    empty["query"] = json!("");
+    let (status, resp) = w.tool(Some(&t.lead.token), "search_context", empty).await;
+    assert!(!mcp_succeeded(status, &resp), "{resp}");
+    // Someone else in the organisation who is not on the project.
+    let other = user(&org, "other", "member");
+    let (status, resp) = w.tool(Some(&other.token), "list_tasks", args).await;
+    assert!(!mcp_succeeded(status, &resp));
+    assert_eq!(resp["result"]["content"][0]["text"], "forbidden");
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_project_assignee_reads_no_company_document_by_any_path() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let base = format!("/v1/companies/{}", t.company);
+    let paths = [
+        format!("{base}/documents"),
+        format!("{base}/documents/{}", t.record("{document}")),
+        format!("{base}/search?q=refunds"),
+        format!("{base}/projects/{}/search?q=refunds", t.project),
+    ];
+    let mut search = json!({"company": t.company, "project": t.project, "query": "refunds"});
+    // The assignee works on the project, but the company's documents are not theirs to read.
+    for path in &paths {
+        assert_eq!(
+            w.status(&t.assignee, "GET", path, None).await,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let (status, resp) = w.tool(Some(&t.assignee.token), "search_context", search.clone()).await;
+    assert!(!mcp_succeeded(status, &resp), "{resp}");
+    assert_eq!(resp["result"]["content"][0]["text"], "forbidden");
+    // Everyone who works on the company reads them, on every path.
+    for who in [&t.lead, &t.engineer, &t.admin] {
+        for path in &paths {
+            assert_eq!(
+                w.status(who, "GET", path, None).await,
+                StatusCode::OK,
+                "{} {path}",
+                who.id
+            );
+        }
+        let (status, resp) = w.tool(Some(&who.token), "search_context", search.clone()).await;
+        assert!(mcp_succeeded(status, &resp), "{resp}");
+    }
+    // A project of another company under this company is not found, for those who may search.
+    search["project"] = json!(new_id("prj"));
+    let (status, resp) = w.tool(Some(&t.lead.token), "search_context", search).await;
+    assert!(!mcp_succeeded(status, &resp));
+    assert_eq!(resp["result"]["content"][0]["text"], "not_found");
 }

@@ -483,10 +483,7 @@ pub(crate) async fn scope(
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
 ) -> Result<Json<ScopeOut>, ApiError> {
-    let mut tx = project_tx(&app, &who, c, p).await?;
-    let scope = tx.scope_of_work().await?.ok_or(ApiError::NotFound)?;
-    tx.commit().await?;
-    Ok(Json(scope.into()))
+    Ok(Json(crate::reads::scope(&app, &who, c, p).await?))
 }
 
 #[utoipa::path(post, operation_id = "add_scope_item", path = "/v1/companies/{company}/projects/{project}/scope/items",
@@ -722,11 +719,7 @@ pub(crate) async fn tasks(
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
 ) -> Result<Json<Vec<TaskOut>>, ApiError> {
-    let mut tx = project_tx(&app, &who, c, p).await?;
-    tx.get().await?.ok_or(ApiError::NotFound)?;
-    let list = tx.tasks().await?;
-    tx.commit().await?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    Ok(Json(crate::reads::tasks(&app, &who, c, p).await?))
 }
 
 #[utoipa::path(post, operation_id = "add_task", path = "/v1/companies/{company}/projects/{project}/tasks", tag = "lifecycle",
@@ -795,11 +788,7 @@ pub(crate) async fn decisions(
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
 ) -> Result<Json<Vec<DecisionOut>>, ApiError> {
-    let mut tx = project_tx(&app, &who, c, p).await?;
-    tx.get().await?.ok_or(ApiError::NotFound)?;
-    let list = tx.decisions().await?;
-    tx.commit().await?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    Ok(Json(crate::reads::decisions(&app, &who, c, p).await?))
 }
 
 /// Record a decision: what, who decided, when and why. The log is append-only.

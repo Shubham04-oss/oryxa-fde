@@ -6,6 +6,8 @@
 //! the project or company id, which makes the bus group match `ProjectScope::event_group` and
 //! `CompanyScope::event_group`.
 
+pub mod inbox;
+
 use oryxa_core::TenantId;
 use oryxa_events::Event;
 use oryxa_fde_core::{
