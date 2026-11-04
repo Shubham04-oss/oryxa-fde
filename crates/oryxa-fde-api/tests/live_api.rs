@@ -194,6 +194,23 @@ impl World {
         (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
     }
 
+    /// Sends one JSON-RPC request to the MCP server as `token`: the HTTP status and the response.
+    async fn mcp_rpc(&self, token: &str, body: &Value) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(oryxa_fde_mcp::PATH)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = self.mcp.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
     /// Sends `bytes` as the body with `content_type`, not as JSON.
     async fn send_raw(
         &self,
@@ -2029,6 +2046,38 @@ async fn mcp_tools_read_one_project_for_whoever_works_on_it() {
         resp["result"]["structuredContent"]["tasks"][0]["title"],
         "Index tickets"
     );
+    assert_eq!(resp["result"]["structuredContent"]["next"], Value::Null);
+    // The lists are paged: one more task makes two pages of one, joined by `next`.
+    let tasks = format!("/v1/companies/{}/projects/{}/tasks", t.company, t.project);
+    let body = Some(json!({"title": "Second task", "status": "todo"}));
+    w.ok(&t.lead, "POST", &tasks, body, StatusCode::CREATED).await;
+    let mut paged = args.clone();
+    paged["limit"] = json!(1);
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+    let first = &resp["result"]["structuredContent"];
+    assert_eq!(
+        (
+            first["tasks"][0]["title"].as_str(),
+            first["tasks"].as_array().unwrap().len()
+        ),
+        (Some("Index tickets"), 1)
+    );
+    paged["after"] = first["next"].clone();
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+    let second = &resp["result"]["structuredContent"];
+    assert_eq!(second["tasks"][0]["title"], "Second task");
+    assert_eq!(second["next"], Value::Null);
+    // A cursor that is not one of this project's tasks, or not an id at all, reads nothing.
+    for bad in [json!(new_id("tsk")), json!("a|b")] {
+        paged["after"] = bad;
+        let (status, resp) = w.tool(Some(&t.assignee.token), "list_tasks", paged.clone()).await;
+        assert!(!mcp_succeeded(status, &resp), "{resp}");
+        assert_eq!(resp["result"]["content"][0]["text"], "invalid_after");
+    }
+    let mut decisions = args.clone();
+    decisions["limit"] = json!(1);
+    let (_, resp) = w.tool(Some(&t.assignee.token), "list_decisions", decisions).await;
+    assert_eq!(resp["result"]["structuredContent"]["next"], Value::Null);
     // Company documents need work on the company: the engineer searches them, the assignee cannot.
     let mut search = args.clone();
     search["query"] = json!("who approves refunds?");
@@ -2294,4 +2343,47 @@ async fn a_task_assignee_must_work_on_the_project() {
     for who in [&t.engineer, &t.assignee] {
         w.ok(&t.lead, "POST", &tasks, task(&who.id), StatusCode::CREATED).await;
     }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn mcp_calls_are_reads_and_do_not_rewrite_the_role_mirror() {
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    let created = w
+        .ok(
+            &alice,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Acme"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let company = format!("/v1/companies/{}", created["id"].as_str().unwrap());
+    let dana = user(&org, "dana", "admin");
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+    // The first call mirrors Dana's admin role, as any first request does.
+    assert_eq!(w.mcp_rpc(&dana.token, &list).await.0, StatusCode::OK);
+    // Take the mirror away behind the API's back: only a write to SpiceDB would bring it back.
+    let tenant = TenantId::new(&org).unwrap();
+    let mirror = oryxa_authz::Relationship {
+        resource: oryxa_authz::ObjectRef::new(&tenant, "workspace", "root"),
+        relation: "admin",
+        subject: oryxa_authz::SubjectRef::object(oryxa_authz::ObjectRef::new(&tenant, "user", &dana.id)),
+        caveat: None,
+        expires_at: None,
+    };
+    w.authz
+        .write(&tenant, &[oryxa_authz::Write::Delete(mirror)], &[])
+        .await
+        .unwrap();
+
+    // Every MCP request is a POST, but none of them writes: the mirror stays gone.
+    assert_eq!(w.mcp_rpc(&dana.token, &list).await.0, StatusCode::OK);
+    assert_eq!(w.status(&dana, "GET", &company, None).await, StatusCode::FORBIDDEN);
+    // A real change still re-mirrors the role first.
+    let rename = Some(json!({"name": "Renamed"}));
+    assert_eq!(w.status(&dana, "PATCH", &company, rename).await, StatusCode::OK);
 }

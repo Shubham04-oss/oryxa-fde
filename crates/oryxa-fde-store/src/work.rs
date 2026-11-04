@@ -102,11 +102,67 @@ pub struct DecisionIn {
     pub decided_at: OffsetDateTime,
 }
 
+/// One page of a list, in the list's order; `more` says whether anything follows its last item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub more: bool,
+}
+
+impl<T> Page<T> {
+    /// `limit + 1` rows were asked for, so a row past `limit` means another page follows.
+    fn of(mut rows: Vec<T>, limit: u32) -> Self {
+        let more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        Self { items: rows, more }
+    }
+}
+
 pub(crate) const TASK: &str =
     "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, created_at, updated_at";
 const DECISION: &str = "decision_id, title, rationale, decided_by, decided_at, recorded_by, created_at";
 
 impl ProjectTx {
+    /// Up to `limit` tasks, oldest first, after task `after` (the last of the previous page).
+    /// `StoreError::Missing("after")` if `after` is not a task of this project.
+    pub async fn tasks_page(&mut self, after: Option<&TaskId>, limit: u32) -> Result<Page<Task>, StoreError> {
+        let (t, c, p) = self.keys();
+        let from: Option<(OffsetDateTime, String)> = match after {
+            None => None,
+            Some(a) => Some(
+                sqlx::query_as(
+                    "select created_at, task_id from tasks
+                     where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4",
+                )
+                .bind(&t)
+                .bind(&c)
+                .bind(&p)
+                .bind(a.as_str())
+                .fetch_optional(&mut *self.tx)
+                .await?
+                .ok_or(StoreError::Missing("after"))?,
+            ),
+        };
+        let (at, id) = from.unzip();
+        let rows = sqlx::query(&format!(
+            "select {TASK} from tasks where tenant_id = $1 and company_id = $2 and project_id = $3
+                 and ($4::timestamptz is null or (created_at, task_id) > ($4, $5))
+             order by created_at, task_id limit $6"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(at)
+        .bind(id)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(task)
+        .collect::<Result<_, _>>()?;
+        Ok(Page::of(rows, limit))
+    }
+
     pub async fn tasks(&mut self) -> Result<Vec<Task>, StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(&format!(
@@ -271,6 +327,51 @@ impl ProjectTx {
         .collect()
     }
 
+    /// Up to `limit` decisions, newest decision first, after decision `after` (the last of the
+    /// previous page). `StoreError::Missing("after")` if `after` is not a decision of this project.
+    pub async fn decisions_page(
+        &mut self,
+        after: Option<&DecisionId>,
+        limit: u32,
+    ) -> Result<Page<Decision>, StoreError> {
+        let (t, c, p) = self.keys();
+        let from: Option<(OffsetDateTime, String)> = match after {
+            None => None,
+            Some(a) => Some(
+                sqlx::query_as(
+                    "select decided_at, decision_id from decisions
+                     where tenant_id = $1 and company_id = $2 and project_id = $3 and decision_id = $4",
+                )
+                .bind(&t)
+                .bind(&c)
+                .bind(&p)
+                .bind(a.as_str())
+                .fetch_optional(&mut *self.tx)
+                .await?
+                .ok_or(StoreError::Missing("after"))?,
+            ),
+        };
+        let (at, id) = from.unzip();
+        // The order mixes directions (decided_at desc, decision_id asc), so no row comparison.
+        let rows = sqlx::query(&format!(
+            "select {DECISION} from decisions where tenant_id = $1 and company_id = $2 and project_id = $3
+                 and ($4::timestamptz is null or decided_at < $4 or (decided_at = $4 and decision_id > $5))
+             order by decided_at desc, decision_id limit $6"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(at)
+        .bind(id)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(decision)
+        .collect::<Result<_, _>>()?;
+        Ok(Page::of(rows, limit))
+    }
+
     /// Appends a decision; the log has no update or delete. `None` if the project is not in this
     /// company.
     pub async fn record_decision(
@@ -354,6 +455,31 @@ fn decision(r: PgRow) -> Result<Decision, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_holds_at_most_its_limit_and_says_whether_more_follow() {
+        assert_eq!(
+            Page::of(vec![1, 2, 3], 2),
+            Page {
+                items: vec![1, 2],
+                more: true
+            }
+        );
+        assert_eq!(
+            Page::of(vec![1, 2], 2),
+            Page {
+                items: vec![1, 2],
+                more: false
+            }
+        );
+        assert_eq!(
+            Page::of(Vec::<u8>::new(), 2),
+            Page {
+                items: vec![],
+                more: false
+            }
+        );
+    }
 
     #[test]
     fn a_blocked_task_needs_a_blocker() {

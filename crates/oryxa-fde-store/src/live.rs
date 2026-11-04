@@ -1761,3 +1761,92 @@ async fn roles_like(conn: &mut sqlx::PgConnection, pattern: &str) -> Vec<String>
 
 /// The bootstrap's roles are cluster-wide, so its tests take turns.
 static BOOTSTRAP_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn tasks_and_decisions_page_in_order_from_a_cursor_in_the_project() {
+    use oryxa_fde_core::{DecisionId, TaskId};
+    let store = store().await;
+    let by = actor("alice");
+    let c = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &c).await;
+    let (p, other) = (
+        add_project(&store, &c, "Paged").await,
+        add_project(&store, &c, "Other").await,
+    );
+    // One transaction: every task has the same created_at, so the id breaks the tie.
+    let mut tx = store.project(&p).await.unwrap();
+    let mut tasks: Vec<String> = Vec::new();
+    for i in 0..5 {
+        let id = TaskId::new(new_id("tsk")).unwrap();
+        tx.add_task(&id, &task_in(&format!("Task {i}"), TaskStatus::Todo), &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tasks.push(id.to_string());
+    }
+    tasks.sort();
+    // Two decisions share a time, so paging crosses a tie in the descending order too.
+    let base = time::OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let mut decisions: Vec<(time::OffsetDateTime, String)> = Vec::new();
+    for days in [3, 1, 1, 0, 2] {
+        let id = DecisionId::new(new_id("dec")).unwrap();
+        let at = base - time::Duration::days(days);
+        let v = DecisionIn {
+            title: Name::new("Decided").unwrap(),
+            rationale: Text::new("Because").unwrap(),
+            decided_by: Name::new("Customer").unwrap(),
+            decided_at: at,
+        };
+        tx.record_decision(&id, &v, &by).await.unwrap().unwrap();
+        decisions.push((at, id.to_string()));
+    }
+    decisions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let decisions: Vec<String> = decisions.into_iter().map(|(_, id)| id).collect();
+    tx.commit().await.unwrap();
+
+    let mut tx = store.project(&p).await.unwrap();
+    let (mut seen, mut after, mut pages) = (Vec::new(), None::<TaskId>, 0);
+    loop {
+        let page = tx.tasks_page(after.as_ref(), 2).await.unwrap();
+        assert!(page.items.len() <= 2);
+        seen.extend(page.items.iter().map(|t| t.id.to_string()));
+        pages += 1;
+        if !page.more {
+            break;
+        }
+        after = page.items.last().map(|t| t.id.clone());
+    }
+    assert_eq!((seen, pages), (tasks.clone(), 3));
+    let (mut seen, mut after) = (Vec::new(), None::<DecisionId>);
+    loop {
+        let page = tx.decisions_page(after.as_ref(), 2).await.unwrap();
+        seen.extend(page.items.iter().map(|d| d.id.to_string()));
+        if !page.more {
+            break;
+        }
+        after = page.items.last().map(|d| d.id.clone());
+    }
+    assert_eq!(seen, decisions);
+    // A full last page says nothing follows.
+    let all = tx.tasks_page(None, 5).await.unwrap();
+    assert_eq!((all.items.len(), all.more), (5, false));
+    // A cursor that is not this project's is refused, never read as "from the start".
+    let unknown = TaskId::new(new_id("tsk")).unwrap();
+    assert!(matches!(
+        tx.tasks_page(Some(&unknown), 2).await,
+        Err(StoreError::Missing("after"))
+    ));
+    tx.commit().await.unwrap();
+    let mut tx = store.project(&other).await.unwrap();
+    let theirs = TaskId::new(&tasks[0]).unwrap();
+    assert!(matches!(
+        tx.tasks_page(Some(&theirs), 2).await,
+        Err(StoreError::Missing("after"))
+    ));
+    let theirs = DecisionId::new(&decisions[0]).unwrap();
+    assert!(matches!(
+        tx.decisions_page(Some(&theirs), 2).await,
+        Err(StoreError::Missing("after"))
+    ));
+}

@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::FromRequestParts;
-use axum::http::Method;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, Method};
 use oryxa_authn::{AccessTokenVerifier, JwtError, KeySource, SessionClaims};
 use oryxa_authz::Write;
 use oryxa_core::{TenantId, UserId};
@@ -59,14 +59,12 @@ impl Principal {
             request_id: self.request_id.clone(),
         }
     }
-}
 
-impl FromRequestParts<Arc<App>> for Principal {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, ApiError> {
-        let token = parts
-            .headers
+    /// The caller named by the request's bearer token. `writes` says whether the request may
+    /// change anything: a change always re-mirrors the role, so a demotion stops every write at
+    /// once on every replica; reads trust this replica's last mirror for up to `ROLE_TTL`.
+    pub async fn from_bearer(headers: &HeaderMap, app: &App, writes: bool) -> Result<Self, ApiError> {
+        let token = headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
@@ -83,9 +81,6 @@ impl FromRequestParts<Arc<App>> for Principal {
         let tenant = TenantId::new(org).map_err(|_| ApiError::Unauthorized)?;
         let user = UserId::new(claims.sub).map_err(|_| ApiError::Unauthorized)?;
         let admin = claims.role.as_deref() == Some("admin");
-        // A change always re-mirrors the role, so a demotion stops every write at once on every
-        // replica; reads trust this replica's last mirror for up to ROLE_TTL.
-        let writes = !matches!(parts.method, Method::GET | Method::HEAD);
         app.sync_workspace_role(&tenant, &user, admin, writes).await?;
         Ok(Principal {
             tenant,
@@ -93,6 +88,15 @@ impl FromRequestParts<Arc<App>> for Principal {
             admin,
             request_id: new_id("req"),
         })
+    }
+}
+
+impl FromRequestParts<Arc<App>> for Principal {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, ApiError> {
+        let writes = !matches!(parts.method, Method::GET | Method::HEAD);
+        Self::from_bearer(&parts.headers, app, writes).await
     }
 }
 
