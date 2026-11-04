@@ -94,6 +94,36 @@ from the image. Only the two run routes use root:
   handler's requests are the sandbox's, so their paths and queries could carry customer data or tokens. Query
   strings are redacted as well, in case either is turned back on.
 
+## Signed hosts (Bedrock)
+
+A rule can sign instead of adding a secret, so the harness reaches Bedrock with short-lived IAM credentials and no
+API key:
+
+```json
+{
+  "host": "bedrock-runtime.eu-west-1.amazonaws.com",
+  "sign": { "service": "bedrock", "region": "eu-west-1", "credentials": "bedrock" }
+}
+```
+
+- Only Bedrock's runtime host in the signing region can be signed for, only over HTTPS, and a rule either signs
+  or adds secrets, not both.
+- The handler reads the body (at most 20 MiB) and drops any `authorization` or `x-amz-*` header the sandbox sent.
+  It then signs `host`, `content-type` and the body with AWS Signature Version 4 (`src/sigv4.ts`, checked against
+  AWS's test suite).
+- Responses have the access key id and session token redacted, like an added secret.
+- `credentials` is a secret reference that resolves to one of:
+  - `{ "roleArn", "accessKeyId", "secretAccessKey" }`: a key whose only permission is `sts:AssumeRole` on that
+    role. The gateway assumes the role for an hour, with a session policy that allows only
+    `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`. The session is named
+    `fde-<tenant>-<company>`, so CloudTrail shows whose run called Bedrock. The base key never signs a Bedrock
+    request.
+  - `{ "accessKeyId", "secretAccessKey", "sessionToken", "expiration" }`: temporary credentials used as they are
+    (dev). A key without an expiration is refused.
+- Credentials are cached per company and refreshed when five minutes are left. A failed refresh keeps the cached
+  ones only while more than a minute is left. Past that, or when none can be had, the request is refused (`502`,
+  `credentials_unavailable`) and never sent unsigned.
+
 ## Secrets
 
 `SecretResolver` turns a company's reference into a value. Dev uses `DevSecretResolver`, which reads the
