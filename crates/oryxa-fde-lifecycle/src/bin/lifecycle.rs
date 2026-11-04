@@ -1,6 +1,7 @@
 //! oryxa-fde-lifecycle on ECS Fargate: reads FDE events from its SQS FIFO queue and applies the
 //! lifecycle rules, and every hour drafts last week's update for any active project without one.
-//! `DATABASE_URL` is the runtime login (the store refuses an owner); `LIFECYCLE_QUEUE_URL` the
+//! It signs in as the runtime login with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`),
+//! or locally with `DATABASE_URL` (the store refuses an owner); `LIFECYCLE_QUEUE_URL` is the
 //! queue; `EVENT_SIGNING_KID` and `EVENT_PUBLIC_KEY` the key FDE events are signed with;
 //! `UPDATE_MODEL` the Bedrock model that drafts updates (Claude Opus 5.5 by default). It calls AWS
 //! only (SQS, Bedrock).
@@ -30,7 +31,7 @@ async fn main() -> Result<(), Error> {
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
-    let store = Store::connect(&env("DATABASE_URL")?).await?;
+    let store = Store::from_env().await?;
     let verifier = Verifier::default().trust(
         env("EVENT_SIGNING_KID")?,
         oryxa_fde_events::SOURCE,
