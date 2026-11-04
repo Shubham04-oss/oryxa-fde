@@ -2217,3 +2217,127 @@ async fn a_document_chunked_anew_keeps_its_searchable_set_until_the_new_one_is_c
     // Named now, it needs nothing more from m1.
     assert!(!tx.drop_chunks(&id, "m1", &[]).await.unwrap());
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_lifecycle_tables_are_scoped_and_the_reconcilers_role_reads_project_keys_only() {
+    let store = store().await;
+    let by = actor("alice");
+    let (t, a) = project_world(&store).await;
+    let b = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        add_project(&store, &c, "B").await
+    };
+    let monday = crate::week_of(time::OffsetDateTime::now_utc().date());
+    for p in [&a, &b] {
+        let criterion = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
+        let run = oryxa_fde_core::EvalRunId::new(new_id("evr")).unwrap();
+        let mut tx = store.project(p).await.unwrap();
+        let v = CriterionIn {
+            description: Text::new("Fast").unwrap(),
+            metric: Name::new("p95").unwrap(),
+            comparator: Comparator::AtMost,
+            target: 2.0,
+            unit: None,
+        };
+        tx.add_criterion(&criterion, &v, &by).await.unwrap().unwrap();
+        let event = new_id("evt");
+        assert!(tx.first_delivery(&event).await.unwrap());
+        tx.record_activity(
+            &event,
+            &ActivityIn::PullRequest { number: 1 },
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        assert!(tx.record_criterion_result(&criterion, &run, 1.5).await.unwrap());
+        assert!(tx.raise_suggestion(SuggestionKind::ReadyToDeploy, &run).await.unwrap());
+        assert!(tx.claim_update_attempt(monday, 3).await.unwrap());
+        let body = UpdateBody::new("Done this week").unwrap();
+        assert!(tx.add_update_draft(monday, &body, "echo").await.unwrap());
+        tx.commit().await.unwrap();
+    }
+
+    // In A's transaction an unfiltered query sees only A's rows.
+    let mut tx = store.company(&a.company).await.unwrap();
+    for table in [
+        "processed_events",
+        "project_activity",
+        "criterion_results",
+        "suggestions",
+        "update_drafts",
+        "update_draft_attempts",
+    ] {
+        let companies: Vec<String> = sqlx::query_scalar(&format!("select distinct company_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(companies, [a.company.company.as_str()], "{table}");
+    }
+    // Updates reach only the columns they are for.
+    for sql in [
+        "update update_drafts set model = 'x'",
+        "update update_drafts set week = week + 7",
+        "update suggestions set kind = 'x'",
+        "update criterion_results set criterion_id = 'x'",
+        "update update_draft_attempts set week = week + 7",
+        "update project_activity set subject = 'x'",
+        "delete from processed_events",
+    ] {
+        let mut sp = tx.conn().begin().await.unwrap();
+        assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
+    }
+    drop(tx);
+
+    // The reconciler's role, which reads every tenant, reads a project's keys and nothing else.
+    let mut tx = store.pool.begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_grants")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let keys: i64 =
+        sqlx::query_scalar("select count(*) from (select tenant_id, company_id, project_id from projects) k")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(keys >= 2);
+    for column in ["stage", "name", "summary"] {
+        let mut sp = (&mut *tx).begin().await.unwrap();
+        let read = sqlx::query(&format!("select {column} from projects limit 1"))
+            .execute(&mut *sp)
+            .await;
+        assert!(read.is_err(), "the grants role reads projects.{column}");
+    }
+    drop(tx);
+    // The weekly list is every project's keys, read that way.
+    let listed = store.projects_for_weekly_updates().await.unwrap();
+    assert!(listed.contains(&a) && listed.contains(&b));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_broken_constraint_is_permanent_and_a_dead_connection_is_not() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let mut tx = store.project(&p).await.unwrap();
+    // A check the store does not map itself: a week that is not a Monday.
+    let broken = sqlx::query(
+        "insert into update_draft_attempts (tenant_id, company_id, project_id, week, attempts)
+         values ($1, $2, $3, date '2026-11-03', 1)",
+    )
+    .bind(p.company.tenant.as_str())
+    .bind(p.company.company.as_str())
+    .bind(p.project.as_str())
+    .execute(&mut *tx.tx)
+    .await
+    .map_err(StoreError::from)
+    .unwrap_err();
+    assert!(broken.is_permanent(), "{broken:?}");
+    drop(tx);
+    let gone = Store::connect("postgres://nobody:x@127.0.0.1:1/none")
+        .await
+        .err()
+        .unwrap();
+    assert!(!gone.is_permanent(), "{gone:?}");
+}

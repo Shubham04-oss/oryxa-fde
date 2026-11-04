@@ -60,7 +60,8 @@ pub fn fact<T: Event + DeserializeOwned>(verifier: &Verifier, msg: &Message) -> 
 }
 
 /// Handles one message from the engine's queue. Events the engine has no rule for are not its to
-/// act on and are deleted; a store failure leaves the event for redelivery.
+/// act on and are deleted; a store failure that may pass leaves the event for redelivery, and one
+/// that would fail the same way again quarantines it (see [`outcome`]).
 pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcome {
     let t = msg.detail_type.as_str();
     let applied = if t == AccessRequestStatusChanged::DETAIL_TYPE {
@@ -86,19 +87,31 @@ pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcom
     } else {
         return Outcome::Done;
     };
+    outcome(t, applied)
+}
+
+/// A rule's result as the queue's outcome. Only a failure that may pass (the database unreachable
+/// or busy) is retried; one of the data is quarantined, so it does not hold up the project's
+/// FIFO group until the dead-letter queue.
+pub fn outcome(detail_type: &str, applied: Result<Applied, StoreError>) -> Outcome {
     match applied {
         Ok(applied) => {
-            tracing::info!(detail_type = %t, ?applied, "lifecycle rule applied");
+            tracing::info!(detail_type, ?applied, "lifecycle rule applied");
             Outcome::Done
         }
+        Err(e) if e.is_permanent() => {
+            tracing::error!(detail_type, error = %e, "lifecycle rule cannot apply; quarantined");
+            Outcome::Quarantine
+        }
         Err(e) => {
-            tracing::warn!(detail_type = %t, error = %e, "lifecycle rule failed; will retry");
+            tracing::warn!(detail_type, error = %e, "lifecycle rule failed; will retry");
             Outcome::Retry
         }
     }
 }
 
-/// A granted access request unblocks the tasks blocked on it.
+/// A granted access request unblocks the tasks blocked on it, if the store still has it granted:
+/// a grant delivered after a revocation unblocks nothing.
 pub async fn on_access_changed(store: &Store, f: &Fact<AccessRequestStatusChanged>) -> Result<Applied, StoreError> {
     let mut tx = store.project(&f.data.scope(&f.tenant)).await?;
     if !tx.first_delivery(&f.event_id).await? {
@@ -165,4 +178,27 @@ async fn record<T>(
     tx.record_activity(&f.event_id, what, f.occurred_at).await?;
     tx.commit().await?;
     Ok(Applied::Recorded { suggested: false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_failure_that_may_pass_is_retried() {
+        let t = "fde.access-request.status-changed.v1";
+        assert_eq!(outcome(t, Ok(Applied::Nothing)), Outcome::Done);
+        for permanent in [
+            StoreError::Rejected("value"),
+            StoreError::Corrupt("task id"),
+            StoreError::Conflict,
+        ] {
+            assert_eq!(outcome(t, Err(permanent)), Outcome::Quarantine);
+        }
+        assert_eq!(outcome(t, Err(StoreError::Db(sqlx_io()))), Outcome::Retry);
+    }
+
+    fn sqlx_io() -> sqlx::Error {
+        sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"))
+    }
 }

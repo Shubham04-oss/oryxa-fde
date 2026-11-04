@@ -3,15 +3,16 @@
 //! It signs in as the runtime login with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`),
 //! or locally with `DATABASE_URL` (the store refuses an owner); `LIFECYCLE_QUEUE_URL` is the
 //! queue; `EVENT_SIGNING_KID` and `EVENT_PUBLIC_KEY` the key FDE events are signed with;
-//! `UPDATE_MODEL` the Bedrock model that drafts updates (Claude Opus 5.5 by default). It calls AWS
-//! only (SQS, Bedrock).
+//! `UPDATE_MODEL` the Bedrock inference profile that drafts updates: Claude Opus 5.5 is reached
+//! only through one (e.g. `<geo>.anthropic.claude-opus-5-5`; a `global.` profile leaves the
+//! region), so there is no default. It calls AWS only (SQS, Bedrock).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use oryxa_events::Verifier;
 use oryxa_fde_events::inbox::sqs;
-use oryxa_fde_lifecycle::drafts::{BedrockDrafter, DEFAULT_MODEL, Drafter, draft_due};
+use oryxa_fde_lifecycle::drafts::{BedrockDrafter, DraftLimits, Drafter, draft_due};
 use oryxa_fde_lifecycle::rules::handle;
 use oryxa_fde_store::Store;
 use tracing_subscriber::EnvFilter;
@@ -38,14 +39,14 @@ async fn main() -> Result<(), Error> {
         &env("EVENT_PUBLIC_KEY")?,
     )?;
     let aws = aws_config::load_from_env().await;
-    let model = std::env::var("UPDATE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+    let model = env("UPDATE_MODEL")?;
     let drafter: Arc<dyn Drafter> = Arc::new(BedrockDrafter::new(aws_sdk_bedrockruntime::Client::new(&aws), model));
 
     let (drafts_store, drafts) = (store.clone(), drafter.clone());
     tokio::spawn(async move {
         loop {
             let today = time::OffsetDateTime::now_utc().date();
-            match draft_due(&drafts_store, drafts.as_ref(), today).await {
+            match draft_due(&drafts_store, drafts.as_ref(), today, &DraftLimits::default()).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(drafted = n, "weekly updates drafted"),
                 Err(e) => tracing::warn!(error = %e, "weekly drafts failed"),

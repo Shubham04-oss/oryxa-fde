@@ -9,7 +9,7 @@ use sqlx::postgres::PgRow;
 use time::{Date, Duration, OffsetDateTime, Time, Weekday};
 
 use crate::engine::Activity;
-use crate::{Name, ProjectTx, StoreError, TaskStatus, Text, audit, id, name, text};
+use crate::{Name, ProjectTx, Store, StoreError, TaskStatus, Text, audit, id, name, text};
 
 /// Longest update accepted.
 pub const MAX_UPDATE_CHARS: usize = 20_000;
@@ -98,7 +98,7 @@ pub struct WeekFacts {
     pub stage: oryxa_fde_core::Stage,
     pub week: Date,
     pub activity: Vec<Activity>,
-    /// Tasks marked done this week.
+    /// Tasks that moved to done this week (and are still done).
     pub done: Vec<Name>,
     /// Tasks still blocked or waiting on the customer, with what blocks them.
     pub stuck: Vec<(Name, TaskStatus, Option<Text>)>,
@@ -128,7 +128,7 @@ impl ProjectTx {
         let (t, c, p) = self.keys();
         let done = sqlx::query_scalar::<_, String>(
             "select title from tasks where tenant_id = $1 and company_id = $2 and project_id = $3
-                 and status = 'done' and updated_at >= $4 and updated_at < $5 order by updated_at, task_id",
+                 and status = 'done' and done_at >= $4 and done_at < $5 order by done_at, task_id",
         )
         .bind(&t)
         .bind(&c)
@@ -205,6 +205,32 @@ impl ProjectTx {
             decisions,
             access,
         }))
+    }
+
+    /// Counts one model call for the update of the week starting `monday`: `false`, and nothing
+    /// counted, once `max` calls were made, so a draft the model keeps refusing is not paid for
+    /// every hour.
+    pub async fn claim_update_attempt(&mut self, monday: Date, max: u32) -> Result<bool, StoreError> {
+        week_bounds(monday)?;
+        let (t, c, p) = self.keys();
+        let claimed: Option<i32> = sqlx::query_scalar(
+            "insert into update_draft_attempts (tenant_id, company_id, project_id, week, attempts)
+             select $1, $2, $3, $4, 1
+             where $5 >= 1
+                 and exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)
+             on conflict (tenant_id, project_id, week) do update
+                 set attempts = update_draft_attempts.attempts + 1, last_attempt_at = now()
+                 where update_draft_attempts.attempts < $5
+             returning attempts",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(monday)
+        .bind(i64::from(max))
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        Ok(claimed.is_some())
     }
 
     /// Stores the drafted update of the week starting `monday`, unless the week has one already.
@@ -349,6 +375,43 @@ fn draft(r: PgRow) -> Result<UpdateDraft, StoreError> {
         decided_by: user("decided_by")?,
         decided_at: r.try_get("decided_at")?,
     })
+}
+
+/// Held while one copy of the service drafts one project's week; another copy finds it taken and
+/// skips that week. A session advisory lock on a connection of its own, never back in the pool:
+/// closing the connection releases it, so a drafter that dies never keeps it.
+pub struct DraftingLock {
+    conn: sqlx::PgConnection,
+}
+
+impl DraftingLock {
+    pub async fn release(self) -> Result<(), StoreError> {
+        use sqlx::Connection;
+        self.conn.close().await?;
+        Ok(())
+    }
+}
+
+impl Store {
+    /// The drafting lock of one project's week, if no other copy holds it.
+    pub async fn lock_drafting(
+        &self,
+        scope: &oryxa_fde_core::ProjectScope,
+        monday: Date,
+    ) -> Result<Option<DraftingLock>, StoreError> {
+        let mut conn = self.pool.acquire().await?;
+        let key = format!(
+            "oryxa-fde-lifecycle|draft|{}|{}|{monday}",
+            scope.tenant(),
+            scope.project
+        );
+        let locked: bool = sqlx::query_scalar("select pg_try_advisory_lock(hashtextextended($1, 0))")
+            .bind(&key)
+            .fetch_one(&mut *conn)
+            .await?;
+        // Unlocked, the connection goes back to the pool holding nothing.
+        Ok(locked.then(|| DraftingLock { conn: conn.detach() }))
+    }
 }
 
 #[cfg(test)]

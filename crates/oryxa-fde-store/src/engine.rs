@@ -200,14 +200,29 @@ impl ProjectTx {
         .collect()
     }
 
-    /// Unblocks the project's tasks blocked on `access`: back to do, with the blocker cleared.
-    /// Returns the tasks it moved.
+    /// Unblocks the project's tasks blocked on `access`, if the request is still granted: back to
+    /// do, with the blocker cleared. Returns the tasks it moved. The request's row is locked until
+    /// commit, so a revocation cannot land between the check and the unblock.
     pub async fn unblock_tasks_blocked_by(
         &mut self,
         access: &AccessRequestId,
         by: &Actor,
     ) -> Result<Vec<TaskId>, StoreError> {
         let (t, c, p) = self.keys();
+        // The event says it was granted; the store says whether it still is (a late delivery).
+        let status: Option<String> = sqlx::query_scalar(
+            "select status from access_requests
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and access_request_id = $4 for share",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(access.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        if status.as_deref() != Some("granted") {
+            return Ok(Vec::new());
+        }
         let raw: Vec<String> = sqlx::query_scalar(
             "update tasks set status = 'todo', blocker = null, blocked_by = null, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and blocked_by = $4 and status = 'blocked'
@@ -366,14 +381,14 @@ impl ProjectTx {
 }
 
 impl Store {
-    /// Every project not yet in operation, across tenants, for the weekly drafts. Read through the
-    /// reconciler's role, which already reads every project's keys and here also its stage.
+    /// Every project's keys, across tenants, for the weekly drafts: read through the reconciler's
+    /// role, which reads exactly these and nothing else of a project. Each draft then reads its
+    /// project, stage included, under that project's own scope.
     pub async fn projects_for_weekly_updates(&self) -> Result<Vec<ProjectScope>, StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("set local role oryxa_fde_grants").execute(&mut *tx).await?;
         let rows = sqlx::query(
-            "select tenant_id, company_id, project_id from projects where stage <> 'operate'
-             order by tenant_id, company_id, project_id",
+            "select tenant_id, company_id, project_id from projects order by tenant_id, company_id, project_id",
         )
         .fetch_all(&mut *tx)
         .await?;

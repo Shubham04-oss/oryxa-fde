@@ -4,6 +4,8 @@
 
 -- A task blocked on an access request of its project is unblocked when the request is granted.
 alter table access_requests add unique (tenant_id, company_id, project_id, access_request_id);
+-- When a task last moved to done: the week's update lists the tasks done that week.
+alter table tasks add column done_at timestamptz;
 alter table tasks add column blocked_by text,
     add foreign key (tenant_id, company_id, project_id, blocked_by)
         references access_requests (tenant_id, company_id, project_id, access_request_id)
@@ -87,6 +89,19 @@ create table update_drafts (
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)
 );
 
+-- Model calls made for a week's update: capped, so a refused or cut-short draft is not paid for
+-- every hour.
+create table update_draft_attempts (
+    tenant_id       text not null,
+    company_id      text not null,
+    project_id      text not null,
+    week            date not null check (extract(isodow from week) = 1),
+    attempts        int not null check (attempts > 0),
+    last_attempt_at timestamptz not null default now(),
+    primary key (tenant_id, project_id, week),
+    foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)
+);
+
 alter table processed_events enable row level security;
 alter table processed_events force row level security;
 alter table project_activity enable row level security;
@@ -97,16 +112,20 @@ alter table suggestions enable row level security;
 alter table suggestions force row level security;
 alter table update_drafts enable row level security;
 alter table update_drafts force row level security;
+alter table update_draft_attempts enable row level security;
+alter table update_draft_attempts force row level security;
 
 create policy in_scope on processed_events to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on project_activity to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on criterion_results to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on suggestions to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on update_drafts to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
+create policy in_scope on update_draft_attempts to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 
 grant select, insert on processed_events, project_activity to oryxa_fde_app;
-grant select, insert, update on criterion_results, suggestions, update_drafts to oryxa_fde_app;
-
--- The weekly drafts list every project's keys and stage through the role that already reads every
--- project's keys for the grant reconciler; it gains the stage only.
-grant select (stage) on projects to oryxa_fde_grants;
+-- Updates name the columns they change, as 0007 does.
+grant select, insert, update (eval_run_id, value, measured_at) on criterion_results to oryxa_fde_app;
+grant select, insert, update (eval_run_id, raised_at, dismissed_by, dismissed_at) on suggestions to oryxa_fde_app;
+grant select, insert, update (body, status, edited_by, edited_at, decided_by, decided_at) on update_drafts
+    to oryxa_fde_app;
+grant select, insert, update (attempts, last_attempt_at) on update_draft_attempts to oryxa_fde_app;

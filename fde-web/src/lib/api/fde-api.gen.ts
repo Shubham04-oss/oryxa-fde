@@ -236,6 +236,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The project's activity: finished agent runs and eval runs and merged pull requests, newest
+         *     first.
+         */
+        get: operations["list_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/assignees": {
         parameters: {
             query?: never;
@@ -461,6 +481,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The engine's open suggestions for the project. It never acts on one: moving the stage is the
+         *     FDE's.
+         */
+        get: operations["list_suggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/suggestions/{kind}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss an open suggestion; the engine raises it again only from a later eval run. */
+        post: operations["dismiss_suggestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/systems": {
         parameters: {
             query?: never;
@@ -505,6 +562,75 @@ export interface paths {
         put: operations["update_task"];
         post?: never;
         delete: operations["remove_task"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's weekly updates, newest week first. */
+        get: operations["list_updates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/updates/{week}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One week's update. */
+        get: operations["get_update"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Edit a drafted update's text; only while it is a draft. */
+        patch: operations["edit_update"];
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/updates/{week}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve a drafted update. Final; it is only marked approved, and nothing is sent from here. */
+        post: operations["approve_update"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/updates/{week}/discard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Discard a drafted update. Final. */
+        post: operations["discard_update"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -690,6 +816,22 @@ export interface components {
         };
         /** @enum {string} */
         AccessState: "requested" | "in_progress" | "granted" | "denied" | "revoked";
+        /** @enum {string} */
+        ActivityKind: "agent_run_finished" | "eval_run_finished" | "pull_request_merged";
+        ActivityOut: {
+            /** Format: int32 */
+            failed?: number | null;
+            kind: components["schemas"]["ActivityKind"];
+            occurred_at: string;
+            outcome?: components["schemas"]["RunOutcomeOut"] | null;
+            /**
+             * Format: int32
+             * @description An eval run's cases passed and failed.
+             */
+            passed?: number | null;
+            /** @description The run's id, or the pull request's number. */
+            subject: string;
+        };
         AssigneeOut: {
             added_at: string;
             /** @description WorkOS user id. */
@@ -845,6 +987,8 @@ export interface components {
             name: string;
             stage: components["schemas"]["ProjectStage"];
         };
+        /** @enum {string} */
+        RunOutcomeOut: "succeeded" | "failed" | "rejected" | "cancelled";
         ScopeChangeOut: {
             action: string;
             actor: string;
@@ -940,6 +1084,14 @@ export interface components {
          * @enum {string}
          */
         StakeholderPart: "sponsor" | "champion" | "user" | "it" | "security" | "other";
+        /** @enum {string} */
+        SuggestionKindOut: "ready_to_deploy";
+        SuggestionOut: {
+            /** @description The eval run that showed it. */
+            eval_run: string;
+            kind: components["schemas"]["SuggestionKindOut"];
+            raised_at: string;
+        };
         SystemBody: {
             description?: string | null;
             /** @description What sort of system, e.g. "CRM" or "data warehouse". */
@@ -958,6 +1110,11 @@ export interface components {
         TaskBody: {
             /** @description The WorkOS user who works it. */
             assignee?: string | null;
+            /**
+             * @description The project's access request it is blocked on, only while `blocked`: once the request is
+             *     granted, the task goes back to `todo`.
+             */
+            blocked_by?: string | null;
             /** @description What blocks the task; required when the status is `blocked`. */
             blocker?: string | null;
             /** @description Due date, `YYYY-MM-DD`. */
@@ -969,6 +1126,8 @@ export interface components {
         };
         TaskOut: {
             assignee?: string | null;
+            /** @description The access request it is blocked on. */
+            blocked_by?: string | null;
             blocker?: string | null;
             created_at: string;
             /** @description `YYYY-MM-DD`. */
@@ -1001,6 +1160,26 @@ export interface components {
         TodayOut: {
             items: components["schemas"]["TodayItemOut"][];
         };
+        UpdateBodyIn: {
+            /** @description The update's text: 1 to 20,000 characters. */
+            body: string;
+        };
+        UpdateOut: {
+            body: string;
+            decided_at?: string | null;
+            /** @description Who approved or discarded it. */
+            decided_by?: string | null;
+            drafted_at: string;
+            edited_at?: string | null;
+            edited_by?: string | null;
+            /** @description The model that drafted it. */
+            model: string;
+            status: components["schemas"]["UpdateState"];
+            /** @description The Monday of the ISO week it covers, `YYYY-MM-DD`. */
+            week: string;
+        };
+        /** @enum {string} */
+        UpdateState: "draft" | "approved" | "discarded";
     };
     responses: never;
     parameters: never;
@@ -1902,6 +2081,61 @@ export interface operations {
             };
         };
     };
+    list_activity: {
+        parameters: {
+            query?: {
+                /** @description At most this many entries, newest first (1 to 200, default 50). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_assignees: {
         parameters: {
             query?: never;
@@ -2751,6 +2985,101 @@ export interface operations {
             };
         };
     };
+    list_suggestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    dismiss_suggestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Which suggestion */
+                kind: components["schemas"]["SuggestionKindOut"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_project_systems: {
         parameters: {
             query?: never;
@@ -3003,6 +3332,296 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_updates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description The week's Monday, YYYY-MM-DD */
+                week: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    edit_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description The week's Monday, YYYY-MM-DD */
+                week: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateBodyIn"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    approve_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description The week's Monday, YYYY-MM-DD */
+                week: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    discard_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description The week's Monday, YYYY-MM-DD */
+                week: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

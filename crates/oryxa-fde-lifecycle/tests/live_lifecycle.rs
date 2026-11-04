@@ -16,7 +16,7 @@ use oryxa_fde_events::inbox::{Message, Outcome};
 use oryxa_fde_events::{
     AccessRequestStatusChanged, AccessStatus, AgentRunFinished, EvalRunFinished, PullRequestMerged, RunOutcome,
 };
-use oryxa_fde_lifecycle::drafts::{Drafted, EchoDrafter, draft_due, draft_week};
+use oryxa_fde_lifecycle::drafts::{DraftLimits, Drafted, Drafter, EchoDrafter, draft_due, draft_week};
 use oryxa_fde_lifecycle::rules::handle;
 use oryxa_fde_store::{
     AccessRequestIn, ActivityIn, Actor, CompanyIn, Comparator, CriterionIn, DecisionIn, Name, ProjectIn, Store,
@@ -97,6 +97,26 @@ async fn access(store: &Store, p: &ProjectScope, what: &str) -> AccessRequestId 
     id
 }
 
+/// Sets the request's status in the store, as an FDE does.
+async fn set_status(store: &Store, p: &ProjectScope, id: &AccessRequestId, status: AccessStatus) {
+    let mut tx = store.project(p).await.unwrap();
+    let current = tx
+        .access_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| &a.id == id)
+        .unwrap();
+    let v = AccessRequestIn {
+        description: current.description,
+        system: None,
+        owner: None,
+        status,
+    };
+    tx.update_access_request(id, &v, &actor()).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+}
+
 fn task_in(title: &str, status: TaskStatus, blocked_by: Option<&AccessRequestId>) -> TaskIn {
     TaskIn {
         title: Name::new(title).unwrap(),
@@ -139,6 +159,7 @@ async fn a_granted_access_request_unblocks_only_the_tasks_blocked_on_it() {
     let loose = add_task(&store, &p, &task_in("Wait on legal", TaskStatus::Blocked, None)).await;
     let open = add_task(&store, &p, &task_in("Write runbook", TaskStatus::Todo, None)).await;
 
+    set_status(&store, &p, &vpn, AccessStatus::Granted).await;
     let granted = message(
         &signer,
         &t,
@@ -166,6 +187,16 @@ async fn a_granted_access_request_unblocks_only_the_tasks_blocked_on_it() {
     tx.commit().await.unwrap();
     assert_eq!(handle(&store, &verifier, &granted).await, Outcome::Done);
     assert_eq!(task_state(&store, &p, &on_vpn).await.0, TaskStatus::Blocked);
+    // Revoked since, a grant the relay delivers late (another event of the same grant) unblocks
+    // nothing either: the store says the request is no longer granted.
+    set_status(&store, &p, &vpn, AccessStatus::Revoked).await;
+    let late = message(
+        &signer,
+        &t,
+        &AccessRequestStatusChanged::new(&p, vpn.clone(), AccessStatus::InProgress, AccessStatus::Granted),
+    );
+    assert_eq!(handle(&store, &verifier, &late).await, Outcome::Done);
+    assert_eq!(task_state(&store, &p, &on_vpn).await.0, TaskStatus::Blocked);
 
     // A change that is not a grant unblocks nothing.
     let denied = message(
@@ -177,6 +208,7 @@ async fn a_granted_access_request_unblocks_only_the_tasks_blocked_on_it() {
     assert_eq!(task_state(&store, &p, &on_db).await.0, TaskStatus::Blocked);
 
     // The same access request id granted in another company, or another tenant, is not this one.
+    set_status(&store, &p, &db, AccessStatus::Granted).await;
     let other = project(&store, &t).await;
     let elsewhere = project(&store, &TenantId::new(new_id("org")).unwrap()).await;
     for s in [&other, &elsewhere] {
@@ -407,10 +439,12 @@ async fn agent_runs_and_merged_pull_requests_land_in_the_activity_once() {
 /// Backdates the project's records to `at`, as if made then; read as the owner.
 async fn made_at(p: &ProjectScope, at: OffsetDateTime) {
     let owner = testing::admin().await;
-    for table in ["tasks", "decisions"] {
-        let column = if table == "tasks" { "updated_at" } else { "created_at" };
+    for (table, columns) in [
+        ("tasks", "updated_at = $3, done_at = $3"),
+        ("decisions", "created_at = $3"),
+    ] {
         sqlx::query(&format!(
-            "update {table} set {column} = $3 where tenant_id = $1 and project_id = $2"
+            "update {table} set {columns} where tenant_id = $1 and project_id = $2"
         ))
         .bind(p.tenant().as_str())
         .bind(p.project.as_str())
@@ -464,7 +498,7 @@ async fn a_weekly_draft_holds_its_own_project_only_and_waits_for_an_fde() {
     busy_week(&store, &c, "Charlie", in_week).await;
 
     assert_eq!(
-        draft_week(&store, &EchoDrafter, &a, monday).await.unwrap(),
+        draft_week(&store, &EchoDrafter, &a, monday, &limits()).await.unwrap(),
         Drafted::Drafted
     );
     let mut tx = store.project(&a).await.unwrap();
@@ -479,16 +513,18 @@ async fn a_weekly_draft_holds_its_own_project_only_and_waits_for_an_fde() {
     drop(tx);
     // Drafted once; a week with nothing in it gets none.
     assert_eq!(
-        draft_week(&store, &EchoDrafter, &a, monday).await.unwrap(),
+        draft_week(&store, &EchoDrafter, &a, monday, &limits()).await.unwrap(),
         Drafted::Exists
     );
     let quiet = project(&store, &t).await;
     assert_eq!(
-        draft_week(&store, &EchoDrafter, &quiet, monday).await.unwrap(),
+        draft_week(&store, &EchoDrafter, &quiet, monday, &limits())
+            .await
+            .unwrap(),
         Drafted::Quiet
     );
     // The weekly job drafts the rest, each from its own project.
-    draft_due(&store, &EchoDrafter, today).await.unwrap();
+    draft_due(&store, &EchoDrafter, today, &limits()).await.unwrap();
     for (s, own) in [(&b, "Bravo"), (&c, "Charlie")] {
         let mut tx = store.project(s).await.unwrap();
         let body = tx.update_draft(monday).await.unwrap().unwrap().body.as_str().to_owned();
@@ -522,4 +558,173 @@ async fn a_weekly_draft_holds_its_own_project_only_and_waits_for_an_fde() {
             .unwrap()
             .is_none()
     );
+}
+
+fn limits() -> DraftLimits {
+    DraftLimits::default()
+}
+
+/// A model that counts its calls and fails or hangs.
+struct Broken {
+    calls: std::sync::atomic::AtomicU32,
+    hang: bool,
+}
+
+impl Drafter for Broken {
+    fn model(&self) -> &str {
+        "broken"
+    }
+
+    fn draft<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, oryxa_fde_lifecycle::LifecycleError>> + Send + 'a>,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let hang = self.hang;
+        Box::pin(async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            Err(oryxa_fde_lifecycle::LifecycleError::Model("stopped: refusal".into()))
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn model_calls_are_capped_timed_and_made_by_one_drafter_at_a_time() {
+    let store = testing::store().await;
+    let t = TenantId::new(new_id("org")).unwrap();
+    let monday = week_of(OffsetDateTime::now_utc().date()) - Duration::weeks(1);
+    let in_week = monday.with_hms(10, 0, 0).unwrap().assume_utc() + Duration::days(2);
+
+    // A model that keeps refusing gets three calls for the week, then none.
+    let p = project(&store, &t).await;
+    busy_week(&store, &p, "Alpha", in_week).await;
+    let refusing = Broken {
+        calls: Default::default(),
+        hang: false,
+    };
+    for _ in 0..3 {
+        assert!(draft_week(&store, &refusing, &p, monday, &limits()).await.is_err());
+    }
+    assert_eq!(
+        draft_week(&store, &refusing, &p, monday, &limits()).await.unwrap(),
+        Drafted::GaveUp
+    );
+    assert_eq!(refusing.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    // Next week is a week of its own.
+    let next = monday + Duration::weeks(1);
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(tx.claim_update_attempt(next, 3).await.unwrap());
+    drop(tx);
+
+    // A model that never answers is cut off at the deadline, and the call still counts.
+    let q = project(&store, &t).await;
+    busy_week(&store, &q, "Bravo", in_week).await;
+    let hanging = Broken {
+        calls: Default::default(),
+        hang: true,
+    };
+    let quick = DraftLimits {
+        timeout: std::time::Duration::from_millis(200),
+        attempts: 1,
+    };
+    let started = std::time::Instant::now();
+    let err = draft_week(&store, &hanging, &q, monday, &quick).await.unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(
+        draft_week(&store, &hanging, &q, monday, &quick).await.unwrap(),
+        Drafted::GaveUp
+    );
+
+    // While another copy holds the project's week, this one skips it and calls nothing; after,
+    // it drafts.
+    let r = project(&store, &t).await;
+    busy_week(&store, &r, "Charlie", in_week).await;
+    let held = store.lock_drafting(&r, monday).await.unwrap().unwrap();
+    assert!(store.lock_drafting(&r, monday).await.unwrap().is_none());
+    assert_eq!(
+        draft_week(&store, &EchoDrafter, &r, monday, &limits()).await.unwrap(),
+        Drafted::Busy
+    );
+    held.release().await.unwrap();
+    assert_eq!(
+        draft_week(&store, &EchoDrafter, &r, monday, &limits()).await.unwrap(),
+        Drafted::Drafted
+    );
+
+    // A project in operation gets no more weekly updates, and no call.
+    let s = project(&store, &t).await;
+    busy_week(&store, &s, "Delta", in_week).await;
+    let mut tx = store.project(&s).await.unwrap();
+    for stage in [
+        Stage::Scope,
+        Stage::Access,
+        Stage::Build,
+        Stage::Evaluate,
+        Stage::Deploy,
+        Stage::Handoff,
+        Stage::Operate,
+    ] {
+        tx.change_stage(stage, &actor()).await.unwrap().unwrap();
+    }
+    tx.commit().await.unwrap();
+    let counting = Broken {
+        calls: Default::default(),
+        hang: false,
+    };
+    assert_eq!(
+        draft_week(&store, &counting, &s, monday, &limits()).await.unwrap(),
+        Drafted::Operating
+    );
+    assert_eq!(counting.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_week_lists_the_tasks_that_moved_to_done_in_it_not_those_only_touched() {
+    let store = testing::store().await;
+    let t = TenantId::new(new_id("org")).unwrap();
+    let monday = week_of(OffsetDateTime::now_utc().date()) - Duration::weeks(1);
+    let in_week = monday.with_hms(10, 0, 0).unwrap().assume_utc() + Duration::days(2);
+    let p = project(&store, &t).await;
+    // Done two weeks before, then edited during the week: touched, not done in it.
+    let old = add_task(&store, &p, &task_in("Done long ago", TaskStatus::Done, None)).await;
+    made_at(&p, in_week - Duration::weeks(2)).await;
+    let mut tx = store.project(&p).await.unwrap();
+    tx.update_task(
+        &old,
+        &task_in("Done long ago, renamed", TaskStatus::Done, None),
+        &actor(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tx.commit().await.unwrap();
+    let owner = testing::admin().await;
+    sqlx::query("update tasks set updated_at = $3 where tenant_id = $1 and task_id = $2")
+        .bind(t.as_str())
+        .bind(old.as_str())
+        .bind(in_week)
+        .execute(&owner)
+        .await
+        .unwrap();
+    // Moved to done during the week.
+    let fresh = add_task(&store, &p, &task_in("Done this week", TaskStatus::Done, None)).await;
+    sqlx::query("update tasks set updated_at = $3, done_at = $3 where tenant_id = $1 and task_id = $2")
+        .bind(t.as_str())
+        .bind(fresh.as_str())
+        .bind(in_week)
+        .execute(&owner)
+        .await
+        .unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    let facts = tx.week_facts(monday).await.unwrap().unwrap();
+    let done: Vec<&str> = facts.done.iter().map(|n| n.as_str()).collect();
+    assert_eq!(done, ["Done this week"]);
 }

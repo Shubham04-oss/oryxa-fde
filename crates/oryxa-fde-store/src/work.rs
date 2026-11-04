@@ -193,9 +193,9 @@ impl ProjectTx {
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "insert into tasks (tenant_id, company_id, project_id, task_id, title, status, blocker, due_on, assignee,
-                 waiting_on, waiting_since, created_by, blocked_by)
+                 waiting_on, waiting_since, created_by, blocked_by, done_at)
              select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $6 = 'waiting_on_customer' then now() end, $11,
-                 $12
+                 $12, case when $6 = 'done' then now() end
              where exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)
              returning {TASK}"
         ))
@@ -244,6 +244,7 @@ impl ProjectTx {
         let row = sqlx::query(&format!(
             "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
                  waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
+                 done_at = case when $6 = 'done' then coalesce(done_at, now()) end,
                  blocked_by = $11, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4 returning {TASK}"
         ))
