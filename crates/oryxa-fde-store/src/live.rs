@@ -2007,7 +2007,7 @@ async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
     assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 2);
     // A complete set is never dropped, whoever asks.
     assert!(!tx.drop_chunks(&id, "m1", &[]).await.unwrap());
-    assert_eq!(tx.stored_chunks(&id, "m1").await.unwrap().len(), 2);
+    assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 2);
     tx.commit().await.unwrap();
 
     // Re-embedded under m2, which replaces m1: until its set is complete, search reads m1's, once.
@@ -2109,4 +2109,108 @@ async fn a_document_an_older_worker_ingested_stays_findable() {
     // And an interrupted set is dropped, under the document's lock.
     assert!(tx.drop_chunks(&pending, "m1", &[]).await.unwrap());
     assert!(tx.stored_chunks(&pending, "m1").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_document_chunked_anew_keeps_its_searchable_set_until_the_new_one_is_complete() {
+    let store = store().await;
+    let admin = admin().await;
+    let by = actor("alice");
+    let s = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &s).await;
+    let id = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    let v = DocumentIn {
+        name: Name::new("runbook.md").unwrap(),
+        content_type: ContentType::Markdown,
+        size_bytes: 5,
+        sha256: "00".repeat(32),
+        blob_key: format!("{}/{}/documents/{id}", s.tenant, s.company),
+    };
+    let mut tx = store.company(&s).await.unwrap();
+    tx.add_document(&id, &v, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    // An older worker's set: two chunks under m1, no model named on the document.
+    for (i, text) in ["Refunds over 500", "need approval"].iter().enumerate() {
+        sqlx::query(&format!(
+            "insert into document_chunks (tenant_id, company_id, document_id, chunk_index, content, embedding,
+                 embedding_model)
+             values ($1, $2, $3, $4, $5, '[1{}]'::vector, 'm1')",
+            ",0".repeat(1023)
+        ))
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(i as i32)
+        .bind(*text)
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+    sqlx::query("update documents set status = 'ingested', chunks = 2 where tenant_id = $1 and document_id = $2")
+        .bind(s.tenant.as_str())
+        .bind(id.as_str())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let found = async |tx: &mut CompanyTx| -> Vec<String> {
+        let mut hits: Vec<String> = tx
+            .search_vector(&axis(0), "m1", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| h.content.as_str().to_owned())
+            .collect();
+        hits.sort();
+        hits
+    };
+    let old = vec!["Refunds over 500".to_owned(), "need approval".to_owned()];
+
+    // This worker chunks it differently under the same model: nothing of the old set is "stored"
+    // for it to resume, and dropping its interrupted set leaves the old set alone.
+    let mut tx = store.company(&s).await.unwrap();
+    assert!(tx.stored_chunks(&id, "m1").await.unwrap().is_empty());
+    let new_chunk = |i: u32, t: &str| ChunkIn {
+        index: i,
+        content: Text::new(t).unwrap(),
+        embedding: axis(0),
+    };
+    assert!(
+        tx.add_chunks(&id, "m1", &[], &[new_chunk(0, "Refunds over 500 need approval")])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        found(&mut tx).await,
+        old,
+        "the old set alone, while the new one is written"
+    );
+    assert_eq!(tx.search_text("refunds", 10).await.unwrap().len(), 1);
+    assert!(tx.drop_chunks(&id, "m1", &[]).await.unwrap());
+    assert_eq!(found(&mut tx).await, old, "dropping the new set keeps the old one");
+    // Written again in full, then finished: the new set replaces the old.
+    let batch = [
+        new_chunk(0, "Refunds over 500 need approval"),
+        new_chunk(1, "from the support lead"),
+    ];
+    assert!(tx.add_chunks(&id, "m1", &[], &batch[..1]).await.unwrap());
+    assert!(matches!(
+        tx.finish_chunks(&id, "m1", &[], 2).await,
+        Err(StoreError::Rejected("chunks_missing"))
+    ));
+    assert_eq!(found(&mut tx).await, old);
+    assert!(tx.add_chunks(&id, "m1", &[], &batch[1..]).await.unwrap());
+    assert!(tx.finish_chunks(&id, "m1", &[], 2).await.unwrap());
+    assert_eq!(
+        found(&mut tx).await,
+        ["Refunds over 500 need approval", "from the support lead"]
+    );
+    let left: i64 = sqlx::query_scalar("select count(*) from document_chunks where document_id = $1")
+        .bind(id.as_str())
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(left, 2, "the old set is gone");
+    // Named now, it needs nothing more from m1.
+    assert!(!tx.drop_chunks(&id, "m1", &[]).await.unwrap());
 }

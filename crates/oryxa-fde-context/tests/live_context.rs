@@ -337,6 +337,7 @@ fn with(ctx: &Context, embedder: &std::sync::Arc<Scripted>, replaces: &[&str]) -
         blobs: ctx.blobs.clone(),
         embedder: embedder.clone(),
         replaces: replaces.iter().map(|m| m.to_string()).collect(),
+        extractor: ctx.extractor.clone(),
     }
 }
 
@@ -443,7 +444,117 @@ async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
         ingest(&ctx, &store, &s, &other).await.unwrap(),
         Ingested::Chunks(1)
     ));
-    let mut tx = store.company(&s).await.unwrap();
-    let stored = tx.stored_chunks(&other, "fake-v2").await.unwrap();
-    assert!(stored[0].1.as_str().contains("Refunds over 500"), "{stored:?}");
+    let stored: Vec<String> = sqlx::query_scalar("select content from document_chunks where document_id = $1")
+        .bind(other.as_str())
+        .fetch_all(&testing::admin().await)
+        .await
+        .unwrap();
+    assert!(
+        stored.len() == 1 && stored[0].contains("Refunds over 500"),
+        "{stored:?}"
+    );
+}
+
+/// A one-page PDF saying `text`, whose font's ToUnicode map is 4 MiB of spaces under
+/// `/ASCIIHexDecode` (it decodes to nothing), under `names` font names.
+fn pdf_with_empty_map(text: &str, names: usize) -> Vec<u8> {
+    use lopdf::{Document, Object, Stream, dictionary};
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let map = Stream::new(dictionary! { "Filter" => "ASCIIHexDecode" }, vec![b' '; 4 << 20]);
+    let map_id = doc.add_object(map);
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "ToUnicode" => map_id,
+    });
+    let mut fonts = lopdf::Dictionary::new();
+    for n in 1..=names {
+        fonts.set(format!("F{n}"), font_id);
+    }
+    let content = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+        "Resources" => dictionary! { "Font" => fonts },
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Count" => 1, "Kids" => vec![page_id.into()],
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+/// Files in memory and the fake embedder, with extraction in a child: `program` and its leading
+/// arguments, under `limits`.
+fn in_child(program: &str, args: &[&str], limits: oryxa_fde_context::child::ChildLimits) -> Context {
+    let child = oryxa_fde_context::child::ChildExtractor::new(program, args.iter().map(Into::into).collect(), limits);
+    Context {
+        extractor: oryxa_fde_context::Extractor::Child(child),
+        ..Context::fake()
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres with pgvector (DATABASE_URL)"]
+async fn extraction_runs_in_a_child_and_a_document_past_its_limits_fails_for_good() {
+    use oryxa_fde_context::child::ChildLimits;
+    let store = testing::store().await;
+    let (signer, verifier) = keys();
+    let t = TenantId::new(new_id("org")).unwrap();
+    let s = company(&store, &t).await;
+    let status = async |doc: &DocumentId| {
+        let mut tx = store.company(&s).await.unwrap();
+        let d = tx.document(doc).await.unwrap().unwrap();
+        (d.status, d.failure)
+    };
+
+    // The ingest binary itself, as the worker runs it: a readable PDF is ingested.
+    let ctx = in_child(env!("CARGO_BIN_EXE_oryxa-fde-ingest"), &[], ChildLimits::default());
+    let good = pdf_with_empty_map("Refunds over 500 need approval", 1);
+    let doc = upload(&ctx, &store, &s, "policy.pdf", ContentType::Pdf, &good).await;
+    let msg = uploaded_event(&t, &doc, &signer).await;
+    assert_eq!(handle(&ctx, &store, &verifier, &msg).await, Outcome::Done);
+    assert_eq!(status(&doc).await, (DocumentStatus::Ingested, None));
+    let q = SearchQuery::new("refunds approval").unwrap();
+    assert_eq!(search_company(&ctx, &store, &s, &q, 5).await.unwrap()[0].document, doc);
+
+    // The reviewer's file: 100 names for a map that decodes to nothing. The child refuses it, the
+    // document fails, and the message is done with, never redelivered.
+    let bomb = pdf_with_empty_map("Refunds", 100);
+    let doc = upload(&ctx, &store, &s, "bomb.pdf", ContentType::Pdf, &bomb).await;
+    let msg = uploaded_event(&t, &doc, &signer).await;
+    let started = std::time::Instant::now();
+    assert_eq!(handle(&ctx, &store, &verifier, &msg).await, Outcome::Done);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(status(&doc).await, (DocumentStatus::Failed, Some("too_large".into())));
+
+    // A child that never finishes is killed at its wall clock; the document fails as too slow,
+    // and its redelivery changes nothing.
+    let limits = ChildLimits {
+        wall: std::time::Duration::from_secs(1),
+        ..ChildLimits::default()
+    };
+    let stuck = in_child("/bin/sh", &["-c", "cat >/dev/null; sleep 30", "sh"], limits);
+    let doc = upload(&stuck, &store, &s, "stuck.pdf", ContentType::Pdf, &good).await;
+    let msg = uploaded_event(&t, &doc, &signer).await;
+    let started = std::time::Instant::now();
+    assert_eq!(handle(&stuck, &store, &verifier, &msg).await, Outcome::Done);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(status(&doc).await, (DocumentStatus::Failed, Some("too_slow".into())));
+    assert_eq!(handle(&stuck, &store, &verifier, &msg).await, Outcome::Done);
+    assert_eq!(ingest(&stuck, &store, &s, &doc).await.unwrap(), Ingested::Settled);
 }

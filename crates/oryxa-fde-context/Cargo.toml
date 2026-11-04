@@ -16,6 +16,7 @@ aws-config.workspace = true
 aws-sdk-bedrockruntime.workspace = true
 aws-sdk-s3.workspace = true
 aws-sdk-sqs.workspace = true
+libc = "0.2"
 lopdf = { version = "0.47", default-features = false }
 oryxa-core.workspace = true
 oryxa-events.workspace = true
@@ -27,7 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

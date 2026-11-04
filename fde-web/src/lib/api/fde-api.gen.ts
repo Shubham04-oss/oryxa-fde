@@ -775,7 +775,7 @@ export interface components {
             chunks: number;
             content_type: string;
             created_at: string;
-            /** @description Why ingestion gave up: `unreadable`, `empty`, `too_large` or `checksum`. */
+            /** @description Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`. */
             failure?: string | null;
             id: string;
             ingested_at?: string | null;

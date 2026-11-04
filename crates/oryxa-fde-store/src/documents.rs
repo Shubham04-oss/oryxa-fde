@@ -141,6 +141,9 @@ const DOCUMENT: &str = "document_id, name, content_type, size_bytes, sha256, sta
 /// models it replaces as `$5`.
 const NEEDS: &str = "(status = 'pending' or (status = 'ingested' and (embedding_model is null
     or (embedding_model <> $4 and embedding_model = any ($5)))))";
+/// The generation a writer fills: an ingested document's next one, beside the set search reads,
+/// or a pending document's own.
+const WRITING: &str = "case when status = 'ingested' then chunk_generation + 1 else chunk_generation end";
 
 impl CompanyTx {
     /// Records an uploaded file and queues `document.uploaded` for ingestion. `None` if the
@@ -233,15 +236,17 @@ impl CompanyTx {
         .transpose()
     }
 
-    /// The chunks already stored for the document under `model`, by index: what an interrupted
-    /// ingestion wrote before it stopped.
+    /// The chunks already stored for the document under `model` in the generation being written, by
+    /// index: what an interrupted ingestion wrote before it stopped. Never the set search reads.
     pub async fn stored_chunks(&mut self, id: &DocumentId, model: &str) -> Result<Vec<(u32, Text)>, StoreError> {
         let s = &self.scope;
-        sqlx::query(
+        sqlx::query(&format!(
             "select chunk_index, content from document_chunks
              where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4
-             order by chunk_index",
-        )
+                 and generation = (select {WRITING} from documents
+                     where tenant_id = $1 and company_id = $2 and document_id = $3)
+             order by chunk_index"
+        ))
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
@@ -257,22 +262,25 @@ impl CompanyTx {
         .collect()
     }
 
-    /// Deletes the document's chunks under `model`, an interrupted set that cannot be resumed, with
-    /// the document locked. `false`, deleting nothing, if it no longer needs `model`'s chunks: a
-    /// complete set (another worker finished it) is never dropped.
+    /// Deletes the generation being written under `model`, an interrupted set that cannot be
+    /// resumed, with the document locked. The set search reads is another generation and stays.
+    /// `false`, deleting nothing, if it no longer needs `model`'s chunks: a complete set (another
+    /// worker finished it) is never dropped.
     pub async fn drop_chunks(&mut self, id: &DocumentId, model: &str, replaces: &[String]) -> Result<bool, StoreError> {
-        if !self.lock_needing(id, model, replaces).await? {
+        let Some(generation) = self.lock_needing(id, model, replaces).await? else {
             return Ok(false);
-        }
+        };
         let s = &self.scope;
         sqlx::query(
             "delete from document_chunks
-             where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4",
+             where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4
+                 and generation = $5",
         )
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(model)
+        .bind(generation)
         .execute(&mut *self.tx)
         .await?;
         Ok(true)
@@ -294,15 +302,15 @@ impl CompanyTx {
         {
             return Err(StoreError::Rejected("embedding"));
         }
-        if !self.lock_needing(id, model, replaces).await? {
+        let Some(generation) = self.lock_needing(id, model, replaces).await? else {
             return Ok(false);
-        }
+        };
         let s = self.scope.clone();
         for c in chunks {
             sqlx::query(
                 "insert into document_chunks (tenant_id, company_id, document_id, chunk_index, content, embedding,
-                     embedding_model)
-                 values ($1, $2, $3, $4, $5, $6::vector, $7) on conflict do nothing",
+                     embedding_model, generation)
+                 values ($1, $2, $3, $4, $5, $6::vector, $7, $8) on conflict do nothing",
             )
             .bind(s.tenant.as_str())
             .bind(s.company.as_str())
@@ -311,16 +319,17 @@ impl CompanyTx {
             .bind(c.content.as_str())
             .bind(vector(&c.embedding))
             .bind(model)
+            .bind(generation)
             .execute(&mut *self.tx)
             .await?;
         }
         Ok(true)
     }
 
-    /// Completes ingestion under `model` once chunks `0..count` are all stored: the document is
-    /// ingested and names that set, and every other chunk of it is deleted. `false`, changing
-    /// nothing, if it no longer needs `model`'s chunks; `Rejected("chunks_missing")` if some are
-    /// not stored yet.
+    /// Completes ingestion under `model` once chunks `0..count` of the generation being written are
+    /// all stored: the document is ingested and names that set, and every other chunk of it,
+    /// the set search read until now included, is deleted. `false`, changing nothing, if it no
+    /// longer needs `model`'s chunks; `Rejected("chunks_missing")` if some are not stored yet.
     pub async fn finish_chunks(
         &mut self,
         id: &DocumentId,
@@ -328,21 +337,22 @@ impl CompanyTx {
         replaces: &[String],
         count: usize,
     ) -> Result<bool, StoreError> {
-        if !self.lock_needing(id, model, replaces).await? {
+        let Some(generation) = self.lock_needing(id, model, replaces).await? else {
             return Ok(false);
-        }
+        };
         let s = self.scope.clone();
         let count = i32::try_from(count).map_err(|_| StoreError::Rejected("chunks"))?;
         let stored: i64 = sqlx::query_scalar(
             "select count(*) from document_chunks
              where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4
-                 and chunk_index < $5",
+                 and generation = $6 and chunk_index < $5",
         )
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(model)
         .bind(count)
+        .bind(generation)
         .fetch_one(&mut *self.tx)
         .await?;
         if stored != i64::from(count) {
@@ -350,18 +360,19 @@ impl CompanyTx {
         }
         sqlx::query(
             "delete from document_chunks where tenant_id = $1 and company_id = $2 and document_id = $3
-                 and (embedding_model <> $4 or chunk_index >= $5)",
+                 and not (embedding_model = $4 and generation = $6 and chunk_index < $5)",
         )
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
         .bind(model)
         .bind(count)
+        .bind(generation)
         .execute(&mut *self.tx)
         .await?;
         sqlx::query(
             "update documents set status = 'ingested', failure = null, chunks = $5, embedding_model = $4,
-                 ingested_at = now()
+                 chunk_generation = $6, ingested_at = now()
              where tenant_id = $1 and company_id = $2 and document_id = $3",
         )
         .bind(s.tenant.as_str())
@@ -369,16 +380,22 @@ impl CompanyTx {
         .bind(id.as_str())
         .bind(model)
         .bind(count)
+        .bind(generation)
         .execute(&mut *self.tx)
         .await?;
         Ok(true)
     }
 
-    /// Locks the document; whether it still needs `model`'s chunks.
-    async fn lock_needing(&mut self, id: &DocumentId, model: &str, replaces: &[String]) -> Result<bool, StoreError> {
+    /// Locks the document; if it still needs `model`'s chunks, the generation they go in.
+    async fn lock_needing(
+        &mut self,
+        id: &DocumentId,
+        model: &str,
+        replaces: &[String],
+    ) -> Result<Option<i32>, StoreError> {
         let s = &self.scope;
-        let needs: Option<bool> = sqlx::query_scalar(&format!(
-            "select {NEEDS} from documents where tenant_id = $1 and company_id = $2 and document_id = $3
+        let row: Option<(bool, i32)> = sqlx::query_as(&format!(
+            "select {NEEDS}, {WRITING} from documents where tenant_id = $1 and company_id = $2 and document_id = $3
              for update"
         ))
         .bind(s.tenant.as_str())
@@ -388,7 +405,7 @@ impl CompanyTx {
         .bind(replaces)
         .fetch_optional(&mut *self.tx)
         .await?;
-        Ok(needs.unwrap_or(false))
+        Ok(row.and_then(|(needs, generation)| needs.then_some(generation)))
     }
 
     /// Marks a pending document failed, with a short code saying why (never its text), and drops
@@ -468,6 +485,7 @@ const HIT_COLUMNS: &str = "c.document_id, d.name, c.chunk_index, c.content";
 /// so a deploy of the API and the ingest worker in either order keeps it findable.
 const CHUNKS: &str = "document_chunks c join documents d
      on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id
+         and c.generation = d.chunk_generation
          and (d.embedding_model = c.embedding_model or (d.embedding_model is null and d.status = 'ingested'))";
 
 /// A company with at most this many chunks for a model is searched exactly, every chunk compared,
@@ -539,12 +557,13 @@ pub(crate) async fn search_vector_with(
         // distances are ranked; the text is read for the passages returned.
         format!(
             "with mine as materialized (
-                 select c.document_id, c.chunk_index, c.embedding <=> $4::vector as distance from {CHUNKS}
+                 select c.document_id, c.generation, c.chunk_index, c.embedding <=> $4::vector as distance
+                 from {CHUNKS}
                  where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3),
              top as (select * from mine order by distance, document_id, chunk_index limit $5)
              select t.document_id, d.name, t.chunk_index, c.content from top t
              join document_chunks c on c.tenant_id = $1 and c.company_id = $2 and c.document_id = t.document_id
-                 and c.embedding_model = $3 and c.chunk_index = t.chunk_index
+                 and c.embedding_model = $3 and c.generation = t.generation and c.chunk_index = t.chunk_index
              join documents d on d.tenant_id = $1 and d.company_id = $2 and d.document_id = t.document_id
              order by t.distance, t.document_id, t.chunk_index"
         )

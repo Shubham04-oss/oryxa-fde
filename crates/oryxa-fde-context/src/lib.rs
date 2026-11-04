@@ -11,6 +11,7 @@ use std::sync::Arc;
 use oryxa_fde_store::StoreError;
 
 pub mod blob;
+pub mod child;
 pub mod chunk;
 pub mod embed;
 pub mod extract;
@@ -38,6 +39,34 @@ pub enum ContextError {
     Config(String),
 }
 
+/// Where a document's text is extracted.
+#[derive(Debug, Clone)]
+pub enum Extractor {
+    /// In this process, on a blocking thread: tests and local runs.
+    InProcess,
+    /// In a child process with hard limits: the ingest worker.
+    Child(child::ChildExtractor),
+}
+
+impl Extractor {
+    /// The document's text, or why it has none; `Err` only if extraction could not run at all.
+    pub async fn extract(
+        &self,
+        content_type: oryxa_fde_store::ContentType,
+        bytes: Vec<u8>,
+        deadline: std::time::Instant,
+    ) -> Result<Result<String, extract::ExtractError>, ContextError> {
+        match self {
+            Extractor::InProcess => {
+                tokio::task::spawn_blocking(move || extract::extract_guarded(content_type, &bytes, deadline))
+                    .await
+                    .map_err(|e| ContextError::Config(format!("extraction thread: {e}")))
+            }
+            Extractor::Child(c) => c.extract(content_type, bytes).await,
+        }
+    }
+}
+
 /// What the context layer runs on: where files live and how text is embedded.
 #[derive(Clone)]
 pub struct Context {
@@ -46,6 +75,8 @@ pub struct Context {
     /// Older models whose documents ingestion re-embeds with the embedder's model; a document on
     /// any other model is left as it is.
     pub replaces: Vec<String>,
+    /// Where documents' text is extracted.
+    pub extractor: Extractor,
 }
 
 impl Context {
@@ -55,6 +86,7 @@ impl Context {
             blobs: Arc::new(MemoryBlobs::default()),
             embedder: Arc::new(FakeEmbedder),
             replaces: Vec::new(),
+            extractor: Extractor::InProcess,
         }
     }
 
@@ -89,6 +121,10 @@ impl Context {
             blobs: Arc::new(S3Blobs::new(aws_sdk_s3::Client::new(&aws), bucket)),
             embedder,
             replaces,
+            // Only the ingest worker extracts, and it runs extraction in a child of its own binary.
+            extractor: Extractor::Child(
+                child::ChildExtractor::this_binary().map_err(|e| ContextError::Config(format!("current exe: {e}")))?,
+            ),
         })
     }
 }

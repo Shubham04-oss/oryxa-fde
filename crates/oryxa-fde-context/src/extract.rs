@@ -77,10 +77,13 @@ fn in_time(deadline: Instant) -> Result<(), ExtractError> {
     }
 }
 
-// ponytail: page content and the font maps decoded for it draw on one budget for the whole file,
-// but loading bounds each object stream (MAX_PDF_STREAM_BYTES), not their total, so a file of many
-// small bombs can still exhaust the ingest worker. It takes one message at a time, so that costs
-// only this document, whose event reaches the dead-letter queue after its redeliveries.
+/// Most content streams one page may list, and most fonts it may name: lopdf decodes each once
+/// per use, so a page listing one stream thousands of times costs thousands of decodes.
+const MAX_PAGE_STREAMS: usize = 256;
+const MAX_PAGE_FONTS: usize = 256;
+
+// The in-process first line. The real limit is the child process the ingest worker runs this in
+// (`child`), with CPU, memory and wall-clock limits that also cover lopdf's load.
 fn pdf(bytes: &[u8], deadline: Instant) -> Result<String, ExtractError> {
     pdf_within(bytes, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, deadline)
 }
@@ -105,45 +108,43 @@ fn pdf_within(
     })?;
     let mut left = content_budget;
     let mut out = String::new();
-    // Each font map is decoded once, by object id. Every font name that uses it is charged for
-    // it, because reading the text decodes it again for each name on each page.
-    let mut maps: HashMap<lopdf::ObjectId, usize> = HashMap::new();
+    // Each stream is measured once, by object id; every use of it is charged, because reading the
+    // text decodes it again for each use.
+    let mut costs: HashMap<lopdf::ObjectId, usize> = HashMap::new();
     for (number, page) in doc.get_pages() {
         in_time(deadline)?;
-        // What reading the page's text decodes, measured within what is left before it is read:
-        // its content and the ToUnicode map of each font it uses, all on one budget for the file.
-        let mut size = match doc.get_page_content_with_limit(page, left) {
-            Ok(content) => content.len(),
-            Err(e) if over_limit(&e) => return Err(ExtractError::TooLarge),
-            // A page that cannot be read is skipped; the rest of the document still counts.
-            Err(_) => continue,
+        // What reading the page's text decodes, within what is left before it is read: each of its
+        // content streams and the ToUnicode map of each font it uses, on one budget for the file.
+        let streams = doc.get_page_contents(page);
+        let fonts = doc.get_page_fonts(page).unwrap_or_default();
+        if streams.len() > MAX_PAGE_STREAMS || fonts.len() > MAX_PAGE_FONTS {
+            return Err(ExtractError::TooLarge);
+        }
+        let mut size = 0usize;
+        let charge = |size: &mut usize, cost: usize| {
+            *size = size.saturating_add(cost);
+            // Over budget already: stop before measuring anything more.
+            if *size > left {
+                Err(ExtractError::TooLarge)
+            } else {
+                Ok(())
+            }
         };
-        for font in doc.get_page_fonts(page).unwrap_or_default().values() {
+        for id in streams {
             in_time(deadline)?;
-            let decoded = match font.get(b"ToUnicode") {
-                Ok(lopdf::Object::Reference(id)) => match maps.get(id) {
-                    Some(n) => *n,
-                    None => {
-                        let Ok(map) = doc.get_object(*id).and_then(lopdf::Object::as_stream) else {
-                            continue;
-                        };
-                        let Some(n) = decoded_len(map, left.saturating_sub(size))? else {
-                            continue;
-                        };
-                        maps.insert(*id, n);
-                        n
-                    }
-                },
-                Ok(lopdf::Object::Stream(map)) => match decoded_len(map, left.saturating_sub(size))? {
-                    Some(n) => n,
-                    None => continue,
-                },
-                _ => continue,
+            if let Some(cost) = cost_of(&doc, id, &mut costs, left.saturating_sub(size))? {
+                charge(&mut size, cost)?;
+            }
+        }
+        for font in fonts.values() {
+            in_time(deadline)?;
+            let cost = match font.get(b"ToUnicode") {
+                Ok(lopdf::Object::Reference(id)) => cost_of(&doc, *id, &mut costs, left.saturating_sub(size))?,
+                Ok(lopdf::Object::Stream(map)) => Some(stream_cost(map, left.saturating_sub(size))?),
+                _ => None,
             };
-            size = size.saturating_add(decoded);
-            // Over budget already: stop before decoding anything more.
-            if size > left {
-                return Err(ExtractError::TooLarge);
+            if let Some(cost) = cost {
+                charge(&mut size, cost)?;
             }
         }
         // lopdf ends the content with a newline of its own, so the page can come to more than was
@@ -162,12 +163,38 @@ fn pdf_within(
     Ok(out)
 }
 
-/// How many bytes a stream decodes to within `limit`; `None` if it cannot be decoded at all.
-fn decoded_len(stream: &lopdf::Stream, limit: usize) -> Result<Option<usize>, ExtractError> {
-    match stream.decompressed_content_with_limit(limit) {
-        Ok(decoded) => Ok(Some(decoded.len())),
+/// The cost of one use of stream `id`, measured the first time (see [`stream_cost`]); `None` if it
+/// is not a stream.
+fn cost_of(
+    doc: &lopdf::Document,
+    id: lopdf::ObjectId,
+    costs: &mut HashMap<lopdf::ObjectId, usize>,
+    limit: usize,
+) -> Result<Option<usize>, ExtractError> {
+    if let Some(cost) = costs.get(&id) {
+        return Ok(Some(*cost));
+    }
+    let Ok(stream) = doc.get_object(id).and_then(lopdf::Object::as_stream) else {
+        return Ok(None);
+    };
+    let cost = stream_cost(stream, limit)?;
+    costs.insert(id, cost);
+    Ok(Some(cost))
+}
+
+/// What one use of a stream costs: the larger of its encoded length, which decoding reads in full
+/// even when it comes to nothing (spaces under `/ASCIIHexDecode`, say), and what it decodes to,
+/// measured within `limit`. A stream that will not decode costs its encoded length, as lopdf then
+/// reads its raw bytes.
+fn stream_cost(stream: &lopdf::Stream, limit: usize) -> Result<usize, ExtractError> {
+    let encoded = stream.content.len();
+    if encoded > limit {
+        return Err(ExtractError::TooLarge);
+    }
+    match stream.get_plain_content_with_limit(limit) {
+        Ok(plain) => Ok(encoded.max(plain.len())),
         Err(e) if over_limit(&e) => Err(ExtractError::TooLarge),
-        Err(_) => Ok(None),
+        Err(_) => Ok(encoded),
     }
 }
 
@@ -481,6 +508,106 @@ pub(crate) mod tests {
         );
         // Ten uses, 40 MiB, fit.
         let file = pdf_with_font_map(&["Hello"], lopdf::SaveOptions::default(), Some(&map), 10);
+        assert!(pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()).is_ok());
+    }
+
+    /// One page whose `/Contents` lists `content` `uses` times, with a font under `names` names
+    /// (F1, F2, ...) whose ToUnicode map is `map`. Streams are stored as given, not compressed.
+    fn pdf_shape(content: lopdf::Stream, uses: usize, map: Option<lopdf::Stream>, names: usize) -> Vec<u8> {
+        use lopdf::{Document, Object, dictionary};
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" };
+        if let Some(map) = map {
+            font.set("ToUnicode", doc.add_object(map));
+        }
+        let font_id = doc.add_object(font);
+        let mut fonts = lopdf::Dictionary::new();
+        for n in 1..=names {
+            fonts.set(format!("F{n}"), font_id);
+        }
+        let content_id = doc.add_object(content);
+        let contents: Vec<Object> = (0..uses).map(|_| content_id.into()).collect();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => contents,
+            "Resources" => dictionary! { "Font" => fonts },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Count" => 1, "Kids" => vec![page_id.into()],
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    fn hello() -> lopdf::Stream {
+        lopdf::Stream::new(lopdf::dictionary! {}, b"BT /F1 12 Tf 72 720 Td (Hello) Tj ET".to_vec())
+    }
+
+    fn quickly<T>(f: impl FnOnce() -> T) -> T {
+        let started = Instant::now();
+        let out = f();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        out
+    }
+
+    #[test]
+    fn a_font_map_that_decodes_to_nothing_is_charged_its_encoded_length() {
+        // The reviewer's shape: 4 MiB of spaces under /ASCIIHexDecode decode to no bytes at all, but
+        // reading them costs 4 MiB each time. 100 names are 400 MiB of reading.
+        let spaces = vec![b' '; 4 << 20];
+        for filter in [
+            lopdf::Object::Name(b"ASCIIHexDecode".to_vec()),
+            lopdf::Object::Array(vec![]),
+        ] {
+            let map = || lopdf::Stream::new(lopdf::dictionary! { "Filter" => filter.clone() }, spaces.clone());
+            let file = pdf_shape(hello(), 1, Some(map()), 100);
+            let refused = quickly(|| pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()));
+            assert_eq!(refused, Err(ExtractError::TooLarge), "{filter:?}");
+            // Ten uses, 40 MiB, fit.
+            let file = pdf_shape(hello(), 1, Some(map()), 10);
+            assert!(
+                pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later())
+                    .unwrap()
+                    .contains("Hello")
+            );
+        }
+    }
+
+    #[test]
+    fn a_content_stream_listed_many_times_is_charged_for_each_listing() {
+        // The reviewer's other shape: one stream of whitespace that decodes to nothing, listed over
+        // and over in /Contents. Each listing reads its 4 MiB again.
+        let spaces = vec![b' '; 4 << 20];
+        let stream = || lopdf::Stream::new(lopdf::dictionary! { "Filter" => "ASCIIHexDecode" }, spaces.clone());
+        // 20 listings are 80 MiB of reading; 5,000 are past what a page may list.
+        for uses in [20, 5000] {
+            let file = pdf_shape(stream(), uses, None, 1);
+            let refused = quickly(|| pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()));
+            assert_eq!(refused, Err(ExtractError::TooLarge), "{uses}");
+        }
+        let file = pdf_shape(stream(), 10, None, 1);
+        assert!(pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()).is_ok());
+    }
+
+    #[test]
+    fn a_page_naming_more_fonts_than_allowed_is_refused() {
+        let file = pdf_shape(hello(), 1, None, MAX_PAGE_FONTS + 1);
+        assert_eq!(
+            pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()),
+            Err(ExtractError::TooLarge)
+        );
+        let file = pdf_shape(hello(), 1, None, MAX_PAGE_FONTS);
         assert!(pdf_within(&file, MAX_PDF_STREAM_BYTES, MAX_PDF_CONTENT_BYTES, later()).is_ok());
     }
 

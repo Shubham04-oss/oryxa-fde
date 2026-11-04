@@ -17,7 +17,6 @@ use sha2::{Digest, Sha256};
 
 use crate::blob::company_prefix;
 use crate::chunk::chunk;
-use crate::extract::extract_guarded;
 use crate::{Context, ContextError};
 
 /// Chunks embedded and stored per transaction: what a redelivery need not embed again.
@@ -63,12 +62,10 @@ pub async fn ingest(
     if bytes.len() as i64 != doc.size_bytes || digest != doc.sha256 {
         return fail(store, scope, id, (model, replaces), "checksum").await;
     }
-    let content_type = doc.content_type;
-    // The handler may be dropped at the message's ceiling; the extraction stops on its own too.
+    // The handler may be dropped at the message's ceiling; the extraction stops on its own too
+    // (its deadline in process, its limits in a child).
     let deadline = std::time::Instant::now() + MAX_EXTRACTION;
-    let text = tokio::task::spawn_blocking(move || extract_guarded(content_type, &bytes, deadline))
-        .await
-        .map_err(|e| ContextError::Blob(e.to_string()))?;
+    let text = ctx.extractor.extract(doc.content_type, bytes, deadline).await?;
     let text = match text {
         Ok(t) => t,
         Err(e) => return fail(store, scope, id, (model, replaces), e.code()).await,
