@@ -8,8 +8,10 @@
 //! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; `SESSION_PASSWORD_PREVIOUS`
 //! is also read, for rotating in two deploys (see `session`: the new key goes here first).
 //!
-//! `DATABASE_URL` is the runtime login, which owns nothing; the store refuses any other. Migrations
-//! run before a deploy as a one-off task (`oryxa-fde-ops migrate`) with the owner's login.
+//! The database login is the runtime login, which owns nothing; the store refuses any other. On
+//! ECS it signs in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`; the RDS CA bundle is built in),
+//! locally with `DATABASE_URL`. Migrations run before a deploy as a one-off task
+//! (`oryxa-fde-ops migrate`) with the migrator's login.
 
 use std::time::Duration;
 
@@ -37,7 +39,7 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let store = Store::connect(&env("DATABASE_URL")?).await?;
+    let store = Store::from_env().await?;
     let authz = SpiceDb::connect_lazy(
         &env("SPICEDB_ENDPOINT")?,
         &env("SPICEDB_PRESHARED_KEY")?,

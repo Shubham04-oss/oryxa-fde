@@ -146,9 +146,10 @@ fn backoff(attempts: i32) -> Duration {
 }
 
 /// Puts dead rows (of one tenant, or all) back in line with a fresh [`RETRY_FOR`], for an operator
-/// after a bus outage longer than that. A replayed row keeps its event id, so the bus deduplicates
-/// one that did arrive, but it reaches consumers after later events of its group that went out
-/// while it was dead; consumers are idempotent and must not rely on that order across a replay.
+/// after a bus outage longer than that. A replayed row keeps its event id, but a day-old replay is
+/// far outside the bus's FIFO deduplication window, so consumers deduplicate by event id: one
+/// that did arrive before arrives again. It also reaches consumers after later events of its group
+/// that went out while it was dead, so consumers must not rely on order across a replay.
 pub async fn replay_dead(store: &Store, tenant: Option<&TenantId>) -> Result<u64, StoreError> {
     let mut tx = store.pool.begin().await?;
     sqlx::query("set local role oryxa_fde_relay").execute(&mut *tx).await?;
