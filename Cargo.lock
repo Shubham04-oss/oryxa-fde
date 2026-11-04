@@ -2585,6 +2585,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oryxa-fde-agent"
+version = "0.1.0"
+dependencies = [
+ "oryxa-core",
+ "oryxa-fde-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "oryxa-fde-api"
 version = "0.1.0"
 dependencies = [
