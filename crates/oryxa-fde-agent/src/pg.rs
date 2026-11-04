@@ -12,6 +12,7 @@ use oryxa_fde_store::{
 };
 
 use crate::event::{ApprovalOutcome, EventLine, Usage};
+use crate::gateway::LeaseToken;
 use crate::ids::{ApprovalId, ToolCallId};
 use crate::run::AgentRun;
 use crate::service::{Remaining, remaining};
@@ -291,8 +292,14 @@ impl RunStore for Store {
         .await
     }
 
-    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
-        on(self, scope, async |tx| tx.take_agent_sandbox(run, lease).await).await
+    async fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        lease: Duration,
+    ) -> Result<Option<LeaseToken>, StoreError> {
+        let generation = on(self, scope, async |tx| tx.take_agent_sandbox(run, lease).await).await?;
+        Ok(generation.map(LeaseToken))
     }
 
     async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {

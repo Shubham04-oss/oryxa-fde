@@ -20,6 +20,7 @@ use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::event::{ApprovalOutcome, EventLine, Usage};
+use crate::gateway::LeaseToken;
 use crate::git::{Delivery, Repository};
 use crate::ids::{ApprovalId, ToolCallId};
 use crate::run::AgentRun;
@@ -166,13 +167,14 @@ pub trait RunStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn spend(&self, scope: &ProjectScope) -> impl Future<Output = Result<Spend, StoreError>> + Send;
     /// Gives the company's sandbox to the run for `lease` if no other live run holds it and no older run of the
-    /// company is waiting for it, and keeps the run alive either way. `NotFound` once the run has ended.
+    /// company is waiting for it, with the lease's generation as the run's token at the gateway, and keeps the run
+    /// alive either way. `NotFound` once the run has ended.
     fn take_sandbox(
         &self,
         scope: &ProjectScope,
         run: &AgentRunId,
         lease: Duration,
-    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<LeaseToken>, StoreError>> + Send;
     /// Extends the run's lease on the sandbox and keeps it alive; `false` if it no longer holds the sandbox.
     fn renew_sandbox(
         &self,
@@ -243,7 +245,8 @@ struct Inner {
     runs: HashMap<(ProjectScope, AgentRunId), Entry>,
     budgets: HashMap<ProjectScope, Budget>,
     spend: HashMap<ProjectScope, Spend>,
-    leases: HashMap<CompanyScope, (AgentRunId, Instant)>,
+    /// Each company's lease: its holder, until when, and its generation.
+    leases: HashMap<CompanyScope, (AgentRunId, Instant, u64)>,
     outbox: Vec<AgentRunFinished>,
     next: u64,
 }
@@ -396,7 +399,12 @@ impl RunStore for InMemoryRuns {
         Ok(self.lock().spend.get(scope).copied().unwrap_or_default())
     }
 
-    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+    async fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        lease: Duration,
+    ) -> Result<Option<LeaseToken>, StoreError> {
         let mut inner = self.lock();
         let now = Instant::now();
         let me = inner
@@ -412,15 +420,19 @@ impl RunStore for InMemoryRuns {
                 && e.record.started_at.is_none()
                 && (e.record.created_at, e.order) < mine
         });
-        let free = match inner.leases.get(&scope.company) {
-            Some((holder, until)) => holder == run || *until <= now,
-            None => true,
+        let generation = match inner.leases.get(&scope.company) {
+            Some((holder, _, generation)) if holder == run => *generation,
+            Some((_, until, _)) if *until > now => return Ok(None),
+            Some((_, _, generation)) => generation + 1,
+            None => 1,
         };
-        if behind || !free {
-            return Ok(false);
+        if behind {
+            return Ok(None);
         }
-        inner.leases.insert(scope.company.clone(), (run.clone(), now + lease));
-        Ok(true)
+        inner
+            .leases
+            .insert(scope.company.clone(), (run.clone(), now + lease, generation));
+        Ok(Some(LeaseToken(generation)))
     }
 
     async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
@@ -431,7 +443,7 @@ impl RunStore for InMemoryRuns {
             _ => return Ok(false),
         }
         match inner.leases.get_mut(&scope.company) {
-            Some((holder, until)) if holder == run => {
+            Some((holder, until, _)) if holder == run => {
                 *until = now + lease;
                 Ok(true)
             }
@@ -497,12 +509,11 @@ impl RunStore for InMemoryRuns {
             seconds: seconds.as_secs(),
             usd_micros,
         };
-        if inner
-            .leases
-            .get(&scope.company)
-            .is_some_and(|(holder, _)| holder == &id)
+        // Let go, keeping the generation: the next holder's is higher.
+        if let Some((holder, until, _)) = inner.leases.get_mut(&scope.company)
+            && holder == &id
         {
-            inner.leases.remove(&scope.company);
+            *until = Instant::now();
         }
         let total = inner.spend.entry(scope.clone()).or_default();
         *total = total.plus(used);
@@ -522,12 +533,11 @@ impl RunStore for InMemoryRuns {
             return Ok(());
         }
         entry.record = run.clone();
-        if inner
-            .leases
-            .get(&scope.company)
-            .is_some_and(|(holder, _)| holder == &id)
+        // Let go, keeping the generation: the next holder's is higher.
+        if let Some((holder, until, _)) = inner.leases.get_mut(&scope.company)
+            && holder == &id
         {
-            inner.leases.remove(&scope.company);
+            *until = Instant::now();
         }
         let total = inner.spend.entry(scope).or_default();
         *total = total.plus(used);

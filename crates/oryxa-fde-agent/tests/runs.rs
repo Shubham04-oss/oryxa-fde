@@ -15,7 +15,7 @@ use oryxa_core::{TenantId, UserId};
 use oryxa_fde_agent::access::{Access, AccessError, Caller, Permission};
 use oryxa_fde_agent::api;
 use oryxa_fde_agent::event::{EVENT_VERSION, Usage};
-use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, ProcessEvent, Sandbox, SandboxError};
+use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, LeaseToken, ProcessEvent, Sandbox, SandboxError};
 use oryxa_fde_agent::git::Delivery;
 use oryxa_fde_agent::live::{LiveError, LiveOutput};
 use oryxa_fde_agent::run::AgentRun;
@@ -119,6 +119,10 @@ struct FakeSandbox {
     /// Once a harness has started, the container will not stop.
     stuck: bool,
     harness_started: AtomicBool,
+    /// The highest lease generation a call carried; a lower one is refused, as at the gateway.
+    seen_lease: std::sync::atomic::AtomicU64,
+    /// When each stop was asked for.
+    stop_times: Mutex<Vec<std::time::Instant>>,
 }
 
 impl FakeSandbox {
@@ -138,7 +142,21 @@ impl FakeSandbox {
             harness_running: Arc::default(),
             stuck: false,
             harness_started: AtomicBool::new(false),
+            seen_lease: std::sync::atomic::AtomicU64::new(0),
+            stop_times: Mutex::default(),
         }
+    }
+
+    /// The gateway's fence: a change from an older lease generation is refused.
+    fn fence(&self, lease: LeaseToken) -> Result<(), SandboxError> {
+        let seen = self.seen_lease.fetch_max(lease.0, Ordering::SeqCst);
+        if lease.0 < seen {
+            return Err(SandboxError::Status {
+                status: 409,
+                route: "lease",
+            });
+        }
+        Ok(())
     }
 
     fn calls(&self) -> Vec<String> {
@@ -170,13 +188,16 @@ fn exec_output(argv: &[String]) -> ExecOutput {
 }
 
 impl Sandbox for FakeSandbox {
-    async fn start(&self, company: &CompanyScope) -> Result<(), SandboxError> {
+    async fn start(&self, company: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        self.fence(lease)?;
         self.call(format!("start {}", company.company));
         Ok(())
     }
 
-    async fn stop(&self, company: &CompanyScope) -> Result<(), SandboxError> {
+    async fn stop(&self, company: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
+        self.fence(lease)?;
         self.call(format!("stop {}", company.company));
+        self.stop_times.lock().unwrap().push(std::time::Instant::now());
         if self.stuck && self.harness_started.load(Ordering::SeqCst) {
             return Err(SandboxError::Unreachable { route: "stop" });
         }
@@ -187,7 +208,8 @@ impl Sandbox for FakeSandbox {
         Ok(())
     }
 
-    async fn exec(&self, _: &CompanyScope, exec: Exec) -> Result<ExecOutput, SandboxError> {
+    async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
+        self.fence(lease)?;
         let out = exec_output(&exec.argv);
         let mut log = self.log.lock().unwrap();
         log.calls.push(format!("exec {}", exec.argv[0]));
@@ -195,7 +217,14 @@ impl Sandbox for FakeSandbox {
         Ok(out)
     }
 
-    async fn write_pack(&self, _: &CompanyScope, run: &AgentRunId, pack: Vec<u8>) -> Result<String, SandboxError> {
+    async fn write_pack(
+        &self,
+        _: &CompanyScope,
+        run: &AgentRunId,
+        pack: Vec<u8>,
+        lease: LeaseToken,
+    ) -> Result<String, SandboxError> {
+        self.fence(lease)?;
         self.call(format!("pack {run}"));
         let mut on_disk = pack;
         if self.tamper_pack {
@@ -210,7 +239,9 @@ impl Sandbox for FakeSandbox {
         run: &AgentRunId,
         sha256: &str,
         _: Duration,
+        lease: LeaseToken,
     ) -> Result<HarnessProcess, SandboxError> {
+        self.fence(lease)?;
         self.call(format!("harness {run} {}", &sha256[..8]));
         if self.harness_running.swap(true, Ordering::SeqCst) {
             return Err(SandboxError::Status {
@@ -238,7 +269,14 @@ impl Sandbox for FakeSandbox {
         })
     }
 
-    async fn write_stdin(&self, _: &CompanyScope, exec: &str, line: String) -> Result<(), SandboxError> {
+    async fn write_stdin(
+        &self,
+        _: &CompanyScope,
+        exec: &str,
+        line: String,
+        lease: LeaseToken,
+    ) -> Result<(), SandboxError> {
+        self.fence(lease)?;
         assert_eq!(exec, "0b7a2f62-8f58-4d2e-a2a9-3d1b1f3c9e10");
         if self.stdin_down {
             return Err(SandboxError::Unreachable { route: "stdin" });
@@ -261,7 +299,9 @@ impl Sandbox for FakeSandbox {
         approval: &ApprovalId,
         run: &AgentRunId,
         _: Duration,
+        lease: LeaseToken,
     ) -> Result<(), SandboxError> {
+        self.fence(lease)?;
         if self.grants_down || !self.held.contains(action) {
             return Err(SandboxError::Status {
                 status: 409,
@@ -437,7 +477,12 @@ impl<S: RunStore> RunStore for Failing<S> {
     async fn spend(&self, scope: &ProjectScope) -> Result<Spend, StoreError> {
         self.0.spend(scope).await
     }
-    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+    async fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        lease: Duration,
+    ) -> Result<Option<LeaseToken>, StoreError> {
         self.0.take_sandbox(scope, run, lease).await
     }
     async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
@@ -1161,13 +1206,13 @@ async fn a_run_whose_hold_is_someone_elses_ends_and_leaves_the_sandbox_alone() {
         assert_eq!(done["failure"], "store_unavailable");
         // A hung renewal never outlasts the hold: the run ends within about one lease.
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-        // The sandbox may be the next run's by now: it is not stopped, and the harness is only told to stop.
+        // The sandbox may be the next run's by now: the run touches it no more, not even the harness's stdin.
         assert!(
             !stopped_after_harness(&runs.sandbox.calls()),
             "{:?}",
             runs.sandbox.calls()
         );
-        assert_eq!(runs.sandbox.log.lock().unwrap().stdin, ["{\"type\":\"cancel\"}\n"]);
+        assert!(runs.sandbox.log.lock().unwrap().stdin.is_empty());
     }
 }
 
@@ -1179,6 +1224,72 @@ async fn a_run_that_cannot_renew_while_it_holds_the_sandbox_destroys_it() {
     let done = wait(&app, &run, ended).await;
     assert_eq!(done["failure"], "store_unavailable");
     assert!(stopped_after_harness(&runs.sandbox.calls()));
+}
+
+#[tokio::test]
+async fn a_sandbox_that_will_not_stop_is_never_stopped_after_the_lease_lapses() {
+    // The reviewer's case: renewals fail, the heartbeat's destroy fails, and the grace outlasts the lease.
+    let lease = Duration::from_millis(200);
+    let mut sandbox = FakeSandbox::new(vec![message("Working."), Step::Hang]);
+    sandbox.stuck = true;
+    let runs = Runs::<TestFailingStore>::new(
+        Failing(InMemoryRuns::default(), Fail::RenewalErrs),
+        sandbox,
+        FakeLive::default(),
+        context(),
+        access(),
+        RunsConfig {
+            lease,
+            grace: Duration::from_secs(1),
+            ..config()
+        },
+    );
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "store_unavailable");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // The run took the lease just before its first stop (the fresh container); every stop came before it lapsed:
+    // the heartbeat's one attempt, and nothing from the grace timer, the lost stream or the run's end.
+    let times = runs.sandbox.stop_times.lock().unwrap().clone();
+    let lapsed = times[0] + lease;
+    let after: Vec<_> = times.iter().map(|t| t.duration_since(times[0])).collect();
+    assert!(times.iter().all(|t| *t < lapsed), "{after:?}");
+    assert_eq!(
+        times.len(),
+        2,
+        "the fresh container's stop and the heartbeat's destroy: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_whose_lease_passed_on_cannot_touch_the_next_runs_sandbox() {
+    // Generation 2 holds the sandbox now; a call from generation 1 is refused, as at the gateway.
+    let sandbox = FakeSandbox::new(vec![]);
+    let company = CompanyScope::new(TenantId::new("org_a").unwrap(), CompanyId::new("cmp_1").unwrap());
+    sandbox.stop(&company, LeaseToken(2)).await.unwrap();
+    assert!(sandbox.stop(&company, LeaseToken(1)).await.is_err());
+    assert!(sandbox.start(&company, LeaseToken(1)).await.is_err());
+    assert_eq!(sandbox.calls(), ["stop cmp_1"]);
+    // The store gives each new holder a higher generation; the holder keeps its own.
+    let store = InMemoryRuns::default();
+    let scope = scope("org_a", "cmp_1", "prj_1");
+    let (one, two) = (stored_run("run_one", &scope), stored_run("run_two", &scope));
+    store.create(&one).await.unwrap();
+    store.create(&two).await.unwrap();
+    let short = Duration::from_millis(1);
+    let first = store.take_sandbox(&scope, one.run.id(), short).await.unwrap().unwrap();
+    assert_eq!(
+        store.take_sandbox(&scope, one.run.id(), short).await.unwrap(),
+        Some(first)
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let second = store
+        .take_sandbox(&scope, two.run.id(), Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(second > first);
 }
 
 #[tokio::test]

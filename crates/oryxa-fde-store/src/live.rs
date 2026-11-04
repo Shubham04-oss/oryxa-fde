@@ -881,6 +881,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
             tx.take_agent_sandbox(&run.id, std::time::Duration::from_secs(60))
                 .await
                 .unwrap()
+                .is_some()
         );
         tx.commit().await.unwrap();
     }

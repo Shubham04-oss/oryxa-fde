@@ -37,6 +37,12 @@ const HARNESS_RUN_KEY = "harness-run";
  * first.
  */
 const HARNESS_LIVE_KEY = "harness-live";
+/**
+ * The highest lease generation a call has carried. Every call that changes the sandbox carries its run's generation,
+ * which the store raises whenever the sandbox passes to another run; a lower one is refused, so a run whose lease has
+ * passed on can never touch the next run's container, however late its call arrives.
+ */
+const LEASE_KEY = "lease-generation";
 const MAX_STDIN_WRITE = 1024 * 1024;
 
 // `lite` and `basic` are too small for a coding agent, and the durable_object policy refuses `basic`.
@@ -85,14 +91,16 @@ export class CompanySandbox extends DurableObject<Env> {
     return { running: this.container().running };
   }
 
-  async start(scope: CompanyScope, instance: InstanceType): Promise<SandboxStatus> {
+  async start(scope: CompanyScope, instance: InstanceType, lease: number): Promise<SandboxStatus> {
     this.#bind(scope);
+    this.#fence(lease);
     const outbound = this.ctx.exports.Outbound({ props: { tenant: scope.tenant, company: scope.company } });
     await startContainer(this.container(), scope, outbound, { instance, idleTimeoutMs: idleTimeoutMs(this.env) });
     return { running: true };
   }
 
-  async stop(): Promise<SandboxStatus> {
+  async stop(lease: number): Promise<SandboxStatus> {
+    this.#fence(lease);
     const container = this.container();
     if (container.running) await container.destroy();
     // Approvals belong to the runs in this container; a new container starts with none.
@@ -102,11 +110,13 @@ export class CompanySandbox extends DurableObject<Env> {
     return { running: false };
   }
 
-  exec(req: ExecRequest): Promise<ExecResult> {
+  exec(req: ExecRequest, lease: number): Promise<ExecResult> {
+    this.#fence(lease);
     return runBuffered(this.#running(), req, AGENT_USER);
   }
 
-  execStream(req: ExecStreamRequest): Promise<ReadableStream<Uint8Array>> {
+  execStream(req: ExecStreamRequest, lease: number): Promise<ReadableStream<Uint8Array>> {
+    this.#fence(lease);
     return this.#stream(req, AGENT_USER);
   }
 
@@ -114,8 +124,9 @@ export class CompanySandbox extends DurableObject<Env> {
    * Writes a run's context pack as root where only root can read it, then reads it back: the API compares this
    * digest with the pack it built before it starts the harness.
    */
-  async writePack(scope: CompanyScope, run: string, pack: Uint8Array): Promise<{ sha256: string }> {
+  async writePack(scope: CompanyScope, run: string, pack: Uint8Array, lease: number): Promise<{ sha256: string }> {
     this.#bind(scope);
+    this.#fence(lease);
     const files = new Files(this.#running());
     const path = packPath(run);
     await files.writeFile(path, pack, { user: ROOT_USER });
@@ -127,8 +138,14 @@ export class CompanySandbox extends DurableObject<Env> {
    * Starts the harness as root on a written pack; it starts the agent as `agent` and then drops root itself. A new
    * run inherits no grant from an earlier one, and none starts while an earlier harness may still run.
    */
-  async startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
+  async startHarness(
+    scope: CompanyScope,
+    run: string,
+    req: HarnessRequest,
+    lease: number,
+  ): Promise<ReadableStream<Uint8Array>> {
     this.#bind(scope);
+    this.#fence(lease);
     if (this.ctx.storage.kv.get<string>(HARNESS_LIVE_KEY) !== undefined)
       throw new GatewayError(409, "a harness may still be running in this sandbox; stop the sandbox first");
     const live = crypto.randomUUID();
@@ -138,12 +155,8 @@ export class CompanySandbox extends DurableObject<Env> {
     const exited = () => {
       if (this.ctx.storage.kv.get<string>(HARNESS_LIVE_KEY) === live) this.ctx.storage.kv.delete(HARNESS_LIVE_KEY);
     };
-    try {
-      return await this.#stream(harnessCommand(run, req), ROOT_USER, exited);
-    } catch (cause) {
-      exited();
-      throw cause;
-    }
+    // If starting it fails, it may still have started: it stays marked until the sandbox stops.
+    return await this.#stream(harnessCommand(run, req), ROOT_USER, exited);
   }
 
   /**
@@ -151,8 +164,9 @@ export class CompanySandbox extends DurableObject<Env> {
    * holds is refused: approving it would gate nothing at the network. So is a grant for any run but the one whose
    * harness is running here.
    */
-  openGrant(scope: CompanyScope, action: string, req: GrantRequest): Grant {
+  openGrant(scope: CompanyScope, action: string, req: GrantRequest, lease: number): Grant {
     this.#bind(scope);
+    this.#fence(lease);
     if (!this.outboundPolicy().hosts.some((h) => h.approval === action))
       throw new GatewayError(409, "no host in the outbound policy is held for this action");
     if (this.ctx.storage.kv.get<string>(HARNESS_RUN_KEY) !== req.run)
@@ -209,7 +223,8 @@ export class CompanySandbox extends DurableObject<Env> {
     );
   }
 
-  async writeStdin(execId: string, data: Uint8Array): Promise<void> {
+  async writeStdin(execId: string, data: Uint8Array, lease: number): Promise<void> {
+    this.#fence(lease);
     const writer = this.#stdin.get(execId);
     if (writer === undefined) throw new GatewayError(404, "no running command with stdin has that id");
     if (data.byteLength > MAX_STDIN_WRITE) throw new GatewayError(413, "stdin write is too large");
@@ -221,7 +236,8 @@ export class CompanySandbox extends DurableObject<Env> {
     return response.body;
   }
 
-  async writeFile(path: string, content: ReadableStream<Uint8Array>): Promise<void> {
+  async writeFile(path: string, content: ReadableStream<Uint8Array>, lease: number): Promise<void> {
+    this.#fence(lease);
     const files = new Files(this.#running());
     await files.mkdir(path.slice(0, path.lastIndexOf("/")) || "/", { recursive: true, user: AGENT_USER });
     await files.writeFile(path, content, { user: AGENT_USER });
@@ -238,6 +254,13 @@ export class CompanySandbox extends DurableObject<Env> {
     const container = this.container();
     if (!container.running) throw new GatewayError(409, "the sandbox is not started");
     return container;
+  }
+
+  // Checked in the same call as the change it guards, so no later run's call can come between the two.
+  #fence(lease: number): void {
+    const seen = this.ctx.storage.kv.get<number>(LEASE_KEY) ?? 0;
+    if (lease < seen) throw new GatewayError(409, "a later run holds this sandbox");
+    if (lease > seen) this.ctx.storage.kv.put(LEASE_KEY, lease);
   }
 
   // A sandbox serves the first scope that used it, so a routing bug cannot point one company at another's sandbox.

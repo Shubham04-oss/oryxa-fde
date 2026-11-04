@@ -23,6 +23,8 @@ export class FakeContainer implements SandboxContainer {
   run: (argv: string[]) => FakeRun = () => ({ exitCode: 0 });
   /** Waiting for a piped process's exit fails, as when the connection to the container drops; it keeps running. */
   exitLost = false;
+  /** Starting a piped process fails, so whether it started is unknown. */
+  startLost = false;
 
   start(options?: ContainerStartupOptions): void {
     if (options !== undefined) this.started.push(options);
@@ -47,6 +49,7 @@ export class FakeContainer implements SandboxContainer {
 
   async exec(argv: string[], options?: ContainerExecOptions): Promise<ExecProcess> {
     this.execs.push({ argv, options });
+    if (options?.stdin === "pipe" && this.startLost) throw new Error("the connection to the container dropped");
     if (options?.stdin === "pipe" && this.exitLost) return lostProcess();
     if (options?.stdin === "pipe") return echoProcess();
     const { stdout = "", stderr = "", exitCode = 0 } = this.run(argv);
@@ -70,9 +73,9 @@ export async function readText(stream: ReadableStream<Uint8Array> | null): Promi
   return stream === null ? "" : new Response(stream).text();
 }
 
-// Runs on with stdout open, while waiting for its exit fails.
+// Closes its output while waiting for its exit fails: it may still run.
 function lostProcess(): ExecProcess {
-  const stdout = new ReadableStream<Uint8Array>({ start: () => {} });
+  const stdout = textStream("");
   const exitCode = Promise.reject(new Error("the connection to the container dropped"));
   exitCode.catch(() => {});
   return process(stdout, textStream(""), exitCode, new WritableStream<Uint8Array>());

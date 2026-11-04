@@ -12,13 +12,19 @@ import { FakeContainer } from "./fakes.js";
 const TOKEN = "sample-service-token-for-tests-0123456789";
 const SECRET_A = "sample-github-token-company-a";
 
+// Every call carries lease generation 1 unless it says otherwise, as one run holding the sandbox would.
 const api = (path: string, init: RequestInit = {}, token = TOKEN) =>
   exports.default.fetch(
     new Request(`https://gateway.test${path}`, {
       ...init,
-      headers: { authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-oryxa-lease": "1",
+        ...(init.headers as Record<string, string> | undefined),
+      },
     }),
   );
+const withLease = (init: RequestInit, lease: string): RequestInit => ({ ...init, headers: { "x-oryxa-lease": lease } });
 const json = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringify(body) });
 const post = (body?: unknown): RequestInit => ({
   method: "POST",
@@ -108,7 +114,7 @@ describe("sandbox lifecycle", () => {
     expect((await api("/v1/sandboxes/org_a/cmp_1/exec", post({ argv: ["true"] }))).status).toBe(409);
     expect((await api("/v1/sandboxes/org_a/cmp_1/start", post())).status).toBe(200);
     const misrouted = await env.SANDBOX.getByName("org_a:cmp_1")
-      .start(companyScope("org_b", "cmp_1"), "standard-2")
+      .start(companyScope("org_b", "cmp_1"), "standard-2", 1)
       .then(
         () => undefined,
         (cause: Error) => cause.message,
@@ -267,6 +273,63 @@ describe("runs", () => {
       expect(third.status).toBe(200);
       await third.body?.cancel();
     });
+  });
+
+  it("refuse every change from a run whose lease has passed to a later one, however late it arrives", async () => {
+    // A sandbox of its own: the generation it reaches outlives the test.
+    const fake = await attachFake("org_fence", "cmp_1");
+    const sandbox = "/v1/sandboxes/org_fence/cmp_1";
+    const exec = post({ argv: ["true"], timeoutMs: 1_000 });
+    // The next run (generation 2) takes the container: it stops it, then starts a fresh one.
+    expect((await api(`${sandbox}/stop`, withLease(post(), "2"))).status).toBe(200);
+    expect((await api(`${sandbox}/start`, withLease(post(), "2"))).status).toBe(200);
+    // The run before it (generation 1) can no longer stop, start, run anything or write to it.
+    for (const [route, init] of [
+      ["stop", post()],
+      ["start", post()],
+      ["exec", exec],
+      ["exec/stream", post({ argv: ["true"], timeoutMs: 1_000 })],
+      ["runs/run_1/context", { method: "PUT", body: "{}" }],
+      ["runs/run_1/harness", post({ sha256: SHA, timeoutMs: 60_000 })],
+      ["files?path=/workspace/a.txt", { method: "PUT", body: "x" }],
+      ["grants/deploy", json({ approval: "apr_1", run: "run_1" })],
+    ] as const) {
+      expect((await api(`${sandbox}/${route}`, withLease(init, "1"))).status, route).toBe(409);
+    }
+    expect(fake.running).toBe(true);
+    expect(fake.execs).toEqual([]);
+    // Its generation still runs commands; a change without one, or with a malformed one, is refused outright.
+    expect((await api(`${sandbox}/exec`, withLease(exec, "2"))).status).toBe(200);
+    for (const lease of ["", "0", "-1", "1.5", "x"]) {
+      expect((await api(`${sandbox}/stop`, withLease(post(), lease))).status, lease).toBe(400);
+    }
+    // Reading and closing a grant need no lease.
+    const bare = (init: RequestInit = {}) => ({ ...init, headers: { "x-oryxa-lease": "" } });
+    expect((await api(sandbox, bare())).status).toBe(200);
+    expect((await api(`${sandbox}/grants/deploy?approval=apr_1`, bare({ method: "DELETE" }))).status).toBe(204);
+  });
+
+  it("keep a harness marked running when its start or its exit cannot be confirmed", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    fake.startLost = true;
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const harness = () => run("harness", post({ sha256: SHA, timeoutMs: 60_000 }));
+    // Starting it failed, so it may have started: no second one joins it.
+    expect((await harness()).status).toBe(500);
+    fake.startLost = false;
+    expect((await harness()).status).toBe(409);
+  });
+
+  it("report no exit it has not seen: the stream breaks off instead", async () => {
+    const fake = await attachFake("org_a", "cmp_1");
+    fake.exitLost = true;
+    await api("/v1/sandboxes/org_a/cmp_1/stop", post());
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const response = await run("harness", post({ sha256: SHA, timeoutMs: 60_000 }));
+    const next = lineReader(response);
+    expect(await next()).toMatchObject({ type: "started" });
+    await expect(next()).rejects.toThrow();
   });
 
   it("keep a harness marked running when its exit cannot be confirmed, until the sandbox stops", async () => {

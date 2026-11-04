@@ -49,9 +49,12 @@ Everything fails closed:
   sandbox (`grant_not_closed`), even if the harness had finished: nothing is delivered from that sandbox;
 - a run is `succeeded` only once its work is delivered (or there was nothing to deliver): a finished run that
   delivered nothing, because it lost its sandbox or its API task stopped, is `failed`;
-- a run that cannot renew its lease while it still holds it destroys the sandbox and ends (`store_unavailable`);
-  one whose lease has lapsed or is someone else's ends the same way but leaves the sandbox alone, since another
-  run may already have been given it, and only tells its harness to stop. A renewal never outlasts the lease;
+- a run touches the sandbox only while it holds the lease: every call that changes it carries the lease's
+  generation, which rises whenever the sandbox passes to another run, and the gateway refuses an older one. A run
+  that cannot renew its lease while it still holds it destroys the sandbox and ends (`store_unavailable`); if that
+  fails too, or the lease has lapsed or is someone else's, it ends the same way and never touches the sandbox again,
+  not even its harness's stdin. Dropping the harness's stream makes the gateway close that, and the harness cancels
+  itself. A renewal, and a stop, never outlast the lease;
 - a harness that does not stop within the grace period has its sandbox destroyed;
 - a sandbox that will not stop is asked three times; its grants are then closed one by one, and the next run
   destroys it before starting, or does not start.

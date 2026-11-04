@@ -17,6 +17,11 @@ const StartRequest = z.strictObject({ instance: InstanceType.optional() });
 const STDIN_ROUTE = /^exec\/([0-9a-f-]{36})\/stdin$/;
 const RUN_ROUTE = /^runs\/([^/]+)\/(context|harness)$/;
 const GRANT_ROUTE = /^grants\/([^/]+)$/;
+/** The calling run's lease generation, on every call that changes the sandbox (see `CompanySandbox`). */
+const LeaseGeneration = z
+  .string()
+  .regex(/^[1-9][0-9]{0,14}$/, "x-oryxa-lease must be a lease generation")
+  .transform(Number);
 
 /**
  * The internal API `oryxa-fde-api` calls, behind a service credential. Every route is under
@@ -50,28 +55,35 @@ export default {
 
 async function dispatch(request: Request, url: URL, route: string, scope: CompanyScope, env: Env): Promise<Response> {
   const sandbox = env.SANDBOX.getByName(sandboxName(scope));
+  const lease = () => LeaseGeneration.parse(request.headers.get("x-oryxa-lease") ?? "");
   switch (`${request.method} ${route}`) {
     case "GET ":
       return Response.json(await sandbox.status());
     case "POST start": {
+      const held = lease();
       const { instance } = await parseBody(request, StartRequest);
-      return Response.json(await sandbox.start(scope, instance ?? defaultInstance(env)));
+      return Response.json(await sandbox.start(scope, instance ?? defaultInstance(env), held));
     }
     case "POST stop":
-      return Response.json(await sandbox.stop());
-    case "POST exec":
-      return Response.json(await sandbox.exec(await parseBody(request, ExecRequest)));
+      return Response.json(await sandbox.stop(lease()));
+    case "POST exec": {
+      const held = lease();
+      return Response.json(await sandbox.exec(await parseBody(request, ExecRequest), held));
+    }
     case "POST exec/stream": {
-      const lines = await sandbox.execStream(await parseBody(request, ExecStreamRequest));
+      const held = lease();
+      const lines = await sandbox.execStream(await parseBody(request, ExecStreamRequest), held);
       return new Response(lines, { headers: { "content-type": "application/x-ndjson" } });
     }
     case "GET files": {
       const body = await sandbox.readFile(WorkspacePath.parse(url.searchParams.get("path")));
       return new Response(body, { headers: { "content-type": "application/octet-stream" } });
     }
-    case "PUT files":
-      await sandbox.writeFile(WorkspacePath.parse(url.searchParams.get("path")), request.body ?? emptyBody());
+    case "PUT files": {
+      const held = lease();
+      await sandbox.writeFile(WorkspacePath.parse(url.searchParams.get("path")), request.body ?? emptyBody(), held);
       return new Response(null, { status: 204 });
+    }
     case "GET outbound-policy":
       return Response.json(await sandbox.outboundPolicy());
     case "PUT outbound-policy":
@@ -79,27 +91,33 @@ async function dispatch(request: Request, url: URL, route: string, scope: Compan
   }
   const stdin = STDIN_ROUTE.exec(route);
   if (stdin?.[1] !== undefined && request.method === "POST") {
-    await sandbox.writeStdin(stdin[1], new Uint8Array(await request.arrayBuffer()));
+    const held = lease();
+    await sandbox.writeStdin(stdin[1], new Uint8Array(await request.arrayBuffer()), held);
     return new Response(null, { status: 204 });
   }
   const [, run, step] = RUN_ROUTE.exec(route) ?? [];
   if (run !== undefined) {
     const id = RunId.parse(run);
     if (step === "context" && request.method === "PUT") {
+      const held = lease();
       const pack = new Uint8Array(await request.arrayBuffer());
       if (pack.byteLength === 0 || pack.byteLength > MAX_PACK_BYTES) return text(413, "context pack size is invalid");
-      return Response.json(await sandbox.writePack(scope, id, pack));
+      return Response.json(await sandbox.writePack(scope, id, pack, held));
     }
     if (step === "harness" && request.method === "POST") {
-      const lines = await sandbox.startHarness(scope, id, await parseBody(request, HarnessRequest));
+      const held = lease();
+      const lines = await sandbox.startHarness(scope, id, await parseBody(request, HarnessRequest), held);
       return new Response(lines, { headers: { "content-type": "application/x-ndjson" } });
     }
   }
   const [, action] = GRANT_ROUTE.exec(route) ?? [];
   if (action !== undefined) {
     const name = ApprovalAction.parse(action);
-    if (request.method === "PUT")
-      return Response.json(await sandbox.openGrant(scope, name, await parseBody(request, GrantRequest)));
+    if (request.method === "PUT") {
+      const held = lease();
+      return Response.json(await sandbox.openGrant(scope, name, await parseBody(request, GrantRequest), held));
+    }
+    // Closing is not fenced: it only takes access away, and only the approval that opened a grant closes it.
     if (request.method === "DELETE") {
       await sandbox.closeGrant(name, ApprovalId.parse(url.searchParams.get("approval")));
       return new Response(null, { status: 204 });
