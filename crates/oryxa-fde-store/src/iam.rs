@@ -288,6 +288,22 @@ mod tests {
     }
 
     #[test]
+    fn a_token_matches_the_aws_sdk_rds_token_generator() {
+        // From aws-sdk-rds 1.159's `auth_token::AuthTokenGenerator`, for the same login, key,
+        // session token and time (2026-11-04T13:46:40Z).
+        const SDK: &str = "fde.cluster-x.eu-west-2.rds.amazonaws.com:5432/?Action=connect&DBUser=oryxa_fde_api\
+            &X-Amz-Algorithm=AWS4-HMAC-SHA256\
+            &X-Amz-Credential=AKIDEXAMPLE%2F20261104%2Feu-west-2%2Frds-db%2Faws4_request\
+            &X-Amz-Date=20261104T134640Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host\
+            &X-Amz-Signature=883300b9ed2b4642a0831dec290100ba186af4f1cf40581f70a648304fd6e11d\
+            &X-Amz-Security-Token=session";
+        let creds = Credentials::new("AKIDEXAMPLE", "secret", Some("session".into()), None, "test");
+        let iam = RdsIam::new(&cfg(), "eu-west-2", SharedCredentialsProvider::new(creds.clone()));
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_800_000);
+        assert_eq!(iam.sign_at(creds, at).unwrap(), SDK);
+    }
+
+    #[test]
     fn connections_verify_the_server_against_the_ca_bundle() {
         let o = cfg().options("tok").unwrap();
         assert_eq!(o.get_host(), "fde.cluster-x.eu-west-2.rds.amazonaws.com");
