@@ -144,6 +144,15 @@ jobs:
           echo "${TOFU_SHA256}  $RUNNER_TEMP/tofu.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/tofu.zip" tofu -d "$RUNNER_TEMP/tofu"
           echo "$RUNNER_TEMP/tofu" >> "$GITHUB_PATH"
+      # Providers cached per lock file (docs/ci.md); init still checks each one against the lock file's hashes.
+      - name: Provider cache directory
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.cache/opentofu/plugins" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.cache/opentofu/plugins"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/opentofu/plugins
+          key: opentofu-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('infra/envs/*/.terraform.lock.hcl') }}
       - run: tofu fmt -check -recursive infra
       - run: tofu -chdir=infra/envs/dev init -backend=false -input=false -lockfile=readonly
       - run: tofu -chdir=infra/envs/dev validate

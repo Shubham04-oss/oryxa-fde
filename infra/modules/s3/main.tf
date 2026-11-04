@@ -1,4 +1,4 @@
-# Adapted from oryxa-platform infra/modules/s3 (2b064a3), unchanged apart from this line.
+# Adapted from oryxa-platform infra/modules/s3 (2b064a3), unchanged apart from this line and force_destroy.
 # Private bucket: KMS-encrypted, versioned, public access blocked, TLS only.
 
 variable "name" {
@@ -9,6 +9,12 @@ variable "kms_key_arn" {
   type = string
 }
 
+variable "force_destroy" {
+  description = "Let destroy delete every object version. Only for tearing an environment down."
+  type        = bool
+  default     = false
+}
+
 variable "noncurrent_days" {
   description = "Days to keep overwritten object versions."
   type        = number
@@ -16,7 +22,8 @@ variable "noncurrent_days" {
 }
 
 resource "aws_s3_bucket" "this" {
-  bucket = var.name
+  bucket        = var.name
+  force_destroy = var.force_destroy
 }
 
 resource "aws_s3_bucket_public_access_block" "this" {

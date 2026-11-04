@@ -31,6 +31,8 @@ variable "delivery_service_principal" {
 
 data "aws_caller_identity" "current" {}
 
+data "aws_region" "current" {}
+
 data "aws_iam_policy_document" "assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -72,6 +74,16 @@ data "aws_iam_policy_document" "publish" {
   statement {
     actions   = ["events:PutEvents"]
     resources = [var.bus_arn]
+  }
+
+  lifecycle {
+    # The bus is made by script, outside OpenTofu: it must be this env's bus, in this account and region.
+    precondition {
+      condition = startswith(var.bus_arn, format(
+        "arn:aws:events:%s:%s:event-busv2/%s/", data.aws_region.current.region, data.aws_caller_identity.current.account_id, var.name,
+      ))
+      error_message = "bus_arn must be the ${var.name} EventBridge v2 bus in this account and region (infra/scripts/create-event-bus.sh)."
+    }
   }
 }
 

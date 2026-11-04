@@ -19,6 +19,12 @@ variable "data_bucket_arns" {
   type        = list(string)
 }
 
+variable "force_destroy" {
+  description = "Let destroy delete every log object. Only for tearing an environment down."
+  type        = bool
+  default     = false
+}
+
 variable "retention_days" {
   type    = number
   default = 365
@@ -101,7 +107,8 @@ resource "aws_kms_alias" "this" {
 # ---------------------------------------------------------------- bucket
 
 resource "aws_s3_bucket" "this" {
-  bucket = var.bucket_name
+  bucket        = var.bucket_name
+  force_destroy = var.force_destroy
 }
 
 resource "aws_s3_bucket_public_access_block" "this" {
