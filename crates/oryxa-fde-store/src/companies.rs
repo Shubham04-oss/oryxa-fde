@@ -7,6 +7,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
+use crate::ProjectTx;
 use crate::projects::{self, Project};
 use crate::{Actor, Name, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
 
@@ -85,6 +86,13 @@ impl CompanyTx {
 
     pub fn scope(&self) -> &CompanyScope {
         &self.scope
+    }
+
+    /// The same transaction, for one project of this company: row-level security still limits it
+    /// to this company, and every query filters by the project too.
+    pub fn into_project(self, project: oryxa_fde_core::ProjectId) -> ProjectTx {
+        let scope = self.scope.project(project);
+        ProjectTx::new(self.tx, scope)
     }
 
     #[cfg(test)]

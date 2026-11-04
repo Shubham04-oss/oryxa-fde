@@ -570,6 +570,7 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}", None),
     ("PATCH", "/v1/companies/{company}", Some(r#"{"name":"pwned"}"#)),
     ("GET", "/v1/companies/{company}/members", None),
+    ("GET", "/v1/companies/{company}/export", None),
     (
         "PUT",
         "/v1/companies/{company}/members/{user}",
@@ -3112,4 +3113,40 @@ async fn a_thread_promotes_into_the_decisions_log_and_a_note_names_only_people_o
     let read = format!("{project}/meeting-notes/{}", added["id"].as_str().unwrap());
     let after = w.ok(&t.lead, "GET", &read, None, StatusCode::OK).await;
     assert_eq!(after["stakeholders"], json!([]));
+
+async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
+    let w = world().await;
+    let org = new_id("org");
+    let a = company(&w, &org, "alpha").await;
+    let b = company(&w, &org, "beta").await;
+    let path = format!("/v1/companies/{}/export", a.company);
+
+    let export = w.ok(&a.lead, "GET", &path, None, StatusCode::OK).await;
+    let text = export.to_string();
+    // Every record of A is in it, under its project; nothing of B's is.
+    assert_eq!(export["company"]["id"], json!(a.company));
+    let projects = export["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["project"]["id"], json!(a.project));
+    for (placeholder, id) in &a.records {
+        if *placeholder != "{answer}" {
+            assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
+        }
+    }
+    assert!(!text.contains(&b.company) && !text.contains(&b.project));
+    for (placeholder, id) in &b.records {
+        assert!(!text.contains(id.as_str()), "B's {placeholder} {id} is in A's export");
+    }
+    // The organisation's security answers are not the company's records.
+    assert!(!text.contains(a.record("{answer}")));
+    // Only those who manage the company export it: its lead and the organisation's admins.
+    w.ok(&a.admin, "GET", &path, None, StatusCode::OK).await;
+    for who in [&a.engineer, &a.assignee, &b.lead] {
+        assert_eq!(
+            w.status(who, "GET", &path, None).await,
+            StatusCode::FORBIDDEN,
+            "{}",
+            who.id
+        );
+    }
 }

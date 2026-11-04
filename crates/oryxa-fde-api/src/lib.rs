@@ -29,6 +29,7 @@ mod companies;
 mod documents;
 mod engine;
 mod error;
+mod export;
 mod lifecycle;
 mod meetings;
 mod plan;
@@ -103,6 +104,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(companies::list, companies::create))
         .routes(routes!(companies::get, companies::update))
         .routes(routes!(companies::members))
+        .routes(routes!(export::export))
         .routes(routes!(companies::set_member, companies::remove_member))
         .routes(routes!(projects::list, projects::create))
         .routes(routes!(projects::get, projects::update))

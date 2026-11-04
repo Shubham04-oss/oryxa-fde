@@ -285,6 +285,13 @@ impl Store {
         Ok(CompanyTx::new(tx, scope.clone()))
     }
 
+    /// A read-only transaction limited to one company that sees one moment of it throughout, for
+    /// an export: its projects are read in the same transaction ([`CompanyTx::into_project`]).
+    pub async fn company_snapshot(&self, scope: &CompanyScope) -> Result<CompanyTx, StoreError> {
+        let tx = self.open_scoped(&scope.tenant, &[&scope.company], true).await?;
+        Ok(CompanyTx::new(tx, scope.clone()))
+    }
+
     /// A transaction limited to one project of one company.
     pub async fn project(&self, scope: &ProjectScope) -> Result<ProjectTx, StoreError> {
         let tx = self.scoped(&scope.company.tenant, &[&scope.company.company]).await?;
@@ -303,7 +310,23 @@ impl Store {
         tenant: &TenantId,
         companies: &[&CompanyId],
     ) -> Result<Transaction<'static, Postgres>, StoreError> {
+        self.open_scoped(tenant, companies, false).await
+    }
+
+    /// [`Store::scoped`]; a `snapshot` is read-only and sees one moment throughout.
+    async fn open_scoped(
+        &self,
+        tenant: &TenantId,
+        companies: &[&CompanyId],
+        snapshot: bool,
+    ) -> Result<Transaction<'static, Postgres>, StoreError> {
         let mut tx = self.pool.begin().await?;
+        if snapshot {
+            // Must come before any other statement of the transaction.
+            sqlx::query("set transaction isolation level repeatable read, read only")
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("set local role oryxa_fde_app").execute(&mut *tx).await?;
         // Company ids are [a-zA-Z0-9_-], so a comma cannot appear inside one.
         let ids = companies.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(",");
