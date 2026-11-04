@@ -832,6 +832,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
             due_on: None,
             assignee: None,
             waiting_on: None,
+            blocked_by: None,
         };
         tx.add_task(&oryxa_fde_core::TaskId::new(new_id("tsk")).unwrap(), &task, &by)
             .await
@@ -1115,6 +1116,7 @@ fn task_in(title: &str, status: TaskStatus) -> TaskIn {
         due_on: None,
         assignee: None,
         waiting_on: None,
+        blocked_by: None,
     }
 }
 

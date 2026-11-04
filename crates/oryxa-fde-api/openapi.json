@@ -1201,6 +1201,91 @@
         }
       }
     },
+    "/v1/companies/{company}/projects/{project}/activity": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "The project's activity: finished agent runs and eval runs and merged pull requests, newest\nfirst.",
+        "operationId": "list_activity",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many entries, newest first (1 to 200, default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ActivityOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/projects/{project}/assignees": {
       "get": {
         "tags": [
@@ -2445,6 +2530,143 @@
         }
       }
     },
+    "/v1/companies/{company}/projects/{project}/suggestions": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "The engine's open suggestions for the project. It never acts on one: moving the stage is the\nFDE's.",
+        "operationId": "list_suggestions",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SuggestionOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/suggestions/{kind}/dismiss": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "Dismiss an open suggestion; the engine raises it again only from a later eval run.",
+        "operationId": "dismiss_suggestion",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Which suggestion",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SuggestionKindOut"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Dismissed"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/projects/{project}/systems": {
       "get": {
         "tags": [
@@ -2808,6 +3030,428 @@
           },
           "404": {
             "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/updates": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "The project's weekly updates, newest week first.",
+        "operationId": "list_updates",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UpdateOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/updates/{week}": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "One week's update.",
+        "operationId": "get_update",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "week",
+            "in": "path",
+            "description": "The week's Monday, YYYY-MM-DD",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "Edit a drafted update's text; only while it is a draft.",
+        "operationId": "edit_update",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "week",
+            "in": "path",
+            "description": "The week's Monday, YYYY-MM-DD",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBodyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/updates/{week}/approve": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "Approve a drafted update. Final; it is only marked approved, and nothing is sent from here.",
+        "operationId": "approve_update",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "week",
+            "in": "path",
+            "description": "The week's Monday, YYYY-MM-DD",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/updates/{week}/discard": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "Discard a drafted update. Final.",
+        "operationId": "discard_update",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "week",
+            "in": "path",
+            "description": "The week's Monday, YYYY-MM-DD",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -3766,6 +4410,62 @@
           "revoked"
         ]
       },
+      "ActivityKind": {
+        "type": "string",
+        "enum": [
+          "agent_run_finished",
+          "eval_run_finished",
+          "pull_request_merged"
+        ]
+      },
+      "ActivityOut": {
+        "type": "object",
+        "required": [
+          "kind",
+          "subject",
+          "occurred_at"
+        ],
+        "properties": {
+          "failed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActivityKind"
+          },
+          "occurred_at": {
+            "type": "string"
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunOutcomeOut",
+                "description": "How an agent run ended."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "passed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An eval run's cases passed and failed.",
+            "minimum": 0
+          },
+          "subject": {
+            "type": "string",
+            "description": "The run's id, or the pull request's number."
+          }
+        }
+      },
       "AssigneeOut": {
         "type": "object",
         "required": [
@@ -4340,6 +5040,15 @@
           }
         }
       },
+      "RunOutcomeOut": {
+        "type": "string",
+        "enum": [
+          "succeeded",
+          "failed",
+          "rejected",
+          "cancelled"
+        ]
+      },
       "ScopeChangeOut": {
         "type": "object",
         "required": [
@@ -4646,6 +5355,32 @@
           "other"
         ]
       },
+      "SuggestionKindOut": {
+        "type": "string",
+        "enum": [
+          "ready_to_deploy"
+        ]
+      },
+      "SuggestionOut": {
+        "type": "object",
+        "required": [
+          "kind",
+          "eval_run",
+          "raised_at"
+        ],
+        "properties": {
+          "eval_run": {
+            "type": "string",
+            "description": "The eval run that showed it."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SuggestionKindOut"
+          },
+          "raised_at": {
+            "type": "string"
+          }
+        }
+      },
       "SystemBody": {
         "type": "object",
         "required": [
@@ -4723,6 +5458,13 @@
             ],
             "description": "The WorkOS user who works it."
           },
+          "blocked_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project's access request it is blocked on, only while `blocked`: once the request is\ngranted, the task goes back to `todo`."
+          },
           "blocker": {
             "type": [
               "string",
@@ -4768,6 +5510,13 @@
               "string",
               "null"
             ]
+          },
+          "blocked_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The access request it is blocked on."
           },
           "blocker": {
             "type": [
@@ -4900,6 +5649,81 @@
             }
           }
         }
+      },
+      "UpdateBodyIn": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The update's text: 1 to 20,000 characters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateOut": {
+        "type": "object",
+        "required": [
+          "week",
+          "body",
+          "status",
+          "model",
+          "drafted_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who approved or discarded it."
+          },
+          "drafted_at": {
+            "type": "string"
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "edited_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "description": "The model that drafted it."
+          },
+          "status": {
+            "$ref": "#/components/schemas/UpdateState"
+          },
+          "week": {
+            "type": "string",
+            "description": "The Monday of the ISO week it covers, `YYYY-MM-DD`."
+          }
+        }
+      },
+      "UpdateState": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "approved",
+          "discarded"
+        ]
       }
     },
     "securitySchemes": {

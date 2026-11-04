@@ -52,7 +52,7 @@ fn as_str(s: AccessStatus) -> &'static str {
     }
 }
 
-fn parse(s: &str) -> Result<AccessStatus, StoreError> {
+pub(crate) fn parse(s: &str) -> Result<AccessStatus, StoreError> {
     ALL.into_iter()
         .find(|a| as_str(*a) == s)
         .ok_or(StoreError::Corrupt("access status"))

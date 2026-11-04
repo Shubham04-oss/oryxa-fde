@@ -696,6 +696,30 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     ("GET", "/v1/companies/{company}/projects/{project}/decisions", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/activity", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/suggestions", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/suggestions/{kind}/dismiss",
+        None,
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/updates", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/updates/{week}", None),
+    (
+        "PATCH",
+        "/v1/companies/{company}/projects/{project}/updates/{week}",
+        Some(r#"{"body":"pwned"}"#),
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/updates/{week}/approve",
+        None,
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/updates/{week}/discard",
+        None,
+    ),
     (
         "POST",
         "/v1/companies/{company}/projects/{project}/decisions",
@@ -874,6 +898,31 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             &format!("{name} refunds over 500 need approval from the support lead"),
         )
         .await;
+    // What the lifecycle engine leaves on a project: an activity entry, an open suggestion and a
+    // drafted update, written as the engine writes them.
+    let scope = CompanyScope::new(TenantId::new(org).unwrap(), CompanyId::new(&company).unwrap())
+        .project(oryxa_fde_core::ProjectId::new(&project).unwrap());
+    let mut tx = w.store.project(&scope).await.unwrap();
+    let run = oryxa_fde_core::EvalRunId::new(new_id("evr")).unwrap();
+    tx.record_activity(
+        &new_id("evt"),
+        &oryxa_fde_store::ActivityIn::EvalRun {
+            run: run.clone(),
+            passed: 9,
+            failed: 1,
+        },
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tx.raise_suggestion(oryxa_fde_store::SuggestionKind::ReadyToDeploy, &run)
+            .await
+            .unwrap()
+    );
+    let body = oryxa_fde_store::UpdateBody::new(format!("{name}: done this week")).unwrap();
+    assert!(tx.add_update_draft(fixture_week(), &body, "echo").await.unwrap());
+    tx.commit().await.unwrap();
     Tenant {
         org: org.to_owned(),
         lead,
@@ -892,8 +941,15 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             ("{access_request}", access_request),
             ("{task}", task),
             ("{answer}", answer),
+            ("{week}", fixture_week().to_string()),
+            ("{kind}", "ready_to_deploy".into()),
         ],
     }
+}
+
+/// The week each fixture's drafted update covers.
+fn fixture_week() -> time::Date {
+    time::macros::date!(2026 - 11 - 02)
 }
 
 /// What a company's lead sees of it; must not change under attack.
@@ -918,6 +974,9 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/access-requests"),
         format!("{project}/tasks"),
         format!("{project}/decisions"),
+        format!("{project}/activity"),
+        format!("{project}/suggestions"),
+        format!("{project}/updates"),
         "/v1/security-answers".into(),
     ] {
         let mut got = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
@@ -2457,4 +2516,130 @@ async fn uploads_take_up_to_20_mib_of_a_known_type_and_other_routes_keep_2_mb() 
         )
         .await;
     assert_eq!(docs.as_array().unwrap().len(), 2, "{docs}");
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn the_engines_activity_suggestions_and_drafts_for_whoever_works_on_the_project() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let project = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let week = format!("{project}/updates/{}", t.record("{week}"));
+
+    // The assignee, who works on the project, reads what the engine left.
+    let activity = w
+        .ok(&t.assignee, "GET", &format!("{project}/activity"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        (activity[0]["kind"].as_str(), activity[0]["passed"].as_u64()),
+        (Some("eval_run_finished"), Some(9))
+    );
+    let suggestions = w
+        .ok(
+            &t.assignee,
+            "GET",
+            &format!("{project}/suggestions"),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(suggestions[0]["kind"], "ready_to_deploy");
+    let updates = w
+        .ok(&t.assignee, "GET", &format!("{project}/updates"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        (updates[0]["status"].as_str(), updates[0]["week"].as_str()),
+        (Some("draft"), Some("2026-11-02"))
+    );
+    for bad in [
+        "{project}/activity?limit=0",
+        "{project}/activity?limit=201",
+        "{project}/updates/2026-11-03",
+    ] {
+        let path = bad.replace("{project}", &project);
+        assert_eq!(
+            w.status(&t.lead, "GET", &path, None).await,
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
+
+    // Edited, then approved: final, and nothing is sent.
+    let edited = w
+        .ok(
+            &t.lead,
+            "PATCH",
+            &week,
+            Some(json!({"body": "Done: indexing."})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (edited["body"].as_str(), edited["edited_by"].as_str()),
+        (Some("Done: indexing."), Some(t.lead.id.as_str()))
+    );
+    let unknown = Some(json!({"body": "x", "status": "approved"}));
+    assert_eq!(
+        w.status(&t.lead, "PATCH", &week, unknown).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let approved = w
+        .ok(&t.engineer, "POST", &format!("{week}/approve"), None, StatusCode::OK)
+        .await;
+    assert_eq!(approved["status"], "approved");
+    assert_eq!(
+        w.status(&t.lead, "PATCH", &week, Some(json!({"body": "late"}))).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        w.status(&t.lead, "POST", &format!("{week}/discard"), None).await,
+        StatusCode::CONFLICT
+    );
+    let next = format!("{project}/updates/2026-11-09");
+    assert_eq!(
+        w.status(&t.lead, "POST", &format!("{next}/approve"), None).await,
+        StatusCode::NOT_FOUND
+    );
+
+    // Dismissed once; a suggestion that is not open, or not a kind, is refused.
+    let dismiss = format!("{project}/suggestions/ready_to_deploy/dismiss");
+    assert_eq!(w.status(&t.lead, "POST", &dismiss, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(w.status(&t.lead, "POST", &dismiss, None).await, StatusCode::NOT_FOUND);
+    let bad = format!("{project}/suggestions/deploy_now/dismiss");
+    assert_eq!(w.status(&t.lead, "POST", &bad, None).await, StatusCode::BAD_REQUEST);
+
+    // Someone in the organisation who is not on the project reads none of it.
+    let other = user(&org, "other", "member");
+    for path in [
+        format!("{project}/activity"),
+        format!("{project}/suggestions"),
+        week.clone(),
+    ] {
+        assert_eq!(
+            w.status(&other, "GET", &path, None).await,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+
+    // A task blocked on one of the project's access requests says so; any other is refused.
+    let tasks = format!("{project}/tasks");
+    let access = t.record("{access_request}");
+    let blocked = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks,
+            Some(json!({"title": "Index", "status": "blocked", "blocker": "API token", "blocked_by": access})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(blocked["blocked_by"], access);
+    let open = Some(json!({"title": "Index", "status": "todo", "blocked_by": access}));
+    assert_eq!(w.status(&t.lead, "POST", &tasks, open).await, StatusCode::CONFLICT);
+    let elsewhere = company(&w, &org, "beta").await;
+    let theirs = Some(json!({"title": "Index", "status": "blocked", "blocker": "x",
+        "blocked_by": elsewhere.record("{access_request}")}));
+    assert_eq!(w.status(&t.lead, "POST", &tasks, theirs).await, StatusCode::BAD_REQUEST);
 }

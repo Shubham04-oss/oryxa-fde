@@ -26,6 +26,7 @@ pub mod auth;
 mod authz;
 mod companies;
 mod documents;
+mod engine;
 mod error;
 mod lifecycle;
 mod projects;
@@ -118,6 +119,13 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(lifecycle::tasks, lifecycle::add_task))
         .routes(routes!(lifecycle::update_task, lifecycle::remove_task))
         .routes(routes!(lifecycle::decisions, lifecycle::record_decision))
+        .routes(routes!(engine::activity))
+        .routes(routes!(engine::suggestions))
+        .routes(routes!(engine::dismiss_suggestion))
+        .routes(routes!(engine::updates))
+        .routes(routes!(engine::update, engine::edit_update))
+        .routes(routes!(engine::approve_update))
+        .routes(routes!(engine::discard_update))
         .routes(routes!(records::security_answers, records::add_security_answer))
         .routes(routes!(
             records::update_security_answer,

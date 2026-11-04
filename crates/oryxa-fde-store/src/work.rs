@@ -1,7 +1,7 @@
 //! A project's tasks (with blockers and a "waiting on customer" state) and its decisions log.
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{DecisionId, StakeholderId, TaskId};
+use oryxa_fde_core::{AccessRequestId, DecisionId, StakeholderId, TaskId};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::{Date, OffsetDateTime};
@@ -58,6 +58,8 @@ pub struct Task {
     pub waiting_on: Option<StakeholderId>,
     /// Since when it has waited on the customer; set while the status is `WaitingOnCustomer`.
     pub waiting_since: Option<OffsetDateTime>,
+    /// The project's access request it is blocked on: granted, it unblocks the task.
+    pub blocked_by: Option<AccessRequestId>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -70,12 +72,16 @@ pub struct TaskIn {
     pub due_on: Option<Date>,
     pub assignee: Option<UserId>,
     pub waiting_on: Option<StakeholderId>,
+    /// Only while the task is blocked.
+    pub blocked_by: Option<AccessRequestId>,
 }
 
 impl TaskIn {
     fn check(&self) -> Result<(), StoreError> {
         if self.status == TaskStatus::Blocked && self.blocker.is_none() {
             Err(StoreError::Rejected("blocker_required"))
+        } else if self.blocked_by.is_some() && self.status != TaskStatus::Blocked {
+            Err(StoreError::Rejected("blocked_by_needs_blocked"))
         } else {
             Ok(())
         }
@@ -119,7 +125,7 @@ impl<T> Page<T> {
 }
 
 pub(crate) const TASK: &str =
-    "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, created_at, updated_at";
+    "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, blocked_by, created_at, updated_at";
 const DECISION: &str = "decision_id, title, rationale, decided_by, decided_at, recorded_by, created_at";
 
 impl ProjectTx {
@@ -183,11 +189,13 @@ impl ProjectTx {
     pub async fn add_task(&mut self, id: &TaskId, v: &TaskIn, by: &Actor) -> Result<Option<Task>, StoreError> {
         v.check()?;
         self.check_waiting_on(v).await?;
+        self.check_blocked_by(v).await?;
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "insert into tasks (tenant_id, company_id, project_id, task_id, title, status, blocker, due_on, assignee,
-                 waiting_on, waiting_since, created_by)
-             select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $6 = 'waiting_on_customer' then now() end, $11
+                 waiting_on, waiting_since, created_by, blocked_by)
+             select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $6 = 'waiting_on_customer' then now() end, $11,
+                 $12
              where exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)
              returning {TASK}"
         ))
@@ -202,6 +210,7 @@ impl ProjectTx {
         .bind(v.assignee.as_ref().map(UserId::as_str))
         .bind(v.waiting_on.as_ref().map(StakeholderId::as_str))
         .bind(by.user.as_str())
+        .bind(v.blocked_by.as_ref().map(AccessRequestId::as_str))
         .fetch_optional(&mut *self.tx)
         .await
         .map_err(|e| {
@@ -230,11 +239,12 @@ impl ProjectTx {
     pub async fn update_task(&mut self, id: &TaskId, v: &TaskIn, by: &Actor) -> Result<Option<Task>, StoreError> {
         v.check()?;
         self.check_waiting_on(v).await?;
+        self.check_blocked_by(v).await?;
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
                  waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
-                 updated_at = now()
+                 blocked_by = $11, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4 returning {TASK}"
         ))
         .bind(&t)
@@ -247,6 +257,7 @@ impl ProjectTx {
         .bind(v.due_on)
         .bind(v.assignee.as_ref().map(UserId::as_str))
         .bind(v.waiting_on.as_ref().map(StakeholderId::as_str))
+        .bind(v.blocked_by.as_ref().map(AccessRequestId::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -289,6 +300,27 @@ impl ProjectTx {
         )
         .await?;
         Ok(true)
+    }
+
+    /// The access request a task is blocked on must be one of this project's.
+    async fn check_blocked_by(&mut self, v: &TaskIn) -> Result<(), StoreError> {
+        let Some(access) = &v.blocked_by else { return Ok(()) };
+        let (t, c, p) = self.keys();
+        let found: bool = sqlx::query_scalar(
+            "select exists (select 1 from access_requests
+                 where tenant_id = $1 and company_id = $2 and project_id = $3 and access_request_id = $4)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(access.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        if found {
+            Ok(())
+        } else {
+            Err(StoreError::Missing("blocked_by"))
+        }
     }
 
     /// The stakeholder a task waits on must belong to this company.
@@ -424,6 +456,7 @@ impl ProjectTx {
 pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
     let assignee: Option<String> = r.try_get("assignee")?;
     let waiting_on: Option<String> = r.try_get("waiting_on")?;
+    let blocked_by: Option<String> = r.try_get("blocked_by")?;
     Ok(Task {
         id: id("task id", TaskId::new, r.try_get("task_id")?)?,
         title: name(r.try_get("title")?, "title")?,
@@ -435,6 +468,9 @@ pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
             .map(|w| id("stakeholder id", StakeholderId::new, w))
             .transpose()?,
         waiting_since: r.try_get("waiting_since")?,
+        blocked_by: blocked_by
+            .map(|a| id("access request id", AccessRequestId::new, a))
+            .transpose()?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })
@@ -490,12 +526,20 @@ mod tests {
             due_on: None,
             assignee: None,
             waiting_on: None,
+            blocked_by: None,
         };
         assert!(matches!(t.check(), Err(StoreError::Rejected("blocker_required"))));
         t.blocker = Some(Text::new("Waiting on IT ticket").unwrap());
         assert!(t.check().is_ok());
+        t.blocked_by = Some(AccessRequestId::new("acc_1").unwrap());
+        assert!(t.check().is_ok(), "blocked on an access request");
         t.status = TaskStatus::WaitingOnCustomer;
         t.blocker = None;
+        assert!(matches!(
+            t.check(),
+            Err(StoreError::Rejected("blocked_by_needs_blocked"))
+        ));
+        t.blocked_by = None;
         assert!(t.check().is_ok());
     }
 }

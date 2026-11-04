@@ -321,6 +321,11 @@ pub struct TaskBody {
     /// The stakeholder at the customer it waits on.
     #[schema(value_type = Option<String>)]
     pub waiting_on: Option<StakeholderId>,
+    /// The project's access request it is blocked on, only while `blocked`: once the request is
+    /// granted, the task goes back to `todo`.
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub blocked_by: Option<AccessRequestId>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -335,6 +340,8 @@ pub struct TaskOut {
     pub waiting_on: Option<String>,
     /// When it started waiting on the customer; set while the status is `waiting_on_customer`.
     pub waiting_since: Option<String>,
+    /// The access request it is blocked on.
+    pub blocked_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -353,6 +360,7 @@ impl From<Task> for TaskOut {
             assignee: t.assignee.map(|a| a.to_string()),
             waiting_on: t.waiting_on.map(|w| w.to_string()),
             waiting_since: t.waiting_since.map(ts),
+            blocked_by: t.blocked_by.map(|a| a.to_string()),
             created_at: ts(t.created_at),
             updated_at: ts(t.updated_at),
         }
@@ -444,6 +452,7 @@ impl TaskBody {
                 .transpose()?,
             assignee: self.assignee,
             waiting_on: self.waiting_on,
+            blocked_by: self.blocked_by,
         })
     }
 }

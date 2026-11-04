@@ -20,6 +20,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 mod access;
 mod companies;
 mod documents;
+mod engine;
 mod grants;
 pub mod iam;
 mod org;
@@ -30,12 +31,14 @@ mod runs;
 mod scope;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+mod updates;
 mod views;
 mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
 pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
+pub use engine::{Activity, ActivityIn, Suggestion, SuggestionKind, engine_actor};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use projects::{Assignee, Project, ProjectIn, ProjectTx};
@@ -44,6 +47,7 @@ pub use runs::{AgentApprovalRow, AgentBudget, AgentDecided, AgentDecision, Agent
 pub use scope::{
     Comparator, Criterion, CriterionIn, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
 };
+pub use updates::{MAX_UPDATE_CHARS, UpdateBody, UpdateDraft, UpdateStatus, WeekFacts, week_bounds, week_of};
 pub use views::{CompanySummary, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
 

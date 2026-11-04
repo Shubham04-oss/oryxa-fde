@@ -105,6 +105,14 @@ pub struct EvalRunFinished {
     pub failed: u32,
 }
 
+/// A pull request of the project's repository was merged: its number only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestMerged {
+    company: CompanyId,
+    project: ProjectId,
+    pub number: u32,
+}
+
 /// `company()` and `scope(tenant)` for a payload about one company.
 macro_rules! company_scoped {
     ($($ty:ident),*) => {$(
@@ -145,7 +153,8 @@ project_scoped!(
     ScopeSignedOff,
     AccessRequestStatusChanged,
     AgentRunFinished,
-    EvalRunFinished
+    EvalRunFinished,
+    PullRequestMerged
 );
 
 impl CompanyCreated {
@@ -230,6 +239,16 @@ impl EvalRunFinished {
     }
 }
 
+impl PullRequestMerged {
+    pub fn new(s: &ProjectScope, number: u32) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            number,
+        }
+    }
+}
+
 macro_rules! events {
     ($($ty:ident => $detail:literal, ordered by $entity:ident;)*) => {
         $(impl Event for $ty {
@@ -253,6 +272,7 @@ events! {
     DocumentUploaded => "fde.document.uploaded.v1", ordered by company;
     AgentRunFinished => "fde.agent-run.finished.v1", ordered by project;
     EvalRunFinished => "fde.eval-run.finished.v1", ordered by project;
+    PullRequestMerged => "fde.pull-request.merged.v1", ordered by project;
 }
 
 #[cfg(test)]
@@ -329,6 +349,7 @@ mod tests {
                 RunOutcome::Succeeded,
             )),
             sample(EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 41, 2)),
+            sample(PullRequestMerged::new(&p, 128)),
         ]
     }
 
@@ -363,8 +384,9 @@ mod tests {
         );
         round_trip(
             EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 9, 1),
-            by_project,
+            by_project.clone(),
         );
+        round_trip(PullRequestMerged::new(&p, 7), by_project);
     }
 
     #[test]
