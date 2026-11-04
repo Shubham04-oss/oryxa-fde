@@ -1,0 +1,148 @@
+name: deploy-api
+# Builds oryxa-fde-api for linux/arm64, pushes it to ECR, runs the store's migrations as the one-off
+# migrate task, then rolls the ECS service onto the new image. Manual and dev only; AWS access is a
+# short-lived OIDC session for the deploy role (infra/envs/dev/deploy.tf). Setup: infra/README.md, Deploys.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-api-dev
+  cancel-in-progress: false # never stop a migration or a rollout halfway
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TARGET: aarch64-unknown-linux-gnu
+
+jobs:
+  build:
+    # Heavy Rust job (docs/ci.md): native on the ARM64 oryxa-a1 runners, cross-compiled on hosted x64 ones.
+    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: ./.github/actions/rust-cache
+      - name: Cross toolchain (x64 runners only)
+        if: runner.arch == 'X64'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p oryxa-fde-api --target "$TARGET"
+      # The image's base is Debian 13 (glibc 2.41): refuse a binary that would not start on it.
+      - name: Check the glibc the binary needs
+        run: |
+          need=$(readelf --version-info "target/$TARGET/release/oryxa-fde-api" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "needs glibc $need"
+          [ "$(printf '%s\n2.41\n' "$need" | sort -V | tail -1)" = "2.41" ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oryxa-fde-api
+          path: target/${{ env.TARGET }}/release/oryxa-fde-api
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    # Light job, always hosted. Only jobs in the `dev` environment can assume the deploy role.
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: infra/docker
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: oryxa-fde-api
+          path: ${{ runner.temp }}/image
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: deploy-api-${{ github.run_id }}
+      # Names, subnets and the migrate task's security group, written by OpenTofu (infra/envs/dev/deploy.tf).
+      - name: Read the deploy config
+        run: |
+          CONFIG="$RUNNER_TEMP/deploy.json"
+          echo "CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          aws ssm get-parameter --name /oryxa-fde-dev/deploy --query Parameter.Value --output text > "$CONFIG"
+          jq -e '.cluster and .service and .api_task_definition and .migrate_task_definition
+            and .migrate_security_group and (.subnets | length > 0) and .ecr_repository_url
+            and .image_tag_parameter' "$CONFIG" > /dev/null
+      # Tags are immutable: a sha already in ECR is reused, never overwritten.
+      - name: Push the image
+        run: |
+          repo=$(jq -r .ecr_repository_url "$CONFIG")
+          echo "IMAGE=$repo:$IMAGE_TAG" >> "$GITHUB_ENV"
+          if aws ecr describe-images --repository-name "${repo#*/}" --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "$repo:$IMAGE_TAG is already in ECR"
+            exit 0
+          fi
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+          docker build --platform linux/arm64 -f infra/docker/oryxa-fde-api.Dockerfile -t "$repo:$IMAGE_TAG" "$RUNNER_TEMP/image"
+          docker push "$repo:$IMAGE_TAG"
+      # New revisions of the API and migrate task definitions: everything as OpenTofu last set it, but the image.
+      - name: Register task definitions
+        run: |
+          # Runs inside $(...), where set -e does not reach, so every step returns on failure itself.
+          register() {
+            local current="$RUNNER_TEMP/$1.current.json" next="$RUNNER_TEMP/$1.json"
+            aws ecs describe-task-definition --task-definition "$1" --query taskDefinition --output json > "$current" || return 1
+            jq -e --arg repo "${IMAGE%:*}" '(.containerDefinitions | length) == 1
+              and (.containerDefinitions[0].image | startswith($repo + ":"))' "$current" > /dev/null \
+              || { echo "$1 is not a single container running ${IMAGE%:*}" >&2; return 1; }
+            jq --arg image "$IMAGE" '.containerDefinitions[0].image = $image
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
+                    .registeredAt, .registeredBy, .deregisteredAt)' "$current" > "$next" || return 1
+            aws ecs register-task-definition --cli-input-json "file://$next" \
+              --query taskDefinition.taskDefinitionArn --output text
+          }
+          migrate=$(register "$(jq -r .migrate_task_definition "$CONFIG")")
+          api=$(register "$(jq -r .api_task_definition "$CONFIG")")
+          { echo "MIGRATE_TASK_DEFINITION=$migrate"; echo "API_TASK_DEFINITION=$api"; } >> "$GITHUB_ENV"
+      - name: Run migrations
+        run: |
+          cluster=$(jq -r .cluster "$CONFIG")
+          network=$(jq -c '{awsvpcConfiguration: {subnets: .subnets, securityGroups: [.migrate_security_group],
+            assignPublicIp: "DISABLED"}}' "$CONFIG")
+          task=$(aws ecs run-task --cluster "$cluster" --launch-type FARGATE --task-definition "$MIGRATE_TASK_DEFINITION" \
+            --network-configuration "$network" --started-by "deploy-api-$GITHUB_RUN_ID" \
+            --query 'tasks[0].taskArn' --output text)
+          [ -n "$task" ] && [ "$task" != "None" ] || { echo "::error::the migrate task did not start"; exit 1; }
+          echo "migrate task: $task"
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
+          read -r code reason < <(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
+            --query 'tasks[0].[containers[0].exitCode, stoppedReason]' --output text)
+          [ "$code" = "0" ] || { echo "::error::migrations failed (exit $code: $reason); logs: CloudWatch /ecs/$(jq -r .migrate_task_definition "$CONFIG")"; exit 1; }
+      - name: Roll the service onto the new image
+        run: |
+          cluster=$(jq -r .cluster "$CONFIG")
+          service=$(jq -r .service "$CONFIG")
+          aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$API_TASK_DEFINITION" > /dev/null
+          aws ecs wait services-stable --cluster "$cluster" --services "$service"
+          # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck.
+          aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
+            | jq -e --arg td "$API_TASK_DEFINITION" \
+                '.services[0].deployments[] | select(.status == "PRIMARY") | .taskDefinition == $td and .rolloutState == "COMPLETED"' \
+            > /dev/null || { echo "::error::the service did not settle on $API_TASK_DEFINITION"; exit 1; }
+      # OpenTofu reads this on every plan, so a later apply keeps this image instead of rolling back.
+      - name: Record the deployed image
+        run: |
+          aws ssm put-parameter --name "$(jq -r .image_tag_parameter "$CONFIG")" --type String --value "$IMAGE_TAG" --overwrite > /dev/null
+          {
+            echo "### Deployed oryxa-fde-api to dev"
+            echo "- image: \`$IMAGE\`"
+            echo "- migrate: \`$MIGRATE_TASK_DEFINITION\`"
+            echo "- service: \`$API_TASK_DEFINITION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out of ECR
+        if: always()
+        run: docker logout "$(jq -r '.ecr_repository_url | split("/")[0]' "$CONFIG" 2> /dev/null)" > /dev/null 2>&1 || true

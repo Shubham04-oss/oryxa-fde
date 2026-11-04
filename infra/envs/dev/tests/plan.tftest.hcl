@@ -157,6 +157,86 @@ run "only_the_migrate_task_connects_as_the_table_owner" {
   }
 }
 
+# GitHub deploys (#31): only this repository's jobs in the dev environment may assume the deploy
+# role, and it may only push the API image, run the migrate task and update the API service.
+run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
+  command = plan
+
+  assert {
+    condition = {
+      for c in one(data.aws_iam_policy_document.github_deploy_assume.statement).condition :
+      c.variable => "${c.test} ${join(" ", c.values)}"
+      } == {
+      "token.actions.githubusercontent.com:aud" = "StringEquals sts.amazonaws.com"
+      "token.actions.githubusercontent.com:sub" = "StringEquals repo:Shubham04-oss/oryxa-fde:environment:dev"
+    }
+    error_message = "the deploy role trusts exactly this repository's dev environment, with no wildcard"
+  }
+  assert {
+    condition     = length(aws_iam_openid_connect_provider.github) == 1
+    error_message = "the GitHub OIDC provider is created when none is passed in"
+  }
+}
+
+run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
+  command = plan
+
+  assert {
+    condition = alltrue(flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : [for a in s.actions : !strcontains(a, "*")]
+    ]))
+    error_message = "no wildcard actions"
+  }
+  assert {
+    condition = toset([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.sid if contains(tolist(s.resources), "*")
+    ]) == toset(["EcrLogin", "TaskDefinitions"])
+    error_message = "only actions with no resource-level scoping take *"
+  }
+  assert {
+    condition = alltrue([
+      for s in data.aws_iam_policy_document.github_deploy.statement :
+      length(s.condition) == 1 && one(s.condition).variable == "iam:PassedToService" if contains(s.actions, "iam:PassRole")
+    ])
+    error_message = "roles may be passed to ECS tasks only"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:RunTask")
+    ]) == ["arn:aws:ecs:us-west-2:000000000000:task-definition/oryxa-fde-dev-migrate:*"]
+    error_message = "the only task the deploy role may run is the migrate task"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
+    ]) == ["arn:aws:ecs:us-west-2:000000000000:service/oryxa-fde-dev/oryxa-fde-api"]
+    error_message = "the only service the deploy role may update is the API"
+  }
+}
+
+run "an_existing_github_oidc_provider_is_reused" {
+  command = plan
+  variables {
+    github_oidc_provider_arn = "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+  }
+
+  assert {
+    condition = (
+      length(aws_iam_openid_connect_provider.github) == 0
+      && one(one(data.aws_iam_policy_document.github_deploy_assume.statement).principals).identifiers == toset([var.github_oidc_provider_arn])
+    )
+    error_message = "the deploy role trusts the provider passed in, and none is created"
+  }
+}
+
+run "rejects_a_wildcard_repository" {
+  command = plan
+  variables {
+    github_repository = "Shubham04-oss/*"
+  }
+  expect_failures = [var.github_repository]
+}
+
 run "rejects_a_bus_that_is_not_oryxa_fde" {
   command = plan
   variables {

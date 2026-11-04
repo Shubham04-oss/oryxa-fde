@@ -1,0 +1,82 @@
+name: deploy-workers
+# Deploys the Cloudflare Workers with Wrangler: the sandbox gateway and realtime/ first (fde-web may
+# bind their Durable Objects), then fde-web. Manual and dev only. The Cloudflare API token and the
+# dev values come from the `dev` environment, never the repository. Setup: infra/README.md, Deploys.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-workers-dev
+  cancel-in-progress: false
+
+jobs:
+  workers:
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [sandbox/gateway, realtime]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A Worker that has not landed yet (realtime/) is skipped.
+      - id: present
+        run: echo "yes=$([ -f '${{ matrix.package }}/package.json' ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.yes == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+      # Lockfile-exact install; wrangler comes from the package's own devDependencies. The gateway's
+      # container image is built here by Docker and pushed to Cloudflare's registry.
+      - if: steps.present.outputs.yes == 'true'
+        working-directory: ${{ matrix.package }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm ci --no-audit --no-fund && npx wrangler deploy
+
+  web:
+    needs: workers
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        working-directory: fde-web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # setup-node's pnpm cache asks pnpm where its store is, so pnpm comes first, at the version package.json pins.
+      - run: npm install -g pnpm@12.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: fde-web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # fde-web's wrangler.jsonc is for local development. The build writes the config Wrangler
+      # deploys (dist/server/wrangler.json); dev's route and the private link to the API are added to
+      # it here: only app.<domain> serves the app (no workers.dev or preview URLs), and the API
+      # binding is the Workers VPC service (infra/modules/cloudflare).
+      - name: Add the dev route and the API binding
+        env:
+          WEB_HOSTNAME: ${{ vars.WEB_HOSTNAME }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          API_VPC_SERVICE_ID: ${{ vars.API_VPC_SERVICE_ID }}
+        run: |
+          : "${WEB_HOSTNAME:?set WEB_HOSTNAME on the dev environment}"
+          : "${CLOUDFLARE_ZONE_ID:?set CLOUDFLARE_ZONE_ID on the dev environment}"
+          : "${API_VPC_SERVICE_ID:?set API_VPC_SERVICE_ID on the dev environment}"
+          config=dist/server/wrangler.json
+          jq --arg host "$WEB_HOSTNAME" --arg zone "$CLOUDFLARE_ZONE_ID" --arg api "$API_VPC_SERVICE_ID" '
+            .routes = [{pattern: ($host + "/*"), zone_id: $zone}]
+            | .workers_dev = false
+            | .preview_urls = false
+            | .vpc_services = [{binding: "API", service_id: $api}]' "$config" > "$RUNNER_TEMP/wrangler.json"
+          mv "$RUNNER_TEMP/wrangler.json" "$config"
+      - env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler deploy

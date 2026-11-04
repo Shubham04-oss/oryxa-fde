@@ -80,8 +80,24 @@ variable "cloudtrail_bucket_name" {
 }
 
 variable "api_image_tag" {
-  description = "Tag of the oryxa-fde-api image in ECR: the git sha (tags are immutable). Unused while start_services is false."
+  description = "Seeds /oryxa-fde-<env>/api-image-tag on the first apply; after that the deploy workflow owns the tag."
   type        = string
+}
+
+variable "github_repository" {
+  description = "owner/name of the repository whose `environment: <env>` jobs may assume the deploy role."
+  type        = string
+  default     = "Shubham04-oss/oryxa-fde"
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_repository))
+    error_message = "github_repository must be owner/name, without wildcards."
+  }
+}
+
+variable "github_oidc_provider_arn" {
+  description = "The account's existing GitHub OIDC provider. Null creates one (an account holds only one)."
+  type        = string
+  default     = null
 }
 
 variable "start_services" {
