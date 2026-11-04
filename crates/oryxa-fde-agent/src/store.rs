@@ -2,22 +2,28 @@
 //! store implements it on Postgres (`pg.rs`), with `finish` writing `agent-run.finished` to the outbox in the same
 //! transaction. `InMemoryRuns` is for tests. Every lookup takes the full `ProjectScope`, so a run of one company is
 //! never found through another's.
+//!
+//! Any API task may drive a run, so the store also holds what must hold across tasks: which run has the company's
+//! sandbox (a lease the run's driver renews), and each live run's reservation against the project's budget.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{AgentRunId, ProjectScope};
+use oryxa_fde_core::{AgentRunId, CompanyScope, ProjectScope};
 use oryxa_fde_events::{AgentRunFinished, RunOutcome};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::event::{ApprovalOutcome, EventLine, Usage};
 use crate::git::{Delivery, Repository};
 use crate::ids::{ApprovalId, ToolCallId};
 use crate::run::AgentRun;
+use crate::service::{Remaining, remaining};
 
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -159,8 +165,33 @@ pub trait RunStore: Send + Sync + 'static {
         by: &UserId,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn spend(&self, scope: &ProjectScope) -> impl Future<Output = Result<Spend, StoreError>> + Send;
-    /// Saves the ended run, adds its use to the project's spend and enqueues `agent-run.finished` with `outcome`,
-    /// all or nothing.
+    /// Gives the company's sandbox to the run for `lease` if no other live run holds it and no older run of the
+    /// company is waiting for it, and keeps the run alive either way. `NotFound` once the run has ended.
+    fn take_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        lease: Duration,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+    /// Extends the run's lease on the sandbox and keeps it alive; `false` if it no longer holds the sandbox.
+    fn renew_sandbox(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        lease: Duration,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+    /// What is left of the project's budget (`default` unless it has its own) after its ended runs' use and its
+    /// other live runs' reservations; reserved for this run, its seconds capped at `max_run`, until it ends. Done
+    /// under a lock on the project's budget, so two runs never both get the same part. `None` when used up.
+    fn reserve(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        default: Budget,
+        max_run: Duration,
+    ) -> impl Future<Output = Result<Option<Remaining>, StoreError>> + Send;
+    /// Saves the ended run, adds its use to the project's spend, lets go of the sandbox and enqueues
+    /// `agent-run.finished` with `outcome`, all or nothing. A run that has already ended is left as it is.
     fn finish(
         &self,
         run: &RunRecord,
@@ -169,12 +200,28 @@ pub trait RunStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
+/// What a live run holds back from the budget: what is left, its seconds capped at the longest a run may take.
+pub fn reservation(left: Remaining, max_run: Duration) -> Spend {
+    Spend {
+        seconds: left.seconds.min(max_run.as_secs()),
+        usd_micros: left.usd_micros,
+    }
+}
+
 struct Entry {
     record: RunRecord,
     order: u64,
     events: Vec<EventLine>,
     approvals: Vec<ApprovalRecord>,
     cancel: bool,
+    alive_until: Instant,
+    reserved: Spend,
+}
+
+impl Entry {
+    fn live(&self, now: Instant) -> bool {
+        self.record.ended_at.is_none() && self.alive_until > now
+    }
 }
 
 #[derive(Default)]
@@ -182,6 +229,7 @@ struct Inner {
     runs: HashMap<(ProjectScope, AgentRunId), Entry>,
     budgets: HashMap<ProjectScope, Budget>,
     spend: HashMap<ProjectScope, Spend>,
+    leases: HashMap<CompanyScope, (AgentRunId, Instant)>,
     outbox: Vec<AgentRunFinished>,
     next: u64,
 }
@@ -227,6 +275,8 @@ impl RunStore for InMemoryRuns {
                 events: Vec::new(),
                 approvals: Vec::new(),
                 cancel: false,
+                alive_until: Instant::now(),
+                reserved: Spend::default(),
             },
         );
         Ok(())
@@ -250,8 +300,15 @@ impl RunStore for InMemoryRuns {
 
     async fn update(&self, run: &RunRecord) -> Result<(), StoreError> {
         let (scope, id) = key(run);
-        self.with(&scope, &id, |e| e.record = run.clone())
-            .ok_or(StoreError::NotFound)
+        self.with(&scope, &id, |e| {
+            // An ended run is never changed.
+            if e.record.ended_at.is_some() {
+                return Err(StoreError::NotFound);
+            }
+            e.record = run.clone();
+            Ok(())
+        })
+        .ok_or(StoreError::NotFound)?
     }
 
     async fn append_event(&self, scope: &ProjectScope, run: &AgentRunId, line: &EventLine) -> Result<(), StoreError> {
@@ -321,12 +378,96 @@ impl RunStore for InMemoryRuns {
         Ok(self.lock().spend.get(scope).copied().unwrap_or_default())
     }
 
+    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        let me = inner
+            .runs
+            .get_mut(&(scope.clone(), run.clone()))
+            .filter(|e| e.record.ended_at.is_none())
+            .ok_or(StoreError::NotFound)?;
+        me.alive_until = now + lease;
+        let mine = (me.record.created_at, me.order);
+        let behind = inner.runs.iter().any(|((s, _), e)| {
+            s.company == scope.company
+                && e.live(now)
+                && e.record.started_at.is_none()
+                && (e.record.created_at, e.order) < mine
+        });
+        let free = match inner.leases.get(&scope.company) {
+            Some((holder, until)) => holder == run || *until <= now,
+            None => true,
+        };
+        if behind || !free {
+            return Ok(false);
+        }
+        inner.leases.insert(scope.company.clone(), (run.clone(), now + lease));
+        Ok(true)
+    }
+
+    async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        match inner.runs.get_mut(&(scope.clone(), run.clone())) {
+            Some(e) if e.record.ended_at.is_none() => e.alive_until = now + lease,
+            _ => return Ok(false),
+        }
+        match inner.leases.get_mut(&scope.company) {
+            Some((holder, until)) if holder == run => {
+                *until = now + lease;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn reserve(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        default: Budget,
+        max_run: Duration,
+    ) -> Result<Option<Remaining>, StoreError> {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        let held = inner
+            .runs
+            .iter()
+            .filter(|((s, id), e)| s == scope && id != run && e.live(now))
+            .fold(Spend::default(), |sum, (_, e)| sum.plus(e.reserved));
+        let budget = inner.budgets.get(scope).copied().unwrap_or(default);
+        let used = inner.spend.get(scope).copied().unwrap_or_default();
+        let left = remaining(budget, used.plus(held));
+        let entry = inner
+            .runs
+            .get_mut(&(scope.clone(), run.clone()))
+            .filter(|e| e.record.ended_at.is_none())
+            .ok_or(StoreError::NotFound)?;
+        if let Some(left) = left {
+            entry.reserved = reservation(left, max_run);
+        }
+        Ok(left)
+    }
+
     async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {
         let mut inner = self.lock();
         let (scope, id) = key(run);
         let event = AgentRunFinished::new(&scope, id.clone(), outcome);
-        let entry = inner.runs.get_mut(&(scope.clone(), id)).ok_or(StoreError::NotFound)?;
+        let entry = inner
+            .runs
+            .get_mut(&(scope.clone(), id.clone()))
+            .ok_or(StoreError::NotFound)?;
+        if entry.record.ended_at.is_some() {
+            return Ok(());
+        }
         entry.record = run.clone();
+        if inner
+            .leases
+            .get(&scope.company)
+            .is_some_and(|(holder, _)| holder == &id)
+        {
+            inner.leases.remove(&scope.company);
+        }
         let total = inner.spend.entry(scope).or_default();
         *total = total.plus(used);
         inner.outbox.push(event);

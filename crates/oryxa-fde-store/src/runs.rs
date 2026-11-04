@@ -1,8 +1,16 @@
-//! Agent runs (`oryxa-fde-agent`): each run, its transcript, the approvals it asked for, and the project's agent
-//! budget. Every function is on a [`ProjectTx`], so it reads and writes one project of one company; row-level
-//! security holds the rest back. A run's end, the project's budget use and `agent-run.finished` commit together.
+//! Agent runs (`oryxa-fde-agent`): each run, its transcript, the approvals it asked for, the project's agent
+//! budget, and which run holds the company's sandbox. Every function is on a [`ProjectTx`], so it reads and writes
+//! one project of one company (the sandbox lease: one company); row-level security holds the rest back. A run's
+//! end, the project's budget use and `agent-run.finished` commit together.
+//!
+//! Any API task may drive a run, so what must hold across tasks lives here: the company's sandbox goes to one run
+//! at a time, and a run's share of the budget is reserved under a lock on the project's budget row when it starts.
+//! A run's driver keeps `alive_until` ahead of now; a run whose driver is gone stops counting against the budget,
+//! and its lease lapses.
 //!
 //! The run's state machine is the agent's to define: it is kept as JSON (`state`) and not read here.
+
+use std::time::Duration;
 
 use oryxa_core::UserId;
 use oryxa_fde_core::AgentRunId;
@@ -206,13 +214,14 @@ impl ProjectTx {
         .collect()
     }
 
-    /// Saves what the run's driver changes: state, times, use and delivery. `false` if there is no such run.
+    /// Saves what the run's driver changes: state, times, use and delivery. `false` if there is no such run, or it
+    /// has ended: an ended run is never changed.
     pub async fn update_agent_run(&mut self, run: &AgentRunRow) -> Result<bool, StoreError> {
         let (t, c, p) = self.keys();
         let updated = sqlx::query(
             "update agent_runs set started_at = $5, ended_at = $6, state = $7::jsonb, input_tokens = $8,
                  output_tokens = $9, delivery = $10::jsonb
-             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4",
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4 and ended_at is null",
         )
         .bind(&t)
         .bind(&c)
@@ -479,17 +488,21 @@ impl ProjectTx {
         .await
     }
 
-    /// Saves the ended run, adds what it used to the project's budget use, and enqueues `agent-run.finished`, all
-    /// in this transaction.
+    /// Saves the ended run, adds what it used to the project's budget use, lets go of the company's sandbox if the
+    /// run holds it, and enqueues `agent-run.finished`, all in this transaction. A run that has already ended is left
+    /// as it is: `false`, with nothing added or enqueued.
     pub async fn finish_agent_run(
         &mut self,
         run: &AgentRunRow,
         used: AgentSpend,
         outcome: RunOutcome,
         by: &Actor,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         if !self.update_agent_run(run).await? {
-            return Err(StoreError::Missing("agent run"));
+            return match self.agent_run(&run.id).await? {
+                Some(_) => Ok(false),
+                None => Err(StoreError::Missing("agent run")),
+            };
         }
         let (t, c, p) = self.keys();
         sqlx::query(
@@ -506,9 +519,170 @@ impl ProjectTx {
         .bind(count(used.usd_micros)?)
         .execute(&mut *self.tx)
         .await?;
+        self.release_sandbox(run.id.as_str()).await?;
         let event = AgentRunFinished::new(&self.scope, run.id.clone(), outcome);
         enqueue(&mut self.tx, &self.scope.company, by, &event).await?;
+        Ok(true)
+    }
+
+    /// Keeps an unended run alive for `ttl`; `false` if it has ended or does not exist.
+    async fn keep_alive(&mut self, run: &AgentRunId, ttl: Duration) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let updated = sqlx::query(
+            "update agent_runs set alive_until = now() + make_interval(secs => $5)
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4 and ended_at is null",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(run.as_str())
+        .bind(ttl.as_secs_f64())
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        Ok(updated == 1)
+    }
+
+    /// Takes the company's sandbox for `run` for `ttl`: only when no live lease is someone else's and no older run of
+    /// the company is still waiting for it, so runs take turns in the order they were created. The run is kept
+    /// alive either way. `Missing` if the run has ended or does not exist.
+    pub async fn take_agent_sandbox(&mut self, run: &AgentRunId, ttl: Duration) -> Result<bool, StoreError> {
+        if !self.keep_alive(run, ttl).await? {
+            return Err(StoreError::Missing("agent run"));
+        }
+        let (t, c, _) = self.keys();
+        let behind: bool = sqlx::query_scalar(
+            "select exists (select 1 from agent_runs w join agent_runs me on me.tenant_id = w.tenant_id
+                 where me.tenant_id = $1 and me.run_id = $3 and w.company_id = $2 and w.ended_at is null
+                   and w.started_at is null and w.alive_until > now()
+                   and (w.created_at, w.run_id) < (me.created_at, me.run_id))",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(run.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        if behind {
+            return Ok(false);
+        }
+        self.lease_sandbox(run.as_str(), ttl).await
+    }
+
+    /// Extends a held lease and keeps the run alive; `false` if the run no longer holds the sandbox.
+    pub async fn renew_agent_sandbox(&mut self, run: &AgentRunId, ttl: Duration) -> Result<bool, StoreError> {
+        if !self.keep_alive(run, ttl).await? {
+            return Ok(false);
+        }
+        let (t, c, _) = self.keys();
+        let updated = sqlx::query(
+            "update agent_sandbox_leases set expires_at = now() + make_interval(secs => $4)
+             where tenant_id = $1 and company_id = $2 and holder = $3",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(run.as_str())
+        .bind(ttl.as_secs_f64())
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        Ok(updated == 1)
+    }
+
+    /// The company's sandbox lease for `holder` (an agent or eval run), if it is free, lapsed or already theirs.
+    async fn lease_sandbox(&mut self, holder: &str, ttl: Duration) -> Result<bool, StoreError> {
+        let (t, c, _) = self.keys();
+        let taken: Option<String> = sqlx::query_scalar(
+            "insert into agent_sandbox_leases (tenant_id, company_id, holder, expires_at)
+             values ($1, $2, $3, now() + make_interval(secs => $4))
+             on conflict (tenant_id, company_id) do update set holder = excluded.holder, expires_at = excluded.expires_at
+                 where agent_sandbox_leases.expires_at <= now() or agent_sandbox_leases.holder = excluded.holder
+             returning holder",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(holder)
+        .bind(ttl.as_secs_f64())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        Ok(taken.is_some())
+    }
+
+    async fn release_sandbox(&mut self, holder: &str) -> Result<(), StoreError> {
+        let (t, c, _) = self.keys();
+        sqlx::query(
+            "update agent_sandbox_leases set expires_at = now()
+             where tenant_id = $1 and company_id = $2 and holder = $3",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(holder)
+        .execute(&mut *self.tx)
+        .await?;
         Ok(())
+    }
+
+    /// Locks the project's budget row until this transaction ends, and returns the project's own budget, what its
+    /// ended runs used, and what its other live runs hold in reservation.
+    pub async fn lock_agent_budget(
+        &mut self,
+        run: &AgentRunId,
+    ) -> Result<(AgentBudget, AgentSpend, AgentSpend), StoreError> {
+        let (t, c, p) = self.keys();
+        sqlx::query(
+            "insert into agent_budgets (tenant_id, company_id, project_id) values ($1, $2, $3)
+             on conflict (tenant_id, project_id) do nothing",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .execute(&mut *self.tx)
+        .await?;
+        sqlx::query(
+            "select 1 from agent_budgets where tenant_id = $1 and company_id = $2 and project_id = $3 for update",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .execute(&mut *self.tx)
+        .await?;
+        let (budget, used) = self.agent_budget().await?;
+        let r = sqlx::query(
+            "select coalesce(sum(reserved_seconds), 0)::bigint as seconds,
+                 coalesce(sum(reserved_usd_micros), 0)::bigint as usd_micros
+             from agent_runs where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id <> $4
+                 and ended_at is null and alive_until > now()",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(run.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        let reserved = AgentSpend {
+            seconds: uncount(r.try_get("seconds")?, "reservation")?,
+            usd_micros: uncount(r.try_get("usd_micros")?, "reservation")?,
+        };
+        Ok((budget, used, reserved))
+    }
+
+    /// Holds `reserved` of the project's budget for an unended run until it ends; call it under
+    /// [`Self::lock_agent_budget`]. `false` if the run has ended or does not exist.
+    pub async fn reserve_agent_budget(&mut self, run: &AgentRunId, reserved: AgentSpend) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let updated = sqlx::query(
+            "update agent_runs set reserved_seconds = $5, reserved_usd_micros = $6
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and run_id = $4 and ended_at is null",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(run.as_str())
+        .bind(count(reserved.seconds)?)
+        .bind(count(reserved.usd_micros)?)
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        Ok(updated == 1)
     }
 }
 
@@ -718,22 +892,24 @@ mod tests {
         tx.commit().await.unwrap();
         assert!(finished_events(&store, &tenant).await.is_empty());
 
-        for _ in 0..2 {
+        // Finished once: a second finish, or a save after it, changes nothing and queues nothing.
+        for first in [true, false] {
             let mut tx = store.project(&scope).await.unwrap();
-            tx.finish_agent_run(&ended, used, RunOutcome::Succeeded, &actor())
-                .await
-                .unwrap();
+            let mut again = ended.clone();
+            again.state = json!({ "state": "failed", "reason": "timed_out" });
+            let row = if first { &ended } else { &again };
+            assert_eq!(
+                tx.finish_agent_run(row, used, RunOutcome::Succeeded, &actor())
+                    .await
+                    .unwrap(),
+                first
+            );
+            assert!(!tx.update_agent_run(&again).await.unwrap());
             tx.commit().await.unwrap();
         }
         let mut tx = store.project(&scope).await.unwrap();
         assert_eq!(tx.agent_run(&r.id).await.unwrap(), Some(ended));
-        assert_eq!(
-            tx.agent_budget().await.unwrap().1,
-            AgentSpend {
-                seconds: 180,
-                usd_micros: 72_000
-            }
-        );
+        assert_eq!(tx.agent_budget().await.unwrap().1, used);
         tx.set_agent_budget(
             AgentBudget {
                 minutes: Some(30),
@@ -745,9 +921,9 @@ mod tests {
         .unwrap();
         assert_eq!(tx.agent_budget().await.unwrap().0.minutes, Some(30));
         tx.commit().await.unwrap();
-        // The event: ids and the outcome only, in the project's group.
+        // The event: once, ids and the outcome only, in the project's group.
         let events = finished_events(&store, &tenant).await;
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         let (group, detail) = &events[0];
         assert_eq!(group, &format!("{}/{}", tenant, scope.project));
         let data: serde_json::Value = serde_json::from_str(detail).unwrap();
@@ -755,6 +931,143 @@ mod tests {
             data["data"],
             json!({ "company": scope.company.company.as_str(), "project": scope.project.as_str(), "agent_run": r.id.as_str(), "outcome": "succeeded" })
         );
+    }
+
+    const LEASE: Duration = Duration::from_secs(60);
+
+    async fn queued(store: &Store, scope: &ProjectScope) -> AgentRunRow {
+        let r = run();
+        let mut tx = store.project(scope).await.unwrap();
+        tx.create_agent_run(&r, &actor()).await.unwrap();
+        tx.commit().await.unwrap();
+        r
+    }
+
+    async fn take(store: &Store, scope: &ProjectScope, run: &AgentRunRow) -> bool {
+        let mut tx = store.project(scope).await.unwrap();
+        let taken = tx.take_agent_sandbox(&run.id, LEASE).await.unwrap();
+        tx.commit().await.unwrap();
+        taken
+    }
+
+    async fn end(store: &Store, scope: &ProjectScope, run: &AgentRunRow) {
+        let mut ended = run.clone();
+        ended.state = json!({ "state": "failed", "reason": "cancelled" });
+        ended.ended_at = Some(OffsetDateTime::now_utc());
+        let mut tx = store.project(scope).await.unwrap();
+        assert!(
+            tx.finish_agent_run(&ended, AgentSpend::default(), RunOutcome::Cancelled, &actor())
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn a_companys_sandbox_goes_to_one_run_at_a_time_in_order() {
+        let store = crate::testing::store().await;
+        let tenant = TenantId::new(new_id("org")).unwrap();
+        let a = project(&store, &tenant).await;
+        // Another project of the same company shares its sandbox; another company has its own.
+        let a2 = a.company.project(ProjectId::new(new_id("prj")).unwrap());
+        let mut tx = store.project(&a2).await.unwrap();
+        let input = ProjectIn {
+            name: Name::new("Second project").unwrap(),
+            summary: None,
+        };
+        tx.create(&input, &actor()).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        let elsewhere = project(&store, &tenant).await;
+
+        let first = queued(&store, &a).await;
+        let second = queued(&store, &a2).await;
+        let third = queued(&store, &a).await;
+        // The newest run waits behind the second, which waits behind the holder.
+        assert!(take(&store, &a, &first).await);
+        assert!(take(&store, &a, &first).await, "the holder takes it again");
+        assert!(!take(&store, &a, &third).await);
+        assert!(!take(&store, &a2, &second).await);
+        assert!(take(&store, &elsewhere, &queued(&store, &elsewhere).await).await);
+
+        let mut tx = store.project(&a).await.unwrap();
+        assert!(tx.renew_agent_sandbox(&first.id, LEASE).await.unwrap());
+        assert!(!tx.renew_agent_sandbox(&third.id, LEASE).await.unwrap());
+        tx.commit().await.unwrap();
+
+        // Its end lets go: the older waiter goes next, not the newer one.
+        end(&store, &a, &first).await;
+        assert!(!take(&store, &a, &third).await);
+        assert!(take(&store, &a2, &second).await);
+        let mut tx = store.project(&a).await.unwrap();
+        assert!(!tx.renew_agent_sandbox(&first.id, LEASE).await.unwrap());
+        assert!(matches!(
+            tx.take_agent_sandbox(&first.id, LEASE).await,
+            Err(StoreError::Missing(_))
+        ));
+        drop(tx);
+
+        // A holder whose driver is gone lapses, and so does an older waiter's place in line.
+        let mut tx = store.project(&a2).await.unwrap();
+        assert!(
+            tx.take_agent_sandbox(&second.id, Duration::from_millis(1))
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(take(&store, &a, &third).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn a_reservation_holds_budget_while_its_run_lives_and_ends_with_it() {
+        let store = crate::testing::store().await;
+        let tenant = TenantId::new(new_id("org")).unwrap();
+        let scope = project(&store, &tenant).await;
+        let (one, two) = (queued(&store, &scope).await, queued(&store, &scope).await);
+        let held = AgentSpend {
+            seconds: 600,
+            usd_micros: 5_000_000,
+        };
+
+        // Reserved under the lock: another transaction waits for the lock and then sees the reservation.
+        let mut tx = store.project(&scope).await.unwrap();
+        let (_, used, reserved) = tx.lock_agent_budget(&one.id).await.unwrap();
+        assert_eq!((used, reserved), (AgentSpend::default(), AgentSpend::default()));
+        assert!(tx.take_agent_sandbox(&one.id, LEASE).await.unwrap());
+        assert!(tx.reserve_agent_budget(&one.id, held).await.unwrap());
+        let waiter = {
+            let store = store.clone();
+            let (scope, id) = (scope.clone(), two.id.clone());
+            tokio::spawn(async move {
+                let mut tx = store.project(&scope).await.unwrap();
+                let locked = tx.lock_agent_budget(&id).await.unwrap();
+                tx.commit().await.unwrap();
+                locked.2
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "the second lock waits for the first transaction");
+        tx.commit().await.unwrap();
+        assert_eq!(waiter.await.unwrap(), held);
+
+        // It ends with its run, whose use is then counted instead.
+        end(&store, &scope, &one).await;
+        let mut tx = store.project(&scope).await.unwrap();
+        assert_eq!(tx.lock_agent_budget(&two.id).await.unwrap().2, AgentSpend::default());
+        assert!(!tx.reserve_agent_budget(&one.id, held).await.unwrap());
+        drop(tx);
+
+        // A run whose driver is gone holds nothing.
+        let mut tx = store.project(&scope).await.unwrap();
+        assert!(tx.take_agent_sandbox(&two.id, Duration::from_millis(1)).await.unwrap());
+        assert!(tx.reserve_agent_budget(&two.id, held).await.unwrap());
+        tx.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let three = queued(&store, &scope).await;
+        let mut tx = store.project(&scope).await.unwrap();
+        assert_eq!(tx.lock_agent_budget(&three.id).await.unwrap().2, AgentSpend::default());
     }
 
     /// `agent-run.finished` rows of one tenant, as (group, detail), read as the relay.

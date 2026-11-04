@@ -28,6 +28,8 @@ import { type CompanyScope, sandboxName } from "./scope.js";
 const POLICY_KEY = "outbound-policy";
 const SCOPE_KEY = "scope";
 const GRANT_PREFIX = "grant:";
+/** The run whose harness this sandbox last started: only it may be granted anything. */
+const HARNESS_RUN_KEY = "harness-run";
 const MAX_STDIN_WRITE = 1024 * 1024;
 
 // `lite` and `basic` are too small for a coding agent, and the durable_object policy refuses `basic`.
@@ -88,6 +90,7 @@ export class CompanySandbox extends DurableObject<Env> {
     if (container.running) await container.destroy();
     // Approvals belong to the runs in this container; a new container starts with none.
     this.#closeAllGrants();
+    this.ctx.storage.kv.delete(HARNESS_RUN_KEY);
     return { running: false };
   }
 
@@ -119,17 +122,21 @@ export class CompanySandbox extends DurableObject<Env> {
   startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
     this.#bind(scope);
     this.#closeAllGrants();
+    this.ctx.storage.kv.put(HARNESS_RUN_KEY, run);
     return this.#stream(harnessCommand(run, req), ROOT_USER);
   }
 
   /**
    * Opens the hosts the outbound policy holds for `action` until the grant expires or is closed. An action no host
-   * holds is refused: approving it would gate nothing at the network.
+   * holds is refused: approving it would gate nothing at the network. So is a grant for any run but the one whose
+   * harness is running here.
    */
   openGrant(scope: CompanyScope, action: string, req: GrantRequest): Grant {
     this.#bind(scope);
     if (!this.outboundPolicy().hosts.some((h) => h.approval === action))
       throw new GatewayError(409, "no host in the outbound policy is held for this action");
+    if (this.ctx.storage.kv.get<string>(HARNESS_RUN_KEY) !== req.run)
+      throw new GatewayError(409, "the grant's run is not the run whose harness is running");
     const grant = { action, approval: req.approval, run: req.run, expiresAt: Date.now() + req.ttlMs };
     this.ctx.storage.kv.put(`${GRANT_PREFIX}${action}`, grant);
     return grant;

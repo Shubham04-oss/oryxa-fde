@@ -1,6 +1,8 @@
 //! `RunStore` on the FDE store (Postgres, `oryxa-fde-store`'s agent run tables): each call is one transaction
 //! scoped to the project, and a run's end commits with its `agent-run.finished` event.
 
+use std::time::Duration;
+
 use oryxa_core::UserId;
 use oryxa_fde_core::{AgentRunId, ProjectScope};
 use oryxa_fde_events::RunOutcome;
@@ -12,7 +14,10 @@ use oryxa_fde_store::{
 use crate::event::{ApprovalOutcome, EventLine, Usage};
 use crate::ids::{ApprovalId, ToolCallId};
 use crate::run::AgentRun;
-use crate::store::{ApprovalRecord, Budget, DecideResult, Decided, RunRecord, RunStore, Spend, StoreError};
+use crate::service::{Remaining, remaining};
+use crate::store::{
+    ApprovalRecord, Budget, DecideResult, Decided, RunRecord, RunStore, Spend, StoreError, reservation,
+};
 
 fn failed(e: PgError) -> StoreError {
     match e {
@@ -262,8 +267,58 @@ impl RunStore for Store {
             seconds: used.seconds,
             usd_micros: used.usd_micros,
         };
+        // A run that already ended stays as it ended.
         on(self, run.run.scope(), async |tx| {
             tx.finish_agent_run(&row, used, outcome, &by).await
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        on(self, scope, async |tx| tx.take_agent_sandbox(run, lease).await).await
+    }
+
+    async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        on(self, scope, async |tx| tx.renew_agent_sandbox(run, lease).await).await
+    }
+
+    async fn reserve(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        default: Budget,
+        max_run: Duration,
+    ) -> Result<Option<Remaining>, StoreError> {
+        on(self, scope, async |tx| {
+            let (own, used, held) = tx.lock_agent_budget(run).await?;
+            let budget = match (own.minutes, own.spend_usd_micros) {
+                (Some(minutes), Some(spend_usd_micros)) => Budget {
+                    minutes,
+                    spend_usd_micros,
+                },
+                _ => default,
+            };
+            let spent = Spend {
+                seconds: used.seconds,
+                usd_micros: used.usd_micros,
+            }
+            .plus(Spend {
+                seconds: held.seconds,
+                usd_micros: held.usd_micros,
+            });
+            let Some(left) = remaining(budget, spent) else {
+                return Ok(None);
+            };
+            let hold = reservation(left, max_run);
+            let hold = AgentSpend {
+                seconds: hold.seconds,
+                usd_micros: hold.usd_micros,
+            };
+            if !tx.reserve_agent_budget(run, hold).await? {
+                return Err(PgError::Missing("agent run"));
+            }
+            Ok(Some(left))
         })
         .await
     }

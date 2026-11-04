@@ -44,8 +44,12 @@ pub enum FailReason {
     BadOutput,
     /// The sandbox, the checkout or the context pack could not be prepared.
     SetupFailed,
-    /// The run store could not keep the transcript or an approval request, so no approval could be decided.
+    /// The run store could not keep the transcript or an approval request, so no approval could be decided; or it
+    /// could not keep the run's hold on the company's sandbox.
     StoreUnavailable,
+    /// The hosts opened for an approved action could not be closed after its call returned, so the sandbox was
+    /// destroyed rather than leave them open.
+    GrantNotClosed,
 }
 
 /// Why the API ends a run itself, besides a cancel or the time limit.
@@ -55,6 +59,7 @@ pub enum StopReason {
     BadOutput,
     SetupFailed,
     StoreUnavailable,
+    GrantNotClosed,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -243,6 +248,7 @@ impl AgentRun {
             StopReason::BadOutput => FailReason::BadOutput,
             StopReason::SetupFailed => FailReason::SetupFailed,
             StopReason::StoreUnavailable => FailReason::StoreUnavailable,
+            StopReason::GrantNotClosed => FailReason::GrantNotClosed,
         })
     }
 

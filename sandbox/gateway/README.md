@@ -74,7 +74,9 @@ from the image. Only the two run routes use root:
   approves, and closes it with `DELETE /grants/<action>?approval=<id>` as soon as that call returns; only the
   approval that opened a grant closes it. It lasts five minutes unless asked otherwise, and at most thirty.
   Starting a harness or stopping the sandbox closes every grant, so no run inherits one. A grant for an action no
-  host is held for is refused (`409`): approving it would gate nothing. An unreadable grant counts as closed.
+  host is held for is refused (`409`): approving it would gate nothing. So is a grant for any run but the one whose
+  harness the sandbox last started, and any grant once the sandbox has stopped. An unreadable grant counts as
+  closed.
 - Redirects are returned to the sandbox, not followed. The next request goes through the policy again.
 - Only HTTP on port 80 and HTTPS on port 443 leave the container (`enableInternet: false`), and a request that
   names any other port is refused. Logs record ids, host and decision, never headers, paths or bodies.

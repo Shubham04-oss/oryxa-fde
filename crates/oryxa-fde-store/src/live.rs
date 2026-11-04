@@ -845,6 +845,41 @@ async fn row_level_security_covers_every_lifecycle_table() {
             .await
             .unwrap()
             .unwrap();
+        // An agent run with its transcript, an approval, the project's budget and the company's sandbox lease.
+        let run = AgentRunRow {
+            id: oryxa_fde_core::AgentRunId::new(new_id("run")).unwrap(),
+            task: "Add a /healthz endpoint.".into(),
+            repository: serde_json::json!({ "owner": "sample-org", "name": "status-page", "base": "main" }),
+            created_by: by.user.clone(),
+            request_id: new_id("req"),
+            created_at: time::OffsetDateTime::now_utc(),
+            started_at: None,
+            ended_at: None,
+            state: serde_json::json!({ "state": "queued" }),
+            input_tokens: 0,
+            output_tokens: 0,
+            delivery: serde_json::json!({ "status": "none" }),
+        };
+        tx.create_agent_run(&run, &by).await.unwrap();
+        tx.append_agent_event(&run.id, 0, "{}").await.unwrap();
+        let approval = AgentApprovalRow {
+            run: run.id.clone(),
+            id: "apr_1".into(),
+            tool_call_id: "toolu_1".into(),
+            action: "deploy".into(),
+            title: "Run: npx wrangler deploy".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            requested_at: time::OffsetDateTime::now_utc(),
+            decision: None,
+        };
+        tx.add_agent_approval(&approval).await.unwrap();
+        tx.set_agent_budget(AgentBudget::default(), &by).await.unwrap();
+        assert!(
+            tx.take_agent_sandbox(&run.id, std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
         tx.commit().await.unwrap();
     }
     let t2 = tenant();
@@ -871,6 +906,11 @@ async fn row_level_security_covers_every_lifecycle_table() {
         "access_requests",
         "tasks",
         "decisions",
+        "agent_runs",
+        "agent_run_events",
+        "agent_approvals",
+        "agent_budgets",
+        "agent_sandbox_leases",
     ] {
         let companies: Vec<String> = sqlx::query_scalar(&format!("select company_id from {table}"))
             .fetch_all(tx.conn())
@@ -895,11 +935,20 @@ async fn row_level_security_covers_every_lifecycle_table() {
         .await
         .unwrap();
     assert_eq!(tenants, [t.as_str()]);
-    // Decisions and the scope change log are append-only for the app.
+    // Decisions, the scope change log and agent transcripts are append-only for the app, and an agent run's record
+    // and an approval's request never change once written.
     for sql in [
         "update decisions set title = 'x'",
         "delete from scope_changes",
         "update scope_signoffs set version = 9",
+        "update agent_run_events set line = '{}'",
+        "delete from agent_runs",
+        "update agent_runs set task = 'x'",
+        "update agent_runs set created_by = 'x'",
+        "update agent_approvals set input = '{}'",
+        "update agent_approvals set action = 'x'",
+        "update agent_budgets set company_id = 'x'",
+        "update agent_sandbox_leases set company_id = 'x'",
     ] {
         let mut sp = tx.conn().begin().await.unwrap();
         assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
@@ -929,6 +978,11 @@ async fn the_runtime_login_owns_nothing_and_holds_nothing_outside_a_role() {
         "select count(*) from outbox",
         "select count(*) from audit_log",
         "select count(*) from company_members",
+        "select count(*) from agent_runs",
+        "select count(*) from agent_run_events",
+        "select count(*) from agent_approvals",
+        "select count(*) from agent_budgets",
+        "select count(*) from agent_sandbox_leases",
     ] {
         assert!(sqlx::query(sql).execute(&mut *conn).await.is_err(), "{sql}");
     }

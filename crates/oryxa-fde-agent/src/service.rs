@@ -1,12 +1,12 @@
 //! The run service: what a run needs (the store, the sandbox gateway, live output, the project's context and
 //! access checks) and how it is configured. Each run is driven by its own task (`orchestrate`); runs in one company
-//! take turns, since they share the company's sandbox and its `/workspace`.
+//! take turns, since they share the company's sandbox and its `/workspace`. The turn is a lease in the store, so
+//! runs driven by different API tasks take turns too.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use oryxa_fde_core::{AgentRunId, CompanyScope, ProjectScope};
+use oryxa_fde_core::{AgentRunId, ProjectScope};
 use tokio::sync::watch;
 
 use crate::access::Access;
@@ -53,8 +53,11 @@ pub struct RunsConfig {
     pub grant_ttl: Duration,
     /// How long a harness that was told to stop gets before its sandbox is destroyed.
     pub grace: Duration,
-    /// How often a run looks for decisions and cancels made on another API task.
+    /// How often a run looks for decisions and cancels made on another API task, and a queued run for its turn.
     pub poll: Duration,
+    /// How long a run's hold on the company's sandbox, and on its budget reservation, lasts without renewal. The run
+    /// renews it four times as often; a run whose API task is gone lets go within this time.
+    pub lease: Duration,
 }
 
 /// What is left of a project's budget.
@@ -78,8 +81,6 @@ pub struct Runs<D: Deps> {
     pub context: D::Context,
     pub access: D::Access,
     pub config: RunsConfig,
-    // ponytail: one entry per company that ever ran, never removed; fine for P0's company counts.
-    companies: Mutex<HashMap<CompanyScope, Arc<tokio::sync::Mutex<()>>>>,
     changes: watch::Sender<u64>,
 }
 
@@ -99,7 +100,6 @@ impl<D: Deps> Runs<D> {
             context,
             access,
             config,
-            companies: Mutex::new(HashMap::new()),
             changes: watch::channel(0).0,
         })
     }
@@ -115,13 +115,8 @@ impl<D: Deps> Runs<D> {
         Ok((budget, self.store.spend(scope).await?))
     }
 
-    /// The company's sandbox, held by one run at a time; waiters are served in order.
-    pub(crate) fn company_slot(&self, company: &CompanyScope) -> Arc<tokio::sync::Mutex<()>> {
-        let mut companies = self.companies.lock().unwrap_or_else(|e| e.into_inner());
-        companies.entry(company.clone()).or_default().clone()
-    }
-
-    /// Wakes runs on this task after a decision or cancel was stored; runs on other tasks see it on their next poll.
+    /// Wakes runs on this task after a decision, a cancel or a run's end was stored; runs on other tasks see it on
+    /// their next poll.
     pub(crate) fn changed(&self) {
         self.changes.send_modify(|n| *n = n.wrapping_add(1));
     }

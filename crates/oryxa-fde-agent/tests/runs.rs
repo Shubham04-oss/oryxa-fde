@@ -16,7 +16,7 @@ use oryxa_fde_agent::api;
 use oryxa_fde_agent::event::{EVENT_VERSION, Usage};
 use oryxa_fde_agent::gateway::{Exec, ExecOutput, HarnessProcess, ProcessEvent, Sandbox, SandboxError};
 use oryxa_fde_agent::live::{LiveError, LiveOutput};
-use oryxa_fde_agent::service::{Deps, Pricing, Runs, RunsConfig};
+use oryxa_fde_agent::service::{Deps, Pricing, Remaining, Runs, RunsConfig};
 use oryxa_fde_agent::store::{
     ApprovalRecord, Budget, DecideResult, Decided, InMemoryRuns, RunRecord, RunStore, Spend, StoreError,
 };
@@ -109,6 +109,7 @@ struct FakeSandbox {
     tamper_pack: bool,
     stdin_down: bool,
     grants_down: bool,
+    close_down: bool,
 }
 
 impl FakeSandbox {
@@ -124,6 +125,7 @@ impl FakeSandbox {
             tamper_pack: false,
             stdin_down: false,
             grants_down: false,
+            close_down: false,
         }
     }
 
@@ -251,6 +253,9 @@ impl Sandbox for FakeSandbox {
 
     async fn close_grant(&self, _: &CompanyScope, action: &str, approval: &ApprovalId) -> Result<(), SandboxError> {
         self.call(format!("close {action} {approval}"));
+        if self.close_down {
+            return Err(SandboxError::Unreachable { route: "grant" });
+        }
         let mut grants = self.grants.lock().unwrap();
         if grants.get(action).is_some_and(|a| a == approval.as_str()) {
             grants.remove(action);
@@ -343,8 +348,16 @@ impl LiveOutput for FakeLive {
     }
 }
 
-/// The in-memory store, made to fail on approval requests: the approval service is down.
-struct Failing<S>(S);
+/// The in-memory store, made to fail one thing.
+struct Failing<S>(S, Fail);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fail {
+    /// Approval requests cannot be kept.
+    Approvals,
+    /// The run's hold on the sandbox is refused, as if another run had been given it.
+    Renewals,
+}
 
 impl<S: RunStore> RunStore for Failing<S> {
     async fn create(&self, run: &RunRecord) -> Result<(), StoreError> {
@@ -365,8 +378,11 @@ impl<S: RunStore> RunStore for Failing<S> {
     async fn events(&self, scope: &ProjectScope, run: &AgentRunId) -> Result<Vec<EventLine>, StoreError> {
         self.0.events(scope, run).await
     }
-    async fn add_approval(&self, _: &ProjectScope, _: &ApprovalRecord) -> Result<(), StoreError> {
-        Err(StoreError::Unavailable)
+    async fn add_approval(&self, scope: &ProjectScope, approval: &ApprovalRecord) -> Result<(), StoreError> {
+        if self.1 == Fail::Approvals {
+            return Err(StoreError::Unavailable);
+        }
+        self.0.add_approval(scope, approval).await
     }
     async fn approvals(&self, scope: &ProjectScope, run: &AgentRunId) -> Result<Vec<ApprovalRecord>, StoreError> {
         self.0.approvals(scope, run).await
@@ -394,6 +410,24 @@ impl<S: RunStore> RunStore for Failing<S> {
     }
     async fn spend(&self, scope: &ProjectScope) -> Result<Spend, StoreError> {
         self.0.spend(scope).await
+    }
+    async fn take_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        self.0.take_sandbox(scope, run, lease).await
+    }
+    async fn renew_sandbox(&self, scope: &ProjectScope, run: &AgentRunId, lease: Duration) -> Result<bool, StoreError> {
+        if self.1 == Fail::Renewals {
+            return Ok(false);
+        }
+        self.0.renew_sandbox(scope, run, lease).await
+    }
+    async fn reserve(
+        &self,
+        scope: &ProjectScope,
+        run: &AgentRunId,
+        default: Budget,
+        max_run: Duration,
+    ) -> Result<Option<Remaining>, StoreError> {
+        self.0.reserve(scope, run, default, max_run).await
     }
     async fn finish(&self, run: &RunRecord, used: Spend, outcome: RunOutcome) -> Result<(), StoreError> {
         self.0.finish(run, used, outcome).await
@@ -509,6 +543,7 @@ fn config() -> RunsConfig {
         grant_ttl: Duration::from_secs(900),
         grace: Duration::from_secs(5),
         poll: Duration::from_millis(20),
+        lease: Duration::from_secs(2),
     }
 }
 
@@ -1036,9 +1071,74 @@ async fn an_approval_whose_hosts_cannot_open_is_never_delivered() {
 }
 
 #[tokio::test]
+async fn a_grant_that_cannot_close_after_its_call_fails_the_run_and_destroys_the_sandbox() {
+    let mut sandbox = FakeSandbox::new(vec![
+        deploy_request(),
+        Step::AwaitDecision,
+        tool_call("toolu_d1", "Run: npx wrangler deploy"),
+        Step::Hang,
+    ]);
+    sandbox.close_down = true;
+    let runs = runs_with(sandbox);
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    wait(&app, &run, |r| r["state"] == "waiting_for_approval").await;
+    call(
+        &app,
+        "POST",
+        &format!("{RUNS_1}/{run}/approvals/apr_1/approve"),
+        "lead",
+        None,
+    )
+    .await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "grant_not_closed");
+    let calls = runs.sandbox.calls();
+    let close = calls.iter().position(|c| c == "close deploy apr_1").unwrap();
+    assert_eq!(calls[close + 1], "stop cmp_1", "{calls:?}");
+    // Nothing was delivered from a sandbox that may still have had the hosts open.
+    assert!(!calls.iter().any(|c| c == "exec curl"), "{calls:?}");
+}
+
+#[tokio::test]
+async fn a_run_that_loses_the_sandbox_destroys_it_and_ends() {
+    let runs = Runs::<TestFailingStore>::new(
+        Failing(InMemoryRuns::default(), Fail::Renewals),
+        FakeSandbox::new(vec![message("Working."), Step::Hang]),
+        FakeLive::default(),
+        context(),
+        access(),
+        RunsConfig {
+            lease: Duration::from_millis(200),
+            ..config()
+        },
+    );
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "store_unavailable");
+    assert!(runs.sandbox.calls().contains(&"stop cmp_1".to_owned()));
+}
+
+#[tokio::test]
+async fn a_queued_run_can_be_cancelled_and_never_touches_the_sandbox() {
+    let runs = runs_with(FakeSandbox::new(vec![message("first"), Step::Hang]));
+    let app = api::router(runs.clone());
+    let first = create(&app).await;
+    wait(&app, &first, |r| r["state"] == "running").await;
+    let second = create(&app).await;
+    call(&app, "POST", &format!("{RUNS_1}/{second}/cancel"), "lead", None).await;
+    let done = wait(&app, &second, ended).await;
+    assert_eq!(done["failure"], "cancelled");
+    assert!(!runs.sandbox.calls().iter().any(|c| c.contains(&second)));
+    let (_, first) = call(&app, "GET", &format!("{RUNS_1}/{first}"), "lead", None).await;
+    assert_eq!(first["state"], "running");
+}
+
+#[tokio::test]
 async fn an_approval_request_the_store_cannot_keep_stops_the_run() {
     let runs = Runs::<TestFailingStore>::new(
-        Failing(InMemoryRuns::default()),
+        Failing(InMemoryRuns::default(), Fail::Approvals),
         FakeSandbox::new(vec![deploy_request(), Step::AwaitDecision, result(Outcome::Success)]),
         FakeLive::default(),
         context(),
@@ -1204,17 +1304,7 @@ fn source_context() -> ProjectContext {
 async fn a_decision_made_on_another_api_task_reaches_the_run() {
     let store = oryxa_fde_store::testing::store().await;
     let (scope, access_a, context_a) = postgres_world(&store).await;
-    let (access_b, context_b) = {
-        let a = FakeAccess {
-            tokens: access_a.tokens.clone(),
-            projects: access_a.projects.clone(),
-            grants: access_a.grants.clone(),
-            down: false,
-        };
-        let mut c = context();
-        c.insert(scope.clone(), source_context());
-        (a, c)
-    };
+    let (access_b, context_b) = second_task(&scope, &access_a);
     // Two API tasks on one database: the run is driven by A, the FDE's decision lands on B.
     let a = Runs::<OnPostgres>::new(
         store.clone(),
@@ -1275,4 +1365,74 @@ async fn a_decision_made_on_another_api_task_reaches_the_run() {
     let mut tx = store.project(&scope).await.unwrap();
     assert!(tx.agent_budget().await.unwrap().1.usd_micros > 0);
     tx.commit().await.unwrap();
+}
+
+/// A second API task's view of a `postgres_world`: the same tokens and grants, the same project context.
+fn second_task(scope: &ProjectScope, access: &FakeAccess) -> (FakeAccess, InMemoryContext) {
+    let a = FakeAccess {
+        tokens: access.tokens.clone(),
+        projects: access.projects.clone(),
+        grants: access.grants.clone(),
+        down: false,
+    };
+    let mut c = context();
+    c.insert(scope.clone(), source_context());
+    (a, c)
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_companys_sandbox_takes_one_run_at_a_time_across_api_tasks() {
+    let store = oryxa_fde_store::testing::store().await;
+    let (scope, access_a, context_a) = postgres_world(&store).await;
+    let (access_b, context_b) = second_task(&scope, &access_a);
+    let a = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![message("first"), Step::Hang]),
+        FakeLive::default(),
+        context_a,
+        access_a,
+        config(),
+    );
+    let b = Runs::<OnPostgres>::new(
+        store.clone(),
+        FakeSandbox::new(vec![result(Outcome::Success)]),
+        FakeLive::default(),
+        context_b,
+        access_b,
+        config(),
+    );
+    let (app_a, app_b) = (api::router(a.clone()), api::router(b.clone()));
+    let path = format!(
+        "/v1/companies/{}/projects/{}/agent-runs",
+        scope.company.company, scope.project
+    );
+    let state = async |app: &Router, run: &str| call(app, "GET", &format!("{path}/{run}"), "lead", None).await.1;
+    let until = async |app: &Router, run: &str, done: &dyn Fn(&Value) -> bool| {
+        for _ in 0..2000 {
+            let r = state(app, run).await;
+            if done(&r) {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("run {run} never got there: {}", state(app, run).await);
+    };
+
+    let (_, first) = call(&app_a, "POST", &path, "lead", Some(new_run())).await;
+    let first = first["id"].as_str().unwrap().to_owned();
+    until(&app_a, &first, &|r| r["state"] == "running").await;
+    // B's run waits for the sandbox A's run holds: B's gateway is never called.
+    let (_, second) = call(&app_b, "POST", &path, "lead", Some(new_run())).await;
+    let second = second["id"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(state(&app_b, &second).await["state"], "queued");
+    assert!(b.sandbox.calls().is_empty(), "{:?}", b.sandbox.calls());
+
+    // Once A's run ends, B's takes the sandbox and runs to the end.
+    call(&app_b, "POST", &format!("{path}/{first}/cancel"), "lead", None).await;
+    until(&app_a, &first, &|r| !r["ended_at"].is_null()).await;
+    let done = until(&app_b, &second, &|r| !r["ended_at"].is_null()).await;
+    assert_eq!(done["state"], "finished", "{done}");
+    assert!(b.sandbox.calls().contains(&"start cmp_1".to_owned()));
 }

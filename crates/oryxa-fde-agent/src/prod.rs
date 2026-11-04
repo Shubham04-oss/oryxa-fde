@@ -158,6 +158,8 @@ pub fn router_from_env<K: KeySource + 'static>(
         grant_ttl: Duration::from_secs(5 * 60),
         grace: Duration::from_secs(60),
         poll: Duration::from_secs(1),
+        // A run whose API task is gone lets go of its company's sandbox within a minute.
+        lease: Duration::from_secs(60),
     };
     let runs = Runs::<Production<K>>::new(
         store.clone(),
