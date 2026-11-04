@@ -11,7 +11,7 @@ Status: accepted, 3 November 2026.
 | `oryxa-fde-api` and workers | Rust on AWS ECS Fargate, reached from Workers over a private link |
 | Database | RDS PostgreSQL 17 with pgvector |
 | Permissions | SpiceDB on Fargate |
-| Files | S3, one prefix and KMS key per company |
+| Files | S3, one prefix per company; one KMS key per company from P1 (real customer data), the environment key in P0 |
 | Events | EventBridge v2 custom bus `oryxa-fde-<env>`, FIFO subscribers into SQS FIFO with a DLQ each, fed by an outbox |
 | Secrets | AWS Secrets Manager; records hold references only |
 | Models | Bedrock first; vendor providers through config later |
@@ -33,3 +33,20 @@ Decision:
 - Work on real or region-bound data runs on the runner in the customer's cloud (P1), never in a
   Cloudflare sandbox.
 - Revisit when the Sandbox SDK supports placement constraints.
+
+## Amendment, 4 November 2026: per-company keys
+
+P0 encrypts company files with the environment key, because P0 holds sample data only. Isolation
+between companies in S3 rests on the company prefix with the API role limited to it, the
+`CompanyScope` check on every request, and CloudTrail data events.
+
+Per-company keys arrive before the first real customer data (P1):
+- a provisioning step, never the API at request time, creates one key per company, tagged with the
+  tenant and company and aliased `alias/oryxa-fde-<env>/companies/<company>`, with a fixed key policy
+  that allows use only through S3 by the roles that serve that company;
+- writes name the company's key, and the bucket policy refuses a write under a company prefix that
+  names any other key;
+- offboarding a company schedules its key for deletion, which makes its objects, versions and
+  backups unreadable.
+
+Proposed by the infra stream in #34.
