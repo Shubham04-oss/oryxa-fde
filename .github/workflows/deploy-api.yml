@@ -130,7 +130,10 @@ jobs:
           task=$(aws ecs run-task --cluster "$cluster" --launch-type FARGATE --task-definition "$MIGRATE_TASK_DEFINITION" \
             --network-configuration "$network" --started-by "deploy-api-$GITHUB_RUN_ID" \
             --query 'tasks[0].taskArn' --output text)
-          [ -n "$task" ] && [ "$task" != "None" ] || { echo "::error::the migrate task did not start"; exit 1; }
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::error::the migrate task did not start"
+            exit 1
+          fi
           echo "migrate task: $task"
           aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
           read -r code reason < <(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
