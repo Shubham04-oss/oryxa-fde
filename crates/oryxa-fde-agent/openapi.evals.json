@@ -1,0 +1,1183 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "oryxa-fde-api: evals",
+    "description": "Eval suites, runs and criterion pass rates. Served by oryxa-fde-api.",
+    "license": {
+      "name": "UNLICENSED",
+      "identifier": "UNLICENSED"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/companies/{company}/projects/{project}/eval-criteria": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Each success criterion's pass rate, from the latest finished run of every suite that measures it. Readable by\nthe customer's guests on the project.",
+        "operationId": "list_eval_criteria",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CriterionOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-runs": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "The project's eval runs, newest first.",
+        "operationId": "list_eval_runs",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EvalRunOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-runs/{run}": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "One eval run with its results per case and per criterion.",
+        "operationId": "get_eval_run",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run",
+            "in": "path",
+            "description": "Eval run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-suites": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "The project's eval suites, newest first.",
+        "operationId": "list_eval_suites",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SuiteOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Create an eval suite measuring some of the project's success criteria.",
+        "operationId": "create_eval_suite",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuiteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-suites/{suite}": {
+      "get": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "One eval suite with its cases.",
+        "operationId": "get_eval_suite",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "suite",
+            "in": "path",
+            "description": "Eval suite id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-suites/{suite}/cases": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Add cases from CSV (columns `input`, and optionally `expected`, `id`, `criteria`).",
+        "operationId": "import_eval_cases",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "suite",
+            "in": "path",
+            "description": "Eval suite id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A case id is already in the suite",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-suites/{suite}/results": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Grade outputs produced elsewhere: CSV with columns `case` and `output`, for cases of the suite.",
+        "operationId": "import_eval_results",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "suite",
+            "in": "path",
+            "description": "Eval suite id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/eval-suites/{suite}/runs": {
+      "post": {
+        "tags": [
+          "evals"
+        ],
+        "summary": "Run the suite: its target produces each case's output in the company's sandbox, and every grader grades it.",
+        "operationId": "start_eval_run",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "suite",
+            "in": "path",
+            "description": "Eval suite id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The suite has no target or no cases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Case": {
+        "type": "object",
+        "required": [
+          "id",
+          "input"
+        ],
+        "properties": {
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The suite's criteria this case measures; empty means all of them."
+          },
+          "expected": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "type": "string"
+          }
+        }
+      },
+      "CaseOutcome": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "failed",
+          "errored"
+        ]
+      },
+      "CaseResult": {
+        "type": "object",
+        "description": "A case's result: its output and each grader's verdict, in the suite's order.",
+        "required": [
+          "case",
+          "outcome",
+          "verdicts"
+        ],
+        "properties": {
+          "case": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CaseOutcome",
+            "description": "`passed` when every grader passed; `errored` when a grader, or the target, could not decide."
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What was graded; absent when the target failed."
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Verdict"
+            }
+          }
+        }
+      },
+      "Command": {
+        "type": "object",
+        "description": "A command run in the sandbox as `agent`, in `/workspace`.",
+        "required": [
+          "argv",
+          "timeout_secs"
+        ],
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_secs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "CriterionOut": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CriterionRate"
+          },
+          {
+            "type": "object",
+            "required": [
+              "suite",
+              "run"
+            ],
+            "properties": {
+              "finished_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run": {
+                "type": "string"
+              },
+              "suite": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "A criterion's pass rate in the latest finished run of a suite that measures it."
+      },
+      "CriterionRate": {
+        "type": "object",
+        "description": "One criterion's result in a run: the cases that measure it, and how many passed. Errored cases count as not\npassed, so a run that could not grade never shows a better rate than it earned.",
+        "required": [
+          "criterion",
+          "passed",
+          "total",
+          "rate"
+        ],
+        "properties": {
+          "criterion": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rate": {
+            "type": "number",
+            "format": "double",
+            "description": "`passed / total`, 0 when no case measures it."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "A short machine-readable code, as `oryxa-fde-api` answers.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "EvalRunOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "suite",
+          "state",
+          "imported",
+          "created_by",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "imported": {
+            "type": "boolean"
+          },
+          "report": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Report"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "`running` or `finished`."
+          },
+          "suite": {
+            "type": "string"
+          }
+        }
+      },
+      "Grader": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The output equals the expected output, ignoring surrounding whitespace.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "ignore_case": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "exact_match"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The output matches a regular expression.",
+            "required": [
+              "pattern",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "regex"
+                ]
+              },
+              "pattern": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The output is JSON valid against a schema (a strict subset of JSON Schema).",
+            "required": [
+              "schema",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "json_schema"
+                ]
+              },
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Command",
+                "description": "A command in the sandbox decides: exit code 0 passes. It gets `EVAL_CASE`, `EVAL_INPUT`, `EVAL_OUTPUT` and\n`EVAL_EXPECTED` in its environment."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "script"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A command in the sandbox decides: exit code 0 passes. It gets `EVAL_CASE`, `EVAL_INPUT`, `EVAL_OUTPUT` and\n`EVAL_EXPECTED` in its environment."
+          },
+          {
+            "type": "object",
+            "description": "A model grades the output against a rubric.",
+            "required": [
+              "rubric",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "judge"
+                ]
+              },
+              "rubric": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "Report": {
+        "type": "object",
+        "required": [
+          "cases",
+          "criteria",
+          "passed",
+          "failed",
+          "errored"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CaseResult"
+            }
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CriterionRate"
+            }
+          },
+          "errored": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "passed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "SuiteIn": {
+        "type": "object",
+        "required": [
+          "name",
+          "criteria",
+          "graders"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Case"
+            }
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The project's success criteria this suite measures."
+          },
+          "graders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Grader"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "target": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Command",
+                "description": "Produces each case's output in the sandbox from `EVAL_CASE` and `EVAL_INPUT`; its stdout is the output.\nWithout one, runs grade outputs imported as CSV."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SuiteOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "criteria",
+          "graders",
+          "cases"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Case"
+            }
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "graders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Grader"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "target": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Command"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Verdict": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "verdict"
+            ],
+            "properties": {
+              "score": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "passed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason",
+              "verdict"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "description": "Why, in the grader's words (a judge may quote the output)."
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The grader could not decide.",
+            "required": [
+              "reason",
+              "verdict"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "errored"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "WorkOS access token"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "evals",
+      "description": "Eval suites linked to success criteria, run in the company's sandbox"
+    }
+  ]
+}

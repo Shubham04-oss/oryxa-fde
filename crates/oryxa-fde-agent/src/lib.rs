@@ -8,6 +8,7 @@
 pub mod access;
 pub mod api;
 pub mod context;
+pub mod evals;
 pub mod event;
 pub mod gateway;
 pub mod git;

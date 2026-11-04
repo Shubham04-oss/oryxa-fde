@@ -22,6 +22,8 @@ pub enum Permission {
     Work,
     /// `manage` on the project's company: set the project's budget.
     Manage,
+    /// `view` on the project, which the customer's guests also hold: read its criteria's pass rates.
+    View,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -105,6 +107,12 @@ impl<K: KeySource + 'static> Access for PlatformAccess<K> {
                 Permission::Work => CheckItem {
                     resource: project,
                     permission: "work",
+                    subject: user,
+                    context: None,
+                },
+                Permission::View => CheckItem {
+                    resource: project,
+                    permission: "view",
                     subject: user,
                     context: None,
                 },

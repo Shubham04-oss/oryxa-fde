@@ -555,7 +555,7 @@ pub(crate) fn describe_responses(api: &mut utoipa::openapi::OpenApi) {
     }
 }
 
-struct Bearer;
+pub(crate) struct Bearer;
 
 impl utoipa::Modify for Bearer {
     fn modify(&self, api: &mut utoipa::openapi::OpenApi) {

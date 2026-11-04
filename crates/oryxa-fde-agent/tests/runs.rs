@@ -64,6 +64,7 @@ impl Access for FakeAccess {
         let name = match permission {
             Permission::Work => "work",
             Permission::Manage => "manage",
+            Permission::View => "view",
         };
         Ok(caller.tenant == *scope.tenant()
             && in_company

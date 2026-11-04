@@ -13,6 +13,7 @@ oryxa-authn.workspace = true
 oryxa-authz.workspace = true
 oryxa-core.workspace = true
 oryxa-fde-core = { path = "../oryxa-fde-core" }
+oryxa-fde-evals = { path = "../oryxa-fde-evals" }
 oryxa-fde-events.workspace = true
 oryxa-fde-store.workspace = true
 # Already in the tree (workos, aws): the gateway and realtime clients.
