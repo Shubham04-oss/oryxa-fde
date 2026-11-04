@@ -152,6 +152,19 @@ impl World {
         body: Option<Value>,
         same_site: bool,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let body = body.map(|b| ("application/json", b.to_string().into_bytes()));
+        self.with_cookie_body(cookie, method, path, body, same_site).await
+    }
+
+    /// [`World::with_cookie`] with any body: its content type and bytes.
+    async fn with_cookie_body(
+        &self,
+        cookie: &str,
+        method: &str,
+        path: &str,
+        body: Option<(&str, Vec<u8>)>,
+        same_site: bool,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
@@ -160,9 +173,7 @@ impl World {
             req = req.header("x-oryxa-request", "1").header("origin", WEB);
         }
         let req = match body {
-            Some(b) => req
-                .header("content-type", "application/json")
-                .body(Body::from(b.to_string())),
+            Some((content_type, bytes)) => req.header("content-type", content_type).body(Body::from(bytes)),
             None => req.body(Body::empty()),
         }
         .unwrap();
@@ -1058,9 +1069,12 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     at.who.id, at.kind
                 ));
             }
-            // Uploads take a raw body, which the cookie helper does not send.
-            if raw.is_none() && matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
-                let (status, _, resp) = w.with_cookie(&cookie_of(at.who), method, &path, body, true).await;
+            if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
+                let body = match raw {
+                    Some(raw) => Some(("text/plain", raw.as_bytes().to_vec())),
+                    None => body.map(|b| ("application/json", b.to_string().into_bytes())),
+                };
+                let (status, _, resp) = w.with_cookie_body(&cookie_of(at.who), method, &path, body, true).await;
                 calls += 1;
                 if status.is_success() {
                     leaks.push(format!(
@@ -1190,6 +1204,13 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+    // The same cookie upload works where it is allowed, so the refusals above are the API's.
+    let own = format!("/v1/companies/{}/documents?name=ours", a.company);
+    let upload = Some(("text/plain", b"our runbook".to_vec()));
+    let (status, _, body) = w
+        .with_cookie_body(&cookie_of(&a.lead), "POST", &own, upload, true)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 #[tokio::test]
