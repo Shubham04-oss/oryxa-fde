@@ -56,19 +56,35 @@ pub(crate) fn relationship(g: &Grant) -> Relationship {
     }
 }
 
-const RECONCILE_BATCH: i64 = 100;
+/// Rows of each kind taken per round: few, because they stay locked (and revocations of them wait)
+/// until the round's SpiceDB writes return.
+const RECONCILE_BATCH: i64 = 25;
 const RECONCILE_EVERY: Duration = Duration::from_secs(5);
 
-/// Writes every pending grant once (oldest first, up to a batch of each kind) and returns how
-/// many it wrote. One that fails again stays pending for the next round.
+/// Writes pending grants (oldest first, a batch of each kind) in one SpiceDB call per tenant and
+/// returns how many it wrote. A tenant's call that fails backs its rows off, so a grant that keeps
+/// failing waits longer each time and the others still go through.
 pub async fn reconcile_grants(app: &App) -> Result<usize, ApiError> {
     let mut pending = app.store.pending_grants(RECONCILE_BATCH).await?;
-    let grants = pending.grants().to_vec();
+    // Grouped in the order rows were taken, so the oldest tenant's batch goes first.
+    let mut by_tenant: Vec<(TenantId, Vec<Grant>)> = Vec::new();
+    for g in pending.grants() {
+        match by_tenant.iter_mut().find(|(t, _)| t == g.tenant()) {
+            Some((_, list)) => list.push(g.clone()),
+            None => by_tenant.push((g.tenant().clone(), vec![g.clone()])),
+        }
+    }
     let mut written = 0;
-    for g in &grants {
-        if app.write(g.tenant(), &[Write::Touch(relationship(g))]).await.is_ok() {
-            pending.mark(g).await?;
-            written += 1;
+    for (tenant, grants) in by_tenant {
+        let writes: Vec<Write> = grants.iter().map(|g| Write::Touch(relationship(g))).collect();
+        let ok = app.write(&tenant, &writes).await.is_ok();
+        for g in &grants {
+            if ok {
+                pending.mark(g).await?;
+                written += 1;
+            } else {
+                pending.mark_failed(g).await?;
+            }
         }
     }
     pending.commit().await?;

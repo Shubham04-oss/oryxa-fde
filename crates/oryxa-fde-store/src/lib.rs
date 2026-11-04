@@ -21,6 +21,7 @@ mod access;
 mod companies;
 mod documents;
 mod grants;
+pub mod iam;
 mod org;
 mod projects;
 mod records;
@@ -50,9 +51,12 @@ pub enum StoreError {
     Db(#[from] sqlx::Error),
     #[error("migrate: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
-    /// The runtime login could act as the owner; migrations need their own login.
-    #[error("refusing a database login that is {0}: the runtime login must own nothing")]
-    Privileged(&'static str),
+    #[error("configuration: {0}")]
+    Config(String),
+    /// The runtime login, or a role it can reach, could act as an owner; migrations need their own
+    /// login.
+    #[error("refusing a database login that can reach owner powers: {0}")]
+    Privileged(String),
     #[error("encode event: {0}")]
     Event(#[from] oryxa_events::PublishError),
     #[error("stored {0} is invalid")]
@@ -150,8 +154,29 @@ pub fn new_id(prefix: &str) -> String {
 /// login, never the service's.
 pub async fn migrate(url: &str) -> Result<(), StoreError> {
     let pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    let result = migrate_with(&pool).await;
     pool.close().await;
+    result
+}
+
+/// Runs the migrations as the migrator: with IAM tokens when `DB_HOST` and the rest are set (see
+/// [`iam::IamConfig`]), else as `MIGRATION_DATABASE_URL`'s login.
+pub async fn migrate_from_env() -> Result<(), StoreError> {
+    match iam::IamConfig::from_env()? {
+        Some(cfg) => {
+            let tokens = iam::RdsIam::from_env(&cfg).await?;
+            iam::migrate_iam(&cfg, &tokens).await
+        }
+        None => {
+            let url = std::env::var("MIGRATION_DATABASE_URL")
+                .map_err(|_| StoreError::Config("MIGRATION_DATABASE_URL or DB_HOST".into()))?;
+            migrate(&url).await
+        }
+    }
+}
+
+pub(crate) async fn migrate_with(pool: &PgPool) -> Result<(), StoreError> {
+    sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
 
@@ -165,6 +190,22 @@ impl Store {
     /// Connects as the runtime login, after checking it cannot act as the owner.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         Self::connect_with(url.parse::<PgConnectOptions>()?).await
+    }
+
+    /// Connects as the runtime login: with IAM tokens when `DB_HOST` and the rest are set (see
+    /// [`iam::IamConfig`]), else as `DATABASE_URL`'s login (local and test runs).
+    pub async fn from_env() -> Result<Self, StoreError> {
+        match iam::IamConfig::from_env()? {
+            Some(cfg) => {
+                let tokens = std::sync::Arc::new(iam::RdsIam::from_env(&cfg).await?);
+                Self::connect_iam(cfg, tokens, iam::REFRESH_EVERY).await
+            }
+            None => {
+                let url =
+                    std::env::var("DATABASE_URL").map_err(|_| StoreError::Config("DATABASE_URL or DB_HOST".into()))?;
+                Self::connect(&url).await
+            }
+        }
     }
 
     pub async fn connect_with(options: PgConnectOptions) -> Result<Self, StoreError> {
@@ -228,39 +269,33 @@ impl Store {
     }
 }
 
-const OWNER_POWERS: [&str; 5] = [
-    "a superuser",
-    "allowed to create roles",
-    "allowed to bypass row-level security",
-    "the database owner",
-    "a table owner",
-];
-
-/// What would let this login act as the owner, if anything: superuser, the right to create roles
-/// or bypass row-level security, or membership of the role that owns the database or a table.
-async fn owner_powers(pool: &PgPool) -> Result<Option<&'static str>, StoreError> {
-    let power: Option<i32> = sqlx::query_scalar(
-        "select case
-             when r.rolsuper then 0
-             when r.rolcreaterole then 1
-             when r.rolbypassrls then 2
-             when pg_has_role(current_user, d.datdba, 'MEMBER') then 3
-             when exists (
-                 select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-                 where n.nspname = current_schema() and pg_has_role(current_user, c.relowner, 'MEMBER')) then 4
-         end
-         from pg_roles r, pg_database d
-         where r.rolname = current_user and d.datname = current_database()",
+/// What would let this login act as an owner, if anything, for the login and every role it can
+/// reach by SET ROLE or inheritance: superuser, the right to create roles or databases or to bypass
+/// row-level security, a predefined role, owning the database, a schema or a relation, creating in
+/// a schema, or an admin option. The same rule as the infra bootstrap's own check.
+async fn owner_powers(pool: &PgPool) -> Result<Option<String>, StoreError> {
+    let found: Option<String> = sqlx::query_scalar(
+        "select string_agg(format('%s (%s)', r.rolname, why), ', ' order by r.rolname, why)
+         from pg_roles r
+         cross join lateral (values
+             (r.rolsuper, 'superuser'),
+             (r.rolcreaterole, 'createrole'),
+             (r.rolcreatedb, 'createdb'),
+             (r.rolbypassrls, 'bypassrls'),
+             (r.rolname like 'pg\\_%', 'predefined role'),
+             (r.oid = (select datdba from pg_database where datname = current_database()), 'owns the database'),
+             (exists (select from pg_class c where c.relowner = r.oid), 'owns a relation'),
+             (exists (select from pg_namespace n where n.nspowner = r.oid), 'owns a schema'),
+             (exists (select from pg_namespace n
+                      where n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'
+                        and has_schema_privilege(r.oid, n.oid, 'create')), 'create in a schema'),
+             (exists (select from pg_auth_members m where m.member = r.oid and m.admin_option), 'admin option')
+         ) as v(failed, why)
+         where pg_has_role(current_user, r.oid, 'member') and v.failed",
     )
     .fetch_one(pool)
     .await?;
-    Ok(power.map(|p| {
-        usize::try_from(p)
-            .ok()
-            .and_then(|i| OWNER_POWERS.get(i))
-            .copied()
-            .unwrap_or(OWNER_POWERS[0])
-    }))
+    Ok(found)
 }
 
 /// Appends an audit row: ids only.

@@ -3264,7 +3264,11 @@ dependencies = [
 name = "oryxa-fde-store"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
  "ed25519-dalek",
+ "http 1.5.0",
  "oryxa-core",
  "oryxa-events",
  "oryxa-fde-core",

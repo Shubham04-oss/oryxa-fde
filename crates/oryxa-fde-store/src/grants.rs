@@ -94,6 +94,18 @@ impl PendingGrants {
         mark(&mut self.tx, grant).await
     }
 
+    /// Records a failed write of one of [`PendingGrants::grants`]: it waits 2 s after the first
+    /// failure, doubling to ten minutes, before it is taken again.
+    pub async fn mark_failed(&mut self, grant: &Grant) -> Result<(), StoreError> {
+        update(
+            &mut self.tx,
+            grant,
+            "grant_attempts = grant_attempts + 1,
+             grant_retry_at = now() + make_interval(secs => least(power(2, least(grant_attempts + 1, 20)), 600))",
+        )
+        .await
+    }
+
     pub async fn commit(self) -> Result<(), StoreError> {
         self.tx.commit().await.map_err(Into::into)
     }
@@ -152,15 +164,18 @@ impl Store {
         Ok(grant.map(|grant| PendingGrant { tx, grant }))
     }
 
-    /// Up to `limit` rows of each kind whose grant is not yet written, across every tenant, locked
-    /// and skipping rows another transaction holds (the API writing that grant right now).
+    /// Up to `limit` rows of each kind whose grant is not yet written and not backing off, across
+    /// every tenant, locked and skipping rows another transaction holds (the API writing that
+    /// grant right now). Rows never tried come first, then those whose wait is longest over, so a
+    /// row that keeps failing cannot crowd out the rest.
     pub async fn pending_grants(&self, limit: i64) -> Result<PendingGrants, StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("set local role oryxa_fde_grants").execute(&mut *tx).await?;
         let mut grants = Vec::new();
         for r in sqlx::query(
-            "select tenant_id, company_id from companies where granted_at is null
-             order by tenant_id, company_id limit $1 for update skip locked",
+            "select tenant_id, company_id from companies
+             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             order by grant_retry_at nulls first, tenant_id, company_id limit $1 for update skip locked",
         )
         .bind(limit)
         .fetch_all(&mut *tx)
@@ -169,8 +184,9 @@ impl Store {
             grants.push(Grant::CompanyWorkspace(company_scope(&r)?));
         }
         for r in sqlx::query(
-            "select tenant_id, company_id, user_id, role from company_members where granted_at is null
-             order by tenant_id, company_id, user_id limit $1 for update skip locked",
+            "select tenant_id, company_id, user_id, role from company_members
+             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             order by grant_retry_at nulls first, tenant_id, company_id, user_id limit $1 for update skip locked",
         )
         .bind(limit)
         .fetch_all(&mut *tx)
@@ -180,8 +196,9 @@ impl Store {
             grants.push(Grant::Member(company_scope(&r)?, user, role_of(r.try_get("role")?)?));
         }
         for r in sqlx::query(
-            "select tenant_id, company_id, project_id from projects where granted_at is null
-             order by tenant_id, project_id limit $1 for update skip locked",
+            "select tenant_id, company_id, project_id from projects
+             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             order by grant_retry_at nulls first, tenant_id, project_id limit $1 for update skip locked",
         )
         .bind(limit)
         .fetch_all(&mut *tx)
@@ -190,8 +207,9 @@ impl Store {
             grants.push(Grant::ProjectCompany(project_scope(&r)?));
         }
         for r in sqlx::query(
-            "select tenant_id, company_id, project_id, user_id from project_assignees where granted_at is null
-             order by tenant_id, project_id, user_id limit $1 for update skip locked",
+            "select tenant_id, company_id, project_id, user_id from project_assignees
+             where granted_at is null and (grant_retry_at is null or grant_retry_at <= now())
+             order by grant_retry_at nulls first, tenant_id, project_id, user_id limit $1 for update skip locked",
         )
         .bind(limit)
         .fetch_all(&mut *tx)
@@ -205,34 +223,44 @@ impl Store {
 }
 
 async fn mark(conn: &mut PgConnection, grant: &Grant) -> Result<(), StoreError> {
+    update(conn, grant, "granted_at = now()").await
+}
+
+/// Updates the row behind `grant` with `set`, a constant assignment list.
+async fn update(conn: &mut PgConnection, grant: &Grant, set: &'static str) -> Result<(), StoreError> {
     let (t, c) = (grant.tenant().as_str(), grant.company().as_str());
-    let q = match grant {
-        Grant::CompanyWorkspace(_) => {
-            sqlx::query("update companies set granted_at = now() where tenant_id = $1 and company_id = $2")
-                .bind(t)
-                .bind(c)
-        }
-        Grant::Member(_, u, _) => sqlx::query(
-            "update company_members set granted_at = now() where tenant_id = $1 and company_id = $2 and user_id = $3",
-        )
-        .bind(t)
-        .bind(c)
-        .bind(u.as_str()),
-        Grant::ProjectCompany(p) => sqlx::query(
-            "update projects set granted_at = now() where tenant_id = $1 and company_id = $2 and project_id = $3",
-        )
-        .bind(t)
-        .bind(c)
-        .bind(p.project.as_str()),
-        Grant::Assignee(p, u) => sqlx::query(
-            "update project_assignees set granted_at = now()
-             where tenant_id = $1 and company_id = $2 and project_id = $3 and user_id = $4",
-        )
-        .bind(t)
-        .bind(c)
-        .bind(p.project.as_str())
-        .bind(u.as_str()),
+    let (sql, project, user) = match grant {
+        Grant::CompanyWorkspace(_) => (
+            format!("update companies set {set} where tenant_id = $1 and company_id = $2"),
+            None,
+            None,
+        ),
+        Grant::Member(_, u, _) => (
+            format!("update company_members set {set} where tenant_id = $1 and company_id = $2 and user_id = $3"),
+            None,
+            Some(u),
+        ),
+        Grant::ProjectCompany(p) => (
+            format!("update projects set {set} where tenant_id = $1 and company_id = $2 and project_id = $3"),
+            Some(&p.project),
+            None,
+        ),
+        Grant::Assignee(p, u) => (
+            format!(
+                "update project_assignees set {set}
+                 where tenant_id = $1 and company_id = $2 and project_id = $3 and user_id = $4"
+            ),
+            Some(&p.project),
+            Some(u),
+        ),
     };
+    let mut q = sqlx::query(&sql).bind(t).bind(c);
+    if let Some(p) = project {
+        q = q.bind(p.as_str());
+    }
+    if let Some(u) = user {
+        q = q.bind(u.as_str());
+    }
     q.execute(conn).await?;
     Ok(())
 }

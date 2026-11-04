@@ -12,8 +12,10 @@ use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use oryxa_events::{Encoded, MemoryPublisher, PublishError, Publisher, Signer, Verifier, decode};
 use oryxa_fde_core::{ScopeItemId, SecurityAnswerId};
 use oryxa_fde_events::{CompanyCreated, ProjectCreated};
+use std::sync::Arc;
+
 use sqlx::Row;
-use sqlx::postgres::PgConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
 use crate::relay::{dispatch_once, replay_dead};
@@ -915,10 +917,10 @@ async fn row_level_security_covers_every_lifecycle_table() {
 async fn the_runtime_login_owns_nothing_and_holds_nothing_outside_a_role() {
     let owner = admin().await;
     // The owner (here the container's superuser) is refused as the runtime login.
-    assert!(matches!(
-        Store::connect(&testing::database_url()).await,
-        Err(StoreError::Privileged("a superuser"))
-    ));
+    match Store::connect(&testing::database_url()).await {
+        Err(StoreError::Privileged(why)) => assert!(why.contains("(superuser)"), "{why}"),
+        other => panic!("the owner must be refused: {:?}", other.err()),
+    }
 
     let store = store().await;
     create_company(&store, &scope(&tenant(), &new_id("cmp"))).await;
@@ -967,10 +969,10 @@ async fn the_runtime_login_owns_nothing_and_holds_nothing_outside_a_role() {
         .unwrap()
         .username(&login)
         .password(&password);
-    assert!(matches!(
-        Store::connect_with(options).await,
-        Err(StoreError::Privileged("the database owner" | "a table owner"))
-    ));
+    match Store::connect_with(options).await {
+        Err(StoreError::Privileged(why)) => assert!(why.contains("owns"), "{why}"),
+        other => panic!("a member of the owner must be refused: {:?}", other.err()),
+    }
 }
 
 #[tokio::test]
@@ -1347,3 +1349,295 @@ async fn a_patch_reads_its_row_locked_so_concurrent_changes_are_not_lost() {
     // It then reads the first PATCH's result, not the row as it was before.
     assert_eq!(second.await.unwrap().as_str(), "Renamed");
 }
+
+/// Hands out the given tokens in order, then the last one again.
+struct Tokens(std::sync::Mutex<Vec<String>>);
+
+impl iam::TokenSource for Tokens {
+    fn token(&self) -> iam::BoxFuture<'_, Result<String, StoreError>> {
+        Box::pin(async move {
+            let mut left = self.0.lock().unwrap();
+            match left.len() {
+                0 => Err(StoreError::Config("no token".into())),
+                1 => Ok(left[0].clone()),
+                _ => Ok(left.remove(0)),
+            }
+        })
+    }
+}
+
+/// The test server's host, port and database, for IAM-style options.
+fn server() -> (String, u16, String) {
+    let o = testing::database_url().parse::<PgConnectOptions>().unwrap();
+    (
+        o.get_host().to_owned(),
+        o.get_port(),
+        o.get_database().unwrap_or("oryxa_fde").to_owned(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn iam_tokens_connect_and_are_refreshed_before_they_expire() {
+    let owner = admin().await;
+    let login = new_id("fde_iam");
+    let (first, second) = (new_id("tok"), new_id("tok"));
+    for sql in [
+        format!("create role {login} login password '{first}'"),
+        format!("grant oryxa_fde_runtime to {login}"),
+    ] {
+        sqlx::query(&sql).execute(&owner).await.unwrap();
+    }
+    let (host, port, database) = server();
+    let cfg = iam::IamConfig {
+        host,
+        port,
+        database,
+        user: login.clone(),
+        ca_bundle: None,
+    };
+
+    // No token at startup: refused, never a fallback.
+    let none: Arc<dyn iam::TokenSource> = Arc::new(Tokens(std::sync::Mutex::new(Vec::new())));
+    assert!(
+        Store::connect_iam(cfg.clone(), none, Duration::from_secs(60))
+            .await
+            .is_err()
+    );
+
+    let tokens: Arc<dyn iam::TokenSource> =
+        Arc::new(Tokens(std::sync::Mutex::new(vec![first.clone(), second.clone()])));
+    let store = Store::connect_iam(cfg.clone(), tokens, Duration::from_millis(200))
+        .await
+        .unwrap();
+    create_company(&store, &scope(&tenant(), &new_id("cmp"))).await;
+
+    // The token rotates (as RDS tokens expire); after a refresh, new connections use the new one.
+    sqlx::query(&format!("alter role {login} password '{second}'"))
+        .execute(&owner)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let held = store.pool.acquire().await.unwrap();
+    let opened: Vec<_> = futures_join(&store, 2).await;
+    assert!(
+        opened.iter().all(Result::is_ok),
+        "new connections use the refreshed token"
+    );
+    drop(held);
+    // The old token no longer opens anything: the refresh is what kept the pool working.
+    let stale = <sqlx::PgConnection as sqlx::Connection>::connect_with(&cfg.options(&first)).await;
+    assert!(stale.is_err());
+}
+
+/// Opens `n` more connections at once, so the pool must dial new ones.
+async fn futures_join(store: &Store, n: usize) -> Vec<Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error>> {
+    let mut held = Vec::new();
+    for _ in 0..n {
+        held.push(store.pool.acquire().await);
+    }
+    held
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_login_that_reaches_any_owner_power_is_refused() {
+    let owner = admin().await;
+    for (power, grant) in [
+        ("createdb", "nologin createdb"),
+        ("bypassrls", "nologin bypassrls"),
+        ("admin option", "nologin"),
+    ] {
+        let (login, role, password) = (new_id("fde_rt"), new_id("fde_reach"), new_id("pw"));
+        let mut setup = vec![
+            format!("create role {role} {grant}"),
+            format!("create role {login} login password '{password}'"),
+            format!("grant oryxa_fde_runtime to {login}"),
+            format!("grant {role} to {login}"),
+        ];
+        if power == "admin option" {
+            // Reachable, and able to hand a role on: refused like ownership.
+            setup.push(format!("grant oryxa_fde_app to {role} with admin option"));
+        }
+        for sql in setup {
+            sqlx::query(&sql).execute(&owner).await.unwrap();
+        }
+        let options = testing::database_url()
+            .parse::<PgConnectOptions>()
+            .unwrap()
+            .username(&login)
+            .password(&password);
+        match Store::connect_with(options).await {
+            Err(StoreError::Privileged(why)) => assert!(why.contains(power), "{power}: {why}"),
+            other => panic!("{power} must be refused: {:?}", other.err()),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_grant_that_keeps_failing_backs_off_and_the_rest_go_through() {
+    let store = store().await;
+    let owner = admin().await;
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let mine = |grants: &[Grant]| -> Vec<Grant> { grants.iter().filter(|g| g.tenant() == &t).cloned().collect() };
+    let workspace = Grant::CompanyWorkspace(c.clone());
+
+    let mut pending = store.pending_grants(10_000).await.unwrap();
+    assert!(mine(pending.grants()).contains(&workspace));
+    pending.mark_failed(&workspace).await.unwrap();
+    pending.commit().await.unwrap();
+    // Backing off: not taken again yet; the member's grant still is.
+    let pending = store.pending_grants(10_000).await.unwrap();
+    assert_eq!(
+        mine(pending.grants()),
+        [Grant::Member(c.clone(), UserId::new("alice").unwrap(), Role::Lead)]
+    );
+    drop(pending);
+    let (attempts, wait): (i32, f64) = sqlx::query_as(
+        "select grant_attempts, extract(epoch from grant_retry_at - now())::float8 from companies
+         where tenant_id = $1 and company_id = $2",
+    )
+    .bind(t.as_str())
+    .bind(c.company.as_str())
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    assert_eq!(attempts, 1);
+    assert!((0.0..=2.5).contains(&wait), "first wait about 2 s, got {wait}");
+    // Its wait over, it is taken again, and a second failure waits longer.
+    sqlx::query("update companies set grant_retry_at = now() - interval '1 second' where tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&owner)
+        .await
+        .unwrap();
+    let mut pending = store.pending_grants(10_000).await.unwrap();
+    assert!(mine(pending.grants()).contains(&workspace));
+    pending.mark_failed(&workspace).await.unwrap();
+    pending.commit().await.unwrap();
+    let wait: f64 = sqlx::query_scalar(
+        "select extract(epoch from grant_retry_at - now())::float8 from companies where tenant_id = $1",
+    )
+    .bind(t.as_str())
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    assert!((2.5..=4.5).contains(&wait), "second wait about 4 s, got {wait}");
+}
+
+/// Runs a psql script the way `psql -f` would for what the bootstrap uses: statements end with
+/// `;` outside `$$` blocks, and `\gexec` runs each value the query returns.
+async fn run_psql(conn: &mut sqlx::PgConnection, script: &str) {
+    let mut buf = String::new();
+    for line in script.lines() {
+        if buf.is_empty() && (line.trim().is_empty() || line.trim_start().starts_with("--")) {
+            continue;
+        }
+        let gexec = line.trim_end().ends_with("\\gexec");
+        buf.push_str(line.trim_end().trim_end_matches("\\gexec"));
+        buf.push('\n');
+        let in_block = buf.matches("$$").count() % 2 == 1;
+        if gexec {
+            let rows: Vec<String> = sqlx::query_scalar(&buf).fetch_all(&mut *conn).await.unwrap();
+            for sql in rows {
+                sqlx::raw_sql(&sql).execute(&mut *conn).await.unwrap();
+            }
+            buf.clear();
+        } else if !in_block && line.trim_end().ends_with(';') {
+            sqlx::raw_sql(&buf)
+                .execute(&mut *conn)
+                .await
+                .unwrap_or_else(|e| panic!("{buf}: {e}"));
+            buf.clear();
+        }
+    }
+    assert!(buf.trim().is_empty(), "unterminated: {buf}");
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_bootstrap_roles_migrate_and_serve_with_no_createrole_anywhere() {
+    const BOOTSTRAP: &str = include_str!("../../../infra/sql/01-bootstrap.sql");
+    let _turn = BOOTSTRAP_TESTS.lock().await;
+    let owner = admin().await;
+    // A database of its own: the bootstrap closes the database it runs in to everyone else.
+    let db = new_id("fde_boot");
+    sqlx::query(&format!("create database {db}"))
+        .execute(&owner)
+        .await
+        .unwrap();
+    // RDS gives every database the rds_iam role; plain Postgres needs it made.
+    sqlx::query("do $$ begin if not exists (select from pg_roles where rolname = 'rds_iam') then create role rds_iam nologin; end if; end $$")
+        .execute(&owner)
+        .await
+        .unwrap();
+    let base = testing::database_url().parse::<PgConnectOptions>().unwrap();
+    let mut master = <sqlx::PgConnection as sqlx::Connection>::connect_with(&base.clone().database(&db))
+        .await
+        .unwrap();
+    run_psql(
+        &mut master,
+        &BOOTSTRAP.replace("on database oryxa_fde", &format!("on database {db}")),
+    )
+    .await;
+
+    // IAM in production; passwords here, set for this run.
+    let (migrator_pw, api_pw) = (new_id("pw"), new_id("pw"));
+    for sql in [
+        format!("alter role oryxa_fde_migrator password '{migrator_pw}'"),
+        format!("alter role oryxa_fde_api password '{api_pw}'"),
+    ] {
+        sqlx::query(&sql).execute(&mut master).await.unwrap();
+    }
+    let createrole: bool = sqlx::query_scalar(
+        "select bool_or(rolcreaterole or rolsuper) from pg_roles where rolname in ('oryxa_fde_migrator', 'oryxa_fde_api')",
+    )
+    .fetch_one(&mut master)
+    .await
+    .unwrap();
+    assert!(!createrole, "neither login may create roles");
+
+    // The migrator migrates with no CREATEROLE; the API connects as a runtime login and works.
+    let as_migrator = base
+        .clone()
+        .database(&db)
+        .username("oryxa_fde_migrator")
+        .password(&migrator_pw);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(as_migrator)
+        .await
+        .unwrap();
+    migrate_with(&pool).await.unwrap();
+    pool.close().await;
+    let as_api = base.clone().database(&db).username("oryxa_fde_api").password(&api_pw);
+    let store = Store::connect_with(as_api).await.unwrap();
+    let c = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &c).await;
+    assert!(store.company(&c).await.unwrap().get().await.unwrap().is_some());
+    let mut conn = store.pool.acquire().await.unwrap();
+    assert!(
+        sqlx::query("set role oryxa_fde_migrator")
+            .execute(&mut *conn)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("select 1 from companies")
+            .execute(&mut *conn)
+            .await
+            .is_err()
+    );
+    drop(conn);
+    drop(store);
+    drop(master);
+    sqlx::query(&format!("drop database {db} with (force)"))
+        .execute(&owner)
+        .await
+        .unwrap();
+}
+
+/// The bootstrap's roles are cluster-wide, so its tests take turns.
+static BOOTSTRAP_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
