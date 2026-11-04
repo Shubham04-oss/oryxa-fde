@@ -211,7 +211,8 @@ impl utoipa::Modify for Bearer {
         cookie.description = Some(
             "The browser session from /auth/callback. A request carrying it, and no bearer token, that is not \
              GET or HEAD must also send `X-Oryxa-Request: 1` and the web app's `Origin`, or it gets \
-             403 {\"error\":\"csrf\"}."
+             403 {\"error\":\"csrf\"}. While WorkOS cannot refresh an expired session, any request may get \
+             503 {\"error\":\"unavailable\"}: the cookie is kept, and the same request works once WorkOS answers."
                 .into(),
         );
         components.add_security_scheme(

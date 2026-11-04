@@ -5,8 +5,8 @@
 //! Bedrock (`EMBEDDING_*`).
 //!
 //! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
-//! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; while the key rotates,
-//! `SESSION_PASSWORD_PREVIOUS` holds the old one, still read.
+//! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; `SESSION_PASSWORD_PREVIOUS`
+//! is also read, for rotating in two deploys (see `session`: the new key goes here first).
 //!
 //! `DATABASE_URL` is the runtime login, which owns nothing; the store refuses any other. Migrations
 //! run before a deploy as a one-off task (`oryxa-fde-ops migrate`) with the owner's login.

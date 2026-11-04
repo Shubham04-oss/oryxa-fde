@@ -79,8 +79,12 @@ pub struct FakeAuthKit {
     pub who: std::sync::Mutex<(Option<String>, String, String)>,
     /// The next refreshes fail for good (`invalid_grant`).
     pub refresh_fails: std::sync::atomic::AtomicBool,
-    /// The next refreshes fail for now (WorkOS down).
+    /// The next refreshes fail for now (WorkOS down), with a 300 ms `Retry-After`.
     pub refresh_unavailable: std::sync::atomic::AtomicBool,
+    /// Refreshes asked for, whatever their outcome.
+    pub refreshes: std::sync::atomic::AtomicUsize,
+    /// The next revokes fail (WorkOS down).
+    pub revoke_fails: std::sync::atomic::AtomicBool,
     pub revoked: std::sync::Mutex<Vec<String>>,
     challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
@@ -124,11 +128,15 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
     ) -> Fut<'a, Result<oryxa_fde_api::Tokens, oryxa_fde_api::RefreshError>> {
         Box::pin(async move {
             use oryxa_fde_api::RefreshError;
+            self.refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.refresh_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(RefreshError::Refused("invalid_grant".into()));
             }
             if self.refresh_unavailable.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(RefreshError::Unavailable("503 from WorkOS".into()));
+                return Err(RefreshError::Unavailable {
+                    why: "503 from WorkOS".into(),
+                    retry_after: Some(std::time::Duration::from_millis(300)),
+                });
             }
             let parts: Vec<&str> = refresh_token.split('|').collect();
             let [_, org, user, role] = parts[..] else {
@@ -144,6 +152,9 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
 
     fn revoke<'a>(&'a self, session_id: &'a str) -> Fut<'a, Result<(), String>> {
         Box::pin(async move {
+            if self.revoke_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("workos is down".into());
+            }
             self.revoked.lock().unwrap().push(session_id.to_owned());
             Ok(())
         })

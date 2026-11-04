@@ -7,8 +7,9 @@
 //! A request that carries the session cookie and no bearer token is authenticated from it: the
 //! access token is verified like a bearer token (refreshed through WorkOS when it has expired),
 //! and the request then goes through the same `Principal` and permission checks. Only WorkOS
-//! refusing the refresh token (`invalid_grant`) ends a session; WorkOS being slow, rate limiting
-//! or failing answers 503 and keeps the cookie.
+//! refusing the session for good (the refresh token is spent, or the user must sign in again
+//! another way) ends it; WorkOS being slow, rate limiting or failing answers 503 and keeps the
+//! cookie, and that session's refresh is not tried again for a few seconds (or `Retry-After`).
 //!
 //! Idle sessions: the API relies on AuthKit's session inactivity timeout (WorkOS dashboard,
 //! Authentication, Sessions), which revokes a refresh token not used for that long, so the next
@@ -16,9 +17,15 @@
 //! sign-in whatever its activity.
 //!
 //! Key rotation: cookies are sealed with `SESSION_PASSWORD`; a cookie sealed with
-//! `SESSION_PASSWORD_PREVIOUS` is still read, and reissued under the new key. A cookie request
-//! that changes anything must also prove it comes from the web app (`X-Oryxa-Request: 1` and the
-//! app's `Origin`), or it is refused as cross-site.
+//! `SESSION_PASSWORD_PREVIOUS` is still read, and reissued under the current key. Rotate in two
+//! deploys, so no replica ever meets a cookie it cannot read: first set the new key as
+//! `SESSION_PASSWORD_PREVIOUS`, then swap the two; drop the old key after [`SESSION_TTL`]. When
+//! rotating out a leaked key, do not keep it as the previous key: everyone signs in again.
+//!
+//! A cookie request that changes anything must also prove it comes from the web app
+//! (`X-Oryxa-Request: 1` and the app's `Origin`), or it is refused as cross-site. `/auth/logout`
+//! never refreshes or reseals: it revokes the WorkOS session if it can, and always clears the
+//! cookie.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -32,6 +39,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use oryxa_authn::JwtError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::{ApiError, App, BoxFuture, ErrorBody, Principal};
@@ -56,16 +64,30 @@ pub struct Tokens {
 /// Why a refresh did not give new tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshError {
-    /// WorkOS refused the refresh token for good (`invalid_grant`: revoked, expired or idle too
-    /// long): the session is over.
+    /// WorkOS refused this session for good (the refresh token is revoked, expired or idle too
+    /// long, or the user must sign in another way): the session is over.
     Refused(String),
-    /// WorkOS could not answer now (timeout, 5xx, rate limited after retries): try again later.
-    Unavailable(String),
+    /// WorkOS could not answer now (timeout, 5xx, rate limited after retries): try again later,
+    /// after `retry_after` if WorkOS said.
+    Unavailable { why: String, retry_after: Option<Duration> },
 }
 
-/// How many times a rate-limited refresh is tried, and the wait before the second try (doubling).
+/// How many times a rate-limited refresh is tried, and the wait before the second try (doubling,
+/// jittered).
 const REFRESH_TRIES: u32 = 3;
 const REFRESH_BACKOFF: Duration = Duration::from_millis(250);
+/// The longest `Retry-After` a request waits out itself; a longer one ends it with a 503.
+const MAX_WAIT_IN_REQUEST: Duration = Duration::from_secs(2);
+/// After WorkOS could not refresh a session, it is not asked again for this long (jittered), or
+/// for its `Retry-After` up to [`MAX_SESSION_BACKOFF`].
+const SESSION_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_SESSION_BACKOFF: Duration = Duration::from_secs(60);
+const LOGOUT_PATH: &str = "/auth/logout";
+
+/// `base` scaled by a random factor in [0.5, 1.5), so sessions that failed together retry apart.
+fn jittered(base: Duration) -> Duration {
+    base.mul_f64(rand::Rng::gen_range(&mut rand::thread_rng(), 0.5..1.5))
+}
 
 /// WorkOS as sign-in needs it. A trait so tests run without WorkOS.
 pub trait AuthKit: Send + Sync + 'static {
@@ -122,7 +144,7 @@ impl AuthKit for WorkOsAuthKit {
         organisation: &'a str,
     ) -> BoxFuture<'a, Result<Tokens, RefreshError>> {
         Box::pin(async move {
-            let mut wait = REFRESH_BACKOFF;
+            let mut backoff = REFRESH_BACKOFF;
             for attempt in 1..=REFRESH_TRIES {
                 let mut p = workos::user_management::AuthenticateWithRefreshTokenParams::new(refresh_token);
                 p.organization_id = Some(organisation.to_owned());
@@ -136,16 +158,28 @@ impl AuthKit for WorkOsAuthKit {
                     Err(e) => e,
                 };
                 let (status, code) = e.api().map(|a| (a.status, a.code.as_deref())).unwrap_or((0, None));
+                let unavailable = || RefreshError::Unavailable {
+                    why: e.to_string(),
+                    retry_after: e.retry_after(),
+                };
                 match refresh_failure(status, code) {
                     Failure::Final => return Err(RefreshError::Refused(e.to_string())),
                     Failure::RateLimited if attempt < REFRESH_TRIES => {
+                        let wait = match e.retry_after() {
+                            Some(after) if after > MAX_WAIT_IN_REQUEST => return Err(unavailable()),
+                            Some(after) => after,
+                            None => jittered(backoff),
+                        };
                         tokio::time::sleep(wait).await;
-                        wait *= 2;
+                        backoff *= 2;
                     }
-                    _ => return Err(RefreshError::Unavailable(e.to_string())),
+                    _ => return Err(unavailable()),
                 }
             }
-            Err(RefreshError::Unavailable("rate limited".into()))
+            Err(RefreshError::Unavailable {
+                why: "rate limited".into(),
+                retry_after: None,
+            })
         })
     }
 
@@ -199,11 +233,27 @@ enum Failure {
     Transient,
 }
 
-/// Only `invalid_grant` ends a session; a 429 is worth retrying; anything else (5xx, a timeout, a
-/// WorkOS or configuration fault) is not the session's fault.
+/// WorkOS error codes that end a session: its refresh token is spent, its user or organisation is
+/// gone, or the user must sign in again another way (SSO, MFA, a verified email).
+const SESSION_ENDED: [&str; 9] = [
+    "invalid_grant",
+    "sso_required",
+    "organization_authentication_methods_required",
+    "mfa_enrollment",
+    "mfa_challenge",
+    "email_verification_required",
+    "organization_selection_required",
+    "user_not_found",
+    "organization_not_found",
+];
+
+/// Whether a failed refresh ends the session. WorkOS refuses a user it will not sign in to the
+/// organisation (such as one no longer a member) with a 403, and our own bad credentials with a
+/// 401, which, like a 5xx or a timeout, is not the session's fault. A 429 is worth retrying.
 fn refresh_failure(status: u16, code: Option<&str>) -> Failure {
     match (status, code) {
-        (_, Some("invalid_grant")) => Failure::Final,
+        (_, Some(c)) if SESSION_ENDED.contains(&c) => Failure::Final,
+        (403, _) => Failure::Final,
         (429, _) => Failure::RateLimited,
         _ => Failure::Transient,
     }
@@ -218,6 +268,9 @@ pub struct SignIn {
     previous: Option<String>,
     authkit: Arc<dyn AuthKit>,
     names: Mutex<HashMap<String, (String, Instant)>>,
+    /// Sessions whose refresh WorkOS could not answer, by hash of refresh token: not asked again
+    /// before then.
+    waits: Mutex<HashMap<String, Instant>>,
 }
 
 fn check_password(password: &str) -> Result<(), String> {
@@ -249,6 +302,7 @@ impl SignIn {
             previous: None,
             authkit,
             names: Mutex::new(HashMap::new()),
+            waits: Mutex::new(HashMap::new()),
         })
     }
 
@@ -285,6 +339,27 @@ impl SignIn {
         workos::helpers::session::unseal(sealed, previous)
             .ok()
             .map(|v| (v, true))
+    }
+
+    /// Whether the session behind `key` is backing off from a failed refresh.
+    fn backing_off(&self, key: &str) -> bool {
+        let waits = self.waits.lock().unwrap_or_else(|e| e.into_inner());
+        waits.get(key).is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// Backs the session behind `key` off for `retry_after` (bounded), or a jittered few seconds.
+    fn back_off(&self, key: String, retry_after: Option<Duration>) {
+        let wait = retry_after
+            .unwrap_or_else(|| jittered(SESSION_BACKOFF))
+            .min(MAX_SESSION_BACKOFF);
+        let now = Instant::now();
+        let mut waits = self.waits.lock().unwrap_or_else(|e| e.into_inner());
+        waits.retain(|_, until| *until > now);
+        waits.insert(key, now + wait);
+    }
+
+    fn refreshed(&self, key: &str) {
+        self.waits.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
     }
 
     /// A display name, cached for a few minutes.
@@ -324,6 +399,10 @@ pub(crate) struct Session {
     /// The user and organisation signed in; a refresh must keep both.
     user: String,
     organisation: String,
+    /// The WorkOS session, for logout to revoke without reading the tokens. Cookies sealed before
+    /// it was kept have none, and logout only clears them.
+    #[serde(default)]
+    session_id: String,
     /// When the user signed in, in Unix seconds.
     signed_in: u64,
 }
@@ -376,13 +455,6 @@ pub(crate) fn safe_return_to(raw: &str) -> Option<String> {
     (resolved.origin() == base.origin()).then(|| raw.to_owned())
 }
 
-/// The session behind a cookie request, as the handlers see it.
-#[derive(Clone)]
-pub(crate) struct CookieSession {
-    /// The WorkOS session id, to revoke on logout.
-    session_id: String,
-}
-
 /// Authenticates a request from its session cookie when it carries no bearer token. See the
 /// module docs; a cookie that cannot be used is cleared.
 pub(crate) async fn layer(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
@@ -399,13 +471,16 @@ pub(crate) async fn layer(State(app): State<Arc<App>>, mut req: Request, next: N
     if !matches!(*req.method(), Method::GET | Method::HEAD) && !sign_in.same_site(req.headers()) {
         return ApiError::Csrf.into_response();
     }
+    // Logout reads the cookie itself: it must never refresh, reseal or keep the session.
+    if req.uri().path() == LOGOUT_PATH {
+        return next.run(req).await;
+    }
     match resume(&app, sign_in, &sealed).await {
-        Ok((token, session_id, reissued)) => {
+        Ok((token, reissued)) => {
             let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {token}")) else {
                 return ApiError::Unauthorized.into_response();
             };
             req.headers_mut().insert(AUTHORIZATION, bearer);
-            req.extensions_mut().insert(CookieSession { session_id });
             let mut resp = next.run(req).await;
             if let Some(cookie) = reissued {
                 resp.headers_mut().append(SET_COOKIE, cookie);
@@ -424,9 +499,8 @@ pub(crate) async fn layer(State(app): State<Arc<App>>, mut req: Request, next: N
     }
 }
 
-/// The access token of a session, refreshed if it has expired: the token, the WorkOS session id
-/// and, after a refresh, the cookie to set.
-async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, String, Option<HeaderValue>), ApiError> {
+/// The access token of a session, refreshed if it has expired, and the cookie to set if it changed.
+async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, Option<HeaderValue>), ApiError> {
     let (s, old_key): (Session, bool) = sign_in.unseal(sealed).ok_or(ApiError::Unauthorized)?;
     if s.purpose != SESSION_PURPOSE || now().saturating_sub(s.signed_in) >= SESSION_TTL.as_secs() {
         return Err(ApiError::Unauthorized);
@@ -440,24 +514,31 @@ async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, St
             } else {
                 None
             };
-            Ok((s.access_token, c.sid, reissued))
+            Ok((s.access_token, reissued))
         }
         Ok(_) => Err(ApiError::Unauthorized),
         Err(JwtError::Rejected(jsonwebtoken_kind)) if is_expiry(&jsonwebtoken_kind) => {
-            let t = sign_in
-                .authkit
-                .refresh(&s.refresh_token, &s.organisation)
-                .await
-                .map_err(|e| match e {
-                    RefreshError::Refused(why) => {
-                        tracing::info!(error = %why, "session refresh refused");
-                        ApiError::Unauthorized
-                    }
-                    RefreshError::Unavailable(why) => {
-                        tracing::warn!(error = %why, "session refresh failed for now");
-                        ApiError::Unavailable
-                    }
-                })?;
+            // Keyed by a hash: refresh tokens are kept out of anything long-lived.
+            let key: String = Sha256::digest(s.refresh_token.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if sign_in.backing_off(&key) {
+                return Err(ApiError::Unavailable);
+            }
+            let t = match sign_in.authkit.refresh(&s.refresh_token, &s.organisation).await {
+                Ok(t) => t,
+                Err(RefreshError::Refused(why)) => {
+                    tracing::info!(error = %why, "session refresh refused");
+                    return Err(ApiError::Unauthorized);
+                }
+                Err(RefreshError::Unavailable { why, retry_after }) => {
+                    tracing::warn!(error = %why, "session refresh failed for now");
+                    sign_in.back_off(key, retry_after);
+                    return Err(ApiError::Unavailable);
+                }
+            };
+            sign_in.refreshed(&key);
             let c = app
                 .tokens
                 .claims(&t.access_token)
@@ -472,7 +553,7 @@ async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, St
                 ..s
             };
             let cookie = set_cookie(SESSION_COOKIE, &sign_in.seal(&renewed)?, left(&renewed));
-            Ok((t.access_token, c.sid, Some(cookie)))
+            Ok((t.access_token, Some(cookie)))
         }
         Err(JwtError::Keys(e)) => {
             tracing::error!(error = %e, "could not load WorkOS signing keys");
@@ -591,6 +672,7 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
         refresh_token: tokens.refresh_token,
         user: claims.sub,
         organisation,
+        session_id: claims.sid,
         signed_in: now(),
     };
     let location = HeaderValue::from_str(&return_to).map_err(|_| ApiError::Internal)?;
@@ -604,28 +686,23 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
     Ok(resp)
 }
 
-/// Sign out: ends the WorkOS session and clears the cookie.
+/// Sign out: clears the session cookie, always, and ends the WorkOS session if WorkOS answers.
+/// It never refreshes or reissues the cookie, whatever state the session is in.
 #[utoipa::path(post, operation_id = "sign_out", path = "/auth/logout", tag = "auth",
     security(("session" = [])),
-    responses((status = 204, description = "Signed out"), (status = 401, body = ErrorBody),
-        (status = 403, body = ErrorBody), (status = 503, body = ErrorBody)))]
-pub(crate) async fn logout(
-    State(app): State<Arc<App>>,
-    session: Option<axum::Extension<CookieSession>>,
-) -> Result<Response, ApiError> {
-    let sign_in = app.sign_in.as_ref().ok_or(ApiError::Unavailable)?;
-    let axum::Extension(session) = session.ok_or(ApiError::Unauthorized)?;
-    let revoked = sign_in.authkit.revoke(&session.session_id).await;
-    // The cookie goes either way; a session WorkOS still holds is reported, not hidden.
-    let mut resp = match revoked {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "workos session revoke failed");
-            ApiError::Unavailable.into_response()
-        }
-    };
-    resp.headers_mut().append(SET_COOKIE, clear_cookie(SESSION_COOKIE));
-    Ok(resp)
+    responses((status = 204, description = "Signed out; the cookie is cleared"), (status = 403, body = ErrorBody)))]
+pub(crate) async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let session = app.sign_in.as_ref().and_then(|sign_in| {
+        let (s, _): (Session, bool) = sign_in.unseal(cookie_value(&headers, SESSION_COOKIE)?)?;
+        (s.purpose == SESSION_PURPOSE && !s.session_id.is_empty()).then_some((sign_in, s.session_id))
+    });
+    if let Some((sign_in, id)) = session
+        && let Err(e) = sign_in.authkit.revoke(&id).await
+    {
+        // Best effort: the browser is signed out either way, and the session lapses at WorkOS.
+        tracing::error!(error = %e, "workos session revoke failed");
+    }
+    (StatusCode::NO_CONTENT, [(SET_COOKIE, clear_cookie(SESSION_COOKIE))]).into_response()
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -676,6 +753,29 @@ pub(crate) async fn me(State(app): State<Arc<App>>, who: Principal) -> Result<Js
 mod tests {
     use super::*;
 
+    /// AuthKit for tests that never reach WorkOS.
+    struct NoAuthKit;
+    impl AuthKit for NoAuthKit {
+        fn authorization_url(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
+            Err("unused".into())
+        }
+        fn exchange_code<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn refresh<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, RefreshError>> {
+            Box::pin(async { Err(RefreshError::Refused("unused".into())) })
+        }
+        fn revoke<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn user_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn organisation_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+    }
+
     #[test]
     fn return_to_must_be_a_same_origin_path() {
         for ok in ["/", "/companies", "/companies/cmp_1?tab=scope#top", "/a%20b"] {
@@ -698,10 +798,23 @@ mod tests {
     }
 
     #[test]
-    fn only_invalid_grant_ends_a_session() {
-        assert_eq!(refresh_failure(400, Some("invalid_grant")), Failure::Final);
-        assert_eq!(refresh_failure(401, Some("invalid_grant")), Failure::Final);
+    fn only_what_this_session_cannot_fix_ends_it() {
+        for (status, code) in [
+            (400, Some("invalid_grant")),
+            (401, Some("invalid_grant")),
+            (403, Some("sso_required")),
+            (403, Some("mfa_enrollment")),
+            (403, Some("organization_authentication_methods_required")),
+            (404, Some("user_not_found")),
+            (404, Some("organization_not_found")),
+            // A user WorkOS will not sign in to the organisation, whatever the code.
+            (403, None),
+            (403, Some("some_new_refusal")),
+        ] {
+            assert_eq!(refresh_failure(status, code), Failure::Final, "{status} {code:?}");
+        }
         assert_eq!(refresh_failure(429, None), Failure::RateLimited);
+        // Outages, and faults of our own such as bad credentials, never sign anyone out.
         for (status, code) in [
             (500, None),
             (502, None),
@@ -709,9 +822,35 @@ mod tests {
             (0, None),
             (401, Some("invalid_client")),
             (400, Some("invalid_request")),
+            (404, None),
         ] {
             assert_eq!(refresh_failure(status, code), Failure::Transient, "{status} {code:?}");
         }
+    }
+
+    #[test]
+    fn retries_are_jittered_around_their_base() {
+        let base = Duration::from_millis(1000);
+        let waits: Vec<Duration> = (0..200).map(|_| jittered(base)).collect();
+        assert!(waits.iter().all(|w| *w >= base / 2 && *w < base * 3 / 2));
+        assert!(waits.iter().any(|w| *w != waits[0]), "not all the same");
+    }
+
+    #[test]
+    fn a_session_that_could_not_refresh_waits_before_asking_again() {
+        let sign_in = SignIn::new("https://fde.test", "a".repeat(64), Arc::new(NoAuthKit)).unwrap();
+        assert!(!sign_in.backing_off("s1"));
+        sign_in.back_off("s1".into(), None);
+        assert!(sign_in.backing_off("s1"));
+        assert!(!sign_in.backing_off("s2"), "only that session");
+        // Retry-After is honoured, but never for more than the cap.
+        sign_in.back_off("s2".into(), Some(Duration::from_secs(3600)));
+        let until = sign_in.waits.lock().unwrap()["s2"];
+        assert!(until <= Instant::now() + MAX_SESSION_BACKOFF);
+        sign_in.back_off("s3".into(), Some(Duration::ZERO));
+        assert!(!sign_in.backing_off("s3"));
+        sign_in.refreshed("s1");
+        assert!(!sign_in.backing_off("s1"));
     }
 
     #[test]
@@ -739,28 +878,7 @@ mod tests {
 
     #[test]
     fn sign_in_configuration_is_checked() {
-        struct None_;
-        impl AuthKit for None_ {
-            fn authorization_url(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
-                Err("unused".into())
-            }
-            fn exchange_code<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, String>> {
-                Box::pin(async { Err("unused".into()) })
-            }
-            fn refresh<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, RefreshError>> {
-                Box::pin(async { Err(RefreshError::Unavailable("unused".into())) })
-            }
-            fn revoke<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
-                Box::pin(async { Err("unused".into()) })
-            }
-            fn user_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
-                Box::pin(async { Err("unused".into()) })
-            }
-            fn organisation_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
-                Box::pin(async { Err("unused".into()) })
-            }
-        }
-        let k = || -> Arc<dyn AuthKit> { Arc::new(None_) };
+        let k = || -> Arc<dyn AuthKit> { Arc::new(NoAuthKit) };
         let pw = "a".repeat(64);
         assert!(SignIn::new("https://fde.example", pw.clone(), k()).is_ok());
         assert!(

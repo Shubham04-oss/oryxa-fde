@@ -26,6 +26,8 @@ oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true
 oryxa-fde-store.workspace = true
+# Jitter for WorkOS retries; already in the tree.
+rand = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -46,7 +48,6 @@ jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rus
 oryxa-fde-mcp = { path = "../oryxa-fde-mcp" }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 oryxa-spicedb-proto.workspace = true
-rand = "0.8"
 rsa = "0.9"
 sqlx.workspace = true
 tonic.workspace = true

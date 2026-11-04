@@ -1427,7 +1427,7 @@ async fn lifecycle_records_end_to_end() {
 #[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn every_documented_route_is_served() {
     let w = world().await;
-    // Without a token every route answers 401 (sign-in itself something else of its own); a
+    // Without a token every route answers 401 (sign-in and sign-out something else of their own); a
     // route the router lacked would answer 404 or 405.
     for (method, template) in spec_routes() {
         let path = template.replace('{', "x").replace('}', "");
@@ -1435,6 +1435,7 @@ async fn every_documented_route_is_served() {
         let want = match template.as_str() {
             "/auth/login" => StatusCode::FOUND,
             "/auth/callback" => StatusCode::BAD_REQUEST,
+            "/auth/logout" => StatusCode::NO_CONTENT,
             _ => StatusCode::UNAUTHORIZED,
         };
         assert_eq!(status, want, "{method} {template}");
@@ -1677,8 +1678,84 @@ async fn browser_sign_in_sets_a_session_that_works_like_a_bearer_token() {
         StatusCode::FORBIDDEN,
         "logout is a change: it needs the web headers too"
     );
-    let (status, _) = w.call(None, "POST", "/auth/logout", None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Without a session there is nothing to revoke, and the cookie is cleared all the same.
+    let (status, headers, _) = w.send(Request::post("/auth/logout").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(set_cookie(&headers, "__Host-fde_session").as_deref(), Some(""));
+}
+
+/// Every `Set-Cookie` of a response, as sent.
+fn set_cookies(headers: &axum::http::HeaderMap) -> Vec<String> {
+    headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn logout_always_clears_the_session_with_one_cookie_and_never_refreshes() {
+    use std::sync::atomic::Ordering;
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // A session whose access token expired an hour ago, sealed with `password`.
+    let expired = |password: &str| {
+        let s = json!({
+            "purpose": "fde_session",
+            "access_token": support::token_for(Some(&org), &alice.id, "member", -3600),
+            "refresh_token": format!("refresh|{org}|{}|member", alice.id),
+            "user": alice.id, "organisation": org, "session_id": "session_1", "signed_in": now - 60,
+        });
+        workos::helpers::session::seal(&s, password).unwrap()
+    };
+    let logout = |router: Router, cookie: String| async move {
+        let req = Request::post("/auth/logout")
+            .header("cookie", format!("__Host-fde_session={cookie}"))
+            .header("x-oryxa-request", "1")
+            .header("origin", WEB)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        (resp.status(), set_cookies(resp.headers()))
+    };
+    let cleared = vec!["__Host-fde_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax".to_owned()];
+
+    // WorkOS down: no refresh is tried, the revoke fails, and the browser is signed out anyway.
+    w.authkit.refresh_unavailable.store(true, Ordering::SeqCst);
+    w.authkit.revoke_fails.store(true, Ordering::SeqCst);
+    let (status, cookies) = logout(w.router.clone(), expired(&w.password)).await;
+    assert_eq!((status, &cookies), (StatusCode::NO_CONTENT, &cleared));
+    assert_eq!(w.authkit.refreshes.load(Ordering::SeqCst), 0);
+    w.authkit.refresh_unavailable.store(false, Ordering::SeqCst);
+    w.authkit.revoke_fails.store(false, Ordering::SeqCst);
+
+    // An expired access token, WorkOS up: revoked, cleared, and still no refresh or new cookie.
+    let (status, cookies) = logout(w.router.clone(), expired(&w.password)).await;
+    assert_eq!((status, &cookies), (StatusCode::NO_CONTENT, &cleared));
+    assert_eq!(w.authkit.refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(w.authkit.revoked.lock().unwrap().as_slice(), ["session_1"]);
+
+    // A cookie under the previous key: revoked and cleared, never resealed under the new one.
+    let rotating = router(App::with_sign_in(
+        w.store.clone(),
+        w.authz.clone(),
+        support::verifier(),
+        w.context.clone(),
+        SignIn::new(WEB, "c".repeat(64), w.authkit.clone())
+            .unwrap()
+            .with_previous_password(w.password.clone())
+            .unwrap(),
+    ));
+    let (status, cookies) = logout(rotating, expired(&w.password)).await;
+    assert_eq!((status, &cookies), (StatusCode::NO_CONTENT, &cleared));
+    assert_eq!(w.authkit.revoked.lock().unwrap().len(), 2);
+    assert_eq!(w.authkit.refreshes.load(Ordering::SeqCst), 0);
 }
 
 /// Starts a sign-in: its state and its sign-in cookie.
@@ -2043,8 +2120,14 @@ async fn a_workos_outage_does_not_sign_anyone_out() {
         (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable"))
     );
     assert_eq!(set_cookie(&headers, "__Host-fde_session"), None, "the cookie is kept");
-    // Back up: the same cookie works and is renewed.
+    // The session backs off for WorkOS's Retry-After: asked again at once, WorkOS is not called.
     w.authkit.refresh_unavailable.store(false, Ordering::SeqCst);
+    let asked = w.authkit.refreshes.load(Ordering::SeqCst);
+    let (status, _, _) = w.with_cookie(&cookie, "GET", "/v1/me", None, false).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(w.authkit.refreshes.load(Ordering::SeqCst), asked);
+    // Back up, after the wait: the same cookie works and is renewed.
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let (status, headers, _) = w.with_cookie(&cookie, "GET", "/v1/me", None, false).await;
     assert_eq!(status, StatusCode::OK);
     assert!(set_cookie(&headers, "__Host-fde_session").is_some_and(|c| !c.is_empty()));
