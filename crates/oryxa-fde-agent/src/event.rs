@@ -58,6 +58,8 @@ pub enum HarnessEvent {
         tool: String,
         input: serde_json::Value,
     },
+    /// The run's model use so far, after each model response; lets the API stop a run at its spend budget.
+    Usage { usage: Usage },
     /// The run's last event.
     Result {
         outcome: Outcome,
@@ -126,10 +128,21 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// Tokens used. In `usage` events, input counts cache reads and writes in full, so a budget errs on the safe side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+impl Usage {
+    /// The larger count of each, so a run's use never goes down between reports.
+    pub fn max(self, other: Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens.max(other.input_tokens),
+            output_tokens: self.output_tokens.max(other.output_tokens),
+        }
+    }
 }
 
 /// What the API writes to the harness's stdin, one JSON object per line.
@@ -204,6 +217,7 @@ mod tests {
             r#"{"v":1,"seq":5,"type":"approval_request","id":"apr_1","tool_call_id":"toolu_4","action":"deploy","title":"Run: wrangler deploy","tool":"Bash","input":{"command":"wrangler deploy"}}"#,
             r#"{"v":1,"seq":6,"type":"result","outcome":"success","text":"Done.","turns":3,"usage":{"input_tokens":10,"output_tokens":5}}"#,
             r#"{"v":1,"seq":7,"type":"result","outcome":"cancelled","text":"","turns":0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+            r#"{"v":1,"seq":8,"type":"usage","usage":{"input_tokens":1200,"output_tokens":180}}"#,
         ];
         for (seq, line) in lines.iter().enumerate() {
             let parsed = parse_line(line).unwrap();

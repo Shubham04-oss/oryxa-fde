@@ -17,7 +17,7 @@ Started as any other user, the harness refuses to run (`not_root`).
 
 | Stream | Carries                                                                                                                                                               |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| stdout | Events: `plan`, `message`, `tool_call`, `file_change`, `command`, `approval_request`, then one `result`. Each line has `v: 1` and a `seq` from 0.                     |
+| stdout | Events: `plan`, `message`, `tool_call`, `file_change`, `command`, `approval_request`, `usage`, then one `result`. Each line has `v: 1` and a `seq` from 0.            |
 | stdin  | `{"type":"approval_decision","id":"apr_…","outcome":"approved"\|"rejected"}` and `{"type":"cancel"}`. The API writes them through the gateway's `/exec/<exec>/stdin`. |
 | stderr | Diagnostics, the agent process's included. Never parsed.                                                                                                              |
 
@@ -54,6 +54,10 @@ into the system prompt as fenced data, not as instructions.
 - **Cancel.** A `cancel` line aborts the SDK, rejects a pending approval and ends the run with `result`
   `cancelled`, even if the SDK is stuck. The API sends it to cancel a run or at its time limit.
 - **Error text.** An error `result` shows fixed text. The SDK's own messages go to stderr.
+- **Usage.** After each model response, a `usage` event carries the run's tokens so far, so the API can stop a run
+  at its spend budget. The SDK's assistant messages carry only the usage known when a response starts; the
+  harness asks for partial messages (`includePartialMessages`) and takes the final count from each response's
+  `message_delta`. Cache reads and writes count as input in full, so a budget stops a run early rather than late.
 
 ## Develop
 

@@ -141,6 +141,8 @@ export async function runHarness({ pack, rules }: LoadedPack, deps: HarnessDeps)
     canUseTool,
     abortController: abort,
     persistSession: false,
+    // Stream events carry each response's final usage, for the `usage` events the budget is enforced on.
+    includePartialMessages: true,
     env: harnessEnv(deps.env, pack),
     // Diagnostics stay on stderr; stdout carries only events.
     stderr: (data) => process.stderr.write(data),

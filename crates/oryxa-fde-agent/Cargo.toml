@@ -8,13 +8,30 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum.workspace = true
+oryxa-authn.workspace = true
+oryxa-authz.workspace = true
 oryxa-core.workspace = true
 oryxa-fde-core = { path = "../oryxa-fde-core" }
+oryxa-fde-events.workspace = true
+oryxa-fde-store.workspace = true
+# Already in the tree (workos, aws): the gateway and realtime clients.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 # The pack's digest, checked by the API and the harness; already in the tree through oryxa-authn.
 sha2 = "0.11.0"
 thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+http-body-util = "0.1.5"
+# Live tests write the schema to SpiceDB with its generated client, as oryxa-fde-api's do.
+oryxa-spicedb-proto.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tonic.workspace = true
+workos.workspace = true
+tower = { version = "0.5.3", features = ["util"] }

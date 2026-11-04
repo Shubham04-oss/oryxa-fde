@@ -1,6 +1,7 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 
+import { Adapter } from "../src/adapter.js";
 import { EventWriter } from "../src/events.js";
 import { harnessEnv, runHarness } from "../src/harness.js";
 import { collect, FakeQuery, fixture, jsonLines, ManualApprovals, samplePack } from "./fakes.js";
@@ -155,6 +156,7 @@ describe("SDK options", () => {
     await runHarness(samplePack(), { query: fake.query, approvals: new ManualApprovals(), emit: () => {}, env });
     const options = fake.options;
     expect(options?.settingSources).toEqual([]);
+    expect(options?.includePartialMessages).toBe(true);
     expect(options?.permissionMode).toBe("default");
     expect(options?.model).toBe("anthropic.claude-opus-5-5");
     expect(options?.maxTurns).toBe(40);
@@ -283,5 +285,37 @@ describe("cancel", () => {
     });
     expect(outcome).toBe("cancelled");
     expect(events.map((e) => e.type)).toEqual(["result"]);
+  });
+});
+
+describe("usage", () => {
+  const stream = (event: unknown) =>
+    ({ type: "stream_event", event, parent_tool_use_id: null }) as unknown as SDKMessage;
+  const response = (input: Record<string, number>, output: number) => [
+    stream({ type: "message_start", message: { id: "msg_1", usage: { ...input, output_tokens: 1 } } }),
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } }),
+    stream({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: output } }),
+    stream({ type: "message_stop" }),
+  ];
+
+  it("reports each finished response's final use, summed over the run, with cache tokens counted in full", () => {
+    const adapter = new Adapter();
+    const first = response({ input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 10 }, 40);
+    const second = response({ input_tokens: 300 }, 60);
+    expect(first.flatMap((m) => adapter.events(m))).toEqual([
+      { type: "usage", usage: { input_tokens: 160, output_tokens: 40 } },
+    ]);
+    expect(second.flatMap((m) => adapter.events(m))).toEqual([
+      { type: "usage", usage: { input_tokens: 460, output_tokens: 100 } },
+    ]);
+  });
+
+  it("ignores counts that are not plain non-negative integers", () => {
+    const adapter = new Adapter();
+    const events = response({ input_tokens: -5, cache_read_input_tokens: 1.5 }, Number.NaN).flatMap((m) =>
+      adapter.events(m),
+    );
+    expect(events).toEqual([{ type: "usage", usage: { input_tokens: 0, output_tokens: 1 } }]);
+    expect(adapter.events(stream({ type: "message_stop" }))).toEqual([]);
   });
 });

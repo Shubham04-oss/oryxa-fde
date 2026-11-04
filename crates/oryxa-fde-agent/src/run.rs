@@ -38,6 +38,23 @@ pub enum FailReason {
     Cancelled,
     /// The run reached its time limit.
     TimedOut,
+    /// The project's agent minutes or model spend ran out.
+    OverBudget,
+    /// The harness sent output that does not parse or skips a line; nothing after it can be trusted.
+    BadOutput,
+    /// The sandbox, the checkout or the context pack could not be prepared.
+    SetupFailed,
+    /// The run store could not keep the transcript or an approval request, so no approval could be decided.
+    StoreUnavailable,
+}
+
+/// Why the API ends a run itself, besides a cancel or the time limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    OverBudget,
+    BadOutput,
+    SetupFailed,
+    StoreUnavailable,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -217,6 +234,16 @@ impl AgentRun {
     /// The run reached its time limit; ends it like `cancel`.
     pub fn time_out(&mut self) -> Result<HarnessInput, RunError> {
         self.end(FailReason::TimedOut)
+    }
+
+    /// Ends the run for `reason`, like `cancel`.
+    pub fn stop(&mut self, reason: StopReason) -> Result<HarnessInput, RunError> {
+        self.end(match reason {
+            StopReason::OverBudget => FailReason::OverBudget,
+            StopReason::BadOutput => FailReason::BadOutput,
+            StopReason::SetupFailed => FailReason::SetupFailed,
+            StopReason::StoreUnavailable => FailReason::StoreUnavailable,
+        })
     }
 
     /// The harness process ended. Without a result first, the run failed.
@@ -469,6 +496,17 @@ mod tests {
                     reason: FailReason::TimedOut
                 }
             );
+        }
+        for (reason, failed) in [
+            (StopReason::OverBudget, FailReason::OverBudget),
+            (StopReason::BadOutput, FailReason::BadOutput),
+            (StopReason::SetupFailed, FailReason::SetupFailed),
+            (StopReason::StoreUnavailable, FailReason::StoreUnavailable),
+        ] {
+            let mut r = waiting();
+            assert_eq!(r.stop(reason), Ok(HarnessInput::Cancel));
+            assert_eq!(r.state(), &RunState::Failed { reason: failed });
+            assert_eq!(r.stop(reason), Err(RunError::Ended));
         }
         // A cancelled queued run never starts, and a cancelled one ignores what the harness sends while stopping.
         let mut r = queued();
