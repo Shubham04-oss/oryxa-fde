@@ -1,11 +1,11 @@
-//! Where uploaded files live: S3, one prefix per company (ADR 0003), encrypted with KMS. Object
-//! keys are built from validated ids only, so none can leave its company's prefix.
+//! Where uploaded files live: S3, one prefix per company (ADR 0003), encrypted by the bucket's
+//! default, the environment's KMS key in P0. Object keys are built from validated ids only, so none
+//! can leave its company's prefix.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::ServerSideEncryption;
 use oryxa_fde_core::{CompanyScope, DocumentId};
 
 use crate::{BoxFuture, ContextError, MAX_DOCUMENT_BYTES};
@@ -52,13 +52,13 @@ impl BlobStore for S3Blobs {
         content_type: &'a str,
     ) -> BoxFuture<'a, Result<(), ContextError>> {
         Box::pin(async move {
-            // ponytail: the environment's KMS key, as ADR 0003 says for P0; P1 names the company's key.
+            // No encryption header: SSE-KMS without a key id would mean the account-wide `aws/s3`
+            // key, not the bucket's. ponytail: P1 names each company's key here (ADR 0003).
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(key)
                 .content_type(content_type)
-                .server_side_encryption(ServerSideEncryption::AwsKms)
                 .body(ByteStream::from(bytes))
                 .send()
                 .await
@@ -137,6 +137,33 @@ mod tests {
     use oryxa_fde_core::CompanyId;
 
     use super::*;
+
+    #[tokio::test]
+    async fn uploads_leave_encryption_to_the_bucket_key() {
+        use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+        let (http, request) = aws_smithy_http_client::test_util::capture_request(None);
+        let conf = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("eu-west-2"))
+            .credentials_provider(Credentials::new("AKIDTEST", "secret", None, None, "test"))
+            .http_client(http)
+            .build();
+        let blobs = S3Blobs::new(aws_sdk_s3::Client::from_conf(conf), "fde-dev-documents");
+        blobs
+            .put("org_1/cmp_1/documents/doc_1", b"notes".to_vec(), "text/plain")
+            .await
+            .unwrap();
+        let sent = request.expect_request();
+        let headers = sent.headers();
+        // Any SSE header would override the bucket's key, and SSE-KMS without a key id is `aws/s3`.
+        for h in [
+            "x-amz-server-side-encryption",
+            "x-amz-server-side-encryption-aws-kms-key-id",
+        ] {
+            assert_eq!(headers.get(h), None, "{h}");
+        }
+        assert!(sent.uri().contains("org_1/cmp_1/documents/doc_1"));
+    }
 
     #[test]
     fn a_document_key_stays_under_its_company_prefix() {

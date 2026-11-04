@@ -1,6 +1,7 @@
 //! Read-only views of one project for callers other than the HTTP routes, such as the MCP server
-//! for coding agents. Each checks `work` on the project before it reads, runs under the project's
-//! `ProjectScope`, and returns what the matching route returns.
+//! for coding agents. Each checks `oryxa-authz` before it reads (`work` on the project; for the
+//! company's documents, `work` on the company), runs under the project's `ProjectScope`, and
+//! returns what the matching route returns.
 
 use oryxa_fde_context::SearchQuery;
 use oryxa_fde_core::{CompanyId, ProjectId};
@@ -33,7 +34,7 @@ pub async fn tasks(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Re
     Ok(list.into_iter().map(Into::into).collect())
 }
 
-/// Passages from the documents of the project's company.
+/// Passages from the documents of the project's company; needs `work` on the company.
 pub async fn search(
     app: &App,
     who: &Principal,

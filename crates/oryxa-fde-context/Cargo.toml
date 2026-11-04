@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 rand = "0.8"

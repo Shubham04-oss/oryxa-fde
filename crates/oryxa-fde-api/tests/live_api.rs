@@ -1950,9 +1950,10 @@ async fn mcp_tools_read_one_project_for_whoever_works_on_it() {
         resp["result"]["structuredContent"]["tasks"][0]["title"],
         "Index tickets"
     );
+    // Company documents need work on the company: the engineer searches them, the assignee cannot.
     let mut search = args.clone();
     search["query"] = json!("who approves refunds?");
-    let (status, resp) = w.tool(Some(&t.assignee.token), "search_context", search.clone()).await;
+    let (status, resp) = w.tool(Some(&t.engineer.token), "search_context", search.clone()).await;
     assert!(mcp_succeeded(status, &resp), "{resp}");
     let hits = &resp["result"]["structuredContent"]["results"];
     assert_eq!(hits[0]["document"], t.record("{document}"));
@@ -1999,12 +2000,58 @@ async fn mcp_tools_read_one_project_for_whoever_works_on_it() {
         )
         .await;
     assert!(!mcp_succeeded(status, &resp), "{resp}");
-    search["query"] = json!("");
-    let (status, resp) = w.tool(Some(&t.lead.token), "search_context", search).await;
+    let mut empty = search.clone();
+    empty["query"] = json!("");
+    let (status, resp) = w.tool(Some(&t.lead.token), "search_context", empty).await;
     assert!(!mcp_succeeded(status, &resp), "{resp}");
     // Someone else in the organisation who is not on the project.
     let other = user(&org, "other", "member");
     let (status, resp) = w.tool(Some(&other.token), "list_tasks", args).await;
     assert!(!mcp_succeeded(status, &resp));
     assert_eq!(resp["result"]["content"][0]["text"], "forbidden");
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_project_assignee_reads_no_company_document_by_any_path() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let base = format!("/v1/companies/{}", t.company);
+    let paths = [
+        format!("{base}/documents"),
+        format!("{base}/documents/{}", t.record("{document}")),
+        format!("{base}/search?q=refunds"),
+        format!("{base}/projects/{}/search?q=refunds", t.project),
+    ];
+    let mut search = json!({"company": t.company, "project": t.project, "query": "refunds"});
+    // The assignee works on the project, but the company's documents are not theirs to read.
+    for path in &paths {
+        assert_eq!(
+            w.status(&t.assignee, "GET", path, None).await,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let (status, resp) = w.tool(Some(&t.assignee.token), "search_context", search.clone()).await;
+    assert!(!mcp_succeeded(status, &resp), "{resp}");
+    assert_eq!(resp["result"]["content"][0]["text"], "forbidden");
+    // Everyone who works on the company reads them, on every path.
+    for who in [&t.lead, &t.engineer, &t.admin] {
+        for path in &paths {
+            assert_eq!(
+                w.status(who, "GET", path, None).await,
+                StatusCode::OK,
+                "{} {path}",
+                who.id
+            );
+        }
+        let (status, resp) = w.tool(Some(&who.token), "search_context", search.clone()).await;
+        assert!(mcp_succeeded(status, &resp), "{resp}");
+    }
+    // A project of another company under this company is not found, for those who may search.
+    search["project"] = json!(new_id("prj"));
+    let (status, resp) = w.tool(Some(&t.lead.token), "search_context", search).await;
+    assert!(!mcp_succeeded(status, &resp));
+    assert_eq!(resp["result"]["content"][0]["text"], "not_found");
 }

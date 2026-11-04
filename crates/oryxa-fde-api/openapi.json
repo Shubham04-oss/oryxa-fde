@@ -2226,7 +2226,7 @@
         "tags": [
           "context"
         ],
-        "summary": "Search the documents of the project's company, for anyone who works on the project.",
+        "summary": "Search the documents of the project's company. Needs `work` on the company, as the document\nlist does; the project must be in it.",
         "operationId": "search_project",
         "parameters": [
           {

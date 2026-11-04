@@ -1,6 +1,7 @@
 //! A company's documents and search over them. Uploading, listing and searching need `work` on
-//! the company; searching through a project needs `work` on the project. The file goes to S3 under
-//! the company's prefix and its row queues `document.uploaded` for the ingestion consumer.
+//! the company, through a project too: a project assignee does not read the company's documents
+//! (lead decision on #45). The file goes to S3 under the company's prefix and its row queues
+//! `document.uploaded` for the ingestion consumer.
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::authz::{company, project};
+use crate::authz::company;
 use crate::records::new;
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
@@ -237,7 +238,8 @@ pub(crate) async fn search(
     Ok(Json(hits.into_iter().map(Into::into).collect()))
 }
 
-/// Search the documents of the project's company, for anyone who works on the project.
+/// Search the documents of the project's company. Needs `work` on the company, as the document
+/// list does; the project must be in it.
 #[utoipa::path(get, operation_id = "search_project", path = "/v1/companies/{company}/projects/{project}/search",
     tag = "context",
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
@@ -254,7 +256,8 @@ pub(crate) async fn search_in_project(
     Ok(Json(crate::reads::search(&app, &who, c, p, &q, limit).await?))
 }
 
-/// The search behind [`search_in_project`] and the MCP `search_context` tool.
+/// The search behind [`search_in_project`] and the MCP `search_context` tool: `work` on the
+/// company, then the project's documents' company searched under the project's scope.
 pub(crate) async fn project_search(
     app: &App,
     who: &Principal,
@@ -264,7 +267,7 @@ pub(crate) async fn project_search(
     limit: usize,
 ) -> Result<Vec<SearchHitOut>, ApiError> {
     let s = who.company(c).project(p);
-    app.require(who, project(&s), "work").await?;
+    app.require(who, company(&s.company), "work").await?;
     let hits = search_project(&app.context, &app.store, &s, q, limit)
         .await?
         .ok_or(ApiError::NotFound)?;
