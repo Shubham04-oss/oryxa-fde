@@ -2597,6 +2597,7 @@ dependencies = [
  "oryxa-core",
  "oryxa-events",
  "oryxa-fde-core",
+ "oryxa-fde-events",
  "oryxa-fde-store",
  "oryxa-spicedb-proto",
  "rand 0.8.8",

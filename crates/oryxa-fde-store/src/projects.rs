@@ -2,7 +2,7 @@
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, Stage};
-use oryxa_fde_events::ProjectCreated;
+use oryxa_fde_events::{ProjectCreated, ProjectStageChanged};
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
@@ -41,6 +41,16 @@ impl ProjectTx {
 
     pub fn scope(&self) -> &ProjectScope {
         &self.scope
+    }
+
+    /// Tenant, company and project ids as bind values, owned so they outlive borrows of `tx`.
+    pub(crate) fn keys(&self) -> (String, String, String) {
+        let s = &self.scope;
+        (
+            s.company.tenant.to_string(),
+            s.company.company.to_string(),
+            s.project.to_string(),
+        )
     }
 
     pub async fn commit(self) -> Result<(), StoreError> {
@@ -125,6 +135,50 @@ impl ProjectTx {
             Some(s.project.as_str()),
         )
         .await?;
+        project(row).map(Some)
+    }
+
+    /// Moves the project to `to` through [`Stage::transition`] and queues `project.stage-changed`.
+    /// `None` if the project is not in this company.
+    pub async fn change_stage(&mut self, to: Stage, by: &Actor) -> Result<Option<Project>, StoreError> {
+        let s = &self.scope;
+        let from: Option<String> = sqlx::query_scalar(
+            "select stage from projects where tenant_id = $1 and company_id = $2 and project_id = $3 for update",
+        )
+        .bind(s.company.tenant.as_str())
+        .bind(s.company.company.as_str())
+        .bind(s.project.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(from) = from else { return Ok(None) };
+        let from = stage(&from)?;
+        from.transition(to)?;
+        let row = sqlx::query(&format!(
+            "update projects set stage = $4, updated_at = now()
+             where tenant_id = $1 and company_id = $2 and project_id = $3 returning {COLUMNS}"
+        ))
+        .bind(s.company.tenant.as_str())
+        .bind(s.company.company.as_str())
+        .bind(s.project.as_str())
+        .bind(to.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        audit(
+            &mut self.tx,
+            &s.company,
+            Some(&s.project),
+            by,
+            "project.stage_changed",
+            Some(to.as_str()),
+        )
+        .await?;
+        let event = ProjectStageChanged {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            from,
+            to,
+        };
+        enqueue(&mut self.tx, &s.company, by, &event).await?;
         project(row).map(Some)
     }
 

@@ -49,8 +49,8 @@ pub struct Member {
 
 /// A transaction limited to one company. Dropping it without [`CompanyTx::commit`] rolls back.
 pub struct CompanyTx {
-    tx: Transaction<'static, Postgres>,
-    scope: CompanyScope,
+    pub(crate) tx: Transaction<'static, Postgres>,
+    pub(crate) scope: CompanyScope,
 }
 
 impl CompanyTx {

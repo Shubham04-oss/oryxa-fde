@@ -322,11 +322,17 @@ fn spec_routes() -> BTreeSet<(String, String)> {
     out
 }
 
-/// Routes that take no company: listing is checked by its contents, creating only ever creates
-/// in the caller's own tenant.
-const UNTARGETED: &[(&str, &str)] = &[("GET", "/v1/companies"), ("POST", "/v1/companies")];
+/// Routes that name nothing: listing is checked by its contents, creating only ever creates in the
+/// caller's own tenant (and, for the security answer library, is open to the whole tenant).
+const UNTARGETED: &[(&str, &str)] = &[
+    ("GET", "/v1/companies"),
+    ("POST", "/v1/companies"),
+    ("GET", "/v1/security-answers"),
+    ("POST", "/v1/security-answers"),
+];
 
-/// Every route that names a company, with a body that would succeed if it were allowed.
+/// Every route that names a company, project, record or answer, with a body that would succeed if
+/// the call were allowed. Placeholders in braces are filled per attack, in the path and the body.
 const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}", None),
     ("PATCH", "/v1/companies/{company}", Some(r#"{"name":"pwned"}"#)),
@@ -356,9 +362,127 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         "/v1/companies/{company}/projects/{project}/assignees/{user}",
         None,
     ),
+    ("GET", "/v1/companies/{company}/stakeholders", None),
+    (
+        "POST",
+        "/v1/companies/{company}/stakeholders",
+        Some(r#"{"name":"pwned"}"#),
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/stakeholders/{stakeholder}",
+        Some(r#"{"name":"pwned"}"#),
+    ),
+    ("DELETE", "/v1/companies/{company}/stakeholders/{stakeholder}", None),
+    ("GET", "/v1/companies/{company}/systems", None),
+    ("POST", "/v1/companies/{company}/systems", Some(r#"{"name":"pwned"}"#)),
+    (
+        "PUT",
+        "/v1/companies/{company}/systems/{system}",
+        Some(r#"{"name":"pwned"}"#),
+    ),
+    ("DELETE", "/v1/companies/{company}/systems/{system}", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/stage",
+        Some(r#"{"stage":"scope"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/scope", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/scope/items",
+        Some(r#"{"kind":"in","description":"pwned"}"#),
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/scope/items/{item}",
+        Some(r#"{"kind":"out","description":"pwned"}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/scope/items/{item}",
+        None,
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/scope/criteria",
+        Some(r#"{"description":"pwned","metric":"m","comparator":"at_least","target":1}"#),
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}",
+        Some(r#"{"description":"pwned","metric":"m","comparator":"at_most","target":0}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}",
+        None,
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/scope/sign-offs",
+        Some(r#"{"stakeholder":"{stakeholder}"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/scope/changes", None),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/access-requests",
+        None,
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/access-requests",
+        Some(r#"{"description":"pwned","status":"granted","owner":"{stakeholder}","system":"{system}"}"#),
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/access-requests/{access_request}",
+        Some(r#"{"description":"pwned","status":"granted"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/tasks", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/tasks",
+        Some(r#"{"title":"pwned","status":"todo"}"#),
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/tasks/{task}",
+        Some(r#"{"title":"pwned","status":"done"}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/tasks/{task}",
+        None,
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/decisions", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/decisions",
+        Some(r#"{"title":"pwned","rationale":"x","decided_by":"x"}"#),
+    ),
+    (
+        "PUT",
+        "/v1/security-answers/{answer}",
+        Some(r#"{"question":"pwned","answer":"pwned"}"#),
+    ),
+    ("DELETE", "/v1/security-answers/{answer}", None),
 ];
 
-/// One company in `org`, led by `lead`, with a project, an engineer and a project assignee.
+/// Placeholders that name one record; a route or body using one can be aimed at another company's
+/// record from the attacker's own project.
+const RECORDS: &[&str] = &[
+    "{stakeholder}",
+    "{system}",
+    "{item}",
+    "{criterion}",
+    "{access_request}",
+    "{task}",
+    "{answer}",
+];
+
+/// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
+/// every lifecycle record.
 struct Tenant {
     org: String,
     lead: User,
@@ -366,6 +490,8 @@ struct Tenant {
     assignee: User,
     company: String,
     project: String,
+    /// Placeholder -> id of this company's record.
+    records: Vec<(&'static str, String)>,
 }
 
 async fn company(w: &World, org: &str, name: &str) -> Tenant {
@@ -393,6 +519,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         )
         .await;
     let project = p["id"].as_str().unwrap().to_owned();
+    let pbase = format!("{base}/projects/{project}");
     let engineer_path = format!("{base}/members/{}", engineer.id);
     w.ok(
         &lead,
@@ -402,8 +529,46 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         StatusCode::NO_CONTENT,
     )
     .await;
-    let assignee_path = format!("{base}/projects/{project}/assignees/{}", assignee.id);
+    let assignee_path = format!("{pbase}/assignees/{}", assignee.id);
     w.ok(&lead, "PUT", &assignee_path, None, StatusCode::NO_CONTENT).await;
+
+    let add = async |path: String, body: Value| -> String {
+        let made = w.ok(&lead, "POST", &path, Some(body), StatusCode::CREATED).await;
+        made["id"].as_str().map(str::to_owned).unwrap_or_default()
+    };
+    let stakeholder = add(format!("{base}/stakeholders"), json!({"name": "Sam", "title": "CTO"})).await;
+    let system = add(format!("{base}/systems"), json!({"name": "Zendesk"})).await;
+    let item = add(
+        format!("{pbase}/scope/items"),
+        json!({"kind": "in", "description": "Tier-1 tickets"}),
+    )
+    .await;
+    let criterion = add(
+        format!("{pbase}/scope/criteria"),
+        json!({"description": "Correct", "metric": "accuracy", "comparator": "at_least", "target": 90, "unit": "%"}),
+    )
+    .await;
+    add(format!("{pbase}/scope/sign-offs"), json!({"stakeholder": stakeholder})).await;
+    let access_request = add(
+        format!("{pbase}/access-requests"),
+        json!({"description": "API token", "status": "requested", "owner": stakeholder, "system": system}),
+    )
+    .await;
+    let task = add(
+        format!("{pbase}/tasks"),
+        json!({"title": "Index tickets", "status": "todo"}),
+    )
+    .await;
+    add(
+        format!("{pbase}/decisions"),
+        json!({"title": "Use Bedrock", "rationale": "Data stays in AWS", "decided_by": "Sam"}),
+    )
+    .await;
+    let answer = add(
+        "/v1/security-answers".into(),
+        json!({"question": format!("{name}: encrypted at rest?"), "answer": "Yes"}),
+    )
+    .await;
     Tenant {
         org: org.to_owned(),
         lead,
@@ -411,6 +576,15 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         assignee,
         company,
         project,
+        records: vec![
+            ("{stakeholder}", stakeholder),
+            ("{system}", system),
+            ("{item}", item),
+            ("{criterion}", criterion),
+            ("{access_request}", access_request),
+            ("{task}", task),
+            ("{answer}", answer),
+        ],
     }
 }
 
@@ -419,14 +593,29 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
     let base = format!("/v1/companies/{}", t.company);
     let project = format!("{base}/projects/{}", t.project);
     let mut out = json!({});
-    for (key, path) in [
-        ("company", base.clone()),
-        ("members", format!("{base}/members")),
-        ("projects", format!("{base}/projects")),
-        ("project", project.clone()),
-        ("assignees", format!("{project}/assignees")),
+    for path in [
+        base.clone(),
+        format!("{base}/members"),
+        format!("{base}/projects"),
+        format!("{base}/stakeholders"),
+        format!("{base}/systems"),
+        project.clone(),
+        format!("{project}/assignees"),
+        format!("{project}/scope"),
+        format!("{project}/scope/changes"),
+        format!("{project}/access-requests"),
+        format!("{project}/tasks"),
+        format!("{project}/decisions"),
+        "/v1/security-answers".into(),
     ] {
-        out[key] = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
+        let mut got = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
+        // Time spent waiting moves on its own; nothing else may.
+        if let Some(list) = got.as_array_mut() {
+            list.iter_mut().for_each(|r| {
+                r.as_object_mut().map(|o| o.remove("days_waiting"));
+            });
+        }
+        out[path] = got;
     }
     out
 }
@@ -435,10 +624,49 @@ struct Attack<'a> {
     who: &'a User,
     company: &'a str,
     project: &'a str,
-    /// The attacker's own company with someone else's project: only project routes apply, since
-    /// acting on your own company is allowed.
-    idor: bool,
-    label: &'static str,
+    records: &'a [(&'static str, String)],
+    /// The victim is in another tenant (the security answer library is shared within one).
+    cross_tenant: bool,
+    kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    /// The victim's company, project and records.
+    Victim,
+    /// The attacker's own company with the victim's project.
+    OwnCompany,
+    /// The attacker's own company and project with the victim's records.
+    OwnProject,
+}
+
+impl Attack<'_> {
+    /// Whether this attack applies to the route: acting on your own company or project is allowed,
+    /// so those attacks only go where another company's id appears.
+    fn applies(&self, template: &str, body: Option<&str>) -> bool {
+        let names_record = RECORDS
+            .iter()
+            .any(|r| template.contains(r) || body.is_some_and(|b| b.contains(r)));
+        if !template.contains("{company}") && !self.cross_tenant {
+            return false;
+        }
+        match self.kind {
+            Kind::Victim => true,
+            Kind::OwnCompany => template.contains("{project}"),
+            Kind::OwnProject => names_record,
+        }
+    }
+
+    fn fill(&self, s: &str) -> String {
+        let mut out = s
+            .replace("{company}", self.company)
+            .replace("{project}", self.project)
+            .replace("{user}", &self.who.id);
+        for (placeholder, id) in self.records {
+            out = out.replace(placeholder, id);
+        }
+        out
+    }
 }
 
 #[tokio::test]
@@ -467,50 +695,39 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
     for (own, victims) in [(&a, vec![&b, &c]), (&c, vec![&a])] {
         for who in [&own.lead, &own.engineer, &own.assignee] {
             for v in &victims {
-                let label = if v.org == own.org {
-                    "same tenant, other company"
-                } else {
-                    "other tenant"
-                };
-                attacks.push(Attack {
-                    who,
-                    company: &v.company,
-                    project: &v.project,
-                    idor: false,
-                    label,
-                });
-                let label = if v.org == own.org {
-                    "own company, same tenant's project"
-                } else {
-                    "own company, other tenant's project"
-                };
-                attacks.push(Attack {
-                    who,
-                    company: &own.company,
-                    project: &v.project,
-                    idor: true,
-                    label,
-                });
+                let cross_tenant = v.org != own.org;
+                for (kind, company, project) in [
+                    (Kind::Victim, &v.company, &v.project),
+                    (Kind::OwnCompany, &own.company, &v.project),
+                    (Kind::OwnProject, &own.company, &own.project),
+                ] {
+                    attacks.push(Attack {
+                        who,
+                        company,
+                        project,
+                        records: &v.records,
+                        cross_tenant,
+                        kind,
+                    });
+                }
             }
         }
     }
 
     let mut leaks = Vec::new();
-    let mut tried = 0;
+    let mut tried = BTreeSet::new();
+    let mut calls = 0;
     for (method, template, body) in TARGETED {
-        for at in attacks.iter().filter(|at| !at.idor || template.contains("{project}")) {
-            // The user in the path is the attacker, trying to add themselves.
-            let path = template
-                .replace("{company}", at.company)
-                .replace("{project}", at.project)
-                .replace("{user}", &at.who.id);
-            let body = body.map(|b| serde_json::from_str(b).unwrap());
+        for at in attacks.iter().filter(|at| at.applies(template, *body)) {
+            let path = at.fill(template);
+            let body = body.map(|b| serde_json::from_str(&at.fill(b)).unwrap());
             let (status, resp) = w.call(Some(&at.who.token), method, &path, body).await;
-            tried += 1;
+            calls += 1;
+            tried.insert((*method, *template));
             if status.is_success() {
                 leaks.push(format!(
-                    "{} ({}) {method} {path} -> {status} {resp}",
-                    at.who.id, at.label
+                    "{} ({:?}) {method} {path} -> {status} {resp}",
+                    at.who.id, at.kind
                 ));
             }
         }
@@ -520,9 +737,10 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
         "cross-company access succeeded:\n{}",
         leaks.join("\n")
     );
-    assert!(tried > 100, "only {tried} attempts");
+    assert_eq!(tried.len(), TARGETED.len(), "every targeted route was attacked");
+    assert!(calls > 500, "only {calls} attempts");
 
-    // Listing shows only the caller's own companies; creating stays in the caller's tenant.
+    // Listing shows only the caller's own companies and tenant; creating stays in the caller's tenant.
     for (t, others) in [(&a, [&b.company, &c.company]), (&c, [&a.company, &b.company])] {
         for who in [&t.lead, &t.engineer, &t.assignee] {
             let list = w.ok(who, "GET", "/v1/companies", None, StatusCode::OK).await;
@@ -533,6 +751,12 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+    let answers = w.ok(&c.lead, "GET", "/v1/security-answers", None, StatusCode::OK).await;
+    assert_eq!(
+        ids(&answers),
+        [c.records[6].1.as_str()],
+        "only the tenant's own answers"
+    );
     let made = w
         .ok(
             &c.lead,
@@ -571,4 +795,205 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             );
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn lifecycle_records_end_to_end() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let (lead, eng, asg) = (&t.lead, &t.engineer, &t.assignee);
+    let base = format!("/v1/companies/{}", t.company);
+    let p = format!("{base}/projects/{}", t.project);
+    let stakeholder = t.records[0].1.clone();
+
+    // Stages move one forward or back, never skip, and an assignee may move them.
+    let stage = format!("{p}/stage");
+    let (status, body) = w
+        .call(Some(&eng.token), "PUT", &stage, Some(json!({"stage": "build"})))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_stage_transition"))
+    );
+    let moved = w
+        .ok(asg, "PUT", &stage, Some(json!({"stage": "scope"})), StatusCode::OK)
+        .await;
+    assert_eq!(moved["stage"], "scope");
+    w.ok(eng, "PUT", &stage, Some(json!({"stage": "discover"})), StatusCode::OK)
+        .await;
+
+    // The scope was signed off at version 2 by the company setup; a change makes it stale and a
+    // new sign-off covers the new version.
+    let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
+    assert_eq!(
+        (scope["version"].as_u64(), scope["signed_off"].as_bool()),
+        (Some(2), Some(true))
+    );
+    let item = w
+        .ok(
+            eng,
+            "POST",
+            &format!("{p}/scope/items"),
+            Some(json!({"kind": "out", "description": "Voice"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
+    assert_eq!(
+        (scope["version"].as_u64(), scope["signed_off"].as_bool()),
+        (Some(3), Some(false))
+    );
+    assert_eq!(scope["items"][1]["kind"], "out");
+    let sign = format!("{p}/scope/sign-offs");
+    let signed = w
+        .ok(
+            eng,
+            "POST",
+            &sign,
+            Some(json!({"stakeholder": stakeholder})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(signed["version"], 3);
+    let (status, _) = w
+        .call(
+            Some(&eng.token),
+            "POST",
+            &sign,
+            Some(json!({"stakeholder": stakeholder})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a version is signed once");
+    let (status, body) = w
+        .call(
+            Some(&eng.token),
+            "POST",
+            &sign,
+            Some(json!({"stakeholder": "stk_nobody"})),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_stakeholder"))
+    );
+    let item_path = format!("{p}/scope/items/{}", item["id"].as_str().unwrap());
+    w.ok(eng, "DELETE", &item_path, None, StatusCode::NO_CONTENT).await;
+    let changes = w
+        .ok(eng, "GET", &format!("{p}/scope/changes"), None, StatusCode::OK)
+        .await;
+    let actions: Vec<(u64, &str)> = changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["version"].as_u64().unwrap(), c["action"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            (1, "item_added"),
+            (2, "criterion_added"),
+            (2, "signed_off"),
+            (3, "item_added"),
+            (3, "signed_off"),
+            (4, "item_removed")
+        ]
+    );
+    // A stakeholder who signed cannot be deleted.
+    let (status, _) = w
+        .call(
+            Some(&lead.token),
+            "DELETE",
+            &format!("{base}/stakeholders/{stakeholder}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Access requests: owner at the customer, status changes published, days waiting.
+    let access = format!("{p}/access-requests/{}", t.records[4].1);
+    let granted = w
+        .ok(
+            eng,
+            "PUT",
+            &access,
+            Some(json!({"description": "API token", "status": "granted", "owner": stakeholder})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (granted["status"].as_str(), granted["days_waiting"].as_i64()),
+        (Some("granted"), Some(0))
+    );
+    assert!(granted["granted_at"].is_string());
+
+    // Tasks: blocked needs a blocker; waiting on the customer is its own state.
+    let task = format!("{p}/tasks/{}", t.records[5].1);
+    let (status, body) = w
+        .call(
+            Some(&eng.token),
+            "PUT",
+            &task,
+            Some(json!({"title": "Index tickets", "status": "blocked"})),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_blocker_required"))
+    );
+    let waiting = w
+        .ok(
+            eng,
+            "PUT",
+            &task,
+            Some(json!({"title": "Index tickets", "status": "waiting_on_customer"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(waiting["status"], "waiting_on_customer");
+
+    // Decisions keep who, when and why.
+    let d = w
+        .ok(
+            eng,
+            "POST",
+            &format!("{p}/decisions"),
+            Some(json!({"title": "Ship to staging", "rationale": "Evals pass", "decided_by": "Sam", "decided_at": "2026-11-01T10:00:00Z"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(
+        (d["decided_by"].as_str(), d["decided_at"].as_str()),
+        (Some("Sam"), Some("2026-11-01T10:00:00Z"))
+    );
+    assert_eq!(d["recorded_by"], eng.id.as_str());
+    let (status, _) = w
+        .call(
+            Some(&eng.token),
+            "POST",
+            &format!("{p}/decisions"),
+            Some(json!({"title": "x", "rationale": "x", "decided_by": "x", "decided_at": "yesterday"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The security answer library is shared across the organisation.
+    let other = user(&org, "other", "member");
+    let answers = w.ok(&other, "GET", "/v1/security-answers", None, StatusCode::OK).await;
+    assert_eq!(answers.as_array().unwrap().len(), 1);
+
+    // Every state change with an event wrote it through the outbox.
+    assert_eq!(
+        w.events(&org).await,
+        [
+            "fde.company.created.v1",
+            "fde.project.created.v1",
+            "fde.scope.signed-off.v1",
+            "fde.project.stage-changed.v1",
+            "fde.project.stage-changed.v1",
+            "fde.scope.signed-off.v1",
+            "fde.access-request.status-changed.v1",
+        ]
+    );
 }

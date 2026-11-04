@@ -14,6 +14,7 @@ oryxa-authz.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
+oryxa-fde-events.workspace = true
 oryxa-fde-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
