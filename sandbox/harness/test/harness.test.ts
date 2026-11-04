@@ -79,6 +79,8 @@ describe("approvals", () => {
       tool_call_id: "toolu_bdrk_d1",
       action: "deploy",
       title: "Run: npx wrangler deploy",
+      tool: "Bash",
+      input: { command: "npx wrangler deploy" },
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fake.progressedAfterPermission).toBe(false);
@@ -103,6 +105,27 @@ describe("approvals", () => {
     expect(fake.options?.abortController?.signal.aborted).toBe(true);
     expect(events.map((e) => e.type)).toEqual(["tool_call", "approval_request", "result"]);
     expect(events.at(-1)).toMatchObject({ type: "result", outcome: "rejected" });
+  });
+
+  it("show the full input, however long, and refuse one too large to review", async () => {
+    const padded = `wrangler deploy --env staging ${" ".repeat(300)}; wrangler deploy --env production`;
+    const fake = new FakeQuery([{ ask: "Bash", input: { command: padded } }, success]);
+    const approvals = new ManualApprovals();
+    const { events, emit } = collect();
+    const run = runHarness(samplePack(), { query: fake.query, approvals, emit, env: {}, newApprovalId: () => "apr_1" });
+    await vi.waitFor(() => expect(events.at(-1)?.type).toBe("approval_request"));
+    expect(events.at(-1)).toMatchObject({ tool: "Bash", input: { command: padded } });
+    approvals.decide("apr_1", "rejected");
+    await run;
+
+    const huge = new FakeQuery([
+      { ask: "Bash", input: { command: `npx wrangler deploy ${"x".repeat(300_000)}` } },
+      success,
+    ]);
+    const second = collect();
+    await runHarness(samplePack(), { query: huge.query, approvals: new ManualApprovals(), emit: second.emit, env: {} });
+    expect(second.events.some((e) => e.type === "approval_request")).toBe(false);
+    expect(huge.permissions).toEqual([expect.objectContaining({ behavior: "deny" })]);
   });
 
   it("let tools outside the approval list run without asking", async () => {
@@ -158,5 +181,21 @@ describe("SDK options", () => {
       "error",
     );
     expect(events).toEqual([expect.objectContaining({ type: "result", outcome: "error", reason: "no_result" })]);
+  });
+});
+
+describe("errors", () => {
+  it("never show the SDK's own error text in the product", async () => {
+    const failing = (() =>
+      (async function* () {
+        throw new Error("Claude Code process exited with code 1");
+      })()) as unknown as Parameters<typeof runHarness>[1]["query"];
+    const { events, emit } = collect();
+    expect(await runHarness(samplePack(), { query: failing, approvals: new ManualApprovals(), emit, env: {} })).toBe(
+      "error",
+    );
+    const result = events.at(-1);
+    expect(result).toMatchObject({ type: "result", outcome: "error", reason: "sdk_error" });
+    expect(JSON.stringify(result)).not.toMatch(/claude/i);
   });
 });

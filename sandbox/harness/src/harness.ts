@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { CanUseTool, Options, PermissionResult, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
-import { Adapter, describeTool } from "./adapter.js";
+import { Adapter, describeTool, RUN_ERROR } from "./adapter.js";
 import { type ApprovalChannel, ruleFor } from "./approvals.js";
 import type { HarnessEvent, Outcome } from "./events.js";
 import { type LoadedPack, systemPrompt } from "./pack.js";
@@ -83,15 +83,20 @@ export async function runHarness({ pack, rules }: LoadedPack, deps: HarnessDeps)
   const canUseTool: CanUseTool = async (tool, input, { signal, toolUseID }): Promise<PermissionResult> => {
     const rule = ruleFor(rules, tool, input);
     if (rule === undefined) return { behavior: "allow", updatedInput: input };
+    // The engineer approves the exact input. One too large to show is refused, never cut short.
+    if (Buffer.byteLength(JSON.stringify(input)) > MAX_APPROVAL_INPUT_BYTES)
+      return { behavior: "deny", message: "This action is too large for an engineer to review. Split it up." };
     const decision = queue.then(() => {
       if (rejected) return "rejected" as const;
       const id = newApprovalId();
       deps.emit({
         type: "approval_request",
         id,
-        tool_call_id: toolUseID,
+        tool_call_id: adapter.toolCallId(toolUseID),
         action: rule.action,
         title: describeTool(tool, input).title,
+        tool,
+        input,
       });
       return deps.approvals.request(id, signal);
     });
@@ -153,6 +158,17 @@ export async function runHarness({ pack, rules }: LoadedPack, deps: HarnessDeps)
 }
 
 function errorResult(reason: string, cause: unknown): HarnessEvent {
-  const text = cause instanceof Error ? cause.message : "";
-  return { type: "result", outcome: "error", reason, text, turns: 0, usage: { input_tokens: 0, output_tokens: 0 } };
+  // The SDK's messages name the SDK and its CLI; they belong in diagnostics, not in the product.
+  if (cause instanceof Error) process.stderr.write(`harness: ${reason}: ${cause.message}\n`);
+  return {
+    type: "result",
+    outcome: "error",
+    reason,
+    text: RUN_ERROR,
+    turns: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
 }
+
+/** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */
+const MAX_APPROVAL_INPUT_BYTES = 256 * 1024;

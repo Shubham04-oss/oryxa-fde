@@ -54,6 +54,9 @@ pub enum HarnessEvent {
         tool_call_id: ToolCallId,
         action: String,
         title: String,
+        /// The tool and its full input, exactly as they will run if approved; the title is only a summary.
+        tool: String,
+        input: serde_json::Value,
     },
     /// The run's last event.
     Result {
@@ -191,7 +194,7 @@ mod tests {
             r#"{"v":1,"seq":2,"type":"tool_call","id":"toolu_1","title":"Read a.ts","kind":"read","status":"completed"}"#,
             r#"{"v":1,"seq":3,"type":"file_change","tool_call_id":"toolu_2","path":"a.ts","change":"modified"}"#,
             r#"{"v":1,"seq":4,"type":"command","tool_call_id":"toolu_3","command":"npm test","status":"failed"}"#,
-            r#"{"v":1,"seq":5,"type":"approval_request","id":"apr_1","tool_call_id":"toolu_4","action":"deploy","title":"Run: wrangler deploy"}"#,
+            r#"{"v":1,"seq":5,"type":"approval_request","id":"apr_1","tool_call_id":"toolu_4","action":"deploy","title":"Run: wrangler deploy","tool":"Bash","input":{"command":"wrangler deploy"}}"#,
             r#"{"v":1,"seq":6,"type":"result","outcome":"success","text":"Done.","turns":3,"usage":{"input_tokens":10,"output_tokens":5}}"#,
         ];
         for (seq, line) in lines.iter().enumerate() {

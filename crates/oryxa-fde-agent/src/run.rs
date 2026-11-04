@@ -199,6 +199,8 @@ mod tests {
                 tool_call_id: ToolCallId::new("toolu_9").unwrap(),
                 action: "deploy".into(),
                 title: "Run: wrangler deploy".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({ "command": "wrangler deploy" }),
             },
         )
     }

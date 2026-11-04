@@ -17,7 +17,16 @@ export type HarnessEvent =
   | { type: "tool_call"; id: string; title: string; kind: ToolKind; status: ToolStatus }
   | { type: "file_change"; tool_call_id: string; path: string; change: "created" | "modified" | "deleted" }
   | { type: "command"; tool_call_id: string; command: string; status: ToolStatus }
-  | { type: "approval_request"; id: string; tool_call_id: string; action: string; title: string }
+  | {
+      type: "approval_request";
+      id: string;
+      tool_call_id: string;
+      action: string;
+      title: string;
+      // The exact tool and input that will run if approved, so the engineer never approves a summary.
+      tool: string;
+      input: Record<string, unknown>;
+    }
   | { type: "result"; outcome: Outcome; reason?: string; text: string; turns: number; usage: Usage };
 
 export const EVENT_VERSION = 1;

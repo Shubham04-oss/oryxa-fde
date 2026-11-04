@@ -23,6 +23,11 @@ export class Adapter {
   readonly #ids = new IdMap();
   readonly #plan = new Map<string, { content: string; status: PlanStatus }>();
 
+  /** The id the review screen knows this tool call by, the same one its `tool_call` events use. */
+  toolCallId(raw: string): string {
+    return this.#ids.safe(raw);
+  }
+
   events(message: SDKMessage): HarnessEvent[] {
     switch (message.type) {
       case "assistant":
@@ -43,7 +48,8 @@ export class Adapter {
                 type: "result",
                 outcome: "error",
                 reason: message.subtype,
-                text: message.errors.join("\n"),
+                // The SDK's errors can name the SDK and its CLI; they go to stderr, and the product gets plain text.
+                text: errorText(message.errors),
                 turns: message.num_turns,
                 usage: usage(message.usage),
               },
@@ -140,6 +146,14 @@ export function describeTool(name: string, input: Record<string, unknown>): { ti
       return titled(name, "other");
   }
 }
+
+function errorText(errors: readonly string[]): string {
+  if (errors.length > 0) process.stderr.write(`harness: ${errors.join("; ")}\n`);
+  return RUN_ERROR;
+}
+
+/** The only error text the product shows; the details stay in the harness's diagnostics. */
+export const RUN_ERROR = "The agent run stopped with an error.";
 
 function usage(u: { input_tokens: number; output_tokens: number }) {
   return { input_tokens: u.input_tokens, output_tokens: u.output_tokens };
