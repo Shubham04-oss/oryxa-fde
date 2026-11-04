@@ -37,9 +37,11 @@ The project context goes into the system prompt as fenced data, not as instructi
 - **A coding tool set.** Read, Write, Edit, NotebookEdit, Glob, Grep, Bash, WebFetch and the task tools. The
   SDK's default set also schedules, messages and spawns agents.
 - **Approvals.** A tool call that matches a rule on the approval list (tool name, and a regular expression over
-  the command or the JSON input) emits `approval_request` and waits. Approval lets the call run. Rejection
-  denies it, aborts the SDK and ends the run with `result` `rejected`. A closed stdin or an aborted run counts
-  as a rejection.
+  the command or the JSON input) emits `approval_request` and waits. The request carries the tool and its full
+  input, so an engineer approves exactly what will run. An input over 256 KiB is refused, never truncated.
+  Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. A
+  closed stdin or an aborted run counts as a rejection.
+- **Error text.** An error `result` shows fixed text. The SDK's own messages go to stderr.
 
 ## Develop
 
