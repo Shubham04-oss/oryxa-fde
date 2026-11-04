@@ -37,7 +37,7 @@ are bound to the VPC service reach it, through the tunnel.
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
 | `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the ALB, Access on `admin.` |
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl`; `deploy.tf` holds the GitHub deploy role and the deploy parameters |
-| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 binary on distroless Debian 13, nonroot |
+| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
 | `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
@@ -221,9 +221,9 @@ as the API's or the migrate task's roles only, run the migrate task, update the 
 service, and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it).
 
 **deploy-api, step by step**
-1. `build`, a heavy Rust job (`docs/ci.md`): `cargo build --release -p oryxa-fde-api` for
-   `aarch64-unknown-linux-gnu`, natively on the ARM64 a1 runners or cross-compiled on hosted ones.
-   It fails if the binary needs a newer glibc than the image's base has (2.41).
+1. `build`, a heavy Rust job (`docs/ci.md`): `cargo build --release` of `oryxa-fde-api` and
+   `oryxa-fde-ops` for `aarch64-unknown-linux-gnu`, natively on the ARM64 a1 runners or
+   cross-compiled on hosted ones. It fails if either needs a newer glibc than the image's base (2.41).
 2. `deploy`, hosted, in `dev`: reads `/oryxa-fde-dev/deploy` (names, subnets, the migrate task's
    security group; written by OpenTofu) and pushes the image tagged with the commit sha. Tags are
    immutable: a sha already in ECR is reused.
@@ -355,8 +355,8 @@ These could not be checked without an account. Each one is flagged at the place 
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - It serves `GET /healthz` without auth (it does), keeps files under
     `tenants/<tenant>/companies/<company>/`, and writes nothing to its root filesystem, which is
-    read-only. Infra builds the image (`deploy-api`) from `cargo build -p oryxa-fde-api`; the image's
-    entrypoint is the binary, so ECS passes `migrate` as its only argument.
+    read-only. Infra builds the image (`deploy-api`) from the `oryxa-fde-api` package's two binaries:
+    `oryxa-fde-api` is the entrypoint, and the migrate task runs `/usr/local/bin/oryxa-fde-ops migrate`.
 - **Web (`fde-web/`, `realtime/`).** `deploy-workers` adds the `API` binding (`env.API`, the Workers
   VPC service) and the zone route on `app.<domain>` to the built config at deploy time, so
   `wrangler.jsonc` keeps no dev values. `realtime/` deploys like the gateway: `npm ci` with a
