@@ -513,13 +513,18 @@ pub(crate) async fn search_vector_with(
     .fetch_one(&mut *conn)
     .await?;
     let sql = if chunks <= exact_max {
-        // Materialised first, so the planner cannot walk the shared index instead.
+        // Materialised first, so the planner cannot walk the shared index instead. Only ids and
+        // distances are ranked; the text is read for the passages returned.
         format!(
             "with mine as materialized (
-                 select {HIT_COLUMNS}, c.embedding <=> $4::vector as distance from {CHUNKS}
-                 where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3)
-             select document_id, name, chunk_index, content from mine
-             order by distance, document_id, chunk_index limit $5"
+                 select c.document_id, c.chunk_index, c.embedding <=> $4::vector as distance from {CHUNKS}
+                 where c.tenant_id = $1 and c.company_id = $2 and c.embedding_model = $3),
+             top as (select * from mine order by distance, document_id, chunk_index limit $5)
+             select t.document_id, d.name, t.chunk_index, c.content from top t
+             join document_chunks c on c.tenant_id = $1 and c.company_id = $2 and c.document_id = t.document_id
+                 and c.embedding_model = $3 and c.chunk_index = t.chunk_index
+             join documents d on d.tenant_id = $1 and d.company_id = $2 and d.document_id = t.document_id
+             order by t.distance, t.document_id, t.chunk_index"
         )
     } else {
         // Keep scanning past other companies' chunks, within a raised budget; relaxed order is put
