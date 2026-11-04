@@ -72,7 +72,6 @@ id_type!(TraceId, "trace id", 128);
 id_type!(GroupId, "group id", 128);
 id_type!(WorkspaceId, "workspace id", 128);
 id_type!(ConnectionId, "connection id", 128);
-id_type!(KbItemId, "kb item id", 128);
 
 /// Hard cap on JSON nesting accepted from callers (tool args, connector payloads).
 pub const MAX_JSON_DEPTH: usize = 32;

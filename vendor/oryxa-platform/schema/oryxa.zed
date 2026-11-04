@@ -44,45 +44,6 @@ definition capability {
     permission grant = agent->configure
 }
 
-definition knowledge_base {
-    relation workspace: workspace
-    permission query = workspace->access
-}
-
-// A data source inside a tenant KB. Native sources are checked here; Bedrock checks per doc.
-// agent_reader scopes what the workspace agent may search on anyone's behalf.
-definition kb_source {
-    relation knowledge_base: knowledge_base
-    relation viewer: user | team#member | workspace#member
-    relation agent_reader: agent
-
-    permission search = viewer & knowledge_base->query
-    permission agent_search = agent_reader
-}
-
-// A group from a connected provider (Google group, Jira group or project role, Slack user group).
-// Connectors flatten nesting before they sync it (Drive includeDerivedMembership, Jira group
-// members), so members are users only, never other groups. ACL sync (#30) keeps it current and
-// writes a removal as a delete at once, never waiting for a later full resync.
-definition provider_group {
-    relation workspace: workspace
-    relation member: user
-}
-
-// Documents from Oryxa's own connectors; we are the ACL source, so check per doc.
-// workspace#member is granted only for shares to the tenant's verified WorkOS domains; link-only
-// sharing and people we cannot match to an Oryxa user grant nothing.
-definition kb_item {
-    relation source: kb_source
-    relation viewer: user | team#member | provider_group#member | workspace#member
-    relation owner: user
-
-    permission view = (viewer + owner) & source->search
-    // An agent sees an item only through a source it was explicitly given. The full rule for an
-    // agent (also what its human and every reader of the answer can see) is oryxa-authz kb_visible.
-    permission agent_view = source->agent_search
-}
-
 // A provider connection held by the credential broker. Egress handles are issued only after
 // `use` for the acting agent (or, in the UI, the human owner).
 definition connection {
@@ -94,7 +55,7 @@ definition connection {
     // agents an admin granted.
     relation agent_user: agent
 
-    // The owner grants only while still in the workspace: removal cuts access before #30's cleanup.
+    // The owner grants only while still in the workspace: removal cuts access at once.
     permission use = (owner & workspace->access) + agent_user
     permission manage = (owner & workspace->access) + workspace->manage
 }

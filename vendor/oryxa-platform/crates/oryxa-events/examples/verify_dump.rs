@@ -26,8 +26,6 @@ fn check(verifier: &Verifier, source: &str, detail_type: &str, detail: &str) -> 
         MemberRemoved,
         GroupMembershipChanged,
         OrganizationDeleted,
-        ChatLinkCreated,
-        ChatLinkInvalidated,
         ToolAuthorizationDecided,
         AgentDelegated,
         ConnectionStatusChanged,
