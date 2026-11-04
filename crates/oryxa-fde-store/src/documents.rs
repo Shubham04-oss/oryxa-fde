@@ -1,7 +1,9 @@
 //! Company documents: the metadata of uploaded files (the bytes are in S3) and, once ingested,
-//! their text in chunks for full-text and vector search. An upload queues `document.uploaded`;
-//! ingestion writes every chunk and marks the document ingested in one transaction, so a
-//! redelivered event finds it ingested and adds nothing.
+//! their text in chunks for full-text and vector search. An upload queues `document.uploaded`.
+//! Ingestion stores chunks a batch at a time under the embedding model, so a redelivered event
+//! resumes after the last batch; once every chunk is stored the document names that model's set,
+//! which is the only one search reads. A document ingested with another model is re-embedded the
+//! same way, and its old set deleted when the new one is complete.
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{CompanyScope, DocumentId};
@@ -86,9 +88,23 @@ pub struct Document {
     /// Why ingestion gave up, as a short code.
     pub failure: Option<String>,
     pub chunks: u32,
+    /// The model of the chunk set search reads; `None` until ingested.
+    pub embedding_model: Option<String>,
     pub uploaded_by: UserId,
     pub created_at: OffsetDateTime,
     pub ingested_at: Option<OffsetDateTime>,
+}
+
+impl Document {
+    /// Whether ingestion under `model` has work to do: a pending document, or one ingested with
+    /// another model. A failed document is never retried.
+    pub fn needs(&self, model: &str) -> bool {
+        match self.status {
+            DocumentStatus::Pending => true,
+            DocumentStatus::Ingested => self.embedding_model.as_deref() != Some(model),
+            DocumentStatus::Failed => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,8 +134,10 @@ pub struct ChunkHit {
     pub content: Text,
 }
 
-const DOCUMENT: &str = "document_id, name, content_type, size_bytes, sha256, status, failure, chunks, uploaded_by,
-    created_at, ingested_at";
+const DOCUMENT: &str = "document_id, name, content_type, size_bytes, sha256, status, failure, chunks, embedding_model,
+    uploaded_by, created_at, ingested_at";
+/// The same test as [`Document::needs`], in SQL over `documents`, with the model as `$4`.
+const NEEDS: &str = "(status = 'pending' or (status = 'ingested' and embedding_model is distinct from $4))";
 
 impl CompanyTx {
     /// Records an uploaded file and queues `document.uploaded` for ingestion. `None` if the
@@ -212,23 +230,65 @@ impl CompanyTx {
         .transpose()
     }
 
-    /// Stores every chunk of a pending document and marks it ingested. Call with the document
-    /// locked ([`CompanyTx::lock_document`]); a document that is not pending is refused.
-    pub async fn record_chunks(&mut self, id: &DocumentId, model: &str, chunks: &[ChunkIn]) -> Result<(), StoreError> {
+    /// The chunks already stored for the document under `model`, by index: what an interrupted
+    /// ingestion wrote before it stopped.
+    pub async fn stored_chunks(&mut self, id: &DocumentId, model: &str) -> Result<Vec<(u32, Text)>, StoreError> {
+        let s = &self.scope;
+        sqlx::query(
+            "select chunk_index, content from document_chunks
+             where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4
+             order by chunk_index",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(|r| {
+            let i =
+                u32::try_from(r.try_get::<i32, _>("chunk_index")?).map_err(|_| StoreError::Corrupt("chunk index"))?;
+            Ok((i, text(r.try_get("content")?, "chunk")?))
+        })
+        .collect()
+    }
+
+    /// Deletes the document's chunks under `model`: an interrupted set that cannot be resumed.
+    pub async fn drop_chunks(&mut self, id: &DocumentId, model: &str) -> Result<(), StoreError> {
+        let s = &self.scope;
+        sqlx::query(
+            "delete from document_chunks
+             where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .execute(&mut *self.tx)
+        .await?;
+        Ok(())
+    }
+
+    /// Stores chunks of a document that still needs `model`'s ([`Document::needs`]), with the
+    /// document locked; a chunk already stored is kept. `false`, storing nothing, if it no longer
+    /// needs them.
+    pub async fn add_chunks(&mut self, id: &DocumentId, model: &str, chunks: &[ChunkIn]) -> Result<bool, StoreError> {
         if chunks
             .iter()
             .any(|c| c.embedding.is_empty() || c.embedding.iter().any(|f| !f.is_finite()))
         {
             return Err(StoreError::Rejected("embedding"));
         }
-        // Settled first: a document that is not pending gets no chunks at all.
-        self.settle(id, DocumentStatus::Ingested, None, chunks.len()).await?;
+        if !self.lock_needing(id, model).await? {
+            return Ok(false);
+        }
         let s = self.scope.clone();
         for c in chunks {
             sqlx::query(
                 "insert into document_chunks (tenant_id, company_id, document_id, chunk_index, content, embedding,
                      embedding_model)
-                 values ($1, $2, $3, $4, $5, $6::vector, $7)",
+                 values ($1, $2, $3, $4, $5, $6::vector, $7) on conflict do nothing",
             )
             .bind(s.tenant.as_str())
             .bind(s.company.as_str())
@@ -240,40 +300,101 @@ impl CompanyTx {
             .execute(&mut *self.tx)
             .await?;
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// Marks a pending document failed, with a short code saying why (never its text).
+    /// Completes ingestion under `model` once chunks `0..count` are all stored: the document is
+    /// ingested and names that set, and every other chunk of it is deleted. `false`, changing
+    /// nothing, if it no longer needs `model`'s chunks; `Rejected("chunks_missing")` if some are
+    /// not stored yet.
+    pub async fn finish_chunks(&mut self, id: &DocumentId, model: &str, count: usize) -> Result<bool, StoreError> {
+        if !self.lock_needing(id, model).await? {
+            return Ok(false);
+        }
+        let s = self.scope.clone();
+        let count = i32::try_from(count).map_err(|_| StoreError::Rejected("chunks"))?;
+        let stored: i64 = sqlx::query_scalar(
+            "select count(*) from document_chunks
+             where tenant_id = $1 and company_id = $2 and document_id = $3 and embedding_model = $4
+                 and chunk_index < $5",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .bind(count)
+        .fetch_one(&mut *self.tx)
+        .await?;
+        if stored != i64::from(count) {
+            return Err(StoreError::Rejected("chunks_missing"));
+        }
+        sqlx::query(
+            "delete from document_chunks where tenant_id = $1 and company_id = $2 and document_id = $3
+                 and (embedding_model <> $4 or chunk_index >= $5)",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .bind(count)
+        .execute(&mut *self.tx)
+        .await?;
+        sqlx::query(
+            "update documents set status = 'ingested', failure = null, chunks = $5, embedding_model = $4,
+                 ingested_at = now()
+             where tenant_id = $1 and company_id = $2 and document_id = $3",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .bind(count)
+        .execute(&mut *self.tx)
+        .await?;
+        Ok(true)
+    }
+
+    /// Locks the document; whether it still needs `model`'s chunks.
+    async fn lock_needing(&mut self, id: &DocumentId, model: &str) -> Result<bool, StoreError> {
+        let s = &self.scope;
+        let needs: Option<bool> = sqlx::query_scalar(&format!(
+            "select {NEEDS} from documents where tenant_id = $1 and company_id = $2 and document_id = $3
+             for update"
+        ))
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .bind(model)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        Ok(needs.unwrap_or(false))
+    }
+
+    /// Marks a pending document failed, with a short code saying why (never its text), and drops
+    /// any chunks an interrupted ingestion left.
     pub async fn record_failure(&mut self, id: &DocumentId, why: &'static str) -> Result<(), StoreError> {
-        self.settle(id, DocumentStatus::Failed, Some(why), 0).await
-    }
-
-    async fn settle(
-        &mut self,
-        id: &DocumentId,
-        status: DocumentStatus,
-        failure: Option<&str>,
-        chunks: usize,
-    ) -> Result<(), StoreError> {
         let s = &self.scope;
         let n = sqlx::query(
-            "update documents set status = $4, failure = $5, chunks = $6, ingested_at = now()
+            "update documents set status = 'failed', failure = $4, chunks = 0, ingested_at = now()
              where tenant_id = $1 and company_id = $2 and document_id = $3 and status = 'pending'",
         )
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(id.as_str())
-        .bind(status.as_str())
-        .bind(failure)
-        .bind(i32::try_from(chunks).map_err(|_| StoreError::Rejected("chunks"))?)
+        .bind(why)
         .execute(&mut *self.tx)
         .await?
         .rows_affected();
-        if n == 1 {
-            Ok(())
-        } else {
-            Err(StoreError::Rejected("document_not_pending"))
+        if n != 1 {
+            return Err(StoreError::Rejected("document_not_pending"));
         }
+        sqlx::query("delete from document_chunks where tenant_id = $1 and company_id = $2 and document_id = $3")
+            .bind(s.tenant.as_str())
+            .bind(s.company.as_str())
+            .bind(id.as_str())
+            .execute(&mut *self.tx)
+            .await?;
+        Ok(())
     }
 
     /// Chunks whose text matches `query` (web search syntax), best first.
@@ -321,8 +442,11 @@ impl ProjectTx {
 }
 
 const HIT_COLUMNS: &str = "c.document_id, d.name, c.chunk_index, c.content";
+/// A document's chunks that search reads: the complete set of the model it names, never one being
+/// written.
 const CHUNKS: &str = "document_chunks c join documents d
-     on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id";
+     on d.tenant_id = c.tenant_id and d.company_id = c.company_id and d.document_id = c.document_id
+         and d.embedding_model = c.embedding_model";
 
 /// A company with at most this many chunks for a model is searched exactly, every chunk compared,
 /// so its recall never depends on how large the shared index has grown. A larger company is a
@@ -455,6 +579,7 @@ fn document(r: PgRow) -> Result<Document, StoreError> {
         status: DocumentStatus::parse(r.try_get("status")?)?,
         failure: r.try_get("failure")?,
         chunks: u32::try_from(r.try_get::<i32, _>("chunks")?).map_err(|_| StoreError::Corrupt("chunks"))?,
+        embedding_model: r.try_get("embedding_model")?,
         uploaded_by: id("user id", UserId::new, r.try_get("uploaded_by")?)?,
         created_at: r.try_get("created_at")?,
         ingested_at: r.try_get("ingested_at")?,
@@ -475,6 +600,31 @@ mod tests {
         for bad in ["text/html", "application/zip", "", "application/pdfx"] {
             assert_eq!(ContentType::parse(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_document_needs_chunks_while_pending_or_ingested_with_another_model() {
+        let mut d = Document {
+            id: DocumentId::new("doc_1").unwrap(),
+            name: Name::new("runbook.md").unwrap(),
+            content_type: ContentType::Markdown,
+            size_bytes: 1,
+            sha256: String::new(),
+            status: DocumentStatus::Pending,
+            failure: None,
+            chunks: 0,
+            embedding_model: None,
+            uploaded_by: UserId::new("alice").unwrap(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            ingested_at: None,
+        };
+        assert!(d.needs("m1"));
+        d.status = DocumentStatus::Ingested;
+        d.embedding_model = Some("m1".into());
+        assert!(!d.needs("m1"));
+        assert!(d.needs("m2"), "a new model re-embeds it");
+        d.status = DocumentStatus::Failed;
+        assert!(!d.needs("m2"), "a failed document is never retried");
     }
 
     #[test]

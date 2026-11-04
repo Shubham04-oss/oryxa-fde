@@ -1331,18 +1331,12 @@ async fn row_level_security_covers_documents_and_chunks() {
         };
         let mut tx = store.company(s).await.unwrap();
         tx.add_document(&id, &v, &by).await.unwrap().unwrap();
-        tx.lock_document(&id).await.unwrap().unwrap();
-        tx.record_chunks(&id, "fake", std::slice::from_ref(&chunk))
-            .await
-            .unwrap();
+        assert!(tx.add_chunks(&id, "fake", std::slice::from_ref(&chunk)).await.unwrap());
+        assert!(tx.finish_chunks(&id, "fake", 1).await.unwrap());
         tx.commit().await.unwrap();
-        // Settled once: writing chunks again is refused before anything is written.
+        // Ingested under this model: more chunks for it are refused, and nothing is written.
         let mut tx = store.company(s).await.unwrap();
-        tx.lock_document(&id).await.unwrap().unwrap();
-        assert!(matches!(
-            tx.record_chunks(&id, "fake", &[chunk]).await,
-            Err(StoreError::Rejected("document_not_pending"))
-        ));
+        assert!(!tx.add_chunks(&id, "fake", &[chunk]).await.unwrap());
     }
 
     // No WHERE clause: A's transaction sees A's document and chunk only.
@@ -1366,14 +1360,14 @@ async fn row_level_security_covers_documents_and_chunks() {
     .await;
     assert!(r.is_err());
     drop(sp);
-    // Chunks are append-only for the app.
-    let mut sp = tx.conn().begin().await.unwrap();
-    assert!(
-        sqlx::query("delete from document_chunks")
-            .execute(&mut *sp)
-            .await
-            .is_err()
-    );
+    // The app may delete chunks (ingestion replaces sets), but only its own company's.
+    let deleted = sqlx::query("delete from document_chunks where company_id <> $1")
+        .bind(a.company.as_str())
+        .execute(tx.conn())
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(deleted, 0);
 }
 
 #[tokio::test]
@@ -1876,8 +1870,9 @@ async fn a_small_company_finds_all_its_chunks_among_many_tenants() {
     .unwrap();
     sqlx::query(
         "insert into documents (tenant_id, company_id, document_id, name, content_type, size_bytes, sha256, blob_key,
-             uploaded_by, status, chunks, ingested_at)
-         select tenant_id, company_id, 'doc_bulk', 'bulk.md', 'text/markdown', 1, 'x', 'x', 'alice', 'ingested', 50, now()
+             uploaded_by, status, chunks, embedding_model, ingested_at)
+         select tenant_id, company_id, 'doc_bulk', 'bulk.md', 'text/markdown', 1, 'x', 'x', 'alice', 'ingested', 50,
+             'fake', now()
          from companies where tenant_id like $1 || '\\_%'",
     )
     .bind(&run)
@@ -1925,8 +1920,8 @@ async fn a_small_company_finds_all_its_chunks_among_many_tenants() {
         .collect();
     let mut tx = store.company(&small).await.unwrap();
     tx.add_document(&id, &v, &by).await.unwrap().unwrap();
-    tx.lock_document(&id).await.unwrap().unwrap();
-    tx.record_chunks(&id, "fake", &chunks).await.unwrap();
+    assert!(tx.add_chunks(&id, "fake", &chunks).await.unwrap());
+    assert!(tx.finish_chunks(&id, "fake", chunks.len()).await.unwrap());
     tx.commit().await.unwrap();
 
     let mut tx = store.company(&small).await.unwrap();
@@ -1964,4 +1959,85 @@ async fn a_small_company_finds_all_its_chunks_among_many_tenants() {
         .await
         .unwrap();
     assert_eq!(hits[0].chunk, 1);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn search_reads_only_a_documents_complete_set_while_it_is_re_embedded() {
+    let store = store().await;
+    let admin = admin().await;
+    let by = actor("alice");
+    let s = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &s).await;
+    let id = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    let v = DocumentIn {
+        name: Name::new("runbook.md").unwrap(),
+        content_type: ContentType::Markdown,
+        size_bytes: 5,
+        sha256: "00".repeat(32),
+        blob_key: format!("{}/{}/documents/{id}", s.tenant, s.company),
+    };
+    let chunk = |i: u32| ChunkIn {
+        index: i,
+        content: Text::new(format!("Refunds over 500 need approval, part {i}")).unwrap(),
+        embedding: axis(i as usize),
+    };
+    let mut tx = store.company(&s).await.unwrap();
+    tx.add_document(&id, &v, &by).await.unwrap().unwrap();
+    // A pending document's first batch is stored, but search sees none of it yet.
+    assert!(tx.add_chunks(&id, "m1", &[chunk(0)]).await.unwrap());
+    assert!(tx.search_text("refunds", 10).await.unwrap().is_empty());
+    assert!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().is_empty());
+    assert!(matches!(
+        tx.finish_chunks(&id, "m1", 2).await,
+        Err(StoreError::Rejected("chunks_missing"))
+    ));
+    // The same chunk again is kept as it is; with the last one, the set is complete.
+    assert!(tx.add_chunks(&id, "m1", &[chunk(0), chunk(1)]).await.unwrap());
+    assert!(tx.finish_chunks(&id, "m1", 2).await.unwrap());
+    let doc = tx.document(&id).await.unwrap().unwrap();
+    assert_eq!(
+        (doc.status, doc.chunks, doc.embedding_model.as_deref()),
+        (DocumentStatus::Ingested, 2, Some("m1"))
+    );
+    assert_eq!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().len(), 2);
+    tx.commit().await.unwrap();
+
+    // Re-embedded under m2: until its set is complete, search reads m1's, once.
+    let mut tx = store.company(&s).await.unwrap();
+    assert!(tx.document(&id).await.unwrap().unwrap().needs("m2"));
+    assert!(tx.add_chunks(&id, "m2", &[chunk(0)]).await.unwrap());
+    assert_eq!(
+        tx.search_text("refunds", 10).await.unwrap().len(),
+        2,
+        "no duplicates from m2"
+    );
+    assert!(tx.search_vector(&axis(0), "m2", 10).await.unwrap().is_empty());
+    assert_eq!(tx.stored_chunks(&id, "m2").await.unwrap().len(), 1);
+    assert!(tx.add_chunks(&id, "m2", &[chunk(1)]).await.unwrap());
+    assert!(tx.finish_chunks(&id, "m2", 2).await.unwrap());
+    assert_eq!(tx.search_vector(&axis(0), "m2", 10).await.unwrap().len(), 2);
+    assert!(tx.search_vector(&axis(0), "m1", 10).await.unwrap().is_empty());
+    // Done under m2: nothing more is taken for it.
+    assert!(!tx.add_chunks(&id, "m2", &[chunk(2)]).await.unwrap());
+    assert!(!tx.finish_chunks(&id, "m2", 2).await.unwrap());
+    tx.commit().await.unwrap();
+    let models: Vec<(String, i64)> = sqlx::query_as(
+        "select embedding_model, count(*) from document_chunks where document_id = $1 group by embedding_model",
+    )
+    .bind(id.as_str())
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(models, [("m2".to_owned(), 2)], "m1's set is gone");
+
+    // A pending document that fails drops what an interrupted run stored, and takes no more.
+    let failed = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    let mut tx = store.company(&s).await.unwrap();
+    tx.add_document(&failed, &v, &by).await.unwrap().unwrap();
+    assert!(tx.add_chunks(&failed, "m2", &[chunk(0)]).await.unwrap());
+    tx.record_failure(&failed, "checksum").await.unwrap();
+    assert!(tx.stored_chunks(&failed, "m2").await.unwrap().is_empty());
+    assert!(!tx.add_chunks(&failed, "m2", &[chunk(0)]).await.unwrap());
+    tx.commit().await.unwrap();
 }

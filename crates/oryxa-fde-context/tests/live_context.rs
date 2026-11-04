@@ -283,3 +283,149 @@ async fn search_finds_the_right_passage_in_its_own_company_only() {
     let visible = tx.search_text("refunds", 50).await.unwrap();
     assert!(visible.iter().all(|h| h.document == runbook));
 }
+
+/// The fake embedder under a chosen model name, counting what it embeds; with `fail_after`, it
+/// fails a call that would take it past that many texts, as Bedrock does mid-document.
+struct Scripted {
+    model: &'static str,
+    embedded: std::sync::atomic::AtomicUsize,
+    fail_after: Option<usize>,
+}
+
+impl Scripted {
+    fn new(model: &'static str, fail_after: Option<usize>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            model,
+            embedded: Default::default(),
+            fail_after,
+        })
+    }
+
+    fn embedded(&self) -> usize {
+        self.embedded.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+type EmbedFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>, oryxa_fde_context::ContextError>> + Send + 'a>,
+>;
+
+impl oryxa_fde_context::Embedder for Scripted {
+    fn model(&self) -> &str {
+        self.model
+    }
+
+    fn embed<'a>(&'a self, texts: &'a [oryxa_fde_store::Text]) -> EmbedFuture<'a> {
+        Box::pin(async move {
+            let before = self.embedded.load(std::sync::atomic::Ordering::SeqCst);
+            if self.fail_after.is_some_and(|n| before + texts.len() > n) {
+                return Err(oryxa_fde_context::ContextError::Embed("throttled".into()));
+            }
+            self.embedded
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|t| oryxa_fde_context::FakeEmbedder::vector(t.as_str()))
+                .collect())
+        })
+    }
+}
+
+fn with(ctx: &Context, embedder: &std::sync::Arc<Scripted>) -> Context {
+    Context {
+        blobs: ctx.blobs.clone(),
+        embedder: embedder.clone(),
+    }
+}
+
+/// Chunks stored for `document` under each model, read as the owner.
+async fn sets(document: &DocumentId) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "select embedding_model, count(*) from document_chunks where document_id = $1
+         group by embedding_model order by embedding_model",
+    )
+    .bind(document.as_str())
+    .fetch_all(&testing::admin().await)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres with pgvector (DATABASE_URL)"]
+async fn ingestion_resumes_where_it_stopped_and_re_embeds_for_a_new_model() {
+    use oryxa_fde_context::ingest::BATCH;
+    let store = testing::store().await;
+    let base = Context::fake();
+    let t = TenantId::new(new_id("org")).unwrap();
+    let s = company(&store, &t).await;
+    // Long enough for three batches: 200-word windows every 160 words.
+    let mut long = String::from("Refunds over 500 pounds need approval from the support lead. ");
+    for i in 0..11_000 {
+        long.push_str(&format!("w{i} "));
+    }
+    let doc = upload(&base, &store, &s, "handbook.md", ContentType::Markdown, long.as_bytes()).await;
+    let q = SearchQuery::new("who approves refunds over 500?").unwrap();
+
+    // Bedrock fails after the first batch: that batch is kept, and nothing is searchable yet.
+    let throttled = Scripted::new("fake-v1", Some(BATCH));
+    let ctx = with(&base, &throttled);
+    assert!(ingest(&ctx, &store, &s, &doc).await.is_err());
+    assert_eq!(sets(&doc).await, [("fake-v1".to_owned(), BATCH as i64)]);
+    let mut tx = store.company(&s).await.unwrap();
+    assert_eq!(
+        tx.document(&doc).await.unwrap().unwrap().status,
+        DocumentStatus::Pending
+    );
+    drop(tx);
+    let probe = with(&base, &Scripted::new("fake-v1", None));
+    assert!(search_company(&probe, &store, &s, &q, 5).await.unwrap().is_empty());
+
+    // The redelivery embeds only what is missing.
+    let v1 = Scripted::new("fake-v1", None);
+    let ctx = with(&base, &v1);
+    let Ingested::Chunks(n) = ingest(&ctx, &store, &s, &doc).await.unwrap() else {
+        panic!("not ingested");
+    };
+    assert!(n > 2 * BATCH, "{n} chunks");
+    assert_eq!(v1.embedded(), n - BATCH);
+    let mut tx = store.company(&s).await.unwrap();
+    let d = tx.document(&doc).await.unwrap().unwrap();
+    drop(tx);
+    assert_eq!(
+        (d.status, d.chunks as usize, d.embedding_model.as_deref()),
+        (DocumentStatus::Ingested, n, Some("fake-v1"))
+    );
+    assert_eq!(
+        search_company(&probe, &store, &s, &q, 5).await.unwrap()[0].document,
+        doc
+    );
+    assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Settled);
+    assert_eq!(v1.embedded(), n - BATCH, "a redelivery embeds nothing");
+
+    // A new model re-embeds it in full; the old set is gone once the new one is complete.
+    let v2 = Scripted::new("fake-v2", None);
+    let ctx = with(&base, &v2);
+    assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Chunks(n));
+    assert_eq!(v2.embedded(), n);
+    assert_eq!(sets(&doc).await, [("fake-v2".to_owned(), n as i64)]);
+    assert_eq!(search_company(&ctx, &store, &s, &q, 5).await.unwrap()[0].document, doc);
+    assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Settled);
+
+    // Stored chunks that are not this text (extraction changed between runs) are not resumed.
+    let other = upload(&base, &store, &s, "notes.md", ContentType::Markdown, RUNBOOK.as_bytes()).await;
+    let mut tx = store.company(&s).await.unwrap();
+    let stale = oryxa_fde_store::ChunkIn {
+        index: 0,
+        content: oryxa_fde_store::Text::new("an older extraction").unwrap(),
+        embedding: vec![0.5; 1024],
+    };
+    assert!(tx.add_chunks(&other, "fake-v2", &[stale]).await.unwrap());
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        ingest(&ctx, &store, &s, &other).await.unwrap(),
+        Ingested::Chunks(1)
+    ));
+    let mut tx = store.company(&s).await.unwrap();
+    let stored = tx.stored_chunks(&other, "fake-v2").await.unwrap();
+    assert!(stored[0].1.as_str().contains("Refunds over 500"), "{stored:?}");
+}

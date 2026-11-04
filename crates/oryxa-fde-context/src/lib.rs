@@ -57,7 +57,8 @@ impl Context {
     /// From the environment: `DOCUMENTS_BUCKET`, and `EMBEDDING_PROVIDER` (`bedrock`, the
     /// default, or `fake`) with `EMBEDDING_MODEL`.
     // ponytail: one embedding model per deployment from the environment; the layered org, company
-    // and project config does not exist yet. Chunks record their model, so a change re-embeds.
+    // and project config does not exist yet. A document ingested with another model is re-embedded
+    // when its `document.uploaded` is delivered again, but nothing replays those after a change yet.
     pub async fn from_env() -> Result<Self, ContextError> {
         let aws = aws_config::load_from_env().await;
         let bucket = std::env::var("DOCUMENTS_BUCKET").map_err(|_| ContextError::Config("DOCUMENTS_BUCKET".into()))?;
