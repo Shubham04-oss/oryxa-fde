@@ -1,5 +1,7 @@
+// @vitest-environment node
+import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
-import { securityHeaders, withSecurityHeaders } from "./security-headers"
+import { ASSET_POLICY, newNonce, securityHeaders, withSecurityHeaders } from "./security-headers"
 
 const page = "https://fde.example.test/"
 
@@ -14,7 +16,7 @@ function directives(policy: string): Record<string, Array<string>> {
 }
 
 describe("securityHeaders", () => {
-  const headers = securityHeaders(new URL(page))
+  const headers = securityHeaders(new URL(page), "bm9uY2U=")
 
   it("sets HSTS, nosniff, a referrer policy and frame protection", () => {
     expect(headers["Strict-Transport-Security"]).toBe("max-age=31536000; includeSubDomains")
@@ -27,7 +29,8 @@ describe("securityHeaders", () => {
     const policy = directives(headers["Content-Security-Policy"]!)
 
     expect(policy["default-src"]).toEqual(["'self'"])
-    expect(policy["script-src"]).toEqual(["'self'", "'unsafe-inline'"])
+    // Inline scripts run only with this response's nonce.
+    expect(policy["script-src"]).toEqual(["'self'", "'nonce-bm9uY2U='"])
     expect(policy["style-src"]).toEqual(["'self'", "'unsafe-inline'"])
     expect(policy["img-src"]).toEqual(["'self'", "data:"])
     expect(policy["font-src"]).toEqual(["'self'"])
@@ -41,6 +44,12 @@ describe("securityHeaders", () => {
     expect(headers["Content-Security-Policy"]).not.toContain("https:")
     // Enforced, not merely reported.
     expect(headers).not.toHaveProperty("Content-Security-Policy-Report-Only")
+  })
+
+  it("allows no inline script at all without a nonce", () => {
+    const policy = directives(securityHeaders(new URL(page))["Content-Security-Policy"]!)
+
+    expect(policy["script-src"]).toEqual(["'self'"])
   })
 
   it("names the page's own socket origin, whatever host and scheme serve it", () => {
@@ -57,6 +66,38 @@ describe("securityHeaders", () => {
     expect(plain["Strict-Transport-Security"]).toBeUndefined()
     expect(plain["X-Frame-Options"]).toBe("DENY")
     expect(plain["Content-Security-Policy"]).toBeDefined()
+  })
+})
+
+describe("newNonce", () => {
+  it("is 128 random bits in base64, new every time", () => {
+    const nonces = new Set(Array.from({ length: 50 }, newNonce))
+
+    expect(nonces.size).toBe(50)
+    for (const nonce of nonces) expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/)
+  })
+})
+
+describe("public/_headers", () => {
+  /** The headers the file sets on every static asset. */
+  function assetHeaders(): Record<string, string> {
+    const file = readFileSync(new URL("../public/_headers", import.meta.url), "utf8")
+    const lines = file.split("\n").filter((line) => line.trim() && !line.startsWith("#"))
+    expect(lines[0]).toBe("/*")
+    return Object.fromEntries(
+      lines.slice(1).map((line) => {
+        const at = line.indexOf(":")
+        return [line.slice(0, at).trim(), line.slice(at + 1).trim()]
+      }),
+    )
+  }
+
+  it("gives static assets the Worker's headers, with a policy that lets an asset do nothing", () => {
+    const { "Content-Security-Policy": pagePolicy, ...rest } = securityHeaders(new URL(page))
+
+    expect(pagePolicy).toBeDefined()
+    expect(assetHeaders()).toEqual({ ...rest, "Content-Security-Policy": ASSET_POLICY })
+    expect(directives(ASSET_POLICY)["default-src"]).toEqual(["'none'"])
   })
 })
 

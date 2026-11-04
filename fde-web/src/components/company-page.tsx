@@ -4,16 +4,16 @@ import { Avatar } from "./app-shell"
 import { ROLE_LABEL } from "./companies-home"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
 import { queries } from "@/lib/api/client"
-import type { CompanyId, Stakeholder } from "@/lib/api/schemas"
+import type { CompanyId, StakeholderPart } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 
-const PART_LABEL: Record<Stakeholder["part"], string> = {
+const PART_LABEL: Record<StakeholderPart, string> = {
   sponsor: "Sponsor",
   champion: "Champion",
-  decision_maker: "Decision maker",
+  user: "User",
+  it: "IT",
   security: "Security",
-  it_owner: "IT owner",
-  end_user: "End user",
+  other: "Other",
 }
 
 /** A company (DESIGN.md §3): its profile, stakeholders, systems and projects. */
@@ -42,12 +42,12 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
   return (
     <Page wide>
       <Card title="Profile">
-        <p className="text-xs leading-relaxed">{c.summary}</p>
-        <dl className="mt-3 grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
+        {c.summary && <p className="mb-3 text-xs leading-relaxed">{c.summary}</p>}
+        <dl className="grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
           {[
-            ["Industry", c.industry],
-            ["Region", c.region],
-            ["Your part", ROLE_LABEL[c.role]],
+            ["Industry", c.industry || "Not set"],
+            ["Region", c.region || "Not set"],
+            ["Your part", c.role ? ROLE_LABEL[c.role] : "Not a member"],
           ].map(([term, value]) => (
             <div key={term}>
               <dt className="text-[11px] text-muted-foreground">{term}</dt>
@@ -69,10 +69,10 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
                     <Avatar name={person.name} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs">{person.name}</p>
-                      <Quiet className="truncate">{person.title}</Quiet>
+                      {person.title && <Quiet className="truncate">{person.title}</Quiet>}
                     </div>
                     <span className="flex-none text-[11px] text-soft">
-                      {PART_LABEL[person.part]}
+                      {PART_LABEL[person.role]}
                     </span>
                   </div>
                 </Row>
@@ -90,9 +90,11 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
                 <Row key={system.id}>
                   <div className="flex items-baseline justify-between gap-3">
                     <p className="truncate text-xs">{system.name}</p>
-                    <span className="flex-none text-[11px] text-soft">{system.kind}</span>
+                    {system.kind && (
+                      <span className="flex-none text-[11px] text-soft">{system.kind}</span>
+                    )}
                   </div>
-                  <Quiet>{system.notes}</Quiet>
+                  {system.description && <Quiet>{system.description}</Quiet>}
                 </Row>
               ))}
             </Rows>

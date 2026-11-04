@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { QueryClientProvider } from "@tanstack/react-query"
 import {
   Outlet,
   RouterProvider,
@@ -7,21 +7,27 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router"
+import type { AnyRouter } from "@tanstack/react-router"
 import { render } from "@testing-library/react"
 import type { ReactNode } from "react"
 import { resetMockApi } from "@/dev/mock-api"
+import { createQueryClient } from "@/lib/session"
 
 /**
  * Renders `ui` at the address `at`, on fresh sample data and a fresh cache, in a router where
  * every path renders it. Links and navigation work, and `router.state.location` says where they
- * went, so a component is tested against the same mock API as `pnpm dev:mock`.
+ * went, so a component is tested against the same mock API as `pnpm dev:mock`. The query client
+ * is the app's own, so a 401 sends the test to sign-in as it would the app.
  */
 export function renderWithRouter(
   ui: ReactNode,
   { at = "/", signedIn = true }: { at?: string; signedIn?: boolean } = {},
 ) {
   resetMockApi({ signedIn })
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const current: { router?: AnyRouter } = {}
+  const queryClient = createQueryClient(() => current.router, {
+    defaultOptions: { queries: { retry: false } },
+  })
   const root = createRootRoute({
     component: () => (
       <>
@@ -38,6 +44,7 @@ export function renderWithRouter(
     routeTree,
     history: createMemoryHistory({ initialEntries: [at] }),
   })
+  current.router = router
   const view = render(
     <QueryClientProvider client={queryClient}>
       {/* The app registers its own route tree's type; this one accepts every path. */}

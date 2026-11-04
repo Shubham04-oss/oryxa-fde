@@ -127,7 +127,7 @@ export function Failed({
   )
 }
 
-/** A company or project that is not the FDE's, or does not exist: the API answers 404 for both. */
+/** A company or project that is not the FDE's, or does not exist: one answer for both. */
 export function NotFound({ what }: { what: "company" | "project" }) {
   return (
     <Page>
@@ -141,4 +141,6 @@ export function NotFound({ what }: { what: "company" | "project" }) {
   )
 }
 
-export const isNotFound = (error: unknown) => error instanceof ApiError && error.status === 404
+/** The API answers 403 for a company or project not the FDE's, and 404 for a missing record. */
+export const isNotFound = (error: unknown) =>
+  error instanceof ApiError && (error.status === 403 || error.status === 404)

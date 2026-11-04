@@ -103,10 +103,16 @@ jobs:
     defaults:
       run:
         working-directory: fde-web
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # setup-node's pnpm cache asks pnpm where its store is, so pnpm comes first, at the version package.json pins.
-      - run: npm install -g pnpm@12.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      # pnpm from corepack, at the version and sha512 package.json pins (`packageManager`), never a
+      # global install. setup-node's pnpm cache asks pnpm where its store is, so pnpm comes first.
+      - run: corepack enable
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -114,11 +120,20 @@ jobs:
           cache-dependency-path: fde-web/pnpm-lock.yaml
       # Lockfile-exact install; only the build scripts pnpm-workspace.yaml allows run.
       - run: pnpm install --frozen-lockfile
+      # The generated client must match the API's committed spec (crates/oryxa-fde-api/openapi.json).
+      - run: pnpm api:check
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm check
       - run: pnpm test
       - run: pnpm build
+      # The dev mock never ships: its marker must not be anywhere in the production build.
+      - name: No mock API in the build
+        run: |
+          if grep -rl "fde-dev-mock-api" dist; then
+            echo "::error::The dev mock API is in the production build (files above)."
+            exit 1
+          fi
 
   deny:
     runs-on: ubuntu-latest

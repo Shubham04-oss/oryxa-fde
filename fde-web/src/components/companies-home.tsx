@@ -7,10 +7,16 @@ import { STAGE_LABEL } from "@/lib/stage"
 import { localDay } from "@/lib/time"
 import { groupOf } from "@/lib/today"
 
-export const ROLE_LABEL: Record<CompanyRole, string> = { lead: "Lead", engineer: "Engineer" }
+export const ROLE_LABEL: Record<CompanyRole, string> = {
+  lead: "Lead",
+  engineer: "Engineer",
+  admin: "Organisation admin",
+}
+
+type Counts = { blocked: number; due: number; waiting: number }
 
 /** Today's counts for one company, in words, or null when nothing needs the FDE there. */
-function attention(counts: { blocked: number; due: number; waiting: number } | undefined) {
+function attention(counts: Counts | undefined) {
   if (!counts) return null
   const parts = [
     counts.blocked && `${counts.blocked} blocked`,
@@ -56,7 +62,7 @@ export function CompaniesHome() {
     )
 
   const day = localDay()
-  const counts = new Map<string, { blocked: number; due: number; waiting: number }>()
+  const counts = new Map<string, Counts>()
   for (const item of today.data?.items ?? []) {
     const group = groupOf(item, day)
     if (!group) continue
@@ -80,7 +86,9 @@ export function CompaniesHome() {
                 <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                   <span className="text-sm font-semibold">{company.name}</span>
                   <span className="text-[11px] text-muted-foreground">
-                    {company.industry} · {ROLE_LABEL[company.role]}
+                    {[company.industry, company.role && ROLE_LABEL[company.role]]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </span>
                 </span>
                 <span className="grid gap-1 text-xs">

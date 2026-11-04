@@ -16,10 +16,12 @@ describe("TodayView", () => {
   it("groups open work across companies into blocked, due and waiting on the customer", async () => {
     renderWithRouter(<TodayView />)
 
+    // Oldest first: a refusal from when it was refused, a blocked task from its last change.
     expect(await titles("Blocked")).toEqual([
-      "Access to Telematics export",
+      "Access: Telematics export",
       "Roll out to the north depot crews",
       "Agree the telematics alternative",
+      "Access: Crew roster export",
       "Staging credentials for the intake API",
     ])
     // Overdue first, then due today; not yet due and done tasks are left out.
@@ -31,13 +33,21 @@ describe("TodayView", () => {
       "Publish eval results to the customer room",
       "Monthly accuracy spot check",
     ])
-    const waiting = await titles("Waiting on the customer")
-    expect(waiting).toHaveLength(9)
-    expect(waiting[0]).toBe("Access to Clinic directory export")
-    expect(waiting).toContain("Dispatcher feedback session")
+    expect(await titles("Waiting on the customer")).toEqual([
+      "Access: Clinic directory export",
+      "Access: Mobile device management enrolment",
+      "Buyer review of week 3 forecasts",
+      "Access: Depot rules, read only",
+      "Access: Intake form API, staging",
+      "Dispatcher feedback session",
+      "Access: Redacted call recordings",
+      "Scope sign-off meeting",
+      "Interview the claims team lead",
+    ])
     expect(screen.queryByText("Load depot rules into the context pack")).toBeNull()
     expect(screen.queryByText("Set up the sandbox with sample orders")).toBeNull()
-    expect(screen.getByText(/^4 blocked, 6 due and 9 waiting on the customer, across 5/))
+    expect(screen.queryByText(/Read replica of the planning database/)).toBeNull()
+    expect(screen.getByText(/^5 blocked, 6 due and 9 waiting on the customer, across 5/))
   })
 
   it("files each item once, even when it is also late", async () => {
@@ -59,10 +69,15 @@ describe("TodayView", () => {
 
     const blocked = await screen.findByRole("region", { name: "Blocked" })
     expect(within(blocked).getByText("Denied by Tomas Becker")).toBeInTheDocument()
+    expect(within(blocked).getByText("Revoked by Ravi Desai")).toBeInTheDocument()
+    expect(
+      within(blocked).getByText("Telematics export refused by the customer's security team"),
+    ).toBeInTheDocument()
     const due = screen.getByRole("region", { name: "Due" })
     expect(within(due).getByText("Overdue by 3 days")).toBeInTheDocument()
     const waiting = screen.getByRole("region", { name: "Waiting on the customer" })
-    expect(within(waiting).getByText("Waiting 6 days on Priya Raman")).toBeInTheDocument()
+    expect(within(waiting).getByText("Waiting 11 days on Sana Qureshi")).toBeInTheDocument()
+    expect(within(waiting).getByText("Waiting 7 days")).toBeInTheDocument()
   })
 
   it("opens the project an item belongs to", async () => {

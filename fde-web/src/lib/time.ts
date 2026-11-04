@@ -1,10 +1,14 @@
-// Days are ISO dates (`2026-11-03`) in the FDE's own time zone; instants are ISO date-times.
+// Days are ISO dates (`2026-11-03`) in the FDE's own time zone; instants are the API's RFC 3339
+// date-times.
 
 /** Today's date where the browser is, as `YYYY-MM-DD`. */
 export function localDay(now = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0")
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
 }
+
+/** The day an instant falls on where the browser is. */
+export const dayOf = (instant: string) => localDay(new Date(instant))
 
 /** Whole days from `from` to `to`, both `YYYY-MM-DD`: negative when `to` is earlier. */
 export function daysBetween(from: string, to: string): number {
@@ -22,10 +26,10 @@ export function dueLabel(due: string, today: string): string {
   return `Due in ${plural(days, "day")}`
 }
 
-/** "Waiting 6 days on Priya Raman", or "Waiting since today on …". */
-export function waitingLabel(since: string, who: string, today: string): string {
-  const days = daysBetween(since, today)
-  return days <= 0 ? `Waiting since today on ${who}` : `Waiting ${plural(days, "day")} on ${who}`
+/** "Waiting 6 days on Priya Raman", "Waiting since today", from the API's day count. */
+export function waitingLabel(days: number, who: string | null): string {
+  const wait = days <= 0 ? "Waiting since today" : `Waiting ${plural(days, "day")}`
+  return who ? `${wait} on ${who}` : wait
 }
 
 /** "3 Nov 2026": a day, for things that last. */

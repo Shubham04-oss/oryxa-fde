@@ -3,13 +3,13 @@ import { useQuery } from "@tanstack/react-query"
 import { Building2, FolderKanban, Search } from "lucide-react"
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog"
 import { queries } from "@/lib/api/client"
-import type { CompanySummary, ProjectSummary } from "@/lib/api/schemas"
+import type { CompanySummary, ProjectSummaryOut } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { cn } from "@/lib/utils"
 
 export type SwitchTarget =
   | { kind: "company"; company: CompanySummary }
-  | { kind: "project"; company: CompanySummary; project: ProjectSummary }
+  | { kind: "project"; company: CompanySummary; project: ProjectSummaryOut }
 
 /** Every place Jump to can open: each company, then each of its projects. */
 export function switchTargets(companies: Array<CompanySummary>): Array<SwitchTarget> {
