@@ -97,8 +97,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD/schema:/schema" authzed/zed:v1.2.1 validate /schema/fde.validation.yaml
 
-  # The web app (fde-web/, TanStack Start on Cloudflare Workers), as the platform's web job. Never deploys.
-
   # Light: the web app (fde-web/, TanStack Start on Cloudflare Workers), always hosted (docs/ci.md). Never deploys.
   web:
     runs-on: ubuntu-latest
