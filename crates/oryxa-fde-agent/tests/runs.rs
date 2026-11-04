@@ -123,6 +123,8 @@ struct FakeSandbox {
     seen_lease: std::sync::atomic::AtomicU64,
     /// When each stop was asked for.
     stop_times: Mutex<Vec<std::time::Instant>>,
+    /// A command with this argument takes this long, as a slow clone or `git add` would.
+    slow: Option<(&'static str, Duration)>,
 }
 
 impl FakeSandbox {
@@ -144,6 +146,7 @@ impl FakeSandbox {
             harness_started: AtomicBool::new(false),
             seen_lease: std::sync::atomic::AtomicU64::new(0),
             stop_times: Mutex::default(),
+            slow: None,
         }
     }
 
@@ -211,9 +214,15 @@ impl Sandbox for FakeSandbox {
     async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
         self.fence(lease)?;
         let out = exec_output(&exec.argv);
-        let mut log = self.log.lock().unwrap();
-        log.calls.push(format!("exec {}", exec.argv[0]));
-        log.execs.push(exec.argv);
+        let slow = self.slow.filter(|(word, _)| exec.argv.iter().any(|a| a == word));
+        {
+            let mut log = self.log.lock().unwrap();
+            log.calls.push(format!("exec {}", exec.argv[0]));
+            log.execs.push(exec.argv);
+        }
+        if let Some((_, wait)) = slow {
+            tokio::time::sleep(wait).await;
+        }
         Ok(out)
     }
 
@@ -423,6 +432,8 @@ enum Fail {
     RenewalHangs,
     /// The store cannot be reached to renew the hold.
     RenewalErrs,
+    /// Renewing panics: the heartbeat dies without a word, and only the hold's own expiry is left to stop the run.
+    RenewalPanics,
 }
 
 impl<S: RunStore> RunStore for Failing<S> {
@@ -490,6 +501,7 @@ impl<S: RunStore> RunStore for Failing<S> {
             Fail::RenewalRefused => Ok(false),
             Fail::RenewalHangs => std::future::pending().await,
             Fail::RenewalErrs => Err(StoreError::Unavailable),
+            Fail::RenewalPanics => panic!("the heartbeat dies"),
             Fail::Approvals => self.0.renew_sandbox(scope, run, lease).await,
         }
     }
@@ -1290,6 +1302,59 @@ async fn a_run_whose_lease_passed_on_cannot_touch_the_next_runs_sandbox() {
         .unwrap()
         .unwrap();
     assert!(second > first);
+}
+
+/// A run whose heartbeat dies at its first renewal, with a short lease: the lease lapses with nothing to say so but
+/// its expiry, and the fake gateway refuses none of the run's calls (they carry the current generation). Only the
+/// run's own check before each call can stop them.
+fn lapsing(sandbox: FakeSandbox, lease: Duration) -> Arc<Runs<TestFailingStore>> {
+    Runs::new(
+        Failing(InMemoryRuns::default(), Fail::RenewalPanics),
+        sandbox,
+        FakeLive::default(),
+        context(),
+        access(),
+        RunsConfig { lease, ..config() },
+    )
+}
+
+#[tokio::test]
+async fn setup_stops_at_the_first_step_after_the_lease_lapses() {
+    // The clone outlasts the lease: the pack and the harness, the next steps, are never asked for.
+    let mut sandbox = FakeSandbox::new(vec![result(Outcome::Success)]);
+    sandbox.slow = Some(("clone", Duration::from_millis(400)));
+    let runs = lapsing(sandbox, Duration::from_millis(200));
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["failure"], "setup_failed", "{done}");
+    let calls = runs.sandbox.calls();
+    assert!(calls.contains(&"exec git".to_owned()), "{calls:?}");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("pack") || c.starts_with("harness")),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn delivery_stops_at_the_first_step_after_the_lease_lapses() {
+    // The harness finishes at once; staging the work outlasts the lease, so nothing after it runs: no commit, no
+    // push, no pull request.
+    let mut sandbox = FakeSandbox::new(vec![result(Outcome::Success)]);
+    sandbox.slow = Some(("add", Duration::from_millis(500)));
+    let runs = lapsing(sandbox, Duration::from_millis(300));
+    let app = api::router(runs.clone());
+    let run = create(&app).await;
+    let done = wait(&app, &run, ended).await;
+    assert_eq!(done["delivery"]["status"], "failed", "{done}");
+    let execs = runs.sandbox.log.lock().unwrap().execs.clone();
+    let staged = execs.iter().position(|a| a.contains(&"add".to_owned())).unwrap();
+    assert!(
+        execs[..staged].iter().any(|a| a.contains(&"checkout".to_owned())),
+        "{execs:?}"
+    );
+    assert_eq!(execs.len(), staged + 1, "nothing after staging: {:?}", &execs[staged..]);
+    assert!(runs.store.0.outbox()[0].outcome == RunOutcome::Failed);
 }
 
 #[tokio::test]
