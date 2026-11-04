@@ -18,3 +18,18 @@ Status: accepted, 3 November 2026.
 
 Customer data at rest stays in AWS. Fargate, not Lambda, because agent runs and live streams outlast
 Lambda's limits. The bus has no OpenTofu resource yet, so it is created by script, as in the platform.
+
+## Amendment, 4 November 2026: sandbox residency
+
+The sandbox gateway work (#5, #13) found that a Cloudflare Sandbox SDK 1.0 sandbox cannot be pinned
+to a region or jurisdiction: placement constraints exist only on the `default` scheduling policy,
+and the SDK requires the `durable_object` policy. Sandbox disk is also ephemeral.
+
+Decision:
+- Cloudflare sandboxes run on sample data only, as already required for P0. No customer data, and
+  nothing a customer's residency terms cover, enters them.
+- Work leaves a sandbox only by push to the project's Git or upload to S3 in AWS before it stops.
+  No R2 backups.
+- Work on real or region-bound data runs on the runner in the customer's cloud (P1), never in a
+  Cloudflare sandbox.
+- Revisit when the Sandbox SDK supports placement constraints.
