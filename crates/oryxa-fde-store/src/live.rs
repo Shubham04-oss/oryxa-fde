@@ -4,6 +4,8 @@
 //! Each test uses fresh tenant ids, so runs never see each other's rows. The store connects as a
 //! fresh runtime login (`testing::store`); `DATABASE_URL`'s login is the owner (`testing::admin`).
 
+use std::time::Duration;
+
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
@@ -1316,4 +1318,32 @@ async fn row_level_security_covers_documents_and_chunks() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_patch_reads_its_row_locked_so_concurrent_changes_are_not_lost() {
+    let store = store().await;
+    let c = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &c).await;
+    let mut first = store.company(&c).await.unwrap();
+    first.get_for_update().await.unwrap().unwrap();
+    // A second read-modify-write waits for the first to finish.
+    let second = {
+        let (store, c) = (store.clone(), c.clone());
+        tokio::spawn(async move {
+            let mut tx = store.company(&c).await.unwrap();
+            let current = tx.get_for_update().await.unwrap().unwrap();
+            tx.commit().await.unwrap();
+            current.name
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!second.is_finished(), "the second PATCH waits for the first");
+    let mut v = CompanyIn::from(first.get().await.unwrap().unwrap());
+    v.name = Name::new("Renamed").unwrap();
+    first.update(&v, &actor("alice")).await.unwrap();
+    first.commit().await.unwrap();
+    // It then reads the first PATCH's result, not the row as it was before.
+    assert_eq!(second.await.unwrap().as_str(), "Renamed");
 }

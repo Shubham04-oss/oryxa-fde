@@ -164,7 +164,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/companies": {
@@ -3673,6 +3678,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -4912,12 +4927,21 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "WorkOS access token"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-fde_session",
+        "description": "The browser session from /auth/callback. A request carrying it, and no bearer token, that is not GET or HEAD must also send `X-Oryxa-Request: 1` and the web app's `Origin`, or it gets 403 {\"error\":\"csrf\"}."
       }
     }
   },
   "security": [
     {
       "bearer": []
+    },
+    {
+      "session": []
     }
   ],
   "tags": [

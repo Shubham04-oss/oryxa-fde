@@ -140,6 +140,24 @@ impl App {
         })
     }
 
+    /// Whether `other`, a user of the caller's tenant, works on the project. User objects are
+    /// per tenant, so a user of another tenant never does.
+    pub(crate) async fn works_on(&self, who: &Principal, other: &UserId, s: &ProjectScope) -> Result<bool, ApiError> {
+        let item = CheckItem {
+            resource: project(s),
+            permission: "work",
+            subject: user(&who.tenant, other),
+            context: None,
+        };
+        match self.authz.check(&who.tenant, &item, &CONSISTENCY).await {
+            Ok(d) => Ok(d.allowed()),
+            Err(e) => {
+                tracing::error!(error = %e, "authz check failed");
+                Err(ApiError::Unavailable)
+            }
+        }
+    }
+
     /// The projects the caller can work on, from SpiceDB: through a company or as an assignee.
     pub(crate) async fn projects_for(&self, who: &Principal) -> Result<Vec<ProjectId>, ApiError> {
         let ids = self

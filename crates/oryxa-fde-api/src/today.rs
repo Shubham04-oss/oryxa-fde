@@ -70,7 +70,7 @@ impl From<TodayItem> for TodayItemOut {
 
 /// What needs the caller across their projects: open tasks and unsettled access requests.
 #[utoipa::path(get, operation_id = "get_today", path = "/v1/today", tag = "projects",
-    responses((status = 200, body = TodayOut), (status = 401, body = ErrorBody)))]
+    responses((status = 200, body = TodayOut), (status = 401, body = ErrorBody), (status = 503, body = ErrorBody)))]
 pub(crate) async fn today(State(app): State<Arc<App>>, who: Principal) -> Result<Json<TodayOut>, ApiError> {
     let projects = app.projects_for(&who).await?;
     let scopes = app.store.project_scopes(&who.tenant, &projects).await?;

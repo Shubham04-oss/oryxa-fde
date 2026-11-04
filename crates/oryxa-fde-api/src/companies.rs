@@ -266,7 +266,7 @@ pub(crate) async fn update(
     let scope = who.company(id);
     app.require(&who, company(&scope), "manage").await?;
     let mut tx = app.store.company(&scope).await?;
-    let current = tx.get().await?.ok_or(ApiError::NotFound)?;
+    let current = tx.get_for_update().await?.ok_or(ApiError::NotFound)?;
     let v = body.apply(current)?;
     let updated = tx.update(&v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;

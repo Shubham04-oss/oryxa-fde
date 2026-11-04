@@ -114,9 +114,19 @@ impl ProjectTx {
     }
 
     pub async fn get(&mut self) -> Result<Option<Project>, StoreError> {
+        self.read("").await
+    }
+
+    /// The project, locked until this transaction ends: for a read-modify-write such as a PATCH,
+    /// so a concurrent change is not lost.
+    pub async fn get_for_update(&mut self) -> Result<Option<Project>, StoreError> {
+        self.read("for update").await
+    }
+
+    async fn read(&mut self, lock: &'static str) -> Result<Option<Project>, StoreError> {
         let s = &self.scope;
         sqlx::query(&format!(
-            "select {COLUMNS} from projects where tenant_id = $1 and company_id = $2 and project_id = $3"
+            "select {COLUMNS} from projects where tenant_id = $1 and company_id = $2 and project_id = $3 {lock}"
         ))
         .bind(s.company.tenant.as_str())
         .bind(s.company.company.as_str())

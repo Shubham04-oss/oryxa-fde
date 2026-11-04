@@ -9,7 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_core::UserId;
 use oryxa_fde_core::{
-    AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, ScopeItemId, Stage, StakeholderId, SystemId, TaskId,
+    AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, ProjectScope, ScopeItemId, Stage, StakeholderId,
+    SystemId, TaskId,
 };
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
@@ -25,6 +26,15 @@ use crate::authz::project;
 use crate::projects::{ProjectOut, ProjectStage};
 use crate::records::{name, new, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
+
+/// A task's assignee must work on its project: a user of another tenant, or of this one with no
+/// access to the project, is refused.
+async fn check_assignee(app: &App, who: &Principal, s: &ProjectScope, v: &TaskIn) -> Result<(), ApiError> {
+    match &v.assignee {
+        Some(a) if !app.works_on(who, a, s).await? => Err(ApiError::Invalid("assignee")),
+        _ => Ok(()),
+    }
+}
 
 pub(crate) async fn project_tx(app: &App, who: &Principal, c: CompanyId, p: ProjectId) -> Result<ProjectTx, ApiError> {
     let s = who.company(c).project(p);
@@ -735,6 +745,7 @@ pub(crate) async fn add_task(
 ) -> Result<(StatusCode, Json<TaskOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
     let v = body.parse()?;
+    check_assignee(&app, &who, tx.scope(), &v).await?;
     let id = new("tsk", TaskId::new)?;
     let added = tx.add_task(&id, &v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
@@ -755,6 +766,7 @@ pub(crate) async fn update_task(
 ) -> Result<Json<TaskOut>, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
     let v = body.parse()?;
+    check_assignee(&app, &who, tx.scope(), &v).await?;
     let updated = tx.update_task(&id, &v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok(Json(updated.into()))

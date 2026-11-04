@@ -77,7 +77,10 @@ pub fn token_for(org: Option<&str>, user: &str, role: &str, secs: i64) -> String
 pub struct FakeAuthKit {
     /// (organization, user, role) the next code exchange signs in.
     pub who: std::sync::Mutex<(Option<String>, String, String)>,
+    /// The next refreshes fail for good (`invalid_grant`).
     pub refresh_fails: std::sync::atomic::AtomicBool,
+    /// The next refreshes fail for now (WorkOS down).
+    pub refresh_unavailable: std::sync::atomic::AtomicBool,
     pub revoked: std::sync::Mutex<Vec<String>>,
     challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
@@ -118,14 +121,18 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
         &'a self,
         refresh_token: &'a str,
         organisation: &'a str,
-    ) -> Fut<'a, Result<oryxa_fde_api::Tokens, String>> {
+    ) -> Fut<'a, Result<oryxa_fde_api::Tokens, oryxa_fde_api::RefreshError>> {
         Box::pin(async move {
+            use oryxa_fde_api::RefreshError;
             if self.refresh_fails.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("refresh token revoked".into());
+                return Err(RefreshError::Refused("invalid_grant".into()));
+            }
+            if self.refresh_unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(RefreshError::Unavailable("503 from WorkOS".into()));
             }
             let parts: Vec<&str> = refresh_token.split('|').collect();
             let [_, org, user, role] = parts[..] else {
-                return Err("bad refresh token".into());
+                return Err(RefreshError::Refused("bad refresh token".into()));
             };
             assert_eq!(org, organisation, "refresh names the session's organisation");
             Ok(oryxa_fde_api::Tokens {

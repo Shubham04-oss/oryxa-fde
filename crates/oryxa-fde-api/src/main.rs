@@ -5,7 +5,8 @@
 //! Bedrock (`EMBEDDING_*`).
 //!
 //! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
-//! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie.
+//! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; while the key rotates,
+//! `SESSION_PASSWORD_PREVIOUS` holds the old one, still read.
 //!
 //! `DATABASE_URL` is the runtime login, which owns nothing; the store refuses any other. Migrations
 //! run before a deploy as a one-off task (`oryxa-fde-ops migrate`) with the owner's login.
@@ -48,11 +49,14 @@ async fn main() -> Result<(), Error> {
         .build();
     let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
     let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
-    let sign_in = SignIn::new(
+    let mut sign_in = SignIn::new(
         env("WEB_ORIGIN")?,
         env("SESSION_PASSWORD")?,
         Arc::new(WorkOsAuthKit(workos.clone())),
     )?;
+    if let Ok(previous) = std::env::var("SESSION_PASSWORD_PREVIOUS") {
+        sign_in = sign_in.with_previous_password(previous)?;
+    }
 
     let signer = Signer::from_pkcs8_pem(env("EVENT_SIGNING_KID")?, &env("EVENT_SIGNING_KEY")?)?;
     let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
