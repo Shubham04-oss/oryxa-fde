@@ -5,7 +5,13 @@
   "name": "oryxa-fde-web",
   "compatibility_date": "2026-09-15",
   "compatibility_flags": ["nodejs_compat"],
-  // Serves the app and sets the security headers on every answer.
+  // Serves the app, forwards /api/* and /auth/* to the FDE API, and sets the security headers on
+  // every answer. Static assets get theirs from public/_headers.
   "main": "src/server.ts",
+  "vars": {
+    // `pnpm dev` against a local oryxa-fde-api. A production build ignores it: there the Worker
+    // reaches the API only through an `API` binding in `vpc_services` (infra `api_vpc_service_id`).
+    "API_URL": "http://localhost:8080",
+  },
   "observability": { "enabled": true },
 }

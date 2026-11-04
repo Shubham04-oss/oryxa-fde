@@ -1,10 +1,9 @@
 import type { TodayItem } from "./api/schemas"
 
-export type TodayGroup = "blocked" | "due" | "waiting"
+export type TodayGroup = "blocked" | "waiting"
 
 export const TODAY_GROUPS: Array<{ key: TodayGroup; title: string; empty: string }> = [
   { key: "blocked", title: "Blocked", empty: "Nothing is blocked." },
-  { key: "due", title: "Due", empty: "Nothing is due today." },
   {
     key: "waiting",
     title: "Waiting on the customer",
@@ -14,39 +13,34 @@ export const TODAY_GROUPS: Array<{ key: TodayGroup; title: string; empty: string
 
 /**
  * Where an open item belongs on Today, or null when it does not need the FDE today. Each item
- * lands in one group: blocked first, then waiting on the customer, then due (today or overdue).
+ * lands in one group: refused or stuck work is blocked, the customer's move is waiting.
  */
-export function groupOf(item: TodayItem, today: string): TodayGroup | null {
+export function groupOf(item: TodayItem): TodayGroup | null {
   if (item.kind === "access_request") {
     const { status } = item.access
-    if (status === "denied") return "blocked"
-    return status === "requested" || status === "in_review" ? "waiting" : null
+    if (status === "denied" || status === "revoked") return "blocked"
+    return status === "requested" || status === "in_progress" ? "waiting" : null
   }
-  const { status, due } = item.task
-  if (status === "done") return null
+  const { status } = item.task
   if (status === "blocked") return "blocked"
-  if (status === "waiting_on_customer") return "waiting"
-  return due !== null && due <= today ? "due" : null
+  return status === "waiting_on_customer" ? "waiting" : null
 }
 
-/** The day an item became urgent: the day a wait began, or the due date. Earliest sorts first. */
-function since(item: TodayItem): string {
-  if (item.kind === "access_request") return item.access.requested_on
-  const { status, due, waiting_since } = item.task
-  const day = status === "waiting_on_customer" ? (waiting_since ?? due) : due
-  return day ?? "9999-12-31"
+/** When an item started needing the FDE: an open request's ask, else its last change. */
+function since(item: TodayItem): number {
+  if (item.kind === "task") return Date.parse(item.task.updated_at)
+  const { access } = item
+  const open = access.status === "requested" || access.status === "in_progress"
+  return Date.parse(open ? access.requested_at : access.status_changed_at)
 }
 
-/** The Today view: open items grouped, oldest first in each group, so overdue work leads. */
-export function groupToday(
-  items: Array<TodayItem>,
-  today: string,
-): Record<TodayGroup, Array<TodayItem>> {
-  const groups: Record<TodayGroup, Array<TodayItem>> = { blocked: [], due: [], waiting: [] }
+/** The Today view: open items grouped, oldest first in each group, so the longest wait leads. */
+export function groupToday(items: Array<TodayItem>): Record<TodayGroup, Array<TodayItem>> {
+  const groups: Record<TodayGroup, Array<TodayItem>> = { blocked: [], waiting: [] }
   for (const item of items) {
-    const group = groupOf(item, today)
+    const group = groupOf(item)
     if (group) groups[group].push(item)
   }
-  for (const list of Object.values(groups)) list.sort((a, b) => since(a).localeCompare(since(b)))
+  for (const list of Object.values(groups)) list.sort((a, b) => since(a) - since(b))
   return groups
 }

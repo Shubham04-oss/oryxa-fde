@@ -4,17 +4,17 @@ import { Failed, Loading, Page, Quiet, Status } from "./page"
 import { queries } from "@/lib/api/client"
 import type { CompanyRole } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
-import { localDay } from "@/lib/time"
 import { groupOf } from "@/lib/today"
 
 export const ROLE_LABEL: Record<CompanyRole, string> = { lead: "Lead", engineer: "Engineer" }
 
+type Counts = { blocked: number; waiting: number }
+
 /** Today's counts for one company, in words, or null when nothing needs the FDE there. */
-function attention(counts: { blocked: number; due: number; waiting: number } | undefined) {
+function attention(counts: Counts | undefined) {
   if (!counts) return null
   const parts = [
     counts.blocked && `${counts.blocked} blocked`,
-    counts.due && `${counts.due} due`,
     counts.waiting && `${counts.waiting} waiting`,
   ].filter(Boolean)
   return parts.length ? { text: parts.join(" · "), urgent: counts.blocked > 0 } : null
@@ -55,12 +55,11 @@ export function CompaniesHome() {
       </Page>
     )
 
-  const day = localDay()
-  const counts = new Map<string, { blocked: number; due: number; waiting: number }>()
+  const counts = new Map<string, Counts>()
   for (const item of today.data?.items ?? []) {
-    const group = groupOf(item, day)
+    const group = groupOf(item)
     if (!group) continue
-    const c = counts.get(item.company.id) ?? { blocked: 0, due: 0, waiting: 0 }
+    const c = counts.get(item.company.id) ?? { blocked: 0, waiting: 0 }
     c[group] += 1
     counts.set(item.company.id, c)
   }
@@ -79,9 +78,11 @@ export function CompaniesHome() {
               >
                 <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                   <span className="text-sm font-semibold">{company.name}</span>
-                  <span className="text-[11px] text-muted-foreground">
-                    {company.industry} · {ROLE_LABEL[company.role]}
-                  </span>
+                  {company.role && (
+                    <span className="text-[11px] text-muted-foreground">
+                      {ROLE_LABEL[company.role]}
+                    </span>
+                  )}
                 </span>
                 <span className="grid gap-1 text-xs">
                   {company.projects.length === 0 && (

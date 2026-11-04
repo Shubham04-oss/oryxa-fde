@@ -4,17 +4,9 @@ import { Avatar } from "./app-shell"
 import { ROLE_LABEL } from "./companies-home"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
 import { queries } from "@/lib/api/client"
-import type { CompanyId, Stakeholder } from "@/lib/api/schemas"
+import type { CompanyId } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
-
-const PART_LABEL: Record<Stakeholder["part"], string> = {
-  sponsor: "Sponsor",
-  champion: "Champion",
-  decision_maker: "Decision maker",
-  security: "Security",
-  it_owner: "IT owner",
-  end_user: "End user",
-}
+import { dayOf, shortDate } from "@/lib/time"
 
 /** A company (DESIGN.md §3): its profile, stakeholders, systems and projects. */
 export function CompanyPage({ companyId }: { companyId: CompanyId }) {
@@ -42,12 +34,11 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
   return (
     <Page wide>
       <Card title="Profile">
-        <p className="text-xs leading-relaxed">{c.summary}</p>
-        <dl className="mt-3 grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
+        <dl className="grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
           {[
-            ["Industry", c.industry],
-            ["Region", c.region],
-            ["Your part", ROLE_LABEL[c.role]],
+            ["Your part", c.role ? ROLE_LABEL[c.role] : "Not a member"],
+            ["Projects", String(c.projects.length)],
+            ["Added", shortDate(dayOf(c.created_at))],
           ].map(([term, value]) => (
             <div key={term}>
               <dt className="text-[11px] text-muted-foreground">{term}</dt>
@@ -69,11 +60,8 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
                     <Avatar name={person.name} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs">{person.name}</p>
-                      <Quiet className="truncate">{person.title}</Quiet>
+                      {person.title && <Quiet className="truncate">{person.title}</Quiet>}
                     </div>
-                    <span className="flex-none text-[11px] text-soft">
-                      {PART_LABEL[person.part]}
-                    </span>
                   </div>
                 </Row>
               ))}
@@ -88,11 +76,8 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
             <Rows>
               {c.systems.map((system) => (
                 <Row key={system.id}>
-                  <div className="flex items-baseline justify-between gap-3">
-                    <p className="truncate text-xs">{system.name}</p>
-                    <span className="flex-none text-[11px] text-soft">{system.kind}</span>
-                  </div>
-                  <Quiet>{system.notes}</Quiet>
+                  <p className="truncate text-xs">{system.name}</p>
+                  {system.description && <Quiet>{system.description}</Quiet>}
                 </Row>
               ))}
             </Rows>

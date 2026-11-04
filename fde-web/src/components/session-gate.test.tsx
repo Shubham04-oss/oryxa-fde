@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it } from "vitest"
 import { SessionGate } from "./session-gate"
+import { resetMockApi } from "@/dev/mock-api"
 import { renderWithRouter } from "@/test/render"
 
 describe("SessionGate", () => {
@@ -34,6 +35,24 @@ describe("SessionGate", () => {
     expect(router.state.location.search).toEqual({ return_to: "/companies/cmp_lumen?tab=x" })
     expect(moves).toBe(1)
     expect(screen.queryByText("Canvas")).toBeNull()
+  })
+
+  it("sends a session that ends mid-visit to sign-in, back to where the FDE is at that moment", async () => {
+    const { router, queryClient } = renderWithRouter(
+      <SessionGate>
+        <p>Canvas</p>
+      </SessionGate>,
+      { at: "/today" },
+    )
+    await screen.findByText("Canvas")
+    await router.navigate({ to: "/companies/cmp_lumen?tab=x" as never })
+
+    resetMockApi({ signedIn: false })
+    // Any read, not only "who am I": the sidebar's companies.
+    await queryClient.refetchQueries({ queryKey: ["companies"], exact: true })
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/sign-in"))
+    expect(router.state.location.search).toEqual({ return_to: "/companies/cmp_lumen?tab=x" })
   })
 
   it("signs out to sign-in and forgets the session's reads", async () => {

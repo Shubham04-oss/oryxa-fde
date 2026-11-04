@@ -1,5 +1,11 @@
 import type { QueryClient } from "@tanstack/react-query"
-import { HeadContent, Link, Scripts, createRootRouteWithContext } from "@tanstack/react-router"
+import {
+  HeadContent,
+  Link,
+  ScriptOnce,
+  Scripts,
+  createRootRouteWithContext,
+} from "@tanstack/react-router"
 import { themeBootScript } from "@/lib/theme"
 import appCss from "../styles.css?url"
 
@@ -28,7 +34,8 @@ function RootDocument({ children }: { children: React.ReactNode }) {
     // The boot script may set data-theme before React hydrates, so the attribute can differ.
     <html lang="en" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />
+        {/* Server-rendered with the request's CSP nonce; it runs before paint and removes itself. */}
+        <ScriptOnce>{themeBootScript}</ScriptOnce>
         <HeadContent />
       </head>
       <body>

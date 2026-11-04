@@ -1,93 +1,74 @@
 import { describe, expect, it } from "vitest"
-import type { Task } from "./api/schemas"
-import { CompanyId, ProjectId, TaskId, TodayItem } from "./api/schemas"
+import type { AccessRequestOut, AccessState, TaskOut, TaskState, TodayItem } from "./api/schemas"
+import { AccessRequestOut as Access, CompanyId, ProjectId, TaskOut as Task } from "./api/schemas"
 import { groupOf, groupToday } from "./today"
 
-const TODAY = "2026-11-03"
 const where = {
   company: { id: CompanyId.parse("cmp_1"), name: "Kestrel Freight" },
   project: { id: ProjectId.parse("prj_1"), name: "Dispatch copilot" },
 }
+const day = (n: number) => `2026-11-${String(n).padStart(2, "0")}T09:00:00Z`
 
-function task(id: string, fields: Partial<Task>): TodayItem {
-  return {
-    kind: "task",
-    ...where,
-    task: {
-      id: TaskId.parse(id),
-      title: id,
-      status: "todo",
-      due: null,
-      assignee: null,
-      blocker: null,
-      waiting_on: null,
-      waiting_since: null,
-      ...fields,
-    },
-  }
+function task(id: string, status: TaskState, updated = 1): TodayItem {
+  const t: TaskOut = Task.parse({
+    id,
+    title: id,
+    status,
+    created_at: day(1),
+    updated_at: day(updated),
+  })
+  return { kind: "task", task: t, ...where }
 }
 
-function access(id: string, status: "requested" | "in_review" | "granted" | "denied", on: string) {
-  return TodayItem.parse({
-    kind: "access_request",
-    ...where,
-    access: { id, system: id, owner: "Tomas Becker", status, requested_on: on },
+function access(id: string, status: AccessState, asked: number, changed = asked): TodayItem {
+  const a: AccessRequestOut = Access.parse({
+    id,
+    description: id,
+    status,
+    requested_at: day(asked),
+    status_changed_at: day(changed),
+    days_waiting: 0,
   })
+  return { kind: "access_request", access: a, owner: null, ...where }
 }
 
 describe("groupOf", () => {
-  it("puts blocked tasks and denied access under Blocked", () => {
-    expect(groupOf(task("t", { status: "blocked" }), TODAY)).toBe("blocked")
-    expect(groupOf(access("a", "denied", "2026-10-01"), TODAY)).toBe("blocked")
+  it("puts blocked tasks and refused access under Blocked", () => {
+    expect(groupOf(task("t", "blocked"))).toBe("blocked")
+    expect(groupOf(access("a", "denied", 1))).toBe("blocked")
+    expect(groupOf(access("a", "revoked", 1))).toBe("blocked")
   })
 
   it("puts tasks waiting on the customer and open access requests under Waiting", () => {
-    expect(groupOf(task("t", { status: "waiting_on_customer" }), TODAY)).toBe("waiting")
-    expect(groupOf(access("a", "requested", "2026-10-01"), TODAY)).toBe("waiting")
-    expect(groupOf(access("a", "in_review", "2026-10-01"), TODAY)).toBe("waiting")
-  })
-
-  it("puts open tasks due today or earlier under Due", () => {
-    expect(groupOf(task("t", { due: TODAY }), TODAY)).toBe("due")
-    expect(groupOf(task("t", { status: "in_progress", due: "2026-10-30" }), TODAY)).toBe("due")
+    expect(groupOf(task("t", "waiting_on_customer"))).toBe("waiting")
+    expect(groupOf(access("a", "requested", 1))).toBe("waiting")
+    expect(groupOf(access("a", "in_progress", 1))).toBe("waiting")
   })
 
   it("leaves out what does not need the FDE today", () => {
-    expect(groupOf(task("t", { due: "2026-11-04" }), TODAY)).toBeNull()
-    expect(groupOf(task("t", { due: null }), TODAY)).toBeNull()
-    expect(groupOf(task("t", { status: "done", due: "2026-10-01" }), TODAY)).toBeNull()
-    expect(groupOf(access("a", "granted", "2026-10-01"), TODAY)).toBeNull()
-  })
-
-  it("files a late task once: blocked or waiting wins over due", () => {
-    expect(groupOf(task("t", { status: "blocked", due: "2026-10-01" }), TODAY)).toBe("blocked")
-    expect(groupOf(task("t", { status: "waiting_on_customer", due: "2026-10-01" }), TODAY)).toBe(
-      "waiting",
-    )
+    for (const status of ["todo", "in_progress", "done"] as const)
+      expect(groupOf(task("t", status)), status).toBeNull()
+    expect(groupOf(access("a", "granted", 1))).toBeNull()
   })
 })
 
 describe("groupToday", () => {
-  it("sorts each group oldest first, so the latest work leads", () => {
-    const groups = groupToday(
-      [
-        task("due_today", { due: TODAY }),
-        task("overdue_3", { due: "2026-10-31" }),
-        task("overdue_1", { due: "2026-11-02" }),
-        task("waited_2", { status: "waiting_on_customer", waiting_since: "2026-11-01" }),
-        access("waited_9", "requested", "2026-10-25"),
-      ],
-      TODAY,
-    )
+  it("sorts each group oldest first, so the longest wait leads", () => {
+    const groups = groupToday([
+      task("blocked_3", "blocked", 3),
+      access("denied_on_2", "denied", 1, 2),
+      task("waited_since_4", "waiting_on_customer", 4),
+      access("asked_on_1", "requested", 1, 5),
+    ])
     const ids = (items: Array<TodayItem>) =>
       items.map((item) => (item.kind === "task" ? item.task.id : item.access.id))
 
-    expect(ids(groups.due)).toEqual(["overdue_3", "overdue_1", "due_today"])
-    expect(ids(groups.waiting)).toEqual(["waited_9", "waited_2"])
-    expect(groups.blocked).toEqual([])
+    // A refusal counts from when it was refused; an open request from when it was asked.
+    expect(ids(groups.blocked)).toEqual(["denied_on_2", "blocked_3"])
+    expect(ids(groups.waiting)).toEqual(["asked_on_1", "waited_since_4"])
   })
 
   it("is empty when nothing is open", () => {
-    expect(groupToday([], TODAY)).toEqual({ blocked: [], due: [], waiting: [] })
+    expect(groupToday([])).toEqual({ blocked: [], waiting: [] })
   })
 })

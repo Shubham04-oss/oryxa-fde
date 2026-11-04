@@ -7,14 +7,14 @@ family of products. When a decision changes, update this file in the same PR.
 
 ## What differs from the platform
 
-| Platform web                                       | FDE web                                                                        | Why                                                                    |
-| -------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| Green and red are the only colours                 | Adds `--attention` (amber) for blocked, overdue, failing and denied            | An FDE scans for what is stuck; red stays for errors only              |
-| The center is driven by `?view=`                   | Real routes: `/`, `/today`, `/companies/<id>`, `/companies/<id>/projects/<id>` | Companies and projects are things people link to and share             |
-| New chat, Requests, Knowledge, Tools               | Jump to, Today, Companies, and the FDE's companies                             | The FDE moves between customers, not conversations                     |
-| Screens in plain CSS per component                 | The shell in `src/shell.css`; screens in Tailwind utilities on the same tokens | Less CSS to keep in step; one place for the shell                      |
-| The gateway mock answers HTTP routes in the Worker | The mock is a `Transport` behind `src/lib/api/client.ts`                       | The API's routes are not defined yet; the seam is the client, not URLs |
-| A pixel cyclone on sign-in                         | The eight stages, fading in                                                    | The product's own shape                                                |
+| Platform web                                       | FDE web                                                                          | Why                                                                    |
+| -------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Green and red are the only colours                 | Adds `--attention` (amber) for blocked, overdue, failing and denied              | An FDE scans for what is stuck; red stays for errors only              |
+| The center is driven by `?view=`                   | Real routes: `/`, `/today`, `/companies/<id>`, `/companies/<id>/projects/<id>`   | Companies and projects are things people link to and share             |
+| New chat, Requests, Knowledge, Tools               | Jump to, Today, Companies, and the FDE's companies                               | The FDE moves between customers, not conversations                     |
+| Screens in plain CSS per component                 | The shell in `src/shell.css`; screens in Tailwind utilities on the same tokens   | Less CSS to keep in step; one place for the shell                      |
+| The gateway mock answers HTTP routes in the Worker | The mock answers the API's routes in the browser, behind `src/lib/api/client.ts` | `dev:mock` needs no Worker or API; the spec's types keep the mock true |
+| A pixel cyclone on sign-in                         | The eight stages, fading in                                                      | The product's own shape                                                |
 
 ## 1. Colour
 
@@ -68,18 +68,22 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 ## 3. Screens
 
 - **Sign-in.** The one expressive screen: the full canvas, a compact card inset right, and the
-  eight stages beside it, each a little stronger than the last. On the mock it says that no
-  account is checked.
-- **Companies (home).** Two cards per row (one below 960px): name, industry and the FDE's part
-  (Lead or Engineer), each project with its stage, and what needs the FDE there today.
-- **Today.** Three cards in a 880px column: **Blocked** (blocked tasks, denied access), **Due**
-  (open tasks due today or overdue, oldest first) and **Waiting on the customer** (tasks waiting
-  on a customer person, open access requests, longest wait first). Each item appears once:
-  blocked wins over waiting, waiting over due. Each row says why it is there.
-- **Company.** Profile, then Stakeholders and Systems side by side (stacked below 960px), then
-  Projects.
-- **Project.** The company link, the summary, the stage bar, Scope (with sign-off) beside Success
-  criteria, then Access, Tasks and Decisions.
+  eight stages beside it, each a little stronger than the last. Continue goes to AuthKit's hosted
+  page through the API (`/auth/login`), which brings the FDE back to where they were. On the mock
+  it says that no account is checked.
+- **Companies (home).** Two cards per row (one below 960px): name and the FDE's part (Lead or
+  Engineer, when they are a member), each project with its stage, and what needs the FDE there
+  today.
+- **Today.** Two cards in a 880px column: **Blocked** (blocked tasks, denied or revoked access)
+  and **Waiting on the customer** (tasks waiting on the customer, open access requests), oldest
+  first in each. Each item appears once, and each row says why it is there: the blocker, who
+  refused, how long a request has waited and on whom. There is no Due card until tasks have due
+  dates in the API.
+- **Company.** Profile (the FDE's part, the project count, when it was added), then Stakeholders
+  and Systems side by side (stacked below 960px), then Projects.
+- **Project.** The company link, the stage bar, Scope beside Success criteria (each with its
+  target), then Access, Tasks and Decisions. Scope says whether it is signed off, changed since
+  sign-off, or not signed off. Access names the system and owner from the company's records.
 - **The stage bar.** Eight steps; done steps in `--text-soft`, the current one in `--text`, later
   ones in `--border-quiet`. Only the moves `oryxa_fde_core::Stage::transition` allows are buttons:
   the next stage, or back to any earlier one for rework. Later stages are disabled and say why. A
@@ -88,16 +92,31 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 ## 4. Data
 
 - `src/lib/api/client.ts` is the only way to the API. Screens use `api` and `queries` from it and
-  nothing else. Every answer is parsed with zod (`schemas.ts`), so a drifting answer fails loudly.
+  nothing else. Calls go through a client generated from the API's committed spec,
+  `crates/oryxa-fde-api/openapi.json` (`pnpm api:generate` writes `src/lib/api/fde-api.gen.ts`;
+  `pnpm api:check` fails CI when it drifts). Every answer is parsed with zod (`schemas.ts`), and
+  `schemas.test.ts` fails the typecheck when a schema stops matching its spec type.
+- The browser only calls its own origin. The Worker (`src/server.ts`, `src/forward.ts`) forwards
+  `/api/*` without the prefix and `/auth/*` as it is to the API: the `API` VPC binding in a
+  deploy, `API_URL` in a dev build only. It refuses a write from another origin (`403 csrf`), and
+  answers `503` when it has no way to the API.
+- The session is the API's HttpOnly cookie, set after AuthKit. No token is ever in JavaScript or
+  browser storage. A 401 on any read or write sends the FDE to sign-in, coming back to the address
+  they were at when it happened (`src/lib/session.ts`); `safeReturnTo` keeps that address a path
+  on this origin.
 - Ids are branded zod types with the platform's id rule (1 to 128 of `[A-Za-z0-9_-]`). Ids from
   the address bar are parsed before any call; a bad one shows "not available".
-- Every project call takes a `ProjectScope` (company and project). A company or project that is
-  not the FDE's answers 404, never 403, so the UI cannot tell "not yours" from "does not exist".
-- `pnpm dev:mock` answers from `src/dev/mock-api.ts`: invented sample data only. It exists only in
-  a dev build with `VITE_FDE_MOCK_API=1`; `mock-excluded.test.ts` proves a production build leaves
-  it out. Tests run against the same mock.
-- When the API stream's OpenAPI spec lands, its generated client becomes a second `Transport` in
-  `client.ts`; schemas follow the spec; screens do not change.
+- Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
+  company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
+  available", so it cannot tell "not yours" from "does not exist".
+- Screens read whole views (`api.companies`, `company`, `project`, `today`) that `client.ts`
+  gathers from the API's per-record endpoints, until the API serves those views itself.
+- Pages carry a content security policy with a fresh script nonce per response; static assets get
+  their headers from `public/_headers`, kept in step by `security-headers.test.ts`.
+- `pnpm dev:mock` answers from `src/dev/mock-api.ts`: the spec's routes in the browser, on
+  invented sample data only. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
+  `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
+  same mock.
 
 ## 5. States and copy
 

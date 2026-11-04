@@ -4,35 +4,30 @@ import { Card, Failed, Loading, Page, Quiet, Row, Rows, Status } from "./page"
 import type { Tone } from "./page"
 import { queries } from "@/lib/api/client"
 import type { TodayItem } from "@/lib/api/schemas"
-import { daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
+import { dayOf, localDay, updatedLabel, waitingLabel } from "@/lib/time"
 import { TODAY_GROUPS, groupToday } from "@/lib/today"
-import type { TodayGroup } from "@/lib/today"
 
 /** What an item is, in a few words. */
 function itemTitle(item: TodayItem) {
-  return item.kind === "task" ? item.task.title : `Access to ${item.access.system}`
+  return item.kind === "task" ? item.task.title : `Access: ${item.access.description}`
 }
 
 /** Why it is in its group, and how urgent: the reason a row is there. */
-function reason(item: TodayItem, group: TodayGroup, today: string): { text: string; tone: Tone } {
+function reason(item: TodayItem, today: string): { text: string; tone: Tone } {
   if (item.kind === "access_request") {
-    const { access } = item
-    if (access.status === "denied") return { text: `Denied by ${access.owner}`, tone: "attention" }
-    return { text: waitingLabel(access.requested_on, access.owner, today), tone: "neutral" }
+    const { access, owner } = item
+    const by = owner ? ` by ${owner}` : ""
+    if (access.status === "denied") return { text: `Denied${by}`, tone: "attention" }
+    if (access.status === "revoked") return { text: `Revoked${by}`, tone: "attention" }
+    return { text: waitingLabel(access.days_waiting, owner), tone: "neutral" }
   }
   const { task } = item
-  if (group === "blocked") return { text: task.blocker ?? "Blocked", tone: "attention" }
-  if (group === "waiting")
-    return {
-      text: waitingLabel(task.waiting_since ?? today, task.waiting_on ?? "the customer", today),
-      tone: "neutral",
-    }
-  const due = task.due ?? today
-  return { text: dueLabel(due, today), tone: daysBetween(today, due) < 0 ? "attention" : "neutral" }
+  if (task.status === "blocked") return { text: task.blocker || "Blocked", tone: "attention" }
+  return { text: updatedLabel(dayOf(task.updated_at), today), tone: "neutral" }
 }
 
 /**
- * Today (DESIGN.md §3): what needs the FDE across every company, in three groups. It says "all
+ * Today (DESIGN.md §3): what needs the FDE across every company, in two groups. It says "all
  * clear" only once the API has answered.
  */
 export function TodayView({ today = localDay() }: { today?: string }) {
@@ -55,8 +50,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
       </Page>
     )
 
-  const groups = groupToday(items.data.items, today)
-  const counts = TODAY_GROUPS.map(({ key }) => groups[key].length)
+  const groups = groupToday(items.data.items)
   const companies = new Set(
     TODAY_GROUPS.flatMap(({ key }) => groups[key].map((item) => item.company.id)),
   ).size
@@ -64,9 +58,9 @@ export function TodayView({ today = localDay() }: { today?: string }) {
   return (
     <Page>
       <p className="text-xs text-muted-foreground">
-        {counts.every((n) => n === 0)
+        {groups.blocked.length + groups.waiting.length === 0
           ? "Nothing needs you today."
-          : `${counts[0]} blocked, ${counts[1]} due and ${counts[2]} waiting on the customer, across ${companies} ${companies === 1 ? "company" : "companies"}.`}
+          : `${groups.blocked.length} blocked and ${groups.waiting.length} waiting on the customer, across ${companies} ${companies === 1 ? "company" : "companies"}.`}
       </p>
       {TODAY_GROUPS.map(({ key, title, empty }) => (
         <Card
@@ -79,7 +73,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
           ) : (
             <Rows>
               {groups[key].map((item) => {
-                const why = reason(item, key, today)
+                const why = reason(item, today)
                 return (
                   <Row key={`${item.kind}:${item.kind === "task" ? item.task.id : item.access.id}`}>
                     <Link

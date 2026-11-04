@@ -2,7 +2,7 @@
   "name": "@oryxa/fde-web",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.4.2",
+  "packageManager": "pnpm@12.4.2+sha512.08adc6613180275c7c9edada39dcf08c9c61ad4e7eaf330a4f3461f102b0f907423454d117f98e72d47fef0616070644d7bffc973a6a57f5090a6d7c368b07c9",
   "scripts": {
     "dev": "vite dev --port 3000",
     "dev:mock": "VITE_FDE_MOCK_API=1 vite dev --port 3000",
@@ -12,7 +12,9 @@
     "lint": "eslint",
     "format": "prettier --write .",
     "check": "prettier --check .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "api:generate": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts",
+    "api:check": "openapi-typescript ../crates/oryxa-fde-api/openapi.json -o src/lib/api/fde-api.gen.ts --check"
   },
   "dependencies": {
     "@base-ui/react": "1.8.0",
@@ -26,6 +28,7 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "1.47.0",
+    "openapi-fetch": "0.17.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "shadcn": "4.21.0",
@@ -48,6 +51,7 @@
     "@vitejs/plugin-react": "6.1.1",
     "eslint": "10.11.0",
     "jsdom": "30.1.0",
+    "openapi-typescript": "7.13.0",
     "prettier": "3.9.8",
     "prettier-plugin-tailwindcss": "0.8.1",
     "typescript": "6.0.3",

@@ -13,45 +13,40 @@ async function titles(group: string) {
 }
 
 describe("TodayView", () => {
-  it("groups open work across companies into blocked, due and waiting on the customer", async () => {
+  it("groups open work across companies into blocked and waiting on the customer", async () => {
     renderWithRouter(<TodayView />)
 
+    // Oldest first: a refusal from when it was refused, a task from its last change.
     expect(await titles("Blocked")).toEqual([
-      "Access to Telematics export",
+      "Access: Telematics export",
       "Roll out to the north depot crews",
       "Agree the telematics alternative",
+      "Access: Crew roster export",
       "Staging credentials for the intake API",
     ])
-    // Overdue first, then due today; not yet due and done tasks are left out.
-    expect(await titles("Due")).toEqual([
-      "Map intake form fields",
-      "Add driver-hours checks to the eval suite",
-      "Replay last month's orders through the planner",
-      "Answer the security questionnaire",
-      "Publish eval results to the customer room",
-      "Monthly accuracy spot check",
+    expect(await titles("Waiting on the customer")).toEqual([
+      "Access: Clinic directory export",
+      "Access: Mobile device management enrolment",
+      "Buyer review of week 3 forecasts",
+      "Access: Depot rules, read only",
+      "Access: Intake form API, staging",
+      "Dispatcher feedback session",
+      "Access: Redacted call recordings",
+      "Interview the claims team lead",
+      "Scope sign-off meeting",
     ])
-    const waiting = await titles("Waiting on the customer")
-    expect(waiting).toHaveLength(9)
-    expect(waiting[0]).toBe("Access to Clinic directory export")
-    expect(waiting).toContain("Dispatcher feedback session")
+    // Open work that is the FDE's own move, done tasks and granted access are left out.
     expect(screen.queryByText("Load depot rules into the context pack")).toBeNull()
     expect(screen.queryByText("Set up the sandbox with sample orders")).toBeNull()
-    expect(screen.getByText(/^4 blocked, 6 due and 9 waiting on the customer, across 5/))
+    expect(screen.queryByText(/Read replica of the planning database/)).toBeNull()
+    expect(screen.getByText(/^5 blocked and 9 waiting on the customer, across 5 companies/))
   })
 
-  it("files each item once, even when it is also late", async () => {
+  it("files each item once", async () => {
     renderWithRouter(<TodayView />)
 
-    const all = [
-      ...(await titles("Blocked")),
-      ...(await titles("Due")),
-      ...(await titles("Waiting on the customer")),
-    ]
+    const all = [...(await titles("Blocked")), ...(await titles("Waiting on the customer"))]
     expect(new Set(all).size).toBe(all.length)
-    // Overdue, but waiting on the customer: it is the customer's move, not the FDE's.
-    expect(await titles("Waiting on the customer")).toContain("Buyer review of week 3 forecasts")
-    expect(await titles("Due")).not.toContain("Buyer review of week 3 forecasts")
   })
 
   it("says why each item is there", async () => {
@@ -59,16 +54,19 @@ describe("TodayView", () => {
 
     const blocked = await screen.findByRole("region", { name: "Blocked" })
     expect(within(blocked).getByText("Denied by Tomas Becker")).toBeInTheDocument()
-    const due = screen.getByRole("region", { name: "Due" })
-    expect(within(due).getByText("Overdue by 3 days")).toBeInTheDocument()
+    expect(within(blocked).getByText("Revoked by Ravi Desai")).toBeInTheDocument()
+    expect(
+      within(blocked).getByText("Telematics export refused by the customer's security team"),
+    ).toBeInTheDocument()
     const waiting = screen.getByRole("region", { name: "Waiting on the customer" })
-    expect(within(waiting).getByText("Waiting 6 days on Priya Raman")).toBeInTheDocument()
+    expect(within(waiting).getByText("Waiting 11 days on Sana Qureshi")).toBeInTheDocument()
+    expect(within(waiting).getByText("Updated 7 days ago")).toBeInTheDocument()
   })
 
   it("opens the project an item belongs to", async () => {
     const { router } = renderWithRouter(<TodayView />)
 
-    await userEvent.click(await screen.findByRole("link", { name: /Map intake form fields/ }))
+    await userEvent.click(await screen.findByRole("link", { name: /Staging credentials/ }))
 
     expect(router.state.location.pathname).toBe(
       "/companies/cmp_brightwater/projects/prj_bw_referrals",

@@ -33,7 +33,9 @@ export function SignIn({ returnTo }: { returnTo: string }) {
     setWorking(true)
     setError(null)
     try {
-      await api.signIn()
+      // AuthKit's hosted page, through the API, which brings the FDE back to `returnTo`. On the
+      // mock it settles at once, and the app moves on by itself.
+      await api.signIn(returnTo)
       // Reads cached while signed out must not survive into the session.
       queryClient.clear()
       router.history.push(safeReturnTo(returnTo))

@@ -19,7 +19,7 @@ async function clientBundle(nodeEnv: "production" | "development") {
       build: {
         lib: { entry: "src/lib/api/client.ts", formats: ["es"] },
         write: false,
-        rollupOptions: { external: [/^@tanstack\//, "zod"] },
+        rollupOptions: { external: [/^@tanstack\//, "zod", "openapi-fetch"] },
       },
     })) as Rollup.RollupOutput | Array<Rollup.RollupOutput>
     return [output]
@@ -38,7 +38,8 @@ describe("the mock API", () => {
   it("is left out of a production build, even with its flag set", async () => {
     const code = await clientBundle("production")
 
-    expect(code).toContain("api_not_connected")
+    // The network transport ships instead: sign-in goes to AuthKit through the API.
+    expect(code).toContain("/auth/login?return_to=")
     expect(code).not.toContain(MOCK_MARKER)
     expect(code).not.toContain("mock-api")
   }, 30_000)
