@@ -3244,6 +3244,7 @@ name = "oryxa-fde-events"
 version = "0.1.0"
 dependencies = [
  "aws-sdk-sqs",
+ "aws-smithy-http-client",
  "ed25519-dalek",
  "oryxa-core",
  "oryxa-events",
@@ -3253,6 +3254,30 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "oryxa-fde-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-sdk-sqs",
+ "ed25519-dalek",
+ "oryxa-core",
+ "oryxa-events",
+ "oryxa-fde-core",
+ "oryxa-fde-events",
+ "oryxa-fde-store",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
