@@ -12,6 +12,8 @@ oryxa-core.workspace = true
 oryxa-fde-core = { path = "../oryxa-fde-core" }
 serde.workspace = true
 serde_json.workspace = true
+# The pack's digest, checked by the API and the harness; already in the tree through oryxa-authn.
+sha2 = "0.11.0"
 thiserror.workspace = true
 
 [dev-dependencies]

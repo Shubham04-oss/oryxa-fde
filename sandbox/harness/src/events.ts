@@ -4,7 +4,7 @@
 export type ToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other";
 export type ToolStatus = "pending" | "in_progress" | "completed" | "failed";
 export type PlanStatus = "pending" | "in_progress" | "completed";
-export type Outcome = "success" | "error" | "rejected";
+export type Outcome = "success" | "error" | "rejected" | "cancelled";
 
 export interface Usage {
   input_tokens: number;

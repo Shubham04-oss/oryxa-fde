@@ -12,6 +12,13 @@ const policy = OutboundPolicy.parse({
 });
 
 describe("outbound policy", () => {
+  it("holds a host for an action on the approval list", () => {
+    const parse = (approval: unknown) => OutboundPolicy.safeParse({ hosts: [{ host: "a.example.com", approval }] });
+    expect(parse("deploy").success).toBe(true);
+    expect(parse("customer_send").success).toBe(true);
+    for (const bad of ["", "de ploy", "a/b", "x".repeat(129), 1]) expect(parse(bad).success, String(bad)).toBe(false);
+  });
+
   it("accepts exact hosts and narrow wildcards", () => {
     for (const host of ["api.example.com", "example.com", "*.example.com", "203.0.113.7", "a-b.example.co.uk"]) {
       expect(OutboundPolicy.safeParse({ hosts: [{ host }] }).success, host).toBe(true);

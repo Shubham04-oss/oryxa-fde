@@ -12,19 +12,36 @@ Every call needs `Authorization: Bearer <SERVICE_TOKEN>`. Without it, or when th
 shorter than 32 characters, the call gets `401` and no sandbox is touched. `oryxa-fde-api` checks the FDE's
 permission on the company before it calls. The tenant and company ids follow the platform's id rules.
 
-| Method and path under `/v1/sandboxes/<tenant>/<company>` | Does                                                                                                                                 |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /`                                                  | `{ "running": bool }`                                                                                                                |
-| `POST /start`                                            | Starts the container. Optional body `{ "instance": "standard-1".."standard-4" }`; the default is `SANDBOX_INSTANCE`.                 |
-| `POST /stop`                                             | Destroys the container. Its disk is lost.                                                                                            |
-| `POST /exec`                                             | `{ argv, cwd?, env?, timeoutMs? }`. Returns `{ exitCode, stdout, stderr, truncated, timedOut }`, keeping up to 1 MiB of each stream. |
-| `POST /exec/stream`                                      | Same body plus `stdin?: bool`. Responds with JSON lines: `started` (with the `exec` id), then `stdout`/`stderr` chunks, then `exit`. |
-| `POST /exec/<exec>/stdin`                                | Writes the body to a streamed command's stdin. The harness reads approval decisions here.                                            |
-| `GET /files?path=` and `PUT /files?path=`                | Reads or writes one file under `/workspace`. A write creates the parent directories.                                                 |
-| `GET /outbound-policy` and `PUT /outbound-policy`        | Reads or replaces the company's outbound policy.                                                                                     |
+| Method and path under `/v1/sandboxes/<tenant>/<company>` | Does                                                                                                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`                                                  | `{ "running": bool }`                                                                                                                    |
+| `POST /start`                                            | Starts the container. Optional body `{ "instance": "standard-1".."standard-4" }`; the default is `SANDBOX_INSTANCE`.                     |
+| `POST /stop`                                             | Destroys the container. Its disk is lost.                                                                                                |
+| `POST /exec`                                             | `{ argv, cwd?, env?, timeoutMs? }`. Returns `{ exitCode, stdout, stderr, truncated, timedOut }`, keeping up to 1 MiB of each stream.     |
+| `POST /exec/stream`                                      | Same body plus `stdin?: bool`. Responds with JSON lines: `started` (with the `exec` id), then `stdout`/`stderr` chunks, then `exit`.     |
+| `POST /exec/<exec>/stdin`                                | Writes the body to a streamed command's stdin. The harness reads approval decisions here.                                                |
+| `GET /files?path=` and `PUT /files?path=`                | Reads or writes one file under `/workspace`. A write creates the parent directories.                                                     |
+| `GET /outbound-policy` and `PUT /outbound-policy`        | Reads or replaces the company's outbound policy.                                                                                         |
+| `PUT /runs/<run>/context`                                | Writes a run's context pack (the body, at most 1 MiB) as root to `/etc/oryxa/runs/<run>.json`, reads it back and returns `{ "sha256" }`. |
+| `POST /runs/<run>/harness`                               | `{ sha256, timeoutMs }`. Starts the harness as root on that pack, with stdin, and streams it like `exec/stream`.                         |
+| `PUT /grants/<action>` and `DELETE /grants/<action>`     | Opens (`{ approval, ttlMs? }`, default 15 minutes, at most 1 hour) or closes the hosts the policy holds for an approval action.          |
 
 `cwd` and file paths must be absolute paths under `/workspace`, with no `.` or `..` segments. An `env` name that
 looks like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*PASSWORD*`, `*CREDENTIALS*`) is refused.
+
+## Users in the sandbox
+
+`exec`, `exec/stream` and the file routes always run as `agent` (uid 1001), named on every call rather than taken
+from the image. Only the two run routes use root:
+
+- **The context pack** goes to `/etc/oryxa/runs/`, a directory only root can open. The agent's processes,
+  including any left running by an earlier run, can neither read a pack nor replace it. The route returns the
+  SHA-256 of the file as read back. The API compares it with the pack it built (`EncodedPack::check_written`) and
+  starts nothing on a difference.
+- **The harness** starts as root with the pack's path and digest on its command line. It refuses a pack whose
+  digest differs, starts the agent as `agent` and then drops to its own user `harness` (uid 1002). The agent's
+  processes then cannot open the harness's stdin, where approval decisions and cancellation arrive, through
+  `/proc`, and cannot read its output or signal it.
 
 ## Outbound policy
 
@@ -33,7 +50,8 @@ looks like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*PASSWORD*`, `*CREDENT
   "hosts": [
     { "host": "registry.npmjs.org" },
     { "host": "*.githubusercontent.com" },
-    { "host": "api.github.com", "inject": [{ "header": "authorization", "secret": "github", "prefix": "Bearer " }] }
+    { "host": "api.github.com", "inject": [{ "header": "authorization", "secret": "github", "prefix": "Bearer " }] },
+    { "host": "api.cloudflare.com", "approval": "deploy" }
   ]
 }
 ```
@@ -48,9 +66,18 @@ looks like a credential (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*PASSWORD*`, `*CREDENT
   so an upstream that echoes the credential cannot hand it to the sandbox. Those requests ask for an
   uncompressed response and drop `Range`. A response in an encoding the redactor cannot read (anything but
   none, gzip or br) is refused.
+- `approval` names an action on the company's approval list, such as `deploy` or `customer_send`. Requests to that
+  host are refused (`403`, `approval_required`) unless the action's grant is open. The API opens it with
+  `PUT /grants/<action>` when an FDE approves a request for that action, and closes it when the run ends. A grant
+  lasts at most an hour, and stopping the sandbox closes them all. An unreadable grant counts as closed. So an
+  agent that gets around the approval prompt, with an obfuscated command or a background process, still cannot
+  deploy or send to the customer.
 - Redirects are returned to the sandbox, not followed. The next request goes through the policy again.
 - Only HTTP on port 80 and HTTPS on port 443 leave the container (`enableInternet: false`), and a request that
   names any other port is refused. Logs record ids, host and decision, never headers, paths or bodies.
+- Workers invocation logs and traces are off (`wrangler.jsonc`). They record every request's URL, and the outbound
+  handler's requests are the sandbox's, so their paths and queries could carry customer data or tokens. Query
+  strings are redacted as well, in case either is turned back on.
 
 ## Secrets
 

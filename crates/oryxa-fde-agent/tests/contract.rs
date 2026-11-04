@@ -10,6 +10,7 @@ use oryxa_fde_core::{AgentRunId, CompanyId, CompanyScope, CriterionId, DecisionI
 
 const EVENTS: &str = include_str!("../../../sandbox/harness/test/fixtures/session.events.jsonl");
 const PACK: &str = include_str!("../../../sandbox/harness/test/fixtures/context.json");
+const PACK_LIMITS: &str = include_str!("../../../sandbox/harness/test/fixtures/pack-limits.json");
 
 fn scope() -> ProjectScope {
     CompanyScope::new(
@@ -133,4 +134,21 @@ async fn the_pack_the_api_builds_is_the_one_the_harness_reads() {
     let expected: serde_json::Value = serde_json::from_str(PACK).unwrap();
     assert_eq!(serde_json::to_value(&pack).unwrap(), expected);
     assert_eq!(serde_json::from_value::<ContextPack>(expected).unwrap(), pack);
+}
+
+#[test]
+fn the_api_and_the_harness_apply_the_same_pack_limits() {
+    use oryxa_fde_agent::context::{
+        MAX_APPROVAL_RULES, MAX_ITEMS, MAX_PACK_BYTES, MAX_PATTERN_BYTES, MAX_TEXT_BYTES, MAX_TOKEN_BYTES,
+    };
+    let limits: serde_json::Value = serde_json::from_str(PACK_LIMITS).unwrap();
+    let expected = serde_json::json!({
+        "max_pack_bytes": MAX_PACK_BYTES,
+        "max_text_bytes": MAX_TEXT_BYTES,
+        "max_items": MAX_ITEMS,
+        "max_approval_rules": MAX_APPROVAL_RULES,
+        "max_pattern_bytes": MAX_PATTERN_BYTES,
+        "max_token_bytes": MAX_TOKEN_BYTES,
+    });
+    assert_eq!(limits, expected);
 }

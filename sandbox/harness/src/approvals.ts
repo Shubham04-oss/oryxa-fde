@@ -35,19 +35,20 @@ export function ruleFor(
   return rules.find((rule) => (rule.tool === "*" || rule.tool === tool) && (rule.regex?.test(subject) ?? true));
 }
 
-const Decision = z.object({
-  type: z.literal("approval_decision"),
-  id: z.string(),
-  outcome: z.enum(["approved", "rejected"]),
-});
+const Input = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("approval_decision"), id: z.string(), outcome: z.enum(["approved", "rejected"]) }),
+  z.object({ type: z.literal("cancel") }),
+]);
 
 /**
- * Decisions arrive on stdin, one JSON line each, written by the API through the gateway. Only the API can write
- * there: the agent's own processes are children of the SDK, not of the harness, and never see this stream.
- * Fails closed: a closed stdin or an aborted request is a rejection, and lines that do not parse are ignored.
+ * Decisions and cancellation arrive on stdin, one JSON line each, written by the API through the gateway. Only the
+ * API can write there: the harness runs as its own user (see `agentSpawner`), so the agent's processes cannot open
+ * its stdin through `/proc`. Fails closed: a closed stdin or an aborted request is a rejection, and lines that do
+ * not parse are ignored.
  */
 export class StdioApprovals implements ApprovalChannel {
   readonly #pending = new Map<string, (outcome: ApprovalOutcome) => void>();
+  readonly #cancel = new AbortController();
   #closed = false;
 
   constructor(input: NodeJS.ReadableStream) {
@@ -74,13 +75,19 @@ export class StdioApprovals implements ApprovalChannel {
     });
   }
 
+  /** Aborts when the API cancels the run. */
+  get cancelled(): AbortSignal {
+    return this.#cancel.signal;
+  }
+
   #receive(line: string): void {
-    let parsed: z.infer<typeof Decision>;
+    let parsed: z.infer<typeof Input>;
     try {
-      parsed = Decision.parse(JSON.parse(line));
+      parsed = Input.parse(JSON.parse(line));
     } catch {
       return;
     }
-    this.#pending.get(parsed.id)?.(parsed.outcome);
+    if (parsed.type === "cancel") this.#cancel.abort();
+    else this.#pending.get(parsed.id)?.(parsed.outcome);
   }
 }

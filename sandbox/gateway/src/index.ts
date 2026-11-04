@@ -6,6 +6,7 @@ import type { Env } from "./env.js";
 import { isGatewayError } from "./errors.js";
 import { ExecRequest, ExecStreamRequest, WorkspacePath } from "./exec.js";
 import { OutboundPolicy } from "./policy.js";
+import { ApprovalAction, GrantRequest, HarnessRequest, MAX_PACK_BYTES, RunId } from "./runs.js";
 import { defaultInstance, InstanceType } from "./sandbox.js";
 import { companyScope, type CompanyScope, sandboxName, ScopeError } from "./scope.js";
 
@@ -14,6 +15,8 @@ export { CompanySandbox } from "./sandbox.js";
 
 const StartRequest = z.strictObject({ instance: InstanceType.optional() });
 const STDIN_ROUTE = /^exec\/([0-9a-f-]{36})\/stdin$/;
+const RUN_ROUTE = /^runs\/([^/]+)\/(context|harness)$/;
+const GRANT_ROUTE = /^grants\/([^/]+)$/;
 
 /**
  * The internal API `oryxa-fde-api` calls, behind a service credential. Every route is under
@@ -78,6 +81,29 @@ async function dispatch(request: Request, url: URL, route: string, scope: Compan
   if (stdin?.[1] !== undefined && request.method === "POST") {
     await sandbox.writeStdin(stdin[1], new Uint8Array(await request.arrayBuffer()));
     return new Response(null, { status: 204 });
+  }
+  const [, run, step] = RUN_ROUTE.exec(route) ?? [];
+  if (run !== undefined) {
+    const id = RunId.parse(run);
+    if (step === "context" && request.method === "PUT") {
+      const pack = new Uint8Array(await request.arrayBuffer());
+      if (pack.byteLength === 0 || pack.byteLength > MAX_PACK_BYTES) return text(413, "context pack size is invalid");
+      return Response.json(await sandbox.writePack(scope, id, pack));
+    }
+    if (step === "harness" && request.method === "POST") {
+      const lines = await sandbox.startHarness(scope, id, await parseBody(request, HarnessRequest));
+      return new Response(lines, { headers: { "content-type": "application/x-ndjson" } });
+    }
+  }
+  const [, action] = GRANT_ROUTE.exec(route) ?? [];
+  if (action !== undefined) {
+    const name = ApprovalAction.parse(action);
+    if (request.method === "PUT")
+      return Response.json(await sandbox.openGrant(scope, name, await parseBody(request, GrantRequest)));
+    if (request.method === "DELETE") {
+      await sandbox.closeGrant(name);
+      return new Response(null, { status: 204 });
+    }
   }
   return text(404, "not found");
 }

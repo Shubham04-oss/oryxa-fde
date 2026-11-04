@@ -122,6 +122,8 @@ pub enum Outcome {
     Error,
     /// An FDE rejected an approval and the harness stopped.
     Rejected,
+    /// The API cancelled the run (on request or at its time limit) and the harness stopped.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -134,7 +136,12 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HarnessInput {
-    ApprovalDecision { id: ApprovalId, outcome: ApprovalOutcome },
+    ApprovalDecision {
+        id: ApprovalId,
+        outcome: ApprovalOutcome,
+    },
+    /// Stop the run: the harness aborts the agent, rejects any pending approval and ends with a `cancelled` result.
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +203,7 @@ mod tests {
             r#"{"v":1,"seq":4,"type":"command","tool_call_id":"toolu_3","command":"npm test","status":"failed"}"#,
             r#"{"v":1,"seq":5,"type":"approval_request","id":"apr_1","tool_call_id":"toolu_4","action":"deploy","title":"Run: wrangler deploy","tool":"Bash","input":{"command":"wrangler deploy"}}"#,
             r#"{"v":1,"seq":6,"type":"result","outcome":"success","text":"Done.","turns":3,"usage":{"input_tokens":10,"output_tokens":5}}"#,
+            r#"{"v":1,"seq":7,"type":"result","outcome":"cancelled","text":"","turns":0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
         ];
         for (seq, line) in lines.iter().enumerate() {
             let parsed = parse_line(line).unwrap();
@@ -232,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_approval_decisions_as_lines() {
+    fn writes_harness_input_as_lines() {
         let input = HarnessInput::ApprovalDecision {
             id: ApprovalId::new("apr_1").unwrap(),
             outcome: ApprovalOutcome::Rejected,
@@ -241,5 +249,6 @@ mod tests {
             input.to_line(),
             "{\"type\":\"approval_decision\",\"id\":\"apr_1\",\"outcome\":\"rejected\"}\n"
         );
+        assert_eq!(HarnessInput::Cancel.to_line(), "{\"type\":\"cancel\"}\n");
     }
 }

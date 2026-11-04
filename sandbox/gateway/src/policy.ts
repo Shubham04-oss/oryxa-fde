@@ -36,6 +36,15 @@ const HostRule = z
   .strictObject({
     host: HostPattern,
     inject: z.array(Injection).max(4).default([]),
+    /**
+     * An action on the company's approval list (`deploy`, `customer_send`). Requests to this host are refused unless
+     * an FDE approved that action and its grant is still open, so an agent that skips the approval prompt (an
+     * obfuscated command, a background process) still cannot reach it.
+     */
+    approval: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,128}$/, "invalid approval action")
+      .optional(),
   })
   // A wildcard covers hosts nobody has checked (`*.amazonaws.com` includes anyone's API Gateway), so secrets go
   // only to exact hosts.

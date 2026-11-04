@@ -1,36 +1,53 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
 import { compileRules, type CompiledRule } from "./approvals.js";
 
-/** Where the API writes the context pack (`oryxa_fde_agent::CONTEXT_PACK_PATH`). */
-export const CONTEXT_PACK_PATH = "/workspace/.oryxa/context.json";
-const MAX_PACK_BYTES = 4 * 1024 * 1024;
+// The same limits as `oryxa_fde_agent::context`, in bytes; both sides' tests check them against
+// test/fixtures/pack-limits.json, so a pack the API builds is never refused here.
+export const PACK_LIMITS = {
+  max_pack_bytes: 1024 * 1024,
+  max_text_bytes: 64 * 1024,
+  max_items: 200,
+  max_approval_rules: 64,
+  max_pattern_bytes: 512,
+  max_token_bytes: 128,
+} as const;
 
+const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+const Text = z.string().refine((t) => bytes(t) <= PACK_LIMITS.max_text_bytes, "too large");
 const Id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
-const Token = (extra: string) => z.string().regex(new RegExp(`^[A-Za-z0-9${extra}]{1,128}$`));
+// ASCII only, so characters are bytes.
+const Token = (extra: string) =>
+  z.string().regex(new RegExp(`^[A-Za-z0-9${extra}]{1,${PACK_LIMITS.max_token_bytes}}$`));
 
-// Mirrors `oryxa_fde_agent::ContextPack`; the Rust side applies the size limits when it builds the pack.
+// Mirrors `oryxa_fde_agent::ContextPack`, with the same limits.
 export const ContextPack = z.strictObject({
   v: z.literal(1),
   run: Id,
   scope: z.strictObject({ company: z.strictObject({ tenant: Id, company: Id }), project: Id }),
-  task: z.string().min(1),
-  scope_of_work: z.string(),
-  success_criteria: z.array(z.strictObject({ id: Id, text: z.string() })),
-  decisions: z.array(z.strictObject({ id: Id, text: z.string() })),
-  conventions: z.array(z.string()),
+  task: Text.refine((t) => t.length > 0, "empty"),
+  scope_of_work: Text,
+  success_criteria: z.array(z.strictObject({ id: Id, text: Text })).max(PACK_LIMITS.max_items),
+  decisions: z.array(z.strictObject({ id: Id, text: Text })).max(PACK_LIMITS.max_items),
+  conventions: z.array(Text).max(PACK_LIMITS.max_items),
   config: z.strictObject({
     model: Token(".:_/-"),
     region: Token("-"),
     max_turns: z.int().positive(),
-    approvals: z.array(
-      z.strictObject({
-        action: Token("_-"),
-        tool: z.union([z.literal("*"), Token("_-")]),
-        pattern: z.string().min(1).max(512).optional(),
-      }),
-    ),
+    approvals: z
+      .array(
+        z.strictObject({
+          action: Token("_-"),
+          tool: z.union([z.literal("*"), Token("_-")]),
+          pattern: z
+            .string()
+            .refine((p) => p.length > 0 && bytes(p) <= PACK_LIMITS.max_pattern_bytes, "empty or too large")
+            .optional(),
+        }),
+      )
+      .max(PACK_LIMITS.max_approval_rules),
   }),
 });
 export type ContextPack = z.infer<typeof ContextPack>;
@@ -40,10 +57,15 @@ export interface LoadedPack {
   rules: CompiledRule[];
 }
 
-export async function loadPack(path: string): Promise<LoadedPack> {
-  const text = await readFile(path, "utf8");
-  if (text.length > MAX_PACK_BYTES) throw new Error("context pack is too large");
-  return parsePack(JSON.parse(text));
+/**
+ * Reads the pack the gateway wrote as root, and refuses it unless its SHA-256 is the one the API passed on the
+ * command line (out of the agent's reach).
+ */
+export async function loadPack(path: string, sha256: string): Promise<LoadedPack> {
+  const raw = await readFile(path);
+  if (raw.byteLength > PACK_LIMITS.max_pack_bytes) throw new Error("context pack is too large");
+  if (createHash("sha256").update(raw).digest("hex") !== sha256) throw new Error("context pack digest differs");
+  return parsePack(JSON.parse(raw.toString("utf8")));
 }
 
 export function parsePack(json: unknown): LoadedPack {

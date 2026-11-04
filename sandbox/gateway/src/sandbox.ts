@@ -13,10 +13,21 @@ import {
   streamLines,
 } from "./exec.js";
 import { EMPTY_POLICY, OutboundPolicy } from "./policy.js";
+import {
+  AGENT_USER,
+  type Grant,
+  type GrantRequest,
+  harnessCommand,
+  type HarnessRequest,
+  packPath,
+  ROOT_USER,
+  sha256Hex,
+} from "./runs.js";
 import { type CompanyScope, sandboxName } from "./scope.js";
 
 const POLICY_KEY = "outbound-policy";
 const SCOPE_KEY = "scope";
+const GRANT_PREFIX = "grant:";
 const MAX_STDIN_WRITE = 1024 * 1024;
 
 // `lite` and `basic` are too small for a coding agent, and the durable_object policy refuses `basic`.
@@ -75,21 +86,64 @@ export class CompanySandbox extends DurableObject<Env> {
   async stop(): Promise<SandboxStatus> {
     const container = this.container();
     if (container.running) await container.destroy();
+    // Approvals belong to the runs in this container; a new container starts with none.
+    for (const [key] of this.ctx.storage.kv.list({ prefix: GRANT_PREFIX })) this.ctx.storage.kv.delete(key);
     return { running: false };
   }
 
   exec(req: ExecRequest): Promise<ExecResult> {
-    return runBuffered(this.#running(), req);
+    return runBuffered(this.#running(), req, AGENT_USER);
   }
 
-  async execStream(req: ExecStreamRequest): Promise<ReadableStream<Uint8Array>> {
+  execStream(req: ExecStreamRequest): Promise<ReadableStream<Uint8Array>> {
+    return this.#stream(req, AGENT_USER);
+  }
+
+  /**
+   * Writes a run's context pack as root where only root can read it, then reads it back: the API compares this
+   * digest with the pack it built before it starts the harness.
+   */
+  async writePack(scope: CompanyScope, run: string, pack: Uint8Array): Promise<{ sha256: string }> {
+    this.#bind(scope);
+    const files = new Files(this.#running());
+    const path = packPath(run);
+    await files.writeFile(path, pack, { user: ROOT_USER });
+    const written = await files.readFile(path, { user: ROOT_USER });
+    return { sha256: await sha256Hex(await written.arrayBuffer()) };
+  }
+
+  /** Starts the harness as root on a written pack; it starts the agent as `agent` and then drops root itself. */
+  startHarness(scope: CompanyScope, run: string, req: HarnessRequest): Promise<ReadableStream<Uint8Array>> {
+    this.#bind(scope);
+    return this.#stream(harnessCommand(run, req), ROOT_USER);
+  }
+
+  /** Opens the hosts the outbound policy holds for `action` until the grant expires or is closed. */
+  openGrant(scope: CompanyScope, action: string, req: GrantRequest): Grant {
+    this.#bind(scope);
+    const grant = { action, approval: req.approval, expiresAt: Date.now() + req.ttlMs };
+    this.ctx.storage.kv.put(`${GRANT_PREFIX}${action}`, grant);
+    return grant;
+  }
+
+  closeGrant(action: string): void {
+    this.ctx.storage.kv.delete(`${GRANT_PREFIX}${action}`);
+  }
+
+  /** Whether an FDE's approval currently opens `action`'s hosts. */
+  grantOpen(action: string): boolean {
+    const grant = this.ctx.storage.kv.get<Grant>(`${GRANT_PREFIX}${action}`);
+    return grant !== undefined && grant.expiresAt > Date.now();
+  }
+
+  async #stream(req: ExecStreamRequest, user: string): Promise<ReadableStream<Uint8Array>> {
     const container = this.#running();
     const execId = crypto.randomUUID();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), req.timeoutMs);
     let process: ExecProcess;
     try {
-      process = await container.exec(req.argv, execOptions(req, abort.signal, req.stdin));
+      process = await container.exec(req.argv, execOptions(req, abort.signal, req.stdin, user));
     } catch (cause) {
       clearTimeout(timer);
       throw cause;
@@ -118,14 +172,14 @@ export class CompanySandbox extends DurableObject<Env> {
   }
 
   async readFile(path: string): Promise<ReadableStream<Uint8Array> | null> {
-    const response = await new Files(this.#running()).readFile(path);
+    const response = await new Files(this.#running()).readFile(path, { user: AGENT_USER });
     return response.body;
   }
 
   async writeFile(path: string, content: ReadableStream<Uint8Array>): Promise<void> {
     const files = new Files(this.#running());
-    await files.mkdir(path.slice(0, path.lastIndexOf("/")) || "/", { recursive: true });
-    await files.writeFile(path, content);
+    await files.mkdir(path.slice(0, path.lastIndexOf("/")) || "/", { recursive: true, user: AGENT_USER });
+    await files.writeFile(path, content, { user: AGENT_USER });
   }
 
   /** The container attached to this object. A method, so tests can stand in a fake container. */

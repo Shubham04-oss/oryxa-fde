@@ -11,7 +11,7 @@ pub mod ids;
 pub mod run;
 
 pub use context::{
-    AgentConfig, ApprovalRule, CONTEXT_PACK_PATH, ContextError, ContextPack, ContextSource, Criterion, Decision,
+    AgentConfig, ApprovalRule, ContextError, ContextPack, ContextSource, Criterion, Decision, EncodedPack,
     InMemoryContext, ProjectContext,
 };
 pub use event::{

@@ -144,7 +144,7 @@ describe("SDK options", () => {
     const fake = new FakeQuery([success]);
     const env = {
       PATH: "/usr/bin",
-      HOME: "/home/agent",
+      HOME: "/root",
       SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
       ANTHROPIC_API_KEY: "sample-key-that-must-not-pass",
       AWS_ACCESS_KEY_ID: "sample-key-that-must-not-pass",
@@ -174,6 +174,19 @@ describe("SDK options", () => {
     expect(JSON.stringify(harnessEnv(env, samplePack().pack))).not.toContain("sample-key-that-must-not-pass");
   });
 
+  it("start the agent through the spawner it is given", async () => {
+    const fake = new FakeQuery([success]);
+    const spawn = vi.fn();
+    await runHarness(samplePack(), {
+      query: fake.query,
+      approvals: new ManualApprovals(),
+      emit: () => {},
+      env: {},
+      spawn,
+    });
+    expect(fake.options?.spawnClaudeCodeProcess).toBe(spawn);
+  });
+
   it("report an SDK that ends without a result as an error", async () => {
     const { events, emit } = collect();
     const fake = new FakeQuery([]);
@@ -197,5 +210,78 @@ describe("errors", () => {
     const result = events.at(-1);
     expect(result).toMatchObject({ type: "result", outcome: "error", reason: "sdk_error" });
     expect(JSON.stringify(result)).not.toMatch(/claude/i);
+  });
+});
+
+describe("cancel", () => {
+  // An SDK that never yields again, as one stuck on a slow model call would.
+  const stuck = (() =>
+    (async function* () {
+      yield deployCall;
+      await new Promise(() => {});
+    })()) as unknown as Parameters<typeof runHarness>[1]["query"];
+
+  it("ends a running run with a cancelled result, even when the SDK does not stop", async () => {
+    const cancel = new AbortController();
+    const { events, emit } = collect();
+    const run = runHarness(samplePack(), {
+      query: stuck,
+      approvals: new ManualApprovals(),
+      emit,
+      env: {},
+      cancel: cancel.signal,
+    });
+    await vi.waitFor(() => expect(events.at(-1)?.type).toBe("tool_call"));
+    cancel.abort();
+    expect(await run).toBe("cancelled");
+    expect(events.at(-1)).toEqual({
+      type: "result",
+      outcome: "cancelled",
+      text: "",
+      turns: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+    expect(events.filter((e) => e.type === "result")).toHaveLength(1);
+  });
+
+  it("denies a pending approval and never lets it run", async () => {
+    const fake = new FakeQuery(deployScript);
+    const approvals = new ManualApprovals();
+    const cancel = new AbortController();
+    const { events, emit } = collect();
+    const run = runHarness(samplePack(), {
+      query: fake.query,
+      approvals,
+      emit,
+      env: {},
+      cancel: cancel.signal,
+      newApprovalId: () => "apr_1",
+    });
+    await vi.waitFor(() => expect(events.at(-1)?.type).toBe("approval_request"));
+    cancel.abort();
+    expect(await run).toBe("cancelled");
+    // An approval that arrives after the cancel changes nothing.
+    approvals.decide("apr_1", "approved");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake.permissions).toEqual([{ behavior: "deny", message: "The run was cancelled.", interrupt: true }]);
+    expect(fake.options?.abortController?.signal.aborted).toBe(true);
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "approval_request", "result"]);
+    expect(events.at(-1)).toMatchObject({ outcome: "cancelled" });
+  });
+
+  it("stops a run cancelled before it started", async () => {
+    const fake = new FakeQuery([deployCall, success]);
+    const cancel = new AbortController();
+    cancel.abort();
+    const { events, emit } = collect();
+    const outcome = await runHarness(samplePack(), {
+      query: fake.query,
+      approvals: new ManualApprovals(),
+      emit,
+      env: {},
+      cancel: cancel.signal,
+    });
+    expect(outcome).toBe("cancelled");
+    expect(events.map((e) => e.type)).toEqual(["result"]);
   });
 });
