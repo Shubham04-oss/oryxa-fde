@@ -2,11 +2,12 @@
 //! to customers' security questionnaires.
 
 use oryxa_core::TenantId;
+use oryxa_fde_core::SecurityAnswerId;
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
-use crate::{Actor, SecurityAnswerId, StoreError, Text, id, text, unique_violation};
+use crate::{Actor, StoreError, Text, id, text, unique_violation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityAnswer {

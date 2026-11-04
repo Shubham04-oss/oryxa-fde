@@ -3,15 +3,13 @@
 //! the version the customer agreed to and queues `scope.signed_off`.
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{CriterionId, StakeholderId};
+use oryxa_fde_core::{CriterionId, ScopeItemId, StakeholderId};
 use oryxa_fde_events::ScopeSignedOff;
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::OffsetDateTime;
 
-use crate::{
-    Actor, Name, ProjectTx, ScopeItemId, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation,
-};
+use crate::{Actor, Name, ProjectTx, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeKind {

@@ -8,12 +8,12 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_fde_core::{
-    AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, Stage, StakeholderId, SystemId, TaskId,
+    AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, ScopeItemId, Stage, StakeholderId, SystemId, TaskId,
 };
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
     AccessRequest, AccessRequestIn, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx, ScopeChange,
-    ScopeItem, ScopeItemId, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, Task, TaskIn, TaskStatus,
+    ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, Task, TaskIn, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

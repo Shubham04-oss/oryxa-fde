@@ -12,7 +12,6 @@ oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true
-serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true

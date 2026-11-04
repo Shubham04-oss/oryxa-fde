@@ -7,6 +7,7 @@ use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use oryxa_events::{Encoded, MemoryPublisher, PublishError, Publisher, Signer, Verifier, decode};
+use oryxa_fde_core::{ScopeItemId, SecurityAnswerId};
 use oryxa_fde_events::{CompanyCreated, ProjectCreated};
 use sqlx::Row;
 

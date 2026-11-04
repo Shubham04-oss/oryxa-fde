@@ -15,7 +15,6 @@ use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
 mod companies;
-mod ids;
 mod org;
 mod projects;
 mod records;
@@ -25,7 +24,6 @@ mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use companies::{Company, CompanyTx, Member, Role};
-pub use ids::{ScopeItemId, SecurityAnswerId};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use projects::{Assignee, Project, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, System, SystemIn};
