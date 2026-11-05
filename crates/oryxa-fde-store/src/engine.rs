@@ -315,7 +315,7 @@ impl ProjectTx {
 
     /// The latest result of each of the project's criteria that has one, judged as
     /// [`ProjectTx::criteria_met`] judges them.
-    pub async fn criterion_results(&mut self) -> Result<Vec<CriterionResult>, StoreError> {
+    pub async fn latest_criterion_results(&mut self) -> Result<Vec<CriterionResult>, StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(
             "select r.criterion_id, r.value, r.measured_at,

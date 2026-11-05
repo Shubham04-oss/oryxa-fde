@@ -301,7 +301,7 @@ pub(crate) async fn room(
     }
     let found = tx.get().await?.ok_or(ApiError::NotFound)?;
     let scope = tx.scope_of_work().await?.ok_or(ApiError::NotFound)?;
-    let results = tx.criterion_results().await?;
+    let results = tx.latest_criterion_results().await?;
     let questions = tx.customer_questions().await?;
     // Newest week first: the first approved one is the latest.
     let approved = tx
