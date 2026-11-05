@@ -1015,3 +1015,123 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
     assert!(tx.claim_digest(third, &pat).await.unwrap().is_none());
     drop(tx);
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn an_approved_update_is_posted_to_its_companys_channel_once() {
+    use oryxa_fde_events::{UpdateApproved, Week};
+    use oryxa_fde_integrations::secrets::Secrets;
+    use oryxa_fde_integrations::slack::BotToken;
+    use oryxa_fde_integrations::testing::{FakeSecrets, FakeSlack, PostMode};
+    use oryxa_fde_lifecycle::rules::{SlackPoster, handle_with};
+    use oryxa_fde_store::{SlackChannelId, SlackTeamId, UpdateBody};
+
+    let store = testing::store().await;
+    let (signer, verifier) = keys();
+    let t = TenantId::new(new_id("org")).unwrap();
+    let p = project(&store, &t).await;
+    let slack = std::sync::Arc::new(FakeSlack::default());
+    let secrets = std::sync::Arc::new(FakeSecrets::default());
+    let arn = secrets
+        .put(t.as_str(), &BotToken::new("xoxb-acme").unwrap())
+        .await
+        .unwrap();
+    let mut org = store.organisation(&t).await.unwrap();
+    org.set_slack_installation(&SlackTeamId::new("T0ACME").unwrap(), &arn, &actor())
+        .await
+        .unwrap();
+    org.commit().await.unwrap();
+    let mut tx = store.company(&p.company).await.unwrap();
+    tx.set_slack_channel(&SlackChannelId::new("C0ACME").unwrap(), &actor())
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    let poster = SlackPoster {
+        slack: slack.clone(),
+        secrets: secrets.clone(),
+    };
+    let approve = async |monday: time::Date, body: &str| {
+        let mut tx = store.project(&p).await.unwrap();
+        tx.add_update_draft(monday, &UpdateBody::new(body).unwrap(), "echo")
+            .await
+            .unwrap();
+        tx.decide_update_draft(monday, true, &actor()).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        message(&signer, &t, &UpdateApproved::new(&p, Week::new(monday).unwrap()))
+    };
+    let monday = week_of(OffsetDateTime::now_utc().date()) - Duration::weeks(1);
+    let posts = || slack.posts.lock().unwrap().clone();
+
+    // Posted once, as plain text: markup in the update cannot mention anyone.
+    let msg = approve(monday, "Done <!channel> & shipped").await;
+    assert_eq!(handle_with(&store, &verifier, Some(&poster), &msg).await, Outcome::Done);
+    assert_eq!(
+        posts(),
+        [(
+            "xoxb-acme".to_owned(),
+            "C0ACME".to_owned(),
+            "Done &lt;!channel&gt; &amp; shipped".to_owned()
+        )]
+    );
+    assert_eq!(handle_with(&store, &verifier, Some(&poster), &msg).await, Outcome::Done);
+    assert_eq!(posts().len(), 1, "a redelivery posts nothing more");
+
+    // Slack unavailable: retried, and posted once it answers.
+    let second = approve(monday - Duration::weeks(1), "Second week").await;
+    *slack.mode.lock().unwrap() = PostMode::Unavailable;
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &second).await,
+        Outcome::Retry
+    );
+    *slack.mode.lock().unwrap() = PostMode::Accept;
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &second).await,
+        Outcome::Done
+    );
+    assert_eq!(posts().len(), 2);
+
+    // Refused for good: not retried, and never posted later.
+    let third = approve(monday - Duration::weeks(2), "Third week").await;
+    *slack.mode.lock().unwrap() = PostMode::Refuse;
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &third).await,
+        Outcome::Done
+    );
+    *slack.mode.lock().unwrap() = PostMode::Accept;
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &third).await,
+        Outcome::Done
+    );
+    assert_eq!(posts().len(), 2);
+
+    // No token: retried, not dropped. No poster, no channel, or no approved update: nothing to do.
+    let fourth = approve(monday - Duration::weeks(3), "Fourth week").await;
+    secrets.delete(&arn).await.unwrap();
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &fourth).await,
+        Outcome::Retry
+    );
+    assert_eq!(handle(&store, &verifier, &fourth).await, Outcome::Done);
+    let draft_only = message(
+        &signer,
+        &t,
+        &UpdateApproved::new(&p, Week::new(monday - Duration::weeks(9)).unwrap()),
+    );
+    assert_eq!(
+        handle_with(&store, &verifier, Some(&poster), &draft_only).await,
+        Outcome::Done
+    );
+    assert_eq!(posts().len(), 2);
+
+    // An opened pull request lands in the activity.
+    let opened = message(&signer, &t, &oryxa_fde_events::PullRequestOpened::new(&p, 12));
+    assert_eq!(handle(&store, &verifier, &opened).await, Outcome::Done);
+    let mut tx = store.project(&p).await.unwrap();
+    let activity = tx.activity(10).await.unwrap();
+    assert!(
+        activity
+            .iter()
+            .any(|a| a.what == ActivityIn::PullRequestOpened { number: 12 })
+    );
+}

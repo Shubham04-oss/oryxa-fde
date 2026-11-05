@@ -3084,3 +3084,205 @@ async fn a_share_link_lives_one_to_ninety_days_whatever_writes_it() {
         assert!(changed.is_err(), "{set}");
     }
 }
+
+/// A fresh GitHub id, unique in this run.
+fn gh_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    (1_000_000 + u64::from(rand::random::<u32>())) * 1000 + NEXT.fetch_add(1, Ordering::SeqCst)
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys() {
+    let store = store().await;
+    let by = actor("alice");
+    let (t1, pa) = project_world(&store).await;
+    let pb = {
+        let c = scope(&t1, &new_id("cmp"));
+        create_company(&store, &c).await;
+        add_project(&store, &c, "B").await
+    };
+    let (t2, pc) = project_world(&store).await;
+    let (i1, i2) = (gh_id(), gh_id());
+    let (r1, r2, r3) = (gh_id(), gh_id(), gh_id());
+    let name = |n: &str| RepositoryName::new(n).unwrap();
+
+    // Claims: one organisation each, never moved.
+    let mut org1 = store.organisation(&t1).await.unwrap();
+    assert_eq!(org1.claim_github_installation(i1, &by).await.unwrap(), Claimed::Claimed);
+    org1.commit().await.unwrap();
+    let mut org2 = store.organisation(&t2).await.unwrap();
+    assert_eq!(org2.claim_github_installation(i2, &by).await.unwrap(), Claimed::Claimed);
+    assert_eq!(org2.claim_github_installation(i2, &by).await.unwrap(), Claimed::Already);
+    assert_eq!(org2.claim_github_installation(i1, &by).await.unwrap(), Claimed::Taken);
+    org2.commit().await.unwrap();
+
+    // Links: under the organisation's own installations, one project per repository.
+    let link = async |p: &ProjectScope, i: u64, r: u64| {
+        let mut tx = store.project(p).await.unwrap();
+        let got = tx.link_github_repository(i, r, &name("acme/rag"), &by).await;
+        tx.commit().await.unwrap();
+        got
+    };
+    assert!(link(&pa, i1, r1).await.unwrap().is_some());
+    assert!(link(&pb, i1, r3).await.unwrap().is_some());
+    assert!(link(&pc, i2, r2).await.unwrap().is_some());
+    assert!(matches!(link(&pb, i1, r1).await, Err(StoreError::Conflict)));
+    assert!(matches!(
+        link(&pa, i2, gh_id()).await,
+        Err(StoreError::Missing("installation"))
+    ));
+
+    // Slack: a workspace each, a channel for A.
+    let team1 = SlackTeamId::new("T0001").unwrap();
+    let mut org1 = store.organisation(&t1).await.unwrap();
+    assert_eq!(
+        org1.set_slack_installation(&team1, "arn:aws:secretsmanager:x:1:secret:s1", &by)
+            .await
+            .unwrap(),
+        None
+    );
+    org1.commit().await.unwrap();
+    let mut org2 = store.organisation(&t2).await.unwrap();
+    org2.set_slack_installation(
+        &SlackTeamId::new("T0002").unwrap(),
+        "arn:aws:secretsmanager:x:1:secret:s2",
+        &by,
+    )
+    .await
+    .unwrap();
+    org2.commit().await.unwrap();
+    let mut ca = store.company(&pa.company).await.unwrap();
+    ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    ca.commit().await.unwrap();
+
+    // Deliveries: once by delivery id, once by body.
+    let mut tx = store.project(&pa).await.unwrap();
+    let body = "a".repeat(64);
+    assert!(tx.record_pull_request("d-1", &body, 7, false).await.unwrap());
+    assert!(!tx.record_pull_request("d-1", &"b".repeat(64), 7, false).await.unwrap());
+    assert!(
+        !tx.record_pull_request("d-2", &body, 7, false).await.unwrap(),
+        "a replayed body"
+    );
+    assert!(tx.record_pull_request("d-3", &"c".repeat(64), 7, true).await.unwrap());
+    tx.commit().await.unwrap();
+    let events: Vec<String> = outbox(&store, &t1).await.into_iter().map(|(_, d, _, _)| d).collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|d| d.starts_with("fde.pull-request"))
+            .collect::<Vec<_>>(),
+        ["fde.pull-request.opened.v1", "fde.pull-request.merged.v1"]
+    );
+
+    // Row-level security: a company's transaction sees its links and deliveries only, an
+    // organisation's its own claims and workspace only.
+    let mut tx = store.company(&pa.company).await.unwrap();
+    for table in ["github_repositories", "github_deliveries", "slack_channels"] {
+        let companies: Vec<String> = sqlx::query_scalar(&format!("select distinct company_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(companies, [pa.company.company.as_str()], "{table}");
+    }
+    for table in ["github_installations", "slack_installations"] {
+        let tenants: Vec<String> = sqlx::query_scalar(&format!("select distinct tenant_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(tenants, [t1.as_str()], "{table}");
+    }
+    drop(tx);
+
+    // Routing reads the keys, across tenants, and nothing else.
+    assert_eq!(store.github_route(i1, r1).await.unwrap(), Some(pa.clone()));
+    assert_eq!(store.github_route(i2, r2).await.unwrap(), Some(pc.clone()));
+    assert_eq!(store.github_route(i2, r1).await.unwrap(), None);
+    assert_eq!(store.github_installation_tenant(i2).await.unwrap(), Some(t2.clone()));
+    assert_eq!(
+        store.slack_team_tenants(&team1).await.unwrap(),
+        std::slice::from_ref(&t1)
+    );
+    let mut tx = store.pool.begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_grants")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for sql in [
+        "select full_name from github_repositories",
+        "select claimed_by from github_installations",
+        "select secret_arn from slack_installations",
+        "select channel_id from slack_channels",
+        "select body_sha256 from github_deliveries",
+        "delete from github_repositories",
+    ] {
+        let mut sp = (&mut *tx).begin().await.unwrap();
+        assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
+    }
+    drop(tx);
+
+    // An approved update is posted once: claimed, released on a failure that may pass, then marked.
+    let monday = time::macros::date!(2026 - 11 - 02);
+    let mut tx = store.project(&pa).await.unwrap();
+    assert!(tx.slack_post(monday).await.unwrap().is_none(), "no update yet");
+    tx.add_update_draft(monday, &UpdateBody::new("Done: tickets").unwrap(), "echo")
+        .await
+        .unwrap();
+    assert!(tx.slack_post(monday).await.unwrap().is_none(), "a draft is not posted");
+    tx.decide_update_draft(monday, true, &by).await.unwrap().unwrap();
+    let post = tx.slack_post(monday).await.unwrap().unwrap();
+    assert_eq!(
+        (post.channel.as_str(), post.secret_arn.as_str()),
+        ("C0001", "arn:aws:secretsmanager:x:1:secret:s1")
+    );
+    assert!(tx.claim_slack_post(monday).await.unwrap());
+    assert!(!tx.claim_slack_post(monday).await.unwrap());
+    tx.finish_slack_post(monday, false).await.unwrap();
+    assert!(tx.claim_slack_post(monday).await.unwrap(), "released");
+    tx.finish_slack_post(monday, true).await.unwrap();
+    tx.finish_slack_post(monday, false).await.unwrap();
+    assert!(!tx.claim_slack_post(monday).await.unwrap(), "posted is final");
+    tx.commit().await.unwrap();
+    let events: Vec<String> = outbox(&store, &t1).await.into_iter().map(|(_, d, _, _)| d).collect();
+    assert!(events.contains(&"fde.update.approved.v1".to_owned()));
+    // B's project has no channel: nothing to post.
+    let mut tx = store.project(&pb).await.unwrap();
+    tx.add_update_draft(monday, &UpdateBody::new("B").unwrap(), "echo")
+        .await
+        .unwrap();
+    tx.decide_update_draft(monday, true, &by).await.unwrap().unwrap();
+    assert!(tx.slack_post(monday).await.unwrap().is_none());
+    drop(tx);
+
+    // Install states: each id once, in any organisation.
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut org1 = store.organisation(&t1).await.unwrap();
+    assert!(org1.use_install_state(id).await.unwrap());
+    assert!(!org1.use_install_state(id).await.unwrap());
+    assert!(!org1.use_install_state("not-hex").await.unwrap());
+    org1.commit().await.unwrap();
+
+    // Unclaiming unlinks that installation's repositories only; uninstalling Slack its channels.
+    let mut org1 = store.organisation(&t1).await.unwrap();
+    assert!(org1.unclaim_github_installation(i1, &by).await.unwrap());
+    assert!(!org1.unclaim_github_installation(i2, &by).await.unwrap(), "not ours");
+    assert_eq!(
+        org1.remove_slack_installation(&by).await.unwrap().as_deref(),
+        Some("arn:aws:secretsmanager:x:1:secret:s1")
+    );
+    org1.commit().await.unwrap();
+    assert_eq!(store.github_route(i1, r1).await.unwrap(), None);
+    assert_eq!(store.github_route(i1, r3).await.unwrap(), None);
+    assert_eq!(store.github_route(i2, r2).await.unwrap(), Some(pc.clone()));
+    let mut ca = store.company(&pa.company).await.unwrap();
+    assert!(ca.slack_channel().await.unwrap().is_none());
+    assert!(matches!(
+        ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), &by).await,
+        Err(StoreError::Missing("slack"))
+    ));
+}
