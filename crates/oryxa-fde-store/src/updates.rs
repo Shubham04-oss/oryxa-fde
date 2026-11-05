@@ -382,11 +382,18 @@ fn draft(r: PgRow) -> Result<UpdateDraft, StoreError> {
 /// closing the connection releases it, so a drafter that dies never keeps it.
 pub struct DraftingLock {
     conn: sqlx::PgConnection,
+    key: String,
 }
 
 impl DraftingLock {
-    pub async fn release(self) -> Result<(), StoreError> {
+    /// Unlocks, then closes. The unlock comes first because the server frees a closed session's
+    /// locks only once its backend has exited, which a new connection can race.
+    pub async fn release(mut self) -> Result<(), StoreError> {
         use sqlx::Connection;
+        sqlx::query("select pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&self.key)
+            .execute(&mut self.conn)
+            .await?;
         self.conn.close().await?;
         Ok(())
     }
@@ -410,7 +417,7 @@ impl Store {
             .fetch_one(&mut *conn)
             .await?;
         // Unlocked, the connection goes back to the pool holding nothing.
-        Ok(locked.then(|| DraftingLock { conn: conn.detach() }))
+        Ok(locked.then(|| DraftingLock { conn: conn.detach(), key }))
     }
 }
 
