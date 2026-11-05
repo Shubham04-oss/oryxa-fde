@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-aws-lc-rs = "1"
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 aws-sdk-secretsmanager.workspace = true
 base64 = "0.22"
 hmac = "0.12"
