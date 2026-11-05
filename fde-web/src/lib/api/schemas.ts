@@ -106,6 +106,10 @@ export const StakeholderOut = z.object({
   name: z.string(),
   role: StakeholderPart,
   title: optionalText,
+  /** Where a sponsor's weekly digest goes. */
+  email: optionalText,
+  /** When they unsubscribed from the weekly digest, if they did. */
+  digest_unsubscribed_at: instant.nullish(),
   updated_at: instant,
 })
 export type StakeholderOut = z.infer<typeof StakeholderOut>

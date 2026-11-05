@@ -560,6 +560,8 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/me"),
     // Names nothing: the token is the permission, and only in the caller's own tenant.
     ("POST", "/v1/share-links/redeem"),
+    // No sign-in: the token in a digest's link names its one delivery, in its own tenant.
+    ("POST", "/v1/digest/unsubscribe"),
     ("GET", "/v1/today"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
@@ -1132,6 +1134,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             // Not records: the same in every company, so they name the victim's only with its path.
             ("{shape}", "shape-1".into()),
             ("{version}", "1".into()),
+
             ("{link}", link),
         ],
     }
@@ -1167,7 +1170,6 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/activity"),
         format!("{project}/suggestions"),
         format!("{project}/updates"),
-
         format!("{project}/share-links"),
         format!("/v1/room/companies/{}/projects/{}", t.company, t.project),
         "/v1/security-answers".into(),
@@ -1745,6 +1747,8 @@ async fn every_documented_route_is_served() {
             "/auth/login" => StatusCode::FOUND,
             "/auth/callback" => StatusCode::BAD_REQUEST,
             "/auth/logout" => StatusCode::NO_CONTENT,
+            // Needs no sign-in, only a token, which `{}` lacks.
+            "/v1/digest/unsubscribe" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::UNAUTHORIZED,
         };
         assert_eq!(status, want, "{method} {template}");
@@ -3172,16 +3176,17 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     let projects = export["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["project"]["id"], json!(a.project));
-    // Every record but the organisation's security answers and the share links, which grant
-    // access rather than record the work.
+    // Every record but the organisation's security answers, the share links, which grant access
+    // rather than record the work, and the suggestions the engine derives from events.
     for (placeholder, id) in &a.records {
-        if !["{answer}", "{link}"].contains(placeholder) {
+        if !["{answer}", "{link}", "{kind}"].contains(placeholder) {
             assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
         }
     }
     assert!(!text.contains(a.record("{link}")));
     assert!(!text.contains(&b.company) && !text.contains(&b.project));
-    for (placeholder, id) in &b.records {
+    // Every company's fixture shares its week and suggestion kind: those name no record of B's.
+    for (placeholder, id) in b.records.iter().filter(|(p, _)| !["{week}", "{kind}"].contains(p)) {
         assert!(!text.contains(id.as_str()), "B's {placeholder} {id} is in A's export");
     }
     // The organisation's security answers are not the company's records.
@@ -3215,6 +3220,39 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
     assert_eq!((&seen["progress"], &seen["stages"]), (&json!(1), &json!(8)));
     assert_eq!(seen["criteria"].as_array().unwrap().len(), 1);
     assert_eq!(seen["scope_awaits_sign_off"], json!(true));
+    // The fixture's update is a draft: the room shows none until an FDE approves it.
+    assert_eq!(seen["latest_update"], Value::Null);
+    assert_eq!(
+        (&seen["criteria"][0]["passing"], &seen["criteria_passing"]),
+        (&Value::Null, &json!(0))
+    );
+    let project_path = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let approve = format!("{project_path}/updates/{}/approve", t.record("{week}"));
+    w.ok(&t.lead, "POST", &approve, None, StatusCode::OK).await;
+    // An eval run measured 95 against "at least 90": the criterion passes.
+    let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap())
+        .project(oryxa_fde_core::ProjectId::new(&t.project).unwrap());
+    let mut tx = w.store.project(&scope).await.unwrap();
+    let criterion = oryxa_fde_core::CriterionId::new(t.record("{criterion}")).unwrap();
+    let run = oryxa_fde_core::EvalRunId::new(new_id("evr")).unwrap();
+    assert!(tx.record_criterion_result(&criterion, &run, 95.0).await.unwrap());
+    tx.commit().await.unwrap();
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["latest_update"]["week"], json!(t.record("{week}")));
+    assert!(
+        seen["latest_update"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("done this week")
+    );
+    assert_eq!(
+        (
+            &seen["criteria"][0]["latest"],
+            &seen["criteria"][0]["passing"],
+            &seen["criteria_passing"]
+        ),
+        (&json!(95.0), &json!(true), &json!(1))
+    );
     let text = seen.to_string();
     for internal in ["Index tickets", "API token", "Tier-1 tickets", "Use Bedrock", "Zendesk"] {
         assert!(!text.contains(internal), "the room shows {internal}");
@@ -3363,4 +3401,73 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
             .await;
         assert_eq!(status.is_success(), ok, "{days} days");
     }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_sponsor_unsubscribes_from_the_digest_with_the_link_alone() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let stakeholders = format!("/v1/companies/{}/stakeholders", t.company);
+
+    // An address is checked, then kept and shown to whoever works on the company.
+    for bad in [
+        "Sam <sam@acme.example>",
+        "sam@acme",
+        "sam@acme.example\r\nBcc: eve@evil.example",
+    ] {
+        let body = json!({"name": "Sam", "role": "sponsor", "email": bad});
+        assert_eq!(
+            w.status(&t.lead, "POST", &stakeholders, Some(body)).await,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    let body = json!({"name": "Sam", "role": "sponsor", "email": "sam@acme.example"});
+    let sam = w
+        .ok(&t.lead, "POST", &stakeholders, Some(body), StatusCode::CREATED)
+        .await;
+    assert_eq!(
+        (&sam["email"], &sam["digest_unsubscribed_at"]),
+        (&json!("sam@acme.example"), &Value::Null)
+    );
+
+    // The fixture's update, approved, and Sam's mail of it claimed as the digest claims it.
+    let project_path = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let approve = format!("{project_path}/updates/{}/approve", t.record("{week}"));
+    w.ok(&t.lead, "POST", &approve, None, StatusCode::OK).await;
+    let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap())
+        .project(oryxa_fde_core::ProjectId::new(&t.project).unwrap());
+    let sam_id = oryxa_fde_core::StakeholderId::new(sam["id"].as_str().unwrap()).unwrap();
+    let mut tx = w.store.project(&scope).await.unwrap();
+    let claim = tx.claim_digest(fixture_week(), &sam_id).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    let token = claim.unsubscribe.to_string();
+
+    // A wrong secret, a malformed token, or the same token naming another tenant: refused alike.
+    let last = if token.ends_with('0') { "1" } else { "0" };
+    let forged = format!("{}{last}", &token[..token.len() - 1]);
+    let elsewhere = token.replacen(&org, &new_id("org"), 1);
+    let unsubscribe = |token: &str| w.call(None, "POST", "/v1/digest/unsubscribe", Some(json!({"token": token})));
+    for bad in [forged.as_str(), "", "not.a.token", elsewhere.as_str()] {
+        assert_eq!(unsubscribe(bad).await.0, StatusCode::NOT_FOUND, "{bad}");
+    }
+    let listed = w.ok(&t.lead, "GET", &stakeholders, None, StatusCode::OK).await;
+    let row = |listed: &Value| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == sam["id"])
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&listed)["digest_unsubscribed_at"], Value::Null);
+
+    // The link alone unsubscribes Sam; again is no change.
+    assert_eq!(unsubscribe(&token).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(unsubscribe(&token).await.0, StatusCode::NO_CONTENT);
+    let listed = w.ok(&t.lead, "GET", &stakeholders, None, StatusCode::OK).await;
+    assert!(row(&listed)["digest_unsubscribed_at"].is_string());
 }

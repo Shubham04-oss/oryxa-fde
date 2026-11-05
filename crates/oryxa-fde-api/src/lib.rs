@@ -147,6 +147,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(share::create, share::list))
         .routes(routes!(share::revoke))
         .routes(routes!(share::redeem))
+        .routes(routes!(share::unsubscribe))
         .routes(routes!(share::room))
         .routes(routes!(session::me))
         .routes(routes!(session::login))

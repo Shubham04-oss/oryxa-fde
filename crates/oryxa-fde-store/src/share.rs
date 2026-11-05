@@ -36,7 +36,7 @@ const LINK: &str = "l.link_id, l.expires_at, l.revoked_at, l.created_by, l.creat
     (select count(*) from share_link_guests g where g.tenant_id = l.tenant_id and g.link_id = l.link_id) as guests";
 
 /// Equal without an early exit, so the time taken says nothing about how much of it matched.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

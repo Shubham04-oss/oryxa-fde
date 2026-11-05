@@ -13,7 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_authz::Write;
 use oryxa_fde_core::{CompanyId, ProjectId, ShareLinkId, Stage};
-use oryxa_fde_store::{Redeemed, ShareLink};
+use oryxa_fde_store::{CriterionResult, Redeemed, ShareLink, UnsubscribeToken, UpdateStatus, new_id};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,9 +87,32 @@ pub struct RoomOut {
     /// Stages reached, from 1 (discover) to `stages` (operate).
     pub progress: u32,
     pub stages: u32,
-    pub criteria: Vec<CriterionOut>,
+    /// The success criteria, each with its latest measured result.
+    pub criteria: Vec<RoomCriterionOut>,
+    /// How many criteria the latest results meet.
+    pub criteria_passing: u32,
     /// The scope as it stands is waiting for the customer's sign-off.
     pub scope_awaits_sign_off: bool,
+    /// The newest update an FDE approved; never a draft.
+    pub latest_update: Option<RoomUpdateOut>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomCriterionOut {
+    pub criterion: CriterionOut,
+    /// The latest value an eval run measured; null until one has.
+    pub latest: Option<f64>,
+    /// Whether that value meets the target; null until measured.
+    pub passing: Option<bool>,
+    pub measured_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomUpdateOut {
+    /// The Monday of the week it covers, `YYYY-MM-DD`.
+    pub week: String,
+    pub body: String,
+    pub approved_at: Option<String>,
 }
 
 fn sha256(s: &str) -> String {
@@ -224,6 +247,31 @@ pub(crate) async fn redeem(
     }))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UnsubscribeBody {
+    /// From the fragment of the link in a weekly digest.
+    pub token: String,
+}
+
+/// Unsubscribe a sponsor from the weekly digest, from the link in a digest they were sent. No
+/// sign-in: the token is the permission, and it does this one thing. A token that is malformed,
+/// unknown or not the latest sent for its delivery is refused alike; again is no change.
+#[utoipa::path(post, operation_id = "unsubscribe_digest", path = "/v1/digest/unsubscribe", tag = "room",
+    request_body = UnsubscribeBody, security(()),
+    responses((status = 204, description = "Unsubscribed"), (status = 404, body = ErrorBody)))]
+pub(crate) async fn unsubscribe(
+    State(app): State<Arc<App>>,
+    Json(body): Json<UnsubscribeBody>,
+) -> Result<StatusCode, ApiError> {
+    let token = UnsubscribeToken::parse(&body.token).ok_or(ApiError::NotFound)?;
+    let mut tx = app.store.project(&token.scope).await?;
+    if !tx.unsubscribe_digest(&token, &new_id("req")).await? {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The customer room of one project: what its guests may see. Needs `work` on the project, or
 /// `view` with a live share link the caller redeemed.
 #[utoipa::path(get, operation_id = "get_room", path = "/v1/room/companies/{company}/projects/{project}", tag = "room",
@@ -245,8 +293,28 @@ pub(crate) async fn room(
     }
     let found = tx.get().await?.ok_or(ApiError::NotFound)?;
     let scope = tx.scope_of_work().await?.ok_or(ApiError::NotFound)?;
+    let results = tx.criterion_results().await?;
+    // Newest week first: the first approved one is the latest.
+    let approved = tx
+        .update_drafts()
+        .await?
+        .into_iter()
+        .find(|u| u.status == UpdateStatus::Approved);
     tx.commit().await?;
     let progress = Stage::ALL.iter().position(|st| *st == found.stage).unwrap_or(0) as u32 + 1;
+    let criteria: Vec<RoomCriterionOut> = scope
+        .criteria
+        .into_iter()
+        .map(|c| {
+            let result: Option<&CriterionResult> = results.iter().find(|r| r.criterion == c.id);
+            RoomCriterionOut {
+                latest: result.map(|r| r.value),
+                passing: result.map(|r| r.passing),
+                measured_at: result.map(|r| ts(r.measured_at)),
+                criterion: c.into(),
+            }
+        })
+        .collect();
     Ok(Json(RoomOut {
         project: found.id.to_string(),
         name: found.name.as_str().to_owned(),
@@ -255,7 +323,13 @@ pub(crate) async fn room(
         stages: Stage::ALL.len() as u32,
         scope_awaits_sign_off: !scope.items.is_empty()
             && scope.sign_off.as_ref().map(|so| so.version) != Some(scope.version),
-        criteria: scope.criteria.into_iter().map(Into::into).collect(),
+        criteria_passing: criteria.iter().filter(|c| c.passing == Some(true)).count() as u32,
+        criteria,
+        latest_update: approved.map(|u| RoomUpdateOut {
+            week: u.week.to_string(),
+            body: u.body.as_str().to_owned(),
+            approved_at: u.decided_at.map(ts),
+        }),
     }))
 }
 

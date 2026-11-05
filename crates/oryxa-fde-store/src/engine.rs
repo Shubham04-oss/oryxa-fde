@@ -83,6 +83,16 @@ impl SuggestionKind {
     }
 }
 
+/// The latest value an eval run measured for one success criterion, and whether it meets the
+/// criterion's target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CriterionResult {
+    pub criterion: CriterionId,
+    pub value: f64,
+    pub passing: bool,
+    pub measured_at: OffsetDateTime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Suggestion {
     pub kind: SuggestionKind,
@@ -301,6 +311,36 @@ impl ProjectTx {
         .fetch_one(&mut *self.tx)
         .await?;
         Ok(met)
+    }
+
+    /// The latest result of each of the project's criteria that has one, judged as
+    /// [`ProjectTx::criteria_met`] judges them.
+    pub async fn criterion_results(&mut self) -> Result<Vec<CriterionResult>, StoreError> {
+        let (t, c, p) = self.keys();
+        sqlx::query(
+            "select r.criterion_id, r.value, r.measured_at,
+                 case c.comparator when 'at_least' then r.value >= c.target when 'at_most' then r.value <= c.target end
+                     as passing
+             from criterion_results r
+             join criteria c on c.tenant_id = r.tenant_id and c.criterion_id = r.criterion_id
+             where r.tenant_id = $1 and r.company_id = $2 and r.project_id = $3
+             order by r.criterion_id",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(|r| {
+            Ok(CriterionResult {
+                criterion: id("criterion id", CriterionId::new, r.try_get("criterion_id")?)?,
+                value: r.try_get("value")?,
+                passing: r.try_get::<Option<bool>, _>("passing")?.unwrap_or(false),
+                measured_at: r.try_get("measured_at")?,
+            })
+        })
+        .collect()
     }
 
     /// Raises a suggestion unless one of its kind is open: `true` if raised (new, or again after it

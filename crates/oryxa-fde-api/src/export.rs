@@ -14,6 +14,7 @@ use utoipa::ToSchema;
 use crate::authz::company;
 use crate::companies::CompanyOut;
 use crate::documents::DocumentOut;
+use crate::engine::UpdateOut;
 use crate::lifecycle::{AccessRequestOut, DecisionOut, ScopeOut, TaskOut};
 use crate::projects::ProjectOut;
 use crate::records::{StakeholderOut, SystemOut};
@@ -37,10 +38,13 @@ pub struct ProjectExport {
     pub access_requests: Vec<AccessRequestOut>,
     pub tasks: Vec<TaskOut>,
     pub decisions: Vec<DecisionOut>,
+    /// The weekly updates, newest first, drafts included.
+    pub updates: Vec<UpdateOut>,
 }
 
 /// The company's records as one JSON document: the company, its stakeholders, systems and
-/// documents (metadata), and each project with its scope, access requests, tasks and decisions.
+/// documents (metadata), and each project with its scope, access requests, tasks, decisions and
+/// weekly updates. What the engine derives from events (activity, suggestions) is left out.
 #[utoipa::path(get, operation_id = "export_company", path = "/v1/companies/{company}/export", tag = "companies",
     params(("company" = String, Path, description = "Company id")),
     responses((status = 200, body = ExportOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
@@ -64,6 +68,7 @@ pub(crate) async fn export(
         let access_requests = ptx.access_requests().await?;
         let tasks = ptx.tasks().await?;
         let decisions = ptx.decisions().await?;
+        let updates = ptx.update_drafts().await?;
         tx = ptx.into_company();
         projects.push(ProjectExport {
             project: p.into(),
@@ -71,6 +76,7 @@ pub(crate) async fn export(
             access_requests: access_requests.into_iter().map(Into::into).collect(),
             tasks: tasks.into_iter().map(Into::into).collect(),
             decisions: decisions.into_iter().map(Into::into).collect(),
+            updates: updates.into_iter().map(Into::into).collect(),
         });
     }
     tx.commit().await?;

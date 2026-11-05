@@ -9,8 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_fde_core::{CompanyId, ProjectId, SecurityAnswerId, StakeholderId, SystemId};
 use oryxa_fde_store::{
-    CompanyTx, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn, StakeholderRole, System,
-    SystemIn, Text, new_id,
+    CompanyTx, EmailAddress, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn,
+    StakeholderRole, System, SystemIn, Text, new_id,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -90,6 +90,9 @@ pub struct StakeholderBody {
     /// Their part in the engagement; `other` if left out.
     #[serde(default)]
     pub role: StakeholderPart,
+    /// Where a sponsor's weekly digest goes. Replacing it with another address subscribes that
+    /// address again.
+    pub email: Option<String>,
 }
 
 impl StakeholderBody {
@@ -98,6 +101,10 @@ impl StakeholderBody {
             name: name(self.name, "name")?,
             title: self.title.map(|t| name(t, "title")).transpose()?,
             role: self.role.into(),
+            email: self
+                .email
+                .map(|e| EmailAddress::new(e).map_err(|_| ApiError::Invalid("email")))
+                .transpose()?,
         })
     }
 }
@@ -108,6 +115,9 @@ pub struct StakeholderOut {
     pub name: String,
     pub title: Option<String>,
     pub role: StakeholderPart,
+    pub email: Option<String>,
+    /// When they unsubscribed from the weekly digest, if they did.
+    pub digest_unsubscribed_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -118,6 +128,8 @@ impl From<Stakeholder> for StakeholderOut {
             name: s.name.as_str().to_owned(),
             title: s.title.map(|t| t.as_str().to_owned()),
             role: s.role.into(),
+            email: s.email.map(|e| e.as_str().to_owned()),
+            digest_unsubscribed_at: s.digest_opt_out_at.map(ts),
             updated_at: ts(s.updated_at),
         }
     }

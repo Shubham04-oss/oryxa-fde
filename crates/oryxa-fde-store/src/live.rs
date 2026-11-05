@@ -518,6 +518,7 @@ async fn add_stakeholder(store: &Store, c: &CompanyScope) -> oryxa_fde_core::Sta
         name: Name::new("Sam Sponsor").unwrap(),
         title: Some(Name::new("VP Engineering").unwrap()),
         role: StakeholderRole::Sponsor,
+        email: None,
     };
     tx.add_stakeholder(&id, &v, &actor("alice")).await.unwrap().unwrap();
     tx.commit().await.unwrap();
