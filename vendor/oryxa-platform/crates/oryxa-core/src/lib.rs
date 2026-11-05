@@ -138,15 +138,29 @@ impl Ctx {
         self.agent_chain.last()
     }
 
-    /// The runtime task a task token was minted for (`session_id` = `task:<id>`); `None` for a
-    /// human's token. Only the gateway's task-token endpoint mints these.
+    /// The runtime task a task token was minted for (`session_id` = `task:<id>[@<session>]`);
+    /// `None` for a human's token. Only the gateway's task-token endpoint mints these.
     pub fn task(&self) -> Option<&str> {
-        self.session_id.strip_prefix(TASK_SESSION_PREFIX)
+        let rest = self.session_id.strip_prefix(TASK_SESSION_PREFIX)?;
+        Some(rest.split_once(TASK_SESSION_SEP).map_or(rest, |(task, _)| task))
+    }
+
+    /// The session a task token's task belongs to, so a parked call can wake it (#141).
+    pub fn task_session(&self) -> Option<&str> {
+        let rest = self.session_id.strip_prefix(TASK_SESSION_PREFIX)?;
+        rest.split_once(TASK_SESSION_SEP).map(|(_, session)| session)
+    }
+
+    /// `session_id` for a task token: the task, then the session it runs in.
+    pub fn task_session_id(task: &str, session: &str) -> String {
+        format!("{TASK_SESSION_PREFIX}{task}{TASK_SESSION_SEP}{session}")
     }
 }
 
 /// `Ctx::session_id` prefix that marks a runtime task token.
 pub const TASK_SESSION_PREFIX: &str = "task:";
+/// Separates task and session in a task token's `session_id`; neither id may contain it.
+const TASK_SESSION_SEP: char = '@';
 
 /// JSON with object keys sorted at every level: the one canonical form used for hashing
 /// approval arguments and signing events. Needed because serde_json's `preserve_order` is
@@ -169,6 +183,26 @@ pub fn canonical_json(v: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_tokens_carry_task_and_session() {
+        let ctx = |session_id: &str| Ctx {
+            tenant: TenantId::new("org_1").unwrap(),
+            user: UserId::new("u1").unwrap(),
+            email: VerifiedEmail::from_workos_verified("a@b.c"),
+            session_id: session_id.into(),
+            agent_chain: Vec::new(),
+            trace_id: "t".into(),
+        };
+        let both = ctx(&Ctx::task_session_id("tsk_ab_1", "org_1|web:u1:c1"));
+        assert_eq!(both.task(), Some("tsk_ab_1"));
+        assert_eq!(both.task_session(), Some("org_1|web:u1:c1"));
+        // Tokens minted before the session was added still name their task.
+        let old = ctx("task:tsk_ab_1");
+        assert_eq!((old.task(), old.task_session()), (Some("tsk_ab_1"), None));
+        let human = ctx("s_123");
+        assert_eq!((human.task(), human.task_session()), (None, None));
+    }
 
     #[test]
     fn ids_reject_unsafe_chars() {

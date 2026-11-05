@@ -8,6 +8,7 @@ use oryxa_core::TenantId;
 use oryxa_spicedb_proto::v1::{
     self, check_bulk_permissions_pair, check_permission_response::Permissionship, consistency::Requirement,
     permissions_service_client::PermissionsServiceClient, precondition, relationship_update,
+    schema_service_client::SchemaServiceClient,
 };
 use tonic::metadata::MetadataValue;
 use tonic::service::interceptor::InterceptedService;
@@ -311,6 +312,17 @@ impl SpiceDb {
         }
         Ok(ids)
     }
+}
+
+/// Replaces the SpiceDB schema (an admin step, not tenant-scoped). Writing the same schema again is a
+/// no-op, so a migration can run it every release.
+pub async fn write_schema(endpoint: &str, preshared_key: &str, schema: &str) -> Result<(), AuthzError> {
+    let (ep, auth) = dial_config(endpoint, preshared_key)?;
+    let mut client = SchemaServiceClient::with_interceptor(ep.connect().await?, auth);
+    client
+        .write_schema(v1::WriteSchemaRequest { schema: schema.into() })
+        .await?;
+    Ok(())
 }
 
 fn dial_config(endpoint: &str, preshared_key: &str) -> Result<(Endpoint, BearerAuth), AuthzError> {

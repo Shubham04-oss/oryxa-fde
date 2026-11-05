@@ -53,6 +53,8 @@ ordered_by! {
     SyncFinished => connection_id;
     TaskStatusChanged => task_id;
     UsageRecorded => task_id;
+    ApprovalRequested => request_id;
+    ApprovalDecided => request_id;
 }
 
 /// Types without an `ordered_by!` entry group by tenant only.
@@ -91,6 +93,8 @@ events! {
     OrganizationDeleted => "oryxa.identity", "identity.organization.deleted.v1";
     ToolAuthorizationDecided => "oryxa.gateway", "gateway.tool-authorization.decided.v1";
     AgentDelegated => "oryxa.gateway", "gateway.agent.delegated.v1";
+    ApprovalRequested => "oryxa.gateway", "gateway.approval.requested.v1";
+    ApprovalDecided => "oryxa.gateway", "gateway.approval.decided.v1";
     ConnectionStatusChanged => "oryxa.connectors", "connectors.connection.status-changed.v1";
     SyncFinished => "oryxa.connectors", "connectors.sync.finished.v1";
     TaskStatusChanged => "oryxa.sessions", "sessions.task.status-changed.v1";
