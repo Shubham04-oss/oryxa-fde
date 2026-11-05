@@ -14,6 +14,10 @@ ignore = [
     # aws-config credentials-login (the `aws login` developer flow, unused on ECS). Same decision as the platform.
     # Revisit when jsonwebtoken and aws-config move to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via elliptic-curve 0.13; public-key verification only; no 0.5 fix" },
+    # pin-utils 0.1.1 is unmaintained (archived upstream, no fixed release); this is not a vulnerability. It comes in
+    # through aws-smithy-http 0.62/0.63 (aws-config and the AWS SDK clients). Current AWS SDKs drop it but need
+    # rust-version 1.94.1. Remove this once the SDK upgrade lands (#77).
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained via aws-smithy-http; no vulnerability; dropped by the AWS SDK upgrade" },
 ]
 
 [licenses]
