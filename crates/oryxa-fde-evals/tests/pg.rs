@@ -6,7 +6,7 @@ use oryxa_fde_evals::{
     Case, CaseId, CaseOutcome, CaseResult, Command, CriterionRate, EvalRun, EvalStore, EvalStoreError, Grader, Report,
     Suite, SuiteId, Verdict,
 };
-use oryxa_fde_store::{Actor, CompanyIn, Name, ProjectIn, Store, new_id};
+use oryxa_fde_store::{Actor, CompanyIn, Comparator, CriterionIn, Name, ProjectIn, Store, Text, new_id};
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -14,7 +14,8 @@ fn lead() -> UserId {
     UserId::new("usr_lead").unwrap()
 }
 
-async fn project(store: &Store, tenant: &TenantId) -> ProjectScope {
+/// A project with two success criteria: accuracy and format.
+async fn project(store: &Store, tenant: &TenantId) -> (ProjectScope, [CriterionId; 2]) {
     let by = Actor {
         user: lead(),
         request_id: new_id("req"),
@@ -36,12 +37,22 @@ async fn project(store: &Store, tenant: &TenantId) -> ProjectScope {
         summary: None,
     };
     tx.create(&input, &by).await.unwrap().unwrap();
+    let criteria = ["label accuracy", "label format"].map(|metric| {
+        let id = CriterionId::new(new_id("crt")).unwrap();
+        let input = CriterionIn {
+            description: Text::new("Labels tickets well").unwrap(),
+            metric: Name::new(metric).unwrap(),
+            comparator: Comparator::AtLeast,
+            target: 0.9,
+            unit: None,
+        };
+        (id, input)
+    });
+    for (id, input) in &criteria {
+        tx.add_criterion(id, input, &by).await.unwrap().unwrap();
+    }
     tx.commit().await.unwrap();
-    scope
-}
-
-fn criterion(raw: &str) -> CriterionId {
-    CriterionId::new(raw.to_owned()).unwrap()
+    (scope, criteria.map(|(id, _)| id))
 }
 
 fn case(id: &str, criteria: Vec<CriterionId>) -> Case {
@@ -53,12 +64,12 @@ fn case(id: &str, criteria: Vec<CriterionId>) -> Case {
     }
 }
 
-fn suite(scope: &ProjectScope) -> Suite {
+fn suite(scope: &ProjectScope, [accuracy, format]: &[CriterionId; 2]) -> Suite {
     Suite {
         id: SuiteId::new(new_id("suite")).unwrap(),
         scope: scope.clone(),
         name: "Triage labels".into(),
-        criteria: vec![criterion("crt_accuracy"), criterion("crt_format")],
+        criteria: vec![accuracy.clone(), format.clone()],
         target: Some(Command {
             argv: vec!["node".into(), "triage.mjs".into()],
             timeout_secs: 30,
@@ -75,11 +86,11 @@ fn suite(scope: &ProjectScope) -> Suite {
                 rubric: "Is the label right?".into(),
             },
         ],
-        cases: vec![case("case_b", vec![criterion("crt_accuracy")]), case("case_a", vec![])],
+        cases: vec![case("case_b", vec![accuracy.clone()]), case("case_a", vec![])],
     }
 }
 
-fn report() -> Report {
+fn report([accuracy, format]: &[CriterionId; 2]) -> Report {
     Report {
         cases: vec![
             CaseResult {
@@ -101,13 +112,13 @@ fn report() -> Report {
         ],
         criteria: vec![
             CriterionRate {
-                criterion: criterion("crt_accuracy"),
+                criterion: accuracy.clone(),
                 passed: 1,
                 total: 2,
                 rate: 0.5,
             },
             CriterionRate {
-                criterion: criterion("crt_format"),
+                criterion: format.clone(),
                 passed: 0,
                 total: 0,
                 rate: 0.0,
@@ -124,9 +135,18 @@ fn report() -> Report {
 async fn suites_runs_and_reports_round_trip_in_their_project_only() {
     let store = oryxa_fde_store::testing::store().await;
     let tenant = TenantId::new(new_id("org")).unwrap();
-    let scope = project(&store, &tenant).await;
-    let other = project(&store, &tenant).await;
-    let s = suite(&scope);
+    let (scope, criteria) = project(&store, &tenant).await;
+    let (other, _) = project(&store, &tenant).await;
+    let s = suite(&scope, &criteria);
+    // Another project's criteria are refused in the database too.
+    let theirs = Suite {
+        scope: other.clone(),
+        ..suite(&scope, &criteria)
+    };
+    assert!(matches!(
+        store.create_suite(&theirs, &lead()).await,
+        Err(EvalStoreError::NotFound)
+    ));
 
     store.create_suite(&s, &lead()).await.unwrap();
     assert!(matches!(
@@ -154,14 +174,14 @@ async fn suites_runs_and_reports_round_trip_in_their_project_only() {
     };
     store.create_run(&run).await.unwrap();
     assert_eq!(store.run(&scope, &run.id).await.unwrap(), Some(run.clone()));
-    store.finish(&run, &report()).await.unwrap();
+    store.finish(&run, &report(&criteria)).await.unwrap();
     assert!(matches!(
-        store.finish(&run, &report()).await,
+        store.finish(&run, &report(&criteria)).await,
         Err(EvalStoreError::Conflict)
     ));
     let ended = store.run(&scope, &run.id).await.unwrap().unwrap();
     assert!(ended.ended_at.is_some());
-    assert_eq!(ended.report, Some(report()));
+    assert_eq!(ended.report, Some(report(&criteria)));
     assert_eq!(store.runs(&scope).await.unwrap(), vec![ended]);
 
     // Another project of the tenant sees, adds and finishes nothing.
@@ -179,6 +199,6 @@ async fn suites_runs_and_reports_round_trip_in_their_project_only() {
         scope: other.clone(),
         ..run.clone()
     };
-    assert!(store.finish(&elsewhere, &report()).await.is_err());
+    assert!(store.finish(&elsewhere, &report(&criteria)).await.is_err());
     assert!(store.create_run(&elsewhere).await.is_err());
 }

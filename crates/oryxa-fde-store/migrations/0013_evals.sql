@@ -2,8 +2,10 @@
 -- per criterion. Written by oryxa-fde-evals through `ProjectTx` (src/evals.rs); a run's results and its
 -- eval-run.finished event commit together.
 --
--- `definition` holds what the evals crate defines (criteria, target, graders) as it serialises it; case text and
--- outputs are sample data and stay here, never in events or logs. JSON that may hold \u0000 is kept as text.
+-- `definition` holds what the evals crate defines (target, graders) as it serialises it; case text and outputs
+-- are sample data and stay here, never in events or logs. JSON that may hold \u0000 is kept as text.
+--
+-- After 0010, whose key on criteria (tenant, company, project, criterion) the suites' criteria reference.
 
 create table eval_suites (
     tenant_id  text not null,
@@ -32,6 +34,22 @@ create table eval_cases (
     primary key (tenant_id, suite_id, case_id),
     foreign key (tenant_id, company_id, project_id, suite_id)
         references eval_suites (tenant_id, company_id, project_id, suite_id)
+);
+
+-- The success criteria a suite measures: each one of the suite's project, and gone from the suite with the
+-- criterion. A case's own `criteria` narrow these.
+create table eval_suite_criteria (
+    tenant_id    text not null,
+    company_id   text not null,
+    project_id   text not null,
+    suite_id     text not null,
+    criterion_id text not null,
+    position     integer not null,
+    primary key (tenant_id, suite_id, criterion_id),
+    foreign key (tenant_id, company_id, project_id, suite_id)
+        references eval_suites (tenant_id, company_id, project_id, suite_id) on delete cascade,
+    foreign key (tenant_id, company_id, project_id, criterion_id)
+        references criteria (tenant_id, company_id, project_id, criterion_id) on delete cascade
 );
 
 create table eval_runs (
@@ -93,6 +111,8 @@ alter table eval_suites enable row level security;
 alter table eval_suites force row level security;
 alter table eval_cases enable row level security;
 alter table eval_cases force row level security;
+alter table eval_suite_criteria enable row level security;
+alter table eval_suite_criteria force row level security;
 alter table eval_runs enable row level security;
 alter table eval_runs force row level security;
 alter table eval_case_results enable row level security;
@@ -102,10 +122,13 @@ alter table eval_criterion_results force row level security;
 
 create policy in_scope on eval_suites to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on eval_cases to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
+create policy in_scope on eval_suite_criteria to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on eval_runs to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on eval_case_results to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 create policy in_scope on eval_criterion_results to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
 
--- The runtime login reaches these only through oryxa_fde_app (0003). Results are written once and never changed.
-grant select, insert on eval_suites, eval_cases, eval_case_results, eval_criterion_results to oryxa_fde_app;
-grant select, insert, update on eval_runs to oryxa_fde_app;
+-- The runtime login reaches these only through oryxa_fde_app (0003). Results are written once and never changed; a
+-- run's own record only gains its end.
+grant select, insert on eval_suites, eval_cases, eval_suite_criteria, eval_runs, eval_case_results,
+    eval_criterion_results to oryxa_fde_app;
+grant update (ended_at, passed, failed, errored) on eval_runs to oryxa_fde_app;

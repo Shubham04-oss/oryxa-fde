@@ -6,7 +6,8 @@
 //! two never share it, whichever API task drives them.
 //!
 //! Suite and case ids are `oryxa-fde-evals`' validated ids, passed as text; what a suite's graders and target are
-//! is the evals crate's to define (`definition`), kept as JSON and not read here.
+//! is the evals crate's to define (`definition`), kept as JSON and not read here. The criteria a suite measures are
+//! rows referencing the project's criteria, so a suite never names another project's, and loses one that is removed.
 
 use std::time::Duration;
 
@@ -31,7 +32,9 @@ pub struct EvalCaseRow {
 pub struct EvalSuiteRow {
     pub id: String,
     pub name: String,
-    /// Criteria, target and graders, as the evals crate serialises them.
+    /// The project's success criteria the suite measures, in order.
+    pub criteria: Vec<CriterionId>,
+    /// Target and graders, as the evals crate serialises them.
     pub definition: serde_json::Value,
     pub created_by: UserId,
     pub created_at: OffsetDateTime,
@@ -138,7 +141,8 @@ impl ProjectTx {
         Ok(())
     }
 
-    /// Stores a new suite with its cases. A suite id already used in the tenant is a conflict.
+    /// Stores a new suite with its criteria and cases. A suite id already used in the tenant is a conflict, and a
+    /// criterion that is not the project's is `Missing`.
     pub async fn create_eval_suite(&mut self, suite: &EvalSuiteRow, by: &Actor) -> Result<(), StoreError> {
         let (t, c, p) = self.keys();
         sqlx::query(
@@ -163,6 +167,25 @@ impl ProjectTx {
                 e.into()
             }
         })?;
+        for (position, criterion) in suite.criteria.iter().enumerate() {
+            sqlx::query(
+                "insert into eval_suite_criteria (tenant_id, company_id, project_id, suite_id, criterion_id, position)
+                 values ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&t)
+            .bind(&c)
+            .bind(&p)
+            .bind(&suite.id)
+            .bind(criterion.as_str())
+            .bind(i32::try_from(position).map_err(|_| StoreError::Rejected("count_too_large"))?)
+            .execute(&mut *self.tx)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(d) if d.is_foreign_key_violation() => StoreError::Missing("criterion"),
+                _ if unique_violation(&e) => StoreError::Rejected("duplicate_criterion"),
+                _ => e.into(),
+            })?;
+        }
         self.insert_cases(&suite.id, &suite.cases).await?;
         audit(
             &mut self.tx,
@@ -210,6 +233,23 @@ impl ProjectTx {
         .collect()
     }
 
+    async fn suite_criteria(&mut self, suite: &str) -> Result<Vec<CriterionId>, StoreError> {
+        let (t, c, p) = self.keys();
+        let rows: Vec<String> = sqlx::query_scalar(
+            "select criterion_id from eval_suite_criteria
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and suite_id = $4 order by position",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(suite)
+        .fetch_all(&mut *self.tx)
+        .await?;
+        rows.into_iter()
+            .map(|r| id("criterion id", CriterionId::new, r))
+            .collect()
+    }
+
     async fn suite_rows(&mut self, suite: Option<&str>) -> Result<Vec<EvalSuiteRow>, StoreError> {
         let (t, c, p) = self.keys();
         let rows = sqlx::query(
@@ -228,6 +268,7 @@ impl ProjectTx {
             let id: String = r.try_get("suite_id")?;
             let definition: String = r.try_get("definition")?;
             suites.push(EvalSuiteRow {
+                criteria: self.suite_criteria(&id).await?,
                 cases: self.eval_cases(&id).await?,
                 id,
                 name: r.try_get("name")?,
@@ -416,7 +457,8 @@ impl ProjectTx {
         self.run_rows(None).await
     }
 
-    /// Records a run's results, once, lets go of the company's sandbox if the run holds it, and enqueues
+    /// Records a run's results, once, with each measured criterion's pass rate as its latest result (`Rejected` if a
+    /// criterion is not the project's), lets go of the company's sandbox if the run holds it, and enqueues
     /// `eval-run.finished` (an errored case counted as failed), all in this transaction. A run that already has
     /// results is a conflict.
     pub async fn finish_eval_run(
@@ -478,6 +520,14 @@ impl ProjectTx {
             .bind(small(rate.total)?)
             .execute(&mut *self.tx)
             .await?;
+            // A criterion no case measured has no new value; its latest result stays the last measured one.
+            if rate.total > 0
+                && !self
+                    .record_criterion_result(criterion, run, f64::from(rate.passed) / f64::from(rate.total))
+                    .await?
+            {
+                return Err(StoreError::Rejected("criterion"));
+            }
         }
         self.release_sandbox(run.as_str()).await?;
         let failed = results.failed.saturating_add(results.errored);
@@ -501,7 +551,7 @@ mod tests {
     use sqlx::Row;
 
     use super::*;
-    use crate::{CompanyIn, Name, ProjectIn, Store, new_id};
+    use crate::{CompanyIn, Comparator, CriterionIn, Name, ProjectIn, Store, Text, new_id};
 
     fn actor() -> Actor {
         Actor {
@@ -510,7 +560,8 @@ mod tests {
         }
     }
 
-    async fn project(store: &Store, tenant: &TenantId) -> ProjectScope {
+    /// A project with one success criterion: answer accuracy, at least 0.9.
+    async fn project(store: &Store, tenant: &TenantId) -> (ProjectScope, CriterionId) {
         let company = CompanyScope::new(tenant.clone(), CompanyId::new(new_id("cmp")).unwrap());
         let mut tx = store.company(&company).await.unwrap();
         let input = CompanyIn {
@@ -528,31 +579,40 @@ mod tests {
             summary: None,
         };
         tx.create(&input, &actor()).await.unwrap().unwrap();
+        let criterion = CriterionId::new(new_id("crt")).unwrap();
+        let accuracy = CriterionIn {
+            description: Text::new("Labels tickets correctly").unwrap(),
+            metric: Name::new("label accuracy").unwrap(),
+            comparator: Comparator::AtLeast,
+            target: 0.9,
+            unit: None,
+        };
+        tx.add_criterion(&criterion, &accuracy, &actor())
+            .await
+            .unwrap()
+            .unwrap();
         tx.commit().await.unwrap();
-        scope
+        (scope, criterion)
     }
 
-    fn criterion(raw: &str) -> CriterionId {
-        CriterionId::new(raw.to_owned()).unwrap()
-    }
-
-    fn case(id: &str) -> EvalCaseRow {
+    fn case(id: &str, criterion: &CriterionId) -> EvalCaseRow {
         EvalCaseRow {
             id: id.into(),
             input: format!("Sample ticket {id}: the export button does nothing."),
             expected: Some("bug".into()),
-            criteria: vec![criterion("crt_accuracy")],
+            criteria: vec![criterion.clone()],
         }
     }
 
-    fn suite() -> EvalSuiteRow {
+    fn suite(criterion: &CriterionId) -> EvalSuiteRow {
         EvalSuiteRow {
             id: new_id("sut"),
             name: "Triage labels".into(),
-            definition: json!({ "criteria": ["crt_accuracy"], "graders": [{ "kind": "exact" }] }),
+            criteria: vec![criterion.clone()],
+            definition: json!({ "graders": [{ "kind": "exact" }] }),
             created_by: UserId::new("usr_lead").unwrap(),
             created_at: OffsetDateTime::now_utc().replace_nanosecond(0).unwrap(),
-            cases: vec![case("cas_b"), case("cas_a")],
+            cases: vec![case("cas_b", criterion), case("cas_a", criterion)],
         }
     }
 
@@ -569,7 +629,7 @@ mod tests {
         }
     }
 
-    fn results() -> EvalResults {
+    fn results(criterion: &CriterionId) -> EvalResults {
         EvalResults {
             cases: vec![
                 EvalCaseResultRow {
@@ -588,15 +648,19 @@ mod tests {
                     error: Some("the target timed out".into()),
                 },
             ],
-            criteria: vec![(criterion("crt_accuracy"), EvalCriterionRow { passed: 1, total: 2 })],
+            criteria: vec![(criterion.clone(), EvalCriterionRow { passed: 1, total: 2 })],
             passed: 1,
             failed: 0,
             errored: 1,
         }
     }
 
-    async fn with_suite_and_run(store: &Store, scope: &ProjectScope) -> (EvalSuiteRow, EvalRunRow) {
-        let s = suite();
+    async fn with_suite_and_run(
+        store: &Store,
+        scope: &ProjectScope,
+        criterion: &CriterionId,
+    ) -> (EvalSuiteRow, EvalRunRow) {
+        let s = suite(criterion);
         let r = run(&s);
         let mut tx = store.project(scope).await.unwrap();
         tx.create_eval_suite(&s, &actor()).await.unwrap();
@@ -610,15 +674,19 @@ mod tests {
     async fn suites_and_runs_stay_in_their_project() {
         let store = crate::testing::store().await;
         let tenant = TenantId::new(new_id("org")).unwrap();
-        let a = project(&store, &tenant).await;
-        let b = project(&store, &tenant).await;
-        let (s, r) = with_suite_and_run(&store, &a).await;
+        let (a, crit) = project(&store, &tenant).await;
+        let (b, _) = project(&store, &tenant).await;
+        let (s, r) = with_suite_and_run(&store, &a, &crit).await;
 
         let mut tx = store.project(&a).await.unwrap();
         assert_eq!(tx.eval_suite(&s.id).await.unwrap(), Some(s.clone()));
         assert_eq!(tx.eval_suites().await.unwrap(), vec![s.clone()]);
         assert_eq!(tx.eval_run(&r.id).await.unwrap(), Some(r.clone()));
-        assert!(tx.add_eval_cases(&s.id, &[case("cas_c")], &actor()).await.unwrap());
+        assert!(
+            tx.add_eval_cases(&s.id, &[case("cas_c", &crit)], &actor())
+                .await
+                .unwrap()
+        );
         let ids: Vec<String> = tx
             .eval_suite(&s.id)
             .await
@@ -630,7 +698,7 @@ mod tests {
             .collect();
         assert_eq!(ids, ["cas_b", "cas_a", "cas_c"]);
         assert!(matches!(
-            tx.add_eval_cases(&s.id, &[case("cas_a")], &actor()).await,
+            tx.add_eval_cases(&s.id, &[case("cas_a", &crit)], &actor()).await,
             Err(StoreError::Conflict)
         ));
         drop(tx);
@@ -648,9 +716,13 @@ mod tests {
             assert!(tx.eval_suites().await.unwrap().is_empty());
             assert_eq!(tx.eval_run(&r.id).await.unwrap(), None);
             assert!(tx.eval_runs().await.unwrap().is_empty());
-            assert!(!tx.add_eval_cases(&s.id, &[case("cas_x")], &actor()).await.unwrap());
+            assert!(
+                !tx.add_eval_cases(&s.id, &[case("cas_x", &crit)], &actor())
+                    .await
+                    .unwrap()
+            );
             assert!(matches!(
-                tx.finish_eval_run(&r.id, &results(), &actor()).await,
+                tx.finish_eval_run(&r.id, &results(&crit), &actor()).await,
                 Err(StoreError::Conflict)
             ));
             drop(tx);
@@ -665,32 +737,35 @@ mod tests {
     async fn a_runs_results_and_its_event_commit_or_roll_back_together() {
         let store = crate::testing::store().await;
         let tenant = TenantId::new(new_id("org")).unwrap();
-        let scope = project(&store, &tenant).await;
-        let (_, r) = with_suite_and_run(&store, &scope).await;
+        let (scope, crit) = project(&store, &tenant).await;
+        let (_, r) = with_suite_and_run(&store, &scope, &crit).await;
 
-        // Rolled back: no results and no event.
+        // Rolled back: no results, no criterion result and no event.
         let mut tx = store.project(&scope).await.unwrap();
-        tx.finish_eval_run(&r.id, &results(), &actor()).await.unwrap();
+        tx.finish_eval_run(&r.id, &results(&crit), &actor()).await.unwrap();
         drop(tx);
         let mut tx = store.project(&scope).await.unwrap();
         assert_eq!(tx.eval_run(&r.id).await.unwrap(), Some(r.clone()));
+        assert_eq!(criterion_result(&mut tx, &crit).await, None);
         tx.commit().await.unwrap();
         assert!(finished_events(&store, &tenant).await.is_empty());
 
         let mut tx = store.project(&scope).await.unwrap();
-        tx.finish_eval_run(&r.id, &results(), &actor()).await.unwrap();
+        tx.finish_eval_run(&r.id, &results(&crit), &actor()).await.unwrap();
         tx.commit().await.unwrap();
         // Results are written once.
         let mut tx = store.project(&scope).await.unwrap();
         assert!(matches!(
-            tx.finish_eval_run(&r.id, &results(), &actor()).await,
+            tx.finish_eval_run(&r.id, &results(&crit), &actor()).await,
             Err(StoreError::Conflict)
         ));
         drop(tx);
         let mut tx = store.project(&scope).await.unwrap();
         let ended = tx.eval_run(&r.id).await.unwrap().unwrap();
         assert!(ended.ended_at.is_some());
-        assert_eq!(ended.results, Some(results()));
+        assert_eq!(ended.results, Some(results(&crit)));
+        // The criterion's pass rate is its latest result, which the lifecycle engine reads.
+        assert_eq!(criterion_result(&mut tx, &crit).await, Some((r.id.to_string(), 0.5)));
         assert_eq!(tx.eval_runs().await.unwrap(), vec![ended]);
         tx.commit().await.unwrap();
 
@@ -712,8 +787,8 @@ mod tests {
         use crate::AgentRunRow;
         let store = crate::testing::store().await;
         let tenant = TenantId::new(new_id("org")).unwrap();
-        let scope = project(&store, &tenant).await;
-        let (_, r) = with_suite_and_run(&store, &scope).await;
+        let (scope, crit) = project(&store, &tenant).await;
+        let (_, r) = with_suite_and_run(&store, &scope, &crit).await;
         let agent = AgentRunRow {
             id: oryxa_fde_core::AgentRunId::new(new_id("run")).unwrap(),
             task: "Add a /healthz endpoint.".into(),
@@ -738,7 +813,7 @@ mod tests {
 
         // The eval run's results let it go; a finished run can neither take nor renew it.
         let mut tx = store.project(&scope).await.unwrap();
-        tx.finish_eval_run(&r.id, &results(), &actor()).await.unwrap();
+        tx.finish_eval_run(&r.id, &results(&crit), &actor()).await.unwrap();
         assert!(!tx.renew_eval_sandbox(&r.id, lease).await.unwrap());
         assert!(matches!(
             tx.take_eval_sandbox(&r.id, lease).await,
@@ -747,9 +822,76 @@ mod tests {
         // The agent run that takes it next gets a higher generation, so the eval run's late calls are refused.
         assert_eq!(tx.take_agent_sandbox(&agent.id, lease).await.unwrap(), Some(held + 1));
         tx.commit().await.unwrap();
-        let (_, other) = with_suite_and_run(&store, &scope).await;
+        let (_, other) = with_suite_and_run(&store, &scope, &crit).await;
         let mut tx = store.project(&scope).await.unwrap();
         assert_eq!(tx.take_eval_sandbox(&other.id, lease).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn a_suite_measures_only_its_projects_criteria_and_loses_one_that_is_removed() {
+        let store = crate::testing::store().await;
+        let tenant = TenantId::new(new_id("org")).unwrap();
+        let (a, crit) = project(&store, &tenant).await;
+        let (b, theirs) = project(&store, &tenant).await;
+
+        // Another project's criterion, or one that does not exist, is refused, and nothing of the suite is kept.
+        for criteria in [
+            vec![theirs.clone()],
+            vec![crit.clone(), CriterionId::new(new_id("crt")).unwrap()],
+        ] {
+            let mut s = suite(&crit);
+            s.criteria = criteria;
+            let mut tx = store.project(&a).await.unwrap();
+            assert!(matches!(
+                tx.create_eval_suite(&s, &actor()).await,
+                Err(StoreError::Missing("criterion"))
+            ));
+            drop(tx);
+            let mut tx = store.project(&a).await.unwrap();
+            assert_eq!(tx.eval_suite(&s.id).await.unwrap(), None);
+        }
+
+        // A run's results for a criterion that is not the project's roll back, with nothing recorded.
+        let (s, r) = with_suite_and_run(&store, &a, &crit).await;
+        let mut tx = store.project(&a).await.unwrap();
+        let mut foreign = results(&crit);
+        foreign
+            .criteria
+            .push((theirs.clone(), EvalCriterionRow { passed: 1, total: 1 }));
+        assert!(matches!(
+            tx.finish_eval_run(&r.id, &foreign, &actor()).await,
+            Err(StoreError::Rejected("criterion"))
+        ));
+        drop(tx);
+        let mut tx = store.project(&b).await.unwrap();
+        assert_eq!(criterion_result(&mut tx, &theirs).await, None);
+        drop(tx);
+
+        // A criterion no case measured keeps its last result.
+        let mut tx = store.project(&a).await.unwrap();
+        let mut unmeasured = results(&crit);
+        unmeasured.criteria[0].1 = EvalCriterionRow { passed: 0, total: 0 };
+        tx.finish_eval_run(&r.id, &unmeasured, &actor()).await.unwrap();
+        assert_eq!(criterion_result(&mut tx, &crit).await, None);
+        tx.commit().await.unwrap();
+
+        // Removing the criterion takes it off the suite.
+        let mut tx = store.project(&a).await.unwrap();
+        assert!(tx.remove_criterion(&crit, &actor()).await.unwrap());
+        tx.commit().await.unwrap();
+        let mut tx = store.project(&a).await.unwrap();
+        assert!(tx.eval_suite(&s.id).await.unwrap().unwrap().criteria.is_empty());
+    }
+
+    /// The criterion's latest result, as (eval run, value), read in the project's transaction.
+    async fn criterion_result(tx: &mut ProjectTx, criterion: &CriterionId) -> Option<(String, f64)> {
+        sqlx::query("select eval_run_id, value from criterion_results where criterion_id = $1")
+            .bind(criterion.as_str())
+            .fetch_optional(&mut *tx.tx)
+            .await
+            .unwrap()
+            .map(|r| (r.get("eval_run_id"), r.get("value")))
     }
 
     /// `eval-run.finished` rows of one tenant, as (group, detail), read as the relay.

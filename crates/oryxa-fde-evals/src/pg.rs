@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{CriterionId, EvalRunId, ProjectScope};
+use oryxa_fde_core::{EvalRunId, ProjectScope};
 use oryxa_fde_store::{
     Actor, EvalCaseResultRow, EvalCaseRow, EvalCriterionRow, EvalResults, EvalRunRow, EvalSuiteRow, ProjectTx, Store,
     StoreError as PgError, new_id,
@@ -18,10 +18,9 @@ use crate::runner::{CriterionRate, Report};
 use crate::store::{EvalRun, EvalStore, EvalStoreError};
 use crate::suite::{Case, Command, Grader, Suite};
 
-/// What the store keeps of a suite besides its name and cases.
+/// What the store keeps of a suite besides its name, criteria and cases.
 #[derive(Serialize, Deserialize)]
 struct Definition {
-    criteria: Vec<CriterionId>,
     target: Option<Command>,
     graders: Vec<Grader>,
 }
@@ -72,13 +71,13 @@ fn case_row(c: &Case) -> EvalCaseRow {
 
 fn suite_row(s: &Suite, by: &UserId) -> Result<EvalSuiteRow, EvalStoreError> {
     let definition = Definition {
-        criteria: s.criteria.clone(),
         target: s.target.clone(),
         graders: s.graders.clone(),
     };
     Ok(EvalSuiteRow {
         id: s.id.to_string(),
         name: s.name.clone(),
+        criteria: s.criteria.clone(),
         definition: serde_json::to_value(&definition).map_err(|_| corrupt("encode"))?,
         created_by: by.clone(),
         created_at: OffsetDateTime::now_utc(),
@@ -92,7 +91,7 @@ fn suite(scope: &ProjectScope, r: EvalSuiteRow) -> Result<Suite, EvalStoreError>
         id: SuiteId::new(r.id).map_err(|_| corrupt("suite id"))?,
         scope: scope.clone(),
         name: r.name,
-        criteria: d.criteria,
+        criteria: r.criteria,
         target: d.target,
         graders: d.graders,
         cases: r

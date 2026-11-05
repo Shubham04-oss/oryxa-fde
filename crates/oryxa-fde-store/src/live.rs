@@ -806,10 +806,8 @@ async fn row_level_security_covers_every_lifecycle_table() {
             target: 2.0,
             unit: Some(Name::new("s").unwrap()),
         };
-        tx.add_criterion(&oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap(), &crit, &by)
-            .await
-            .unwrap()
-            .unwrap();
+        let criterion = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
+        tx.add_criterion(&criterion, &crit, &by).await.unwrap().unwrap();
         tx.sign_off(&stakeholder, &by).await.unwrap().unwrap();
         let access = AccessRequestIn {
             description: Text::new("Zendesk token").unwrap(),
@@ -884,6 +882,47 @@ async fn row_level_security_covers_every_lifecycle_table() {
                 .unwrap()
                 .is_some()
         );
+        // An eval suite measuring the criterion, with one case, and a finished run of it.
+        let suite = EvalSuiteRow {
+            id: new_id("suite"),
+            name: "Latency".into(),
+            criteria: vec![criterion.clone()],
+            definition: serde_json::json!({ "graders": [] }),
+            created_by: by.user.clone(),
+            created_at: time::OffsetDateTime::now_utc(),
+            cases: vec![EvalCaseRow {
+                id: "case_1".into(),
+                input: "Sample ticket".into(),
+                expected: None,
+                criteria: vec![],
+            }],
+        };
+        tx.create_eval_suite(&suite, &by).await.unwrap();
+        let eval = EvalRunRow {
+            id: oryxa_fde_core::EvalRunId::new(new_id("eval")).unwrap(),
+            suite: suite.id.clone(),
+            imported: true,
+            created_by: by.user.clone(),
+            request_id: new_id("req"),
+            created_at: time::OffsetDateTime::now_utc(),
+            ended_at: None,
+            results: None,
+        };
+        tx.create_eval_run(&eval, &by).await.unwrap();
+        let results = EvalResults {
+            cases: vec![EvalCaseResultRow {
+                case: "case_1".into(),
+                outcome: "passed".into(),
+                output: Some("ok".into()),
+                verdicts: "[]".into(),
+                error: None,
+            }],
+            criteria: vec![(criterion, EvalCriterionRow { passed: 1, total: 1 })],
+            passed: 1,
+            failed: 0,
+            errored: 0,
+        };
+        tx.finish_eval_run(&eval.id, &results, &by).await.unwrap();
         tx.commit().await.unwrap();
     }
     let t2 = tenant();
@@ -915,6 +954,12 @@ async fn row_level_security_covers_every_lifecycle_table() {
         "agent_approvals",
         "agent_budgets",
         "agent_sandbox_leases",
+        "eval_suites",
+        "eval_suite_criteria",
+        "eval_cases",
+        "eval_runs",
+        "eval_case_results",
+        "eval_criterion_results",
     ] {
         let companies: Vec<String> = sqlx::query_scalar(&format!("select company_id from {table}"))
             .fetch_all(tx.conn())
@@ -939,8 +984,8 @@ async fn row_level_security_covers_every_lifecycle_table() {
         .await
         .unwrap();
     assert_eq!(tenants, [t.as_str()]);
-    // Decisions, the scope change log and agent transcripts are append-only for the app, and an agent run's record
-    // and an approval's request never change once written.
+    // Decisions, the scope change log, agent transcripts and eval results are append-only for the app; an agent
+    // run's record, an approval's request and an eval run's record (but its end) never change once written.
     for sql in [
         "update decisions set title = 'x'",
         "delete from scope_changes",
@@ -953,6 +998,16 @@ async fn row_level_security_covers_every_lifecycle_table() {
         "update agent_approvals set action = 'x'",
         "update agent_budgets set company_id = 'x'",
         "update agent_sandbox_leases set company_id = 'x'",
+        "update eval_suites set definition = '{}'",
+        "delete from eval_suites",
+        "update eval_suite_criteria set criterion_id = 'x'",
+        "delete from eval_suite_criteria",
+        "update eval_cases set input = 'x'",
+        "update eval_runs set suite_id = 'x'",
+        "update eval_runs set created_by = 'x'",
+        "delete from eval_runs",
+        "update eval_case_results set outcome = 'passed'",
+        "update eval_criterion_results set passed = 9",
     ] {
         let mut sp = tx.conn().begin().await.unwrap();
         assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
@@ -987,6 +1042,12 @@ async fn the_runtime_login_owns_nothing_and_holds_nothing_outside_a_role() {
         "select count(*) from agent_approvals",
         "select count(*) from agent_budgets",
         "select count(*) from agent_sandbox_leases",
+        "select count(*) from eval_suites",
+        "select count(*) from eval_suite_criteria",
+        "select count(*) from eval_cases",
+        "select count(*) from eval_runs",
+        "select count(*) from eval_case_results",
+        "select count(*) from eval_criterion_results",
     ] {
         assert!(sqlx::query(sql).execute(&mut *conn).await.is_err(), "{sql}");
     }
