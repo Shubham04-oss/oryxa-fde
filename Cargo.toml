@@ -24,6 +24,7 @@ oryxa-fde-events = { path = "crates/oryxa-fde-events" }
 oryxa-fde-store = { path = "crates/oryxa-fde-store" }
 oryxa-fde-context = { path = "crates/oryxa-fde-context" }
 oryxa-fde-api = { path = "crates/oryxa-fde-api" }
+oryxa-fde-integrations = { path = "crates/oryxa-fde-integrations" }
 
 # Same versions and features as the platform base uses.
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
@@ -46,6 +47,7 @@ aws-config = { version = "1.8.13", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 sha2 = "0.10"
 

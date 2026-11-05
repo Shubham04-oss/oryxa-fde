@@ -256,6 +256,17 @@ impl SlackApp {
         })
     }
 
+    /// For posting with a tenant's bot token only, as the poster does: it holds no OAuth
+    /// credentials, so its code exchange is always refused.
+    pub fn for_posting(http: Outbound) -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_uri: String::new(),
+            http,
+        }
+    }
+
     fn api(&self, method: Method, name: &str) -> Result<reqwest::RequestBuilder, SlackError> {
         Ok(self.http.request(method, &format!("https://slack.com/api/{name}"))?)
     }
@@ -293,6 +304,9 @@ impl Slack for SlackApp {
 
     fn exchange<'a>(&'a self, code: &'a str) -> BoxFuture<'a, Result<(TeamId, BotToken), SlackError>> {
         Box::pin(async move {
+            if self.client_id.is_empty() {
+                return Err(SlackError::Refused("no_oauth_credentials".into()));
+            }
             #[derive(Deserialize)]
             struct Access {
                 access_token: String,

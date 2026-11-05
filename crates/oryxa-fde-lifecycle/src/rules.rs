@@ -5,15 +5,23 @@
 //! - a finished eval run lands in the activity, and if every success criterion now meets its
 //!   target (and the project is not yet deploying), raises a "ready to deploy" suggestion; the
 //!   stage itself never moves;
-//! - a finished agent run and a merged pull request land in the activity.
+//! - a finished agent run, and a pull request opened or merged, land in the activity;
+//! - an approved update is posted to the company's Slack channel, once (see [`on_update_approved`]).
+//!
+//! The Slack post is the one rule that calls out: it claims the post in the store first, so a
+//! redelivered event finds the claim instead of its event id, and a failure that may pass releases
+//! the claim for the retry.
 
 use oryxa_core::TenantId;
 use oryxa_events::{Event, Verifier, decode};
 use oryxa_fde_core::{Stage, TaskId};
 use oryxa_fde_events::inbox::{Message, Outcome, refusal};
 use oryxa_fde_events::{
-    AccessRequestStatusChanged, AccessStatus, AgentRunFinished, EvalRunFinished, PullRequestMerged,
+    AccessRequestStatusChanged, AccessStatus, AgentRunFinished, EvalRunFinished, PullRequestMerged, PullRequestOpened,
+    UpdateApproved,
 };
+use oryxa_fde_integrations::secrets::Secrets;
+use oryxa_fde_integrations::slack::{ChannelId, Slack, SlackError};
 use oryxa_fde_store::{ActivityIn, Store, StoreError, SuggestionKind, engine_actor};
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
@@ -60,11 +68,28 @@ pub fn fact<T: Event + DeserializeOwned>(verifier: &Verifier, msg: &Message) -> 
     })
 }
 
+/// Where approved updates are posted: Slack, with each tenant's bot token from Secrets Manager.
+pub struct SlackPoster {
+    pub slack: std::sync::Arc<dyn Slack>,
+    pub secrets: std::sync::Arc<dyn Secrets>,
+}
+
+/// [`handle_with`], with no Slack posting.
+pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcome {
+    handle_with(store, verifier, None, msg).await
+}
+
 /// Handles one message from the engine's queue. Events the engine has no rule for are not its to
 /// act on and are deleted; a store failure that may pass leaves the event for redelivery, and one
 /// that would fail the same way again quarantines it (see [`outcome`]).
-pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcome {
+pub async fn handle_with(store: &Store, verifier: &Verifier, poster: Option<&SlackPoster>, msg: &Message) -> Outcome {
     let t = msg.detail_type.as_str();
+    if t == UpdateApproved::DETAIL_TYPE {
+        return match fact(verifier, msg) {
+            Ok(f) => on_update_approved(store, poster, &f).await,
+            Err(o) => o,
+        };
+    }
     let (event_id, applied) = if t == AccessRequestStatusChanged::DETAIL_TYPE {
         match fact(verifier, msg) {
             Ok(f) => (f.event_id.clone(), on_access_changed(store, &f).await),
@@ -83,6 +108,11 @@ pub async fn handle(store: &Store, verifier: &Verifier, msg: &Message) -> Outcom
     } else if t == PullRequestMerged::DETAIL_TYPE {
         match fact(verifier, msg) {
             Ok(f) => (f.event_id.clone(), on_pull_request(store, &f).await),
+            Err(o) => return o,
+        }
+    } else if t == PullRequestOpened::DETAIL_TYPE {
+        match fact(verifier, msg) {
+            Ok(f) => (f.event_id.clone(), on_pull_request_opened(store, &f).await),
             Err(o) => return o,
         }
     } else {
@@ -165,6 +195,87 @@ pub async fn on_agent_run(store: &Store, f: &Fact<AgentRunFinished>) -> Result<A
 pub async fn on_pull_request(store: &Store, f: &Fact<PullRequestMerged>) -> Result<Applied, StoreError> {
     let what = ActivityIn::PullRequest { number: f.data.number };
     record(store, f, &f.data.scope(&f.tenant), &what).await
+}
+
+/// An opened pull request lands in the activity.
+pub async fn on_pull_request_opened(store: &Store, f: &Fact<PullRequestOpened>) -> Result<Applied, StoreError> {
+    let what = ActivityIn::PullRequestOpened { number: f.data.number };
+    record(store, f, &f.data.scope(&f.tenant), &what).await
+}
+
+/// What posting an approved update did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Posted {
+    Posted,
+    /// Claimed or posted before: nothing sent.
+    Redelivered,
+    /// No Slack poster, no channel for the company, no workspace, or the update is not approved.
+    NothingToPost,
+    /// Slack refused for good (the channel is gone, the token revoked): the claim is kept, so it is
+    /// not tried again.
+    Refused(String),
+}
+
+/// Posts the approved update to the company's channel, once: claimed before sending, marked sent
+/// after, and released when the send fails in a way that may pass, so the redelivery tries again.
+pub async fn on_update_approved(store: &Store, poster: Option<&SlackPoster>, f: &Fact<UpdateApproved>) -> Outcome {
+    let applied = post_update(store, poster, f).await;
+    match applied {
+        Ok(Ok(posted)) => {
+            tracing::info!(event_id = %f.event_id, ?posted, "approved update posted");
+            Outcome::Done
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(event_id = %f.event_id, error = %e, "approved update not posted; will retry");
+            Outcome::Retry
+        }
+        Err(e) => outcome(UpdateApproved::DETAIL_TYPE, &f.event_id, Err(e)),
+    }
+}
+
+/// The store's errors outside, Slack's and Secrets Manager's inside: those release the claim.
+async fn post_update(
+    store: &Store,
+    poster: Option<&SlackPoster>,
+    f: &Fact<UpdateApproved>,
+) -> Result<Result<Posted, String>, StoreError> {
+    let Some(poster) = poster else {
+        return Ok(Ok(Posted::NothingToPost));
+    };
+    let scope = f.data.scope(&f.tenant);
+    let week = f.data.week.monday();
+    let mut tx = store.project(&scope).await?;
+    let Some(post) = tx.slack_post(week).await? else {
+        return Ok(Ok(Posted::NothingToPost));
+    };
+    if !tx.claim_slack_post(week).await? {
+        return Ok(Ok(Posted::Redelivered));
+    }
+    tx.commit().await?;
+    let channel = ChannelId::new(post.channel.as_str()).ok_or(StoreError::Corrupt("slack channel"))?;
+    let sent = match poster.secrets.get(&post.secret_arn).await {
+        Ok(token) => poster
+            .slack
+            .post(&token, &channel, post.body.as_str())
+            .await
+            .map_err(|e| (matches!(e, SlackError::Refused(_)), e.to_string())),
+        Err(e) => Err((false, e.to_string())),
+    };
+    let mut tx = store.project(&scope).await?;
+    let result = match sent {
+        Ok(()) => {
+            tx.finish_slack_post(week, true).await?;
+            Ok(Posted::Posted)
+        }
+        // Refused for good: keep the claim, so the update is not posted twice nor retried forever.
+        Err((true, why)) => Ok(Posted::Refused(why)),
+        Err((false, why)) => {
+            tx.finish_slack_post(week, false).await?;
+            Err(why)
+        }
+    };
+    tx.commit().await?;
+    Ok(result)
 }
 
 async fn record<T>(

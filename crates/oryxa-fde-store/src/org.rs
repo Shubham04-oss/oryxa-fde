@@ -25,8 +25,8 @@ pub struct SecurityAnswerIn {
 
 /// A transaction limited to one organisation's own records; no company's rows are visible.
 pub struct OrgTx {
-    tx: Transaction<'static, Postgres>,
-    tenant: TenantId,
+    pub(crate) tx: Transaction<'static, Postgres>,
+    pub(crate) tenant: TenantId,
 }
 
 const COLUMNS: &str = "answer_id, question, answer, updated_at";
@@ -76,7 +76,7 @@ impl OrgTx {
                 e.into()
             }
         })?;
-        self.audit(by, "security_answer.added", id).await?;
+        self.audit(by, "security_answer.added", id.as_str()).await?;
         answer(row)
     }
 
@@ -97,7 +97,7 @@ impl OrgTx {
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
-        self.audit(by, "security_answer.updated", id).await?;
+        self.audit(by, "security_answer.updated", id.as_str()).await?;
         answer(row).map(Some)
     }
 
@@ -111,17 +111,17 @@ impl OrgTx {
         if n == 0 {
             return Ok(false);
         }
-        self.audit(by, "security_answer.removed", id).await?;
+        self.audit(by, "security_answer.removed", id.as_str()).await?;
         Ok(true)
     }
 
     /// Organisation-level audit rows have no company.
-    async fn audit(&mut self, by: &Actor, action: &'static str, target: &SecurityAnswerId) -> Result<(), StoreError> {
+    pub(crate) async fn audit(&mut self, by: &Actor, action: &'static str, target: &str) -> Result<(), StoreError> {
         sqlx::query("insert into audit_log (tenant_id, actor, action, target) values ($1, $2, $3, $4)")
             .bind(self.tenant.as_str())
             .bind(by.user.as_str())
             .bind(action)
-            .bind(target.as_str())
+            .bind(target)
             .execute(&mut *self.tx)
             .await?;
         Ok(())

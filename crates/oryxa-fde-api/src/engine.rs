@@ -26,6 +26,7 @@ const MAX_ACTIVITY: u32 = 200;
 pub enum ActivityKind {
     AgentRunFinished,
     EvalRunFinished,
+    PullRequestOpened,
     PullRequestMerged,
 }
 
@@ -84,6 +85,14 @@ impl From<Activity> for ActivityOut {
                 failed: None,
                 occurred_at,
             },
+            ActivityIn::PullRequestOpened { number } => Self {
+                kind: ActivityKind::PullRequestOpened,
+                subject: number.to_string(),
+                outcome: None,
+                passed: None,
+                failed: None,
+                occurred_at,
+            },
         }
     }
 }
@@ -95,8 +104,8 @@ pub struct ActivityParams {
     pub limit: Option<u32>,
 }
 
-/// The project's activity: finished agent runs and eval runs and merged pull requests, newest
-/// first.
+/// The project's activity: finished agent runs and eval runs, and pull requests opened and
+/// merged, newest first.
 #[utoipa::path(get, operation_id = "list_activity", path = "/v1/companies/{company}/projects/{project}/activity",
     tag = "lifecycle",
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),

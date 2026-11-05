@@ -355,6 +355,16 @@ impl ProjectTx {
         let s = self.scope.clone();
         let week = monday.to_string();
         audit(&mut self.tx, &s.company, Some(&s.project), by, action, Some(&week)).await?;
+        if action == "update.approved" {
+            let week = oryxa_fde_events::Week::new(monday).ok_or(StoreError::Rejected("week"))?;
+            crate::enqueue(
+                &mut self.tx,
+                &s.company,
+                by,
+                &oryxa_fde_events::UpdateApproved::new(&s, week),
+            )
+            .await?;
+        }
         draft(row).map(Some)
     }
 }

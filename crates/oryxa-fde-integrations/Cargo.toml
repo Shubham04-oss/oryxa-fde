@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 aws-lc-rs = "1"
+aws-sdk-secretsmanager.workspace = true
 base64 = "0.22"
 hmac = "0.12"
 rand = "0.8"

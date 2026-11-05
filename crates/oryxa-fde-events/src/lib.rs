@@ -105,6 +105,48 @@ pub struct EvalRunFinished {
     pub failed: u32,
 }
 
+/// The Monday of an ISO week, as `YYYY-MM-DD` on the bus; anything else is refused when decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Week(time::Date);
+
+impl Week {
+    pub fn new(monday: time::Date) -> Option<Self> {
+        (monday.weekday() == time::Weekday::Monday).then_some(Self(monday))
+    }
+
+    pub fn monday(self) -> time::Date {
+        self.0
+    }
+}
+
+const WEEK: &[time::format_description::BorrowedFormatItem<'_>] =
+    time::macros::format_description!("[year]-[month]-[day]");
+
+impl Serialize for Week {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let text = self.0.format(WEEK).map_err(serde::ser::Error::custom)?;
+        s.serialize_str(&text)
+    }
+}
+
+impl<'de> Deserialize<'de> for Week {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        time::Date::parse(&raw, WEEK)
+            .ok()
+            .and_then(Week::new)
+            .ok_or_else(|| serde::de::Error::custom("not the Monday of a week"))
+    }
+}
+
+/// An FDE approved the project's update of a week: the week only, never its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateApproved {
+    company: CompanyId,
+    project: ProjectId,
+    pub week: Week,
+}
+
 /// A pull request was opened in the project's repository: its number only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestOpened {
@@ -163,7 +205,8 @@ project_scoped!(
     AgentRunFinished,
     EvalRunFinished,
     PullRequestOpened,
-    PullRequestMerged
+    PullRequestMerged,
+    UpdateApproved
 );
 
 impl CompanyCreated {
@@ -248,6 +291,16 @@ impl EvalRunFinished {
     }
 }
 
+impl UpdateApproved {
+    pub fn new(s: &ProjectScope, week: Week) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            week,
+        }
+    }
+}
+
 impl PullRequestOpened {
     pub fn new(s: &ProjectScope, number: u32) -> Self {
         Self {
@@ -293,6 +346,7 @@ events! {
     EvalRunFinished => "fde.eval-run.finished.v1", ordered by project;
     PullRequestOpened => "fde.pull-request.opened.v1", ordered by project;
     PullRequestMerged => "fde.pull-request.merged.v1", ordered by project;
+    UpdateApproved => "fde.update.approved.v1", ordered by project;
 }
 
 #[cfg(test)]
@@ -323,6 +377,23 @@ mod tests {
 
     fn project() -> ProjectScope {
         company().project(ProjectId::new("prj_1").unwrap())
+    }
+
+    fn week() -> Week {
+        Week::new(time::macros::date!(2026 - 11 - 02)).unwrap()
+    }
+
+    #[test]
+    fn a_week_is_a_monday_on_the_way_in_and_out() {
+        assert_eq!(serde_json::to_value(week()).unwrap(), serde_json::json!("2026-11-02"));
+        assert_eq!(
+            serde_json::from_value::<Week>(serde_json::json!("2026-11-02")).unwrap(),
+            week()
+        );
+        assert!(Week::new(time::macros::date!(2026 - 11 - 03)).is_none());
+        for bad in ["2026-11-03", "2026-13-02", "02/11/2026", "", "2026-11-02 drop table"] {
+            assert!(serde_json::from_value::<Week>(serde_json::json!(bad)).is_err(), "{bad}");
+        }
     }
 
     fn signed<T: Event>(signer: &Signer, data: &T) -> Encoded {
@@ -371,6 +442,7 @@ mod tests {
             sample(EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 41, 2)),
             sample(PullRequestOpened::new(&p, 127)),
             sample(PullRequestMerged::new(&p, 128)),
+            sample(UpdateApproved::new(&p, week())),
         ]
     }
 
@@ -408,7 +480,8 @@ mod tests {
             by_project.clone(),
         );
         round_trip(PullRequestOpened::new(&p, 6), by_project.clone());
-        round_trip(PullRequestMerged::new(&p, 7), by_project);
+        round_trip(PullRequestMerged::new(&p, 7), by_project.clone());
+        round_trip(UpdateApproved::new(&p, week()), by_project);
     }
 
     #[test]
