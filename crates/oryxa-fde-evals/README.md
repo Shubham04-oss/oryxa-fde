@@ -26,6 +26,9 @@ A grader that cannot decide (a sandbox or model failure, a case without `expecte
 `errored`, never a pass. An errored case counts against its criteria's pass rates, and as failed in
 `eval_run.finished`.
 
+A run is bounded (`runner::Limits`): it ends at a deadline (the agent run's `max_run`), and its judge makes at most
+a set number of model calls (`EVAL_JUDGE_MAX_CALLS`), each counted before it is made. Cases past either limit error.
+
 ## CSV
 
 - **Cases:** `input`, and optionally `expected`, `id` and `criteria` (ids separated by `;`).
@@ -35,9 +38,11 @@ Unknown columns, malformed rows, more than 10,000 rows, or more than 8 MiB are r
 
 ## Storage
 
-`EvalStore` is implemented on Postgres (`pg`, over `oryxa-fde-store`'s eval tables from `0009_evals.sql`): each call
-is one transaction scoped to the project, under forced row-level security. `finish` records the report once and
-writes `EvalRunFinished` (ids and counts, an errored case counted as failed) to the outbox in the same transaction.
+`EvalStore` is implemented on Postgres (`pg`, over `oryxa-fde-store`'s eval tables from `0013_evals.sql`): each call
+is one transaction scoped to the project, under forced row-level security. A suite's criteria reference the project's
+criteria in the database, and leave the suite when a criterion is removed. `finish` records the report once, sets
+each measured criterion's pass rate as its latest result (which the lifecycle engine reads), and writes
+`EvalRunFinished` (ids and counts, an errored case counted as failed) to the outbox, all in one transaction.
 `InMemoryEvals` is for tests.
 
 Case text and outputs are sample data and stay in these tables, never in events or logs. A stored output cannot

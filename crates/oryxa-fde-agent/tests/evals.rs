@@ -66,6 +66,8 @@ struct FakeSandbox {
     harness: std::sync::atomic::AtomicBool,
     /// The lease generation each call that changes the sandbox carried.
     leases: Mutex<Vec<u64>>,
+    /// The starts and harness checks, in order.
+    calls: Mutex<Vec<&'static str>>,
 }
 
 fn out(code: i32, stdout: &str) -> ExecOutput {
@@ -111,6 +113,7 @@ fn answer(exec: &Exec) -> ExecOutput {
 impl Sandbox for FakeSandbox {
     async fn start(&self, _: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
         self.leases.lock().unwrap().push(lease.0);
+        self.calls.lock().unwrap().push("start");
         Ok(())
     }
     async fn stop(&self, _: &CompanyScope, lease: LeaseToken) -> Result<(), SandboxError> {
@@ -118,6 +121,7 @@ impl Sandbox for FakeSandbox {
         Ok(())
     }
     async fn harness_may_run(&self, _: &CompanyScope) -> Result<bool, SandboxError> {
+        self.calls.lock().unwrap().push("harness_may_run");
         Ok(self.harness.load(std::sync::atomic::Ordering::SeqCst))
     }
     async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {
@@ -191,6 +195,11 @@ fn crit(id: &str) -> CriterionId {
 }
 
 fn world() -> (Arc<Evals<Test>>, Router) {
+    world_with(100)
+}
+
+/// The world, with the judge allowed `judge_calls` model calls per run.
+fn world_with(judge_calls: u32) -> (Arc<Evals<Test>>, Router) {
     let mut access = FakeAccess::default();
     for (token, tenant, user) in [
         ("lead", "org_a", "usr_lead"),
@@ -270,11 +279,13 @@ fn world() -> (Arc<Evals<Test>>, Router) {
         commands: Mutex::new(vec![]),
         harness: std::sync::atomic::AtomicBool::new(false),
         leases: Mutex::default(),
+        calls: Mutex::default(),
     };
     let runs = Runs::<Test>::new(InMemoryRuns::default(), sandbox, Offline, context, access, config);
     let judge = JudgeConfig {
         model: "anthropic.claude-opus-5-5".into(),
         region: "eu-west-1".into(),
+        max_calls: judge_calls,
     };
     let evals = Evals::new(runs, InMemoryEvals::default(), judge);
     let router = evals::router(evals.clone());
@@ -600,6 +611,33 @@ async fn an_eval_runs_sandbox_calls_carry_its_lease_generation() {
 }
 
 #[tokio::test]
+async fn an_eval_run_makes_no_more_judge_calls_than_it_is_allowed() {
+    let (evals, app) = world_with(1);
+    let suite = create_suite(&app, answer_suite()).await;
+    let (_, run) = call(&app, "POST", &format!("{P1}/eval-suites/{suite}/runs"), "lead", None).await;
+    let done = finished(&app, run["id"].as_str().unwrap()).await;
+    // One call for the first case; the second errors without reaching the model.
+    let judged = |e: &Exec| e.argv[0] == "curl";
+    assert_eq!(
+        evals
+            .runs
+            .sandbox
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| judged(e))
+            .count(),
+        1
+    );
+    assert_eq!(done["report"]["cases"][0]["outcome"], "passed", "{done}");
+    assert_eq!(
+        done["report"]["cases"][1]["error"],
+        "the run used all the judge's model calls"
+    );
+}
+
+#[tokio::test]
 async fn an_eval_never_runs_beside_a_harness_that_may_still_run() {
     let (evals, app) = world();
     let suite = create_suite(&app, answer_suite()).await;
@@ -614,6 +652,8 @@ async fn an_eval_never_runs_beside_a_harness_that_may_still_run() {
     assert_eq!(done["report"]["errored"], 2, "{done}");
     assert_eq!(done["report"]["cases"][0]["error"], "the sandbox could not start");
     assert!(evals.runs.sandbox.commands.lock().unwrap().is_empty());
+    // The run's lease reached the gateway before the check, so no earlier holder's harness can start after it.
+    assert_eq!(*evals.runs.sandbox.calls.lock().unwrap(), ["start", "harness_may_run"]);
 }
 
 #[tokio::test]

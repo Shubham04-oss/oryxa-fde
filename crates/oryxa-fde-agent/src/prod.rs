@@ -12,6 +12,7 @@
 //! | `AGENT_BUDGET_MINUTES`, `AGENT_BUDGET_USD` | 600 minutes and 100 dollars per project without a budget of its own |
 //! | `AGENT_PRICE_INPUT_USD_PER_MTOK`, `AGENT_PRICE_OUTPUT_USD_PER_MTOK` | 15 and 75 |
 //! | `EVAL_JUDGE_MODEL` | `AGENT_MODEL`: the model the eval judge grader uses, in `AGENT_REGION` |
+//! | `EVAL_JUDGE_MAX_CALLS` | 200 model calls per eval run; an eval run also ends at `AGENT_RUN_MAX_MINUTES` |
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -153,6 +154,7 @@ pub fn router_from_env<K: KeySource + 'static>(
     let judge = JudgeConfig {
         model: var("EVAL_JUDGE_MODEL").unwrap_or_else(|| agent.model.clone()),
         region: agent.region.clone(),
+        max_calls: number("EVAL_JUDGE_MAX_CALLS", 200)?,
     };
     let config = RunsConfig {
         pricing: Pricing {

@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use oryxa_fde_core::{CompanyId, CompanyScope, CriterionId, EvalRunId, ProjectId, ProjectScope};
 use oryxa_fde_evals::import::{self, MAX_CSV_BYTES};
-use oryxa_fde_evals::runner::{self, CriterionRate, Report, Source};
+use oryxa_fde_evals::runner::{self, CriterionRate, Limits, Report, Source};
 use oryxa_fde_evals::{
     Case, CaseId, CaseOutcome, CaseResult, Command, CommandOutput, EvalRun, EvalSandbox, EvalStore, EvalStoreError,
     Grader, Judge, JudgeFailed, SandboxFailed, Suite, SuiteId,
@@ -49,6 +49,8 @@ pub trait EvalDeps: Deps {
 pub struct JudgeConfig {
     pub model: String,
     pub region: String,
+    /// Model calls one eval run may make.
+    pub max_calls: u32,
 }
 
 pub struct Evals<D: EvalDeps> {
@@ -124,11 +126,11 @@ fn ts(t: OffsetDateTime) -> String {
         .unwrap_or_default()
 }
 
-/// The company's sandbox for one eval run: commands run as `agent` through the gateway.
 /// An eval run's hold on the company's sandbox, as its heartbeat keeps it: until when, with which token at the
 /// gateway. `None` before it is given and once it is lost.
 type Hold = watch::Receiver<Option<(Instant, LeaseToken)>>;
 
+/// The company's sandbox for one eval run: commands run as `agent` through the gateway.
 struct CompanySandbox<'a, D: Deps> {
     runs: &'a Runs<D>,
     company: CompanyScope,
@@ -147,17 +149,18 @@ impl<D: Deps> CompanySandbox<'_, D> {
 
 impl<D: Deps> EvalSandbox for CompanySandbox<'_, D> {
     async fn start(&self) -> Result<(), SandboxFailed> {
-        // An eval grades the checkout an agent run left, so it does not start fresh; but never beside a harness that
-        // may still run (one whose API task is gone), whose agent could change what is graded.
-        match self.runs.sandbox.harness_may_run(&self.company).await {
-            Ok(false) => {}
-            Ok(true) | Err(_) => return Err(SandboxFailed),
-        }
+        // The run's lease reaches the gateway first, so an earlier holder can start no harness after the check below.
         self.runs
             .sandbox
             .start(&self.company, self.lease()?)
             .await
-            .map_err(|_| SandboxFailed)
+            .map_err(|_| SandboxFailed)?;
+        // An eval grades the checkout an agent run left, so it does not start fresh; but never beside a harness that
+        // may still run (one whose API task is gone), whose agent could change what is graded.
+        match self.runs.sandbox.harness_may_run(&self.company).await {
+            Ok(false) => Ok(()),
+            Ok(true) | Err(_) => Err(SandboxFailed),
+        }
     }
 
     async fn run(
@@ -534,7 +537,12 @@ async fn execute<D: EvalDeps>(evals: Arc<Evals<D>>, suite: Suite, source: Source
     evals.runs.changed();
 }
 
+/// Runs the suite for at most `max_run` from now, with the judge's calls capped.
 async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source, hold: Hold) -> Report {
+    let limits = Limits {
+        deadline: Instant::now() + evals.runs.config.max_run,
+        judge_calls: evals.judge.max_calls,
+    };
     let sandbox = CompanySandbox {
         runs: &evals.runs,
         company: suite.scope.company.clone(),
@@ -544,7 +552,7 @@ async fn run_suite<D: EvalDeps>(evals: &Evals<D>, suite: &Suite, source: &Source
         sandbox: &sandbox,
         config: &evals.judge,
     };
-    runner::run(suite, source, &sandbox, &judge).await
+    runner::run(suite, source, &sandbox, &judge, limits).await
 }
 
 /// Waits for the company's sandbox; when it is given, until when it is held and the run's token at the gateway.
@@ -752,6 +760,7 @@ mod tests {
         let config = |model: &str, region: &str| JudgeConfig {
             model: model.into(),
             region: region.into(),
+            max_calls: 1,
         };
         assert_eq!(
             converse_url(&config("eu.anthropic.claude-opus-5-5", "eu-west-1")).unwrap(),
