@@ -357,6 +357,417 @@
         }
       }
     },
+    "/v1/companies/{company}/canvas": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The company's canvas at its latest version; version 0 and no content if never saved.",
+        "operationId": "get_company_canvas",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Save the company's canvas as a new version, on top of `base_version`.",
+        "operationId": "save_company_canvas",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CanvasBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasVersionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another save came first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over 8 MiB"
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/canvas/links": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The company canvas's shape links.",
+        "operationId": "list_company_canvas_links",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LinkOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/canvas/shapes/{shape}/link": {
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Link a shape on the company's canvas to a record, replacing its link if it had one.",
+        "operationId": "link_company_shape",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "shape",
+            "in": "path",
+            "description": "Shape id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Remove a shape's link on the company's canvas.",
+        "operationId": "unlink_company_shape",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "shape",
+            "in": "path",
+            "description": "Shape id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/canvas/versions": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The company canvas's newest versions (up to 100), newest first.",
+        "operationId": "list_company_canvas_versions",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CanvasVersionOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/canvas/versions/{version}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One version of the company's canvas.",
+        "operationId": "get_company_canvas_version",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/documents": {
       "get": {
         "tags": [
@@ -530,6 +941,313 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/meeting-notes": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The company's meeting notes, latest meeting first.",
+        "operationId": "list_company_meeting_notes",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MeetingNoteOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Add a meeting note to the company.",
+        "operationId": "add_company_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingNoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/meeting-notes/{note}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One of the company's meeting notes.",
+        "operationId": "get_company_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Replace one of the company's meeting notes.",
+        "operationId": "update_company_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingNoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Remove one of the company's meeting notes.",
+        "operationId": "remove_company_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
           },
           "403": {
             "description": "Forbidden",
@@ -1474,6 +2192,510 @@
         }
       }
     },
+    "/v1/companies/{company}/projects/{project}/canvas": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The project's canvas at its latest version; version 0 and no content if never saved.",
+        "operationId": "get_project_canvas",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Save the project's canvas as a new version, on top of `base_version`.",
+        "operationId": "save_project_canvas",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CanvasBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasVersionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another save came first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over 8 MiB"
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/canvas/links": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The project canvas's shape links.",
+        "operationId": "list_project_canvas_links",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LinkOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/canvas/shapes/{shape}/link": {
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Link a shape on the project's canvas to a record, replacing its link if it had one.",
+        "operationId": "link_project_shape",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "shape",
+            "in": "path",
+            "description": "Shape id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Remove a shape's link on the project's canvas.",
+        "operationId": "unlink_project_shape",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "shape",
+            "in": "path",
+            "description": "Shape id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/canvas/versions": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The project canvas's newest versions (up to 100), newest first.",
+        "operationId": "list_project_canvas_versions",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CanvasVersionOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/canvas/versions/{version}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One version of the project's canvas.",
+        "operationId": "get_project_canvas_version",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/projects/{project}/decisions": {
       "get": {
         "tags": [
@@ -1593,6 +2815,368 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/meeting-notes": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The project's meeting notes, latest meeting first.",
+        "operationId": "list_project_meeting_notes",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MeetingNoteOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Add a meeting note to the project.",
+        "operationId": "add_project_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingNoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/meeting-notes/{note}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One of the project's meeting notes.",
+        "operationId": "get_project_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Replace one of the project's meeting notes.",
+        "operationId": "update_project_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingNoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingNoteOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Remove one of the project's meeting notes.",
+        "operationId": "remove_project_meeting_note",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "note",
+            "in": "path",
+            "description": "Meeting note id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
           },
           "403": {
             "description": "Forbidden",
@@ -3041,6 +4625,436 @@
         }
       }
     },
+    "/v1/companies/{company}/projects/{project}/threads": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The project's threads, most recently active first.",
+        "operationId": "list_project_threads",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subject_kind",
+            "in": "query",
+            "description": "Only threads about this kind of subject; needs `subject_id` too.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SubjectKind"
+            }
+          },
+          {
+            "name": "subject_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThreadOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Start a thread about one of the project's records, the company's stakeholders or systems, or a\nshape on the project's canvas.",
+        "operationId": "start_project_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/threads/{thread}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One of the project's threads with its comments.",
+        "operationId": "get_project_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadWithComments"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/comments": {
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Comment on one of the project's threads.",
+        "operationId": "comment_project_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/promote": {
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Promote a project's thread to its decisions log. A thread is promoted once.",
+        "operationId": "promote_project_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already promoted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/projects/{project}/updates": {
       "get": {
         "tags": [
@@ -4039,6 +6053,290 @@
         }
       }
     },
+    "/v1/companies/{company}/threads": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "The company's threads, most recently active first.",
+        "operationId": "list_company_threads",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subject_kind",
+            "in": "query",
+            "description": "Only threads about this kind of subject; needs `subject_id` too.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SubjectKind"
+            }
+          },
+          {
+            "name": "subject_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThreadOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Start a thread about one of the company's records (a stakeholder, system, document or meeting\nnote) or a shape on its canvas.",
+        "operationId": "start_company_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/threads/{thread}": {
+      "get": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "One of the company's threads with its comments.",
+        "operationId": "get_company_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadWithComments"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/threads/{thread}/comments": {
+      "post": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Comment on one of the company's threads.",
+        "operationId": "comment_company_thread",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -4491,6 +6789,119 @@
           "admin"
         ]
       },
+      "CanvasBody": {
+        "type": "object",
+        "required": [
+          "base_version",
+          "content"
+        ],
+        "properties": {
+          "base_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version this save was made on: the latest, or 0 for a canvas never saved.",
+            "minimum": 0
+          },
+          "content": {
+            "type": "object",
+            "description": "The canvas library's scene, a JSON object of at most 8 MiB and 64 levels; stored as sent.\nNever parsed into a tree: a body of millions of tiny values would cost many times its size."
+          }
+        }
+      },
+      "CanvasOut": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The scene; null for a canvas never saved."
+          },
+          "saved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "saved_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 for a canvas never saved.",
+            "minimum": 0
+          }
+        }
+      },
+      "CanvasVersionOut": {
+        "type": "object",
+        "required": [
+          "version",
+          "size_bytes",
+          "saved_by",
+          "saved_at"
+        ],
+        "properties": {
+          "saved_at": {
+            "type": "string"
+          },
+          "saved_by": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "CommentBody": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        }
+      },
+      "CommentOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "body",
+          "author",
+          "created_at"
+        ],
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
       "CompanyBody": {
         "type": "object",
         "required": [
@@ -4850,6 +7261,58 @@
           "out"
         ]
       },
+      "LinkBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The record's id. A stakeholder of the company; a scope item or access request of the\nproject, or on a company's canvas of any of its projects."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinkKind"
+          }
+        }
+      },
+      "LinkKind": {
+        "type": "string",
+        "description": "The kind of record a shape stands for.",
+        "enum": [
+          "stakeholder",
+          "scope_item",
+          "access_request"
+        ]
+      },
+      "LinkOut": {
+        "type": "object",
+        "required": [
+          "shape",
+          "kind",
+          "id",
+          "linked_by",
+          "linked_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinkKind"
+          },
+          "linked_at": {
+            "type": "string"
+          },
+          "linked_by": {
+            "type": "string"
+          },
+          "shape": {
+            "type": "string"
+          }
+        }
+      },
       "MeOut": {
         "type": "object",
         "required": [
@@ -4867,6 +7330,90 @@
           },
           "user": {
             "$ref": "#/components/schemas/NamedOut"
+          }
+        }
+      },
+      "MeetingNoteBody": {
+        "type": "object",
+        "required": [
+          "title",
+          "held_on",
+          "body"
+        ],
+        "properties": {
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The workspace's users who took part; each must work on the company or project."
+          },
+          "body": {
+            "type": "string",
+            "description": "The notes, up to 20000 characters."
+          },
+          "held_on": {
+            "type": "string",
+            "description": "The day of the meeting, `YYYY-MM-DD`."
+          },
+          "stakeholders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The company's stakeholders who took part."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "MeetingNoteOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "held_on",
+          "body",
+          "stakeholders",
+          "attendees",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "held_on": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "stakeholders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
           }
         }
       },
@@ -5037,6 +7584,37 @@
           },
           "stage": {
             "$ref": "#/components/schemas/ProjectStage"
+          }
+        }
+      },
+      "PromoteBody": {
+        "type": "object",
+        "required": [
+          "title",
+          "decided_by"
+        ],
+        "properties": {
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When, RFC 3339; defaults to now."
+          },
+          "decided_by": {
+            "type": "string",
+            "description": "Who decided, often someone at the customer."
+          },
+          "rationale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why; defaults to the thread's opening comment."
+          },
+          "title": {
+            "type": "string",
+            "description": "What was decided."
           }
         }
       },
@@ -5355,6 +7933,37 @@
           "other"
         ]
       },
+      "SubjectKind": {
+        "type": "string",
+        "enum": [
+          "stakeholder",
+          "system",
+          "document",
+          "task",
+          "decision",
+          "access_request",
+          "scope_item",
+          "criterion",
+          "meeting_note",
+          "shape"
+        ]
+      },
+      "SubjectRef": {
+        "type": "object",
+        "description": "A record or a canvas shape, by kind and id.",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SubjectKind"
+          }
+        }
+      },
       "SuggestionKindOut": {
         "type": "string",
         "enum": [
@@ -5571,6 +8180,81 @@
           "done"
         ]
       },
+      "ThreadBody": {
+        "type": "object",
+        "required": [
+          "subject",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The opening comment."
+          },
+          "subject": {
+            "$ref": "#/components/schemas/SubjectRef"
+          }
+        }
+      },
+      "ThreadOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "subject",
+          "created_by",
+          "created_at",
+          "comments",
+          "last_comment_at"
+        ],
+        "properties": {
+          "comments": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The decision it was promoted to."
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_comment_at": {
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/SubjectRef"
+          }
+        }
+      },
+      "ThreadWithComments": {
+        "type": "object",
+        "required": [
+          "thread",
+          "comments"
+        ],
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommentOut"
+            },
+            "description": "Oldest first."
+          },
+          "thread": {
+            "$ref": "#/components/schemas/ThreadOut"
+          }
+        }
+      },
       "TodayItemOut": {
         "oneOf": [
           {
@@ -5772,6 +8456,10 @@
     {
       "name": "context",
       "description": "A company's documents and search over them"
+    },
+    {
+      "name": "planning",
+      "description": "Canvases and their shape links, comment threads and meeting notes, for a company and for each project"
     }
   ]
 }

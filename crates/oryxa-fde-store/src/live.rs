@@ -2341,3 +2341,460 @@ async fn a_broken_constraint_is_permanent_and_a_dead_connection_is_not() {
         .unwrap();
     assert!(!gone.is_permanent(), "{gone:?}");
 }
+
+fn snapshot_in(bytes: &[u8]) -> SnapshotIn {
+    use sha2::Digest;
+    SnapshotIn {
+        id: SnapshotId::new(new_id("cnv")).unwrap(),
+        size_bytes: bytes.len() as u32,
+        sha256: sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
+        body: SnapshotBody::Inline(bytes.to_vec()),
+    }
+}
+
+async fn add_item(store: &Store, p: &ProjectScope) -> ScopeItemId {
+    let id = ScopeItemId::new(new_id("itm")).unwrap();
+    let mut tx = store.project(p).await.unwrap();
+    let v = ScopeItemIn {
+        kind: ScopeKind::In,
+        description: Text::new("Tier-1 tickets").unwrap(),
+    };
+    tx.add_scope_item(&id, &v, &actor("alice")).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
+fn note_in(stakeholders: Vec<oryxa_fde_core::StakeholderId>) -> MeetingNoteIn {
+    MeetingNoteIn {
+        title: Name::new("Discovery workshop").unwrap(),
+        held_on: time::macros::date!(2026 - 11 - 02),
+        body: NoteText::new("Refunds over 500 need the support lead.\nNext: API token.").unwrap(),
+        stakeholders,
+        attendees: vec![UserId::new("alice").unwrap()],
+    }
+}
+
+/// One of every planning record at the company and at its project.
+async fn planning_records(store: &Store, p: &ProjectScope) {
+    let by = actor("alice");
+    let stakeholder = add_stakeholder(store, &p.company).await;
+    let item = add_item(store, p).await;
+    for (mut tx, target, subject) in [
+        (
+            PlanTx::from(store.company(&p.company).await.unwrap()),
+            LinkTarget::Stakeholder(stakeholder.clone()),
+            Subject::Stakeholder(stakeholder.clone()),
+        ),
+        (
+            PlanTx::from(store.project(p).await.unwrap()),
+            LinkTarget::ScopeItem(item.clone()),
+            Subject::ScopeItem(item.clone()),
+        ),
+    ] {
+        tx.save_canvas(0, &snapshot_in(br#"{"elements":[]}"#), &by)
+            .await
+            .unwrap()
+            .unwrap();
+        let shape = ShapeId::new("shape-1").unwrap();
+        tx.link_shape(&shape, &target, &by).await.unwrap().unwrap();
+        let first = (
+            &CommentId::new(new_id("cmt")).unwrap(),
+            &Text::new("Who owns this?").unwrap(),
+        );
+        tx.start_thread(&ThreadId::new(new_id("thr")).unwrap(), &subject, first, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.add_meeting_note(
+            &MeetingNoteId::new(new_id("mtg")).unwrap(),
+            &note_in(vec![stakeholder.clone()]),
+            &by,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn row_level_security_covers_canvases_threads_and_notes() {
+    let store = store().await;
+    let (t, a) = project_world(&store).await;
+    let b = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        add_project(&store, &c, "B").await
+    };
+    planning_records(&store, &a).await;
+    planning_records(&store, &b).await;
+
+    // In A's transaction an unfiltered query sees only A's rows: the company's and the project's.
+    let mut tx = store.company(&a.company).await.unwrap();
+    for table in [
+        "canvas_versions",
+        "canvas_links",
+        "threads",
+        "thread_comments",
+        "meeting_notes",
+        "meeting_note_stakeholders",
+    ] {
+        let companies: Vec<String> = sqlx::query_scalar(&format!("select distinct company_id from {table}"))
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(companies, [a.company.company.as_str()], "{table}");
+    }
+    // Saved versions and comments never change; a thread changes only by promotion.
+    for sql in [
+        "update canvas_versions set version = 9",
+        "update canvas_versions set content = 'x'",
+        "delete from canvas_versions",
+        "update thread_comments set body = 'x'",
+        "delete from thread_comments",
+        "update threads set subject_id = 'x'",
+        "delete from threads",
+    ] {
+        let mut sp = tx.conn().begin().await.unwrap();
+        assert!(sqlx::query(sql).execute(&mut *sp).await.is_err(), "{sql}");
+    }
+    drop(tx);
+
+    // Each place reads its own records only: the company's are not the project's.
+    let mut company = PlanTx::from(store.company(&a.company).await.unwrap());
+    let mut project = PlanTx::from(store.project(&a).await.unwrap());
+    for tx in [&mut company, &mut project] {
+        assert_eq!(tx.canvas_versions().await.unwrap().len(), 1);
+        assert_eq!(tx.canvas_links().await.unwrap().len(), 1);
+        assert_eq!(tx.threads(None).await.unwrap().len(), 1);
+        assert_eq!(tx.meeting_notes().await.unwrap().len(), 1);
+    }
+    let company_link = &company.canvas_links().await.unwrap()[0];
+    assert!(matches!(company_link.target, LinkTarget::Stakeholder(_)));
+    let project_link = &project.canvas_links().await.unwrap()[0];
+    assert!(matches!(project_link.target, LinkTarget::ScopeItem(_)));
+    // B's project under A's company is nothing.
+    let mut cross = PlanTx::from(store.project(&a.company.project(b.project.clone())).await.unwrap());
+    assert!(cross.canvas().await.unwrap().is_none());
+    assert!(cross.threads(None).await.unwrap().is_empty());
+    assert!(cross.meeting_notes().await.unwrap().is_empty());
+    let by = actor("alice");
+    assert!(cross.save_canvas(0, &snapshot_in(b"{}"), &by).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_canvas_saves_only_on_top_of_its_latest_version() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let by = actor("alice");
+    let mut tx = PlanTx::from(store.company(&p.company).await.unwrap());
+    assert_eq!(tx.canvas_head().await.unwrap(), 0);
+    assert!(tx.canvas().await.unwrap().is_none());
+    let one = tx
+        .save_canvas(0, &snapshot_in(b"{\"v\":1}"), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(one.version, 1);
+    tx.commit().await.unwrap();
+    // A stale base, and one from the future, are both refused; neither leaves a gap.
+    for base in [0, 5] {
+        let mut sp = PlanTx::from(store.company(&p.company).await.unwrap());
+        let stale = sp.save_canvas(base, &snapshot_in(b"{}"), &by).await;
+        assert!(matches!(stale, Err(StoreError::Conflict)), "{base}: {stale:?}");
+    }
+    let mut tx = PlanTx::from(store.company(&p.company).await.unwrap());
+    let two = tx
+        .save_canvas(1, &snapshot_in(b"{\"v\":2}"), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(two.version, 2);
+    tx.commit().await.unwrap();
+
+    // Two editors saving on top of the same version: one wins, the other conflicts.
+    let mut first = PlanTx::from(store.company(&p.company).await.unwrap());
+    let mut second = PlanTx::from(store.company(&p.company).await.unwrap());
+    first
+        .save_canvas(2, &snapshot_in(b"{\"v\":3}"), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    let racing = tokio::spawn(async move {
+        let r = second.save_canvas(2, &snapshot_in(b"{\"v\":3b}"), &by).await;
+        (r, second)
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first.commit().await.unwrap();
+    let (lost, _) = racing.await.unwrap();
+    assert!(matches!(lost, Err(StoreError::Conflict)), "{lost:?}");
+
+    let mut tx = PlanTx::from(store.company(&p.company).await.unwrap());
+    let latest = tx.canvas().await.unwrap().unwrap();
+    assert_eq!(latest.meta.version, 3);
+    assert_eq!(latest.body, SnapshotBody::Inline(b"{\"v\":3}".to_vec()));
+    let old = tx.canvas_version(1).await.unwrap().unwrap();
+    assert_eq!(old.body, SnapshotBody::Inline(b"{\"v\":1}".to_vec()));
+    assert!(tx.canvas_version(4).await.unwrap().is_none());
+    let versions: Vec<u32> = tx.canvas_versions().await.unwrap().iter().map(|m| m.version).collect();
+    assert_eq!(versions, [3, 2, 1]);
+    // The project's canvas is another canvas.
+    let mut project = PlanTx::from(store.project(&p).await.unwrap());
+    assert_eq!(project.canvas_head().await.unwrap(), 0);
+    // A large snapshot is stored by its S3 key.
+    let big = SnapshotIn {
+        body: SnapshotBody::Blob(format!("{}/{}/canvas/cnv_1", p.company.tenant, p.company.company)),
+        ..snapshot_in(b"{}")
+    };
+    project.save_canvas(0, &big, &actor("alice")).await.unwrap().unwrap();
+    assert_eq!(project.canvas().await.unwrap().unwrap().body, big.body);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_shape_links_only_to_a_record_of_its_place_and_goes_with_the_record() {
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let other = add_project(&store, &p.company, "Other").await;
+    let elsewhere = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        c
+    };
+    let by = actor("alice");
+    let stakeholder = add_stakeholder(&store, &p.company).await;
+    let foreign = add_stakeholder(&store, &elsewhere).await;
+    let item = add_item(&store, &p).await;
+    let other_item = add_item(&store, &other).await;
+    let shape = ShapeId::new("shape-1").unwrap();
+
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    for refused in [
+        LinkTarget::ScopeItem(other_item.clone()),
+        LinkTarget::Stakeholder(foreign.clone()),
+        LinkTarget::AccessRequest(oryxa_fde_core::AccessRequestId::new("acc_missing").unwrap()),
+    ] {
+        let r = tx.link_shape(&shape, &refused, &by).await;
+        assert!(matches!(r, Err(StoreError::Missing("target"))), "{refused:?}: {r:?}");
+        tx = PlanTx::from(store.project(&p).await.unwrap());
+    }
+    tx.link_shape(&shape, &LinkTarget::ScopeItem(item.clone()), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    // Linking again replaces the link.
+    let replaced = tx
+        .link_shape(&shape, &LinkTarget::Stakeholder(stakeholder.clone()), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replaced.target, LinkTarget::Stakeholder(stakeholder.clone()));
+    assert_eq!(tx.canvas_links().await.unwrap().len(), 1);
+    tx.link_shape(&ShapeId::new("shape-2").unwrap(), &LinkTarget::ScopeItem(item), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    // The company's canvas may link a scope item of any of its projects.
+    let mut company = PlanTx::from(store.company(&p.company).await.unwrap());
+    company
+        .link_shape(&shape, &LinkTarget::ScopeItem(other_item), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    company.commit().await.unwrap();
+
+    // Removing the stakeholder removes its link; it is not refused as still in use.
+    let mut records = store.company(&p.company).await.unwrap();
+    assert!(records.remove_stakeholder(&stakeholder, &by).await.unwrap());
+    records.commit().await.unwrap();
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    let shapes: Vec<String> = tx
+        .canvas_links()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.shape.to_string())
+        .collect();
+    assert_eq!(shapes, ["shape-2"]);
+    assert!(tx.unlink_shape(&ShapeId::new("shape-2").unwrap(), &by).await.unwrap());
+    assert!(!tx.unlink_shape(&ShapeId::new("shape-2").unwrap(), &by).await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_thread_is_about_a_record_of_its_place_and_promotes_once() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let other = add_project(&store, &p.company, "Other").await;
+    let by = actor("alice");
+    let stakeholder = add_stakeholder(&store, &p.company).await;
+    let item = add_item(&store, &p).await;
+    let other_item = add_item(&store, &other).await;
+    let document = oryxa_fde_core::DocumentId::new(new_id("doc")).unwrap();
+    {
+        let mut tx = store.company(&p.company).await.unwrap();
+        let v = DocumentIn {
+            name: Name::new("policy.txt").unwrap(),
+            content_type: ContentType::Text,
+            size_bytes: 5,
+            sha256: "00".into(),
+            blob_key: "k".into(),
+        };
+        tx.add_document(&document, &v, &by).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+    }
+    let first = |text: &str| (CommentId::new(new_id("cmt")).unwrap(), Text::new(text).unwrap());
+    let start = async |tx: &mut PlanTx, subject: Subject| {
+        let (c, body) = first("Opening question");
+        tx.start_thread(&ThreadId::new(new_id("thr")).unwrap(), &subject, (&c, &body), &by)
+            .await
+    };
+
+    // A project thread: on the project's records and the company's people and systems, never on
+    // the company's documents or another project's records.
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    for refused in [
+        Subject::Document(document.clone()),
+        Subject::ScopeItem(other_item.clone()),
+    ] {
+        let r = start(&mut tx, refused.clone()).await;
+        assert!(matches!(r, Err(StoreError::Missing("subject"))), "{refused:?}: {r:?}");
+    }
+    let on_item = start(&mut tx, Subject::ScopeItem(item.clone())).await.unwrap().unwrap();
+    start(&mut tx, Subject::Stakeholder(stakeholder.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    start(&mut tx, Subject::Shape(ShapeId::new("shape-1").unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+    let (c, body) = first("Agreed: tier-1 only");
+    tx.comment(&on_item.id, &c, &body, &by).await.unwrap().unwrap();
+    let only_item = tx.threads(Some(&Subject::ScopeItem(item.clone()))).await.unwrap();
+    assert_eq!(only_item.len(), 1);
+    assert_eq!(
+        (only_item[0].id.clone(), only_item[0].comments),
+        (on_item.id.clone(), 2)
+    );
+    let comments = tx.comments(&on_item.id).await.unwrap().unwrap();
+    assert_eq!(
+        comments.iter().map(|c| c.body.as_str()).collect::<Vec<_>>(),
+        ["Opening question", "Agreed: tier-1 only"]
+    );
+    tx.commit().await.unwrap();
+
+    // A company thread: on the company's records, never on a project's.
+    let mut company = PlanTx::from(store.company(&p.company).await.unwrap());
+    let r = start(&mut company, Subject::ScopeItem(item.clone())).await;
+    assert!(matches!(r, Err(StoreError::Missing("subject"))), "{r:?}");
+    company = PlanTx::from(store.company(&p.company).await.unwrap());
+    start(&mut company, Subject::Document(document)).await.unwrap().unwrap();
+    // The project's threads are not the company's.
+    assert_eq!(company.threads(None).await.unwrap().len(), 1);
+    assert!(company.thread(&on_item.id).await.unwrap().is_none());
+    let (c, body) = first("Not here");
+    assert!(company.comment(&on_item.id, &c, &body, &by).await.unwrap().is_none());
+    company.commit().await.unwrap();
+
+    // Promotion records the decision, with the opening comment as its rationale, once.
+    let promote = PromoteIn {
+        title: Name::new("Tier-1 only").unwrap(),
+        rationale: None,
+        decided_by: Name::new("Sam Sponsor").unwrap(),
+        decided_at: time::OffsetDateTime::now_utc(),
+    };
+    let mut tx = store.project(&p).await.unwrap();
+    let decision = oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap();
+    let recorded = tx
+        .promote_thread(&on_item.id, &decision, &promote, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.rationale.as_str(), "Opening question");
+    let again = tx
+        .promote_thread(
+            &on_item.id,
+            &oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap(),
+            &promote,
+            &by,
+        )
+        .await;
+    assert!(
+        matches!(again, Err(StoreError::Rejected("already_promoted"))),
+        "{again:?}"
+    );
+    tx.commit().await.unwrap();
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    assert_eq!(tx.thread(&on_item.id).await.unwrap().unwrap().decision, Some(decision));
+    // Another project's thread cannot be promoted from here.
+    let mut elsewhere = store.project(&other).await.unwrap();
+    let missing = elsewhere
+        .promote_thread(
+            &on_item.id,
+            &oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap(),
+            &promote,
+            &by,
+        )
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_meeting_note_names_people_of_its_company_only() {
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let elsewhere = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        c
+    };
+    let by = actor("alice");
+    let sam = add_stakeholder(&store, &p.company).await;
+    let pat = add_stakeholder(&store, &p.company).await;
+    let foreign = add_stakeholder(&store, &elsewhere).await;
+    let id = MeetingNoteId::new(new_id("mtg")).unwrap();
+
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    let r = tx
+        .add_meeting_note(&id, &note_in(vec![sam.clone(), foreign]), &by)
+        .await;
+    assert!(matches!(r, Err(StoreError::Missing("stakeholders"))), "{r:?}");
+    tx = PlanTx::from(store.project(&p).await.unwrap());
+    let added = tx
+        .add_meeting_note(&id, &note_in(vec![sam.clone(), pat.clone(), sam.clone()]), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut both = vec![sam.clone(), pat.clone()];
+    both.sort();
+    assert_eq!(added.stakeholders, both);
+    let mut changed = note_in(vec![pat.clone()]);
+    changed.title = Name::new("Workshop, revised").unwrap();
+    let updated = tx.update_meeting_note(&id, &changed, &by).await.unwrap().unwrap();
+    assert_eq!(
+        (updated.title.as_str(), updated.stakeholders.clone()),
+        ("Workshop, revised", vec![pat.clone()])
+    );
+    tx.commit().await.unwrap();
+    // The company's notes are not the project's.
+    let mut company = PlanTx::from(store.company(&p.company).await.unwrap());
+    assert!(company.meeting_note(&id).await.unwrap().is_none());
+    assert!(company.update_meeting_note(&id, &changed, &by).await.unwrap().is_none());
+    assert!(!company.remove_meeting_note(&id, &by).await.unwrap());
+    drop(company);
+
+    // Removing a stakeholder takes them off the note.
+    let mut records = store.company(&p.company).await.unwrap();
+    assert!(records.remove_stakeholder(&pat, &by).await.unwrap());
+    records.commit().await.unwrap();
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    assert!(tx.meeting_note(&id).await.unwrap().unwrap().stakeholders.is_empty());
+    assert!(tx.remove_meeting_note(&id, &by).await.unwrap());
+    assert!(tx.meeting_notes().await.unwrap().is_empty());
+}

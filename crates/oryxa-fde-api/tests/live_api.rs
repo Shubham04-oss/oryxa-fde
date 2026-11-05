@@ -725,6 +725,115 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         "/v1/companies/{company}/projects/{project}/decisions",
         Some(r#"{"title":"pwned","rationale":"x","decided_by":"x"}"#),
     ),
+    ("GET", "/v1/companies/{company}/canvas", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/canvas",
+        Some(r#"{"base_version":1,"content":{"elements":[]}}"#),
+    ),
+    ("GET", "/v1/companies/{company}/canvas/versions", None),
+    ("GET", "/v1/companies/{company}/canvas/versions/{version}", None),
+    ("GET", "/v1/companies/{company}/canvas/links", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/canvas/shapes/{shape}/link",
+        Some(r#"{"kind":"stakeholder","id":"{stakeholder}"}"#),
+    ),
+    ("DELETE", "/v1/companies/{company}/canvas/shapes/{shape}/link", None),
+    ("GET", "/v1/companies/{company}/threads", None),
+    (
+        "POST",
+        "/v1/companies/{company}/threads",
+        Some(r#"{"subject":{"kind":"stakeholder","id":"{stakeholder}"},"body":"pwned"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/threads/{thread}", None),
+    (
+        "POST",
+        "/v1/companies/{company}/threads/{thread}/comments",
+        Some(r#"{"body":"pwned"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/meeting-notes", None),
+    (
+        "POST",
+        "/v1/companies/{company}/meeting-notes",
+        Some(r#"{"title":"pwned","held_on":"2026-11-02","body":"pwned","stakeholders":["{stakeholder}"]}"#),
+    ),
+    ("GET", "/v1/companies/{company}/meeting-notes/{note}", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/meeting-notes/{note}",
+        Some(r#"{"title":"pwned","held_on":"2026-11-02","body":"pwned","stakeholders":["{stakeholder}"]}"#),
+    ),
+    ("DELETE", "/v1/companies/{company}/meeting-notes/{note}", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/canvas", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/canvas",
+        Some(r#"{"base_version":1,"content":{"elements":[]}}"#),
+    ),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/canvas/versions",
+        None,
+    ),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/canvas/versions/{version}",
+        None,
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/canvas/links", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/canvas/shapes/{shape}/link",
+        Some(r#"{"kind":"access_request","id":"{access_request}"}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/canvas/shapes/{shape}/link",
+        None,
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/threads", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/threads",
+        Some(r#"{"subject":{"kind":"task","id":"{task}"},"body":"pwned"}"#),
+    ),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/threads/{thread}",
+        None,
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/threads/{thread}/comments",
+        Some(r#"{"body":"pwned"}"#),
+    ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/threads/{thread}/promote",
+        Some(r#"{"title":"pwned","decided_by":"pwned"}"#),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/meeting-notes", None),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/meeting-notes",
+        Some(r#"{"title":"pwned","held_on":"2026-11-02","body":"pwned","stakeholders":["{stakeholder}"]}"#),
+    ),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/meeting-notes/{note}",
+        None,
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/meeting-notes/{note}",
+        Some(r#"{"title":"pwned","held_on":"2026-11-02","body":"pwned","stakeholders":["{stakeholder}"]}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/meeting-notes/{note}",
+        None,
+    ),
     (
         "PUT",
         "/v1/security-answers/{answer}",
@@ -759,6 +868,8 @@ const RECORDS: &[&str] = &[
     "{access_request}",
     "{task}",
     "{answer}",
+    "{thread}",
+    "{note}",
 ];
 
 /// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
@@ -923,6 +1034,36 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     let body = oryxa_fde_store::UpdateBody::new(format!("{name}: done this week")).unwrap();
     assert!(tx.add_update_draft(fixture_week(), &body, "echo").await.unwrap());
     tx.commit().await.unwrap();
+    // At the company and at the project: a saved canvas with a linked shape, a thread and a note.
+    let mut planning = Vec::new();
+    for (at, link, subject) in [
+        (
+            base.clone(),
+            json!({"kind": "stakeholder", "id": stakeholder}),
+            json!({"kind": "stakeholder", "id": stakeholder}),
+        ),
+        (
+            pbase.clone(),
+            json!({"kind": "access_request", "id": access_request}),
+            json!({"kind": "task", "id": task}),
+        ),
+    ] {
+        let canvas = json!({"base_version": 0, "content": {"elements": [{"id": "shape-1"}]}});
+        w.ok(&lead, "PUT", &format!("{at}/canvas"), Some(canvas), StatusCode::OK)
+            .await;
+        let link_path = format!("{at}/canvas/shapes/shape-1/link");
+        w.ok(&lead, "PUT", &link_path, Some(link), StatusCode::OK).await;
+        let thread = add(
+            format!("{at}/threads"),
+            json!({"subject": subject, "body": "Who owns this?"}),
+        )
+        .await;
+        let note = json!({"title": "Workshop", "held_on": "2026-11-02", "body": "Refund rules",
+            "stakeholders": [stakeholder]});
+        let note = add(format!("{at}/meeting-notes"), note).await;
+        planning.push((thread, note));
+    }
+    let [(thread, note), (project_thread, project_note)] = <[_; 2]>::try_from(planning).unwrap();
     Tenant {
         org: org.to_owned(),
         lead,
@@ -943,6 +1084,13 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             ("{answer}", answer),
             ("{week}", fixture_week().to_string()),
             ("{kind}", "ready_to_deploy".into()),
+            ("{thread}", thread),
+            ("{project_thread}", project_thread),
+            ("{note}", note),
+            ("{project_note}", project_note),
+            // Not records: the same in every company, so they name the victim's only with its path.
+            ("{shape}", "shape-1".into()),
+            ("{version}", "1".into()),
         ],
     }
 }
@@ -978,6 +1126,18 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/suggestions"),
         format!("{project}/updates"),
         "/v1/security-answers".into(),
+        format!("{base}/canvas"),
+        format!("{base}/canvas/versions"),
+        format!("{base}/canvas/links"),
+        format!("{base}/threads"),
+        format!("{base}/threads/{}", t.record("{thread}")),
+        format!("{base}/meeting-notes"),
+        format!("{project}/canvas"),
+        format!("{project}/canvas/versions"),
+        format!("{project}/canvas/links"),
+        format!("{project}/threads"),
+        format!("{project}/threads/{}", t.record("{project_thread}")),
+        format!("{project}/meeting-notes"),
     ] {
         let mut got = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
         // Time spent waiting moves on its own; nothing else may.
@@ -1031,6 +1191,13 @@ impl Attack<'_> {
     }
 
     fn fill(&self, s: &str) -> String {
+        // A project's threads and notes are other records than its company's, under the same names.
+        let s = if s.contains("{project}/") {
+            s.replace("{thread}", "{project_thread}")
+                .replace("{note}", "{project_note}")
+        } else {
+            s.to_owned()
+        };
         let mut out = s
             .replace("{company}", self.company)
             .replace("{project}", self.project)
@@ -2642,4 +2809,307 @@ async fn the_engines_activity_suggestions_and_drafts_for_whoever_works_on_the_pr
     let theirs = Some(json!({"title": "Index", "status": "blocked", "blocker": "x",
         "blocked_by": elsewhere.record("{access_request}")}));
     assert_eq!(w.status(&t.lead, "POST", &tasks, theirs).await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_canvas_saves_on_its_latest_version_and_a_large_one_is_checked_when_read_back() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let base = format!("/v1/companies/{}", t.company);
+    let project = format!("{base}/projects/{}", t.project);
+    let canvas = format!("{base}/canvas");
+
+    // The fixture saved version 1; a save on version 0 lost to it.
+    let stale = json!({"base_version": 0, "content": {"elements": []}});
+    let (status, body) = w.call(Some(&t.engineer.token), "PUT", &canvas, Some(stale)).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("conflict"))
+    );
+    let not_a_scene = json!({"base_version": 1, "content": [1, 2]});
+    let (status, body) = w.call(Some(&t.engineer.token), "PUT", &canvas, Some(not_a_scene)).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_content"))
+    );
+
+    // Past the inline size the scene goes to S3 under the company's prefix, and reads back whole.
+    let scene = json!({"elements": [{"id": "shape-1"}], "files": {"f1": {"dataURL": "x".repeat(300 * 1024)}}});
+    let save = json!({"base_version": 1, "content": scene});
+    let saved = w.ok(&t.engineer, "PUT", &canvas, Some(save), StatusCode::OK).await;
+    assert_eq!(saved["version"], 2);
+    let latest = w.ok(&t.lead, "GET", &canvas, None, StatusCode::OK).await;
+    assert_eq!((&latest["version"], &latest["content"]), (&json!(2), &scene));
+    let owner = testing::admin().await;
+    let key: String = sqlx::query_scalar(
+        "select blob_key from canvas_versions where tenant_id = $1 and company_id = $2 and project_id is null
+         and version = 2",
+    )
+    .bind(&org)
+    .bind(&t.company)
+    .fetch_one(&owner)
+    .await
+    .unwrap();
+    assert!(key.starts_with(&format!("{org}/{}/canvas/cnv_", t.company)), "{key}");
+    let first = w
+        .ok(&t.lead, "GET", &format!("{canvas}/versions/1"), None, StatusCode::OK)
+        .await;
+    assert_eq!(first["content"], json!({"elements": [{"id": "shape-1"}]}));
+    let versions = w
+        .ok(&t.lead, "GET", &format!("{canvas}/versions"), None, StatusCode::OK)
+        .await;
+    let numbers: Vec<u64> = versions
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["version"].as_u64().unwrap())
+        .collect();
+    assert_eq!(numbers, [2, 1]);
+    assert_eq!(
+        w.status(&t.lead, "GET", &format!("{canvas}/versions/3"), None).await,
+        StatusCode::NOT_FOUND
+    );
+
+    // An object changed in S3 is refused, never served.
+    w.context
+        .blobs
+        .put(&key, br#"{"elements":["planted"]}"#.to_vec(), "application/json")
+        .await
+        .unwrap();
+    assert_eq!(
+        w.status(&t.lead, "GET", &canvas, None).await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    // Too large: past 8 MiB stored is refused by the API, past the body limit by the router.
+    let huge = |n: usize| json!({"base_version": 2, "content": {"blob": "x".repeat(n)}});
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &canvas, Some(huge(8 * 1024 * 1024 + 10)))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_content_too_large"))
+    );
+    let (status, _) = w
+        .call(Some(&t.lead.token), "PUT", &canvas, Some(huge(10 * 1024 * 1024)))
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // A project's assignee works on the project's canvas, not the company's.
+    assert_eq!(w.status(&t.assignee, "GET", &canvas, None).await, StatusCode::FORBIDDEN);
+    let own = format!("{project}/canvas");
+    let loaded = w.ok(&t.assignee, "GET", &own, None, StatusCode::OK).await;
+    assert_eq!(loaded["version"], 1);
+    let save = json!({"base_version": 1, "content": {"elements": []}});
+    let saved = w.ok(&t.assignee, "PUT", &own, Some(save), StatusCode::OK).await;
+    assert_eq!(saved["version"], 2);
+
+    // A shape links to a record of its place only.
+    let other = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{base}/projects"),
+            Some(json!({"name": "Other"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let other_item = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{base}/projects/{}/scope/items", other["id"].as_str().unwrap()),
+            Some(json!({"kind": "in", "description": "Voice"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let link = json!({"kind": "scope_item", "id": other_item["id"]});
+    let (status, body) = w
+        .call(
+            Some(&t.assignee.token),
+            "PUT",
+            &format!("{own}/shapes/s2/link"),
+            Some(link.clone()),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_target"))
+    );
+    let linked = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &format!("{canvas}/shapes/s2/link"),
+            Some(link),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (&linked["shape"], &linked["kind"]),
+        (&json!("s2"), &json!("scope_item"))
+    );
+    let (status, _) = w
+        .call(Some(&t.lead.token), "PUT", &format!("{canvas}/shapes/a:b/link"), None)
+        .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_thread_promotes_into_the_decisions_log_and_a_note_names_only_people_of_its_place() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let base = format!("/v1/companies/{}", t.company);
+    let project = format!("{base}/projects/{}", t.project);
+    let thread = format!("{project}/threads/{}", t.record("{project_thread}"));
+
+    // The fixture's project thread is about its task; the assignee comments and promotes it.
+    w.ok(
+        &t.assignee,
+        "POST",
+        &format!("{thread}/comments"),
+        Some(json!({"body": "Tier-1 only, agreed with Sam"})),
+        StatusCode::CREATED,
+    )
+    .await;
+    let detail = w.ok(&t.assignee, "GET", &thread, None, StatusCode::OK).await;
+    let bodies: Vec<&str> = detail["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, ["Who owns this?", "Tier-1 only, agreed with Sam"]);
+    let promote = json!({"title": "Tier-1 only", "decided_by": "Sam"});
+    let decision = w
+        .ok(
+            &t.assignee,
+            "POST",
+            &format!("{thread}/promote"),
+            Some(promote.clone()),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(decision["rationale"], "Who owns this?");
+    let log = w
+        .ok(
+            &t.assignee,
+            "GET",
+            &format!("{project}/decisions"),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert!(ids(&log).contains(&decision["id"].as_str().unwrap()));
+    let (status, body) = w
+        .call(
+            Some(&t.assignee.token),
+            "POST",
+            &format!("{thread}/promote"),
+            Some(promote),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_already_promoted"))
+    );
+    let detail = w.ok(&t.assignee, "GET", &thread, None, StatusCode::OK).await;
+    assert_eq!(detail["thread"]["decision"], decision["id"]);
+
+    // Threads are about records of their place: no project thread on the company's documents.
+    let on_document = json!({"subject": {"kind": "document", "id": t.record("{document}")}, "body": "?"});
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "POST",
+            &format!("{project}/threads"),
+            Some(on_document.clone()),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_subject"))
+    );
+    w.ok(
+        &t.lead,
+        "POST",
+        &format!("{base}/threads"),
+        Some(on_document),
+        StatusCode::CREATED,
+    )
+    .await;
+    let shape = json!({"subject": {"kind": "shape", "id": "shape-1"}, "body": "Is this the CRM?"});
+    w.ok(
+        &t.lead,
+        "POST",
+        &format!("{project}/threads"),
+        Some(shape),
+        StatusCode::CREATED,
+    )
+    .await;
+    let on_shape = w
+        .ok(
+            &t.lead,
+            "GET",
+            &format!("{project}/threads?subject_kind=shape&subject_id=shape-1"),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(on_shape.as_array().unwrap().len(), 1);
+
+    // Attendees must work on the place: the assignee works on the project, not on the company.
+    let note = |attendee: &str| {
+        json!({"title": "Weekly", "held_on": "2026-11-03", "body": "Status", "attendees": [attendee],
+            "stakeholders": [t.record("{stakeholder}")]})
+    };
+    let added = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{project}/meeting-notes"),
+            Some(note(&t.assignee.id)),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(added["attendees"], json!([t.assignee.id]));
+    for (path, attendee) in [
+        (format!("{base}/meeting-notes"), &t.assignee.id),
+        (
+            format!("{project}/meeting-notes"),
+            &format!("user_nobody_{}", new_id("u")),
+        ),
+    ] {
+        let (status, body) = w.call(Some(&t.lead.token), "POST", &path, Some(note(attendee))).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_attendees")),
+            "{path}"
+        );
+    }
+    let mut foreign = note(&t.lead.id);
+    foreign["stakeholders"] = json!(["stk_of_someone_else"]);
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "POST",
+            &format!("{base}/meeting-notes"),
+            Some(foreign),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_stakeholders"))
+    );
+    // Removing the stakeholder takes them off the notes.
+    let stakeholder = format!("{base}/stakeholders/{}", t.record("{stakeholder}"));
+    w.ok(&t.lead, "DELETE", &stakeholder, None, StatusCode::NO_CONTENT)
+        .await;
+    let read = format!("{project}/meeting-notes/{}", added["id"].as_str().unwrap());
+    let after = w.ok(&t.lead, "GET", &read, None, StatusCode::OK).await;
+    assert_eq!(after["stakeholders"], json!([]));
 }

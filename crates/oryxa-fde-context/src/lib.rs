@@ -18,7 +18,7 @@ pub mod extract;
 pub mod ingest;
 pub mod search;
 
-pub use blob::{BlobStore, MemoryBlobs, S3Blobs, document_key};
+pub use blob::{BlobStore, MemoryBlobs, S3Blobs, canvas_key, document_key};
 pub use embed::{Embedder, FakeEmbedder};
 pub use search::{Hit, SearchQuery};
 

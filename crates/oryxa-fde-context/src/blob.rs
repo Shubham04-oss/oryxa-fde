@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use aws_sdk_s3::primitives::ByteStream;
 use oryxa_fde_core::{CompanyScope, DocumentId};
+use oryxa_fde_store::SnapshotId;
 
 use crate::{BoxFuture, ContextError, MAX_DOCUMENT_BYTES};
 
@@ -28,6 +29,12 @@ pub fn company_prefix(s: &CompanyScope) -> String {
 /// `<tenant>/<company>/documents/<document>`.
 pub fn document_key(s: &CompanyScope, id: &DocumentId) -> String {
     format!("{}documents/{id}", company_prefix(s))
+}
+
+/// `<tenant>/<company>/canvas/<snapshot>`: a canvas snapshot too large for Postgres, of the company
+/// or of one of its projects.
+pub fn canvas_key(s: &CompanyScope, id: &SnapshotId) -> String {
+    format!("{}canvas/{id}", company_prefix(s))
 }
 
 pub struct S3Blobs {
@@ -173,5 +180,8 @@ mod tests {
         assert!(key.starts_with(&company_prefix(&s)));
         // Ids cannot hold a separator, so no id climbs out of the prefix.
         assert!(DocumentId::new("../x").is_err() && DocumentId::new("a/b").is_err());
+        let canvas = canvas_key(&s, &SnapshotId::new("cnv_1").unwrap());
+        assert_eq!(canvas, "org_1/cmp_1/canvas/cnv_1");
+        assert!(SnapshotId::new("../x").is_err() && SnapshotId::new("a/b").is_err());
     }
 }

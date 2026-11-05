@@ -94,6 +94,93 @@ export interface paths {
         patch: operations["update_company"];
         trace?: never;
     };
+    "/v1/companies/{company}/canvas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company's canvas at its latest version; version 0 and no content if never saved. */
+        get: operations["get_company_canvas"];
+        /** Save the company's canvas as a new version, on top of `base_version`. */
+        put: operations["save_company_canvas"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/canvas/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company canvas's shape links. */
+        get: operations["list_company_canvas_links"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/canvas/shapes/{shape}/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Link a shape on the company's canvas to a record, replacing its link if it had one. */
+        put: operations["link_company_shape"];
+        post?: never;
+        /** Remove a shape's link on the company's canvas. */
+        delete: operations["unlink_company_shape"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/canvas/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company canvas's newest versions (up to 100), newest first. */
+        get: operations["list_company_canvas_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/canvas/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of the company's canvas. */
+        get: operations["get_company_canvas_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/documents": {
         parameters: {
             query?: never;
@@ -127,6 +214,43 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/meeting-notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company's meeting notes, latest meeting first. */
+        get: operations["list_company_meeting_notes"];
+        put?: never;
+        /** Add a meeting note to the company. */
+        post: operations["add_company_meeting_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/meeting-notes/{note}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One of the company's meeting notes. */
+        get: operations["get_company_meeting_note"];
+        /** Replace one of the company's meeting notes. */
+        put: operations["update_company_meeting_note"];
+        post?: never;
+        /** Remove one of the company's meeting notes. */
+        delete: operations["remove_company_meeting_note"];
         options?: never;
         head?: never;
         patch?: never;
@@ -291,6 +415,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/canvas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's canvas at its latest version; version 0 and no content if never saved. */
+        get: operations["get_project_canvas"];
+        /** Save the project's canvas as a new version, on top of `base_version`. */
+        put: operations["save_project_canvas"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/canvas/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project canvas's shape links. */
+        get: operations["list_project_canvas_links"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/canvas/shapes/{shape}/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Link a shape on the project's canvas to a record, replacing its link if it had one. */
+        put: operations["link_project_shape"];
+        post?: never;
+        /** Remove a shape's link on the project's canvas. */
+        delete: operations["unlink_project_shape"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/canvas/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project canvas's newest versions (up to 100), newest first. */
+        get: operations["list_project_canvas_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/canvas/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of the project's canvas. */
+        get: operations["get_project_canvas_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/decisions": {
         parameters: {
             query?: never;
@@ -304,6 +515,43 @@ export interface paths {
         /** Record a decision: what, who decided, when and why. The log is append-only. */
         post: operations["record_decision"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/meeting-notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's meeting notes, latest meeting first. */
+        get: operations["list_project_meeting_notes"];
+        put?: never;
+        /** Add a meeting note to the project. */
+        post: operations["add_project_meeting_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/meeting-notes/{note}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One of the project's meeting notes. */
+        get: operations["get_project_meeting_note"];
+        /** Replace one of the project's meeting notes. */
+        put: operations["update_project_meeting_note"];
+        post?: never;
+        /** Remove one of the project's meeting notes. */
+        delete: operations["remove_project_meeting_note"];
         options?: never;
         head?: never;
         patch?: never;
@@ -567,6 +815,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's threads, most recently active first. */
+        get: operations["list_project_threads"];
+        put?: never;
+        /**
+         * Start a thread about one of the project's records, the company's stakeholders or systems, or a
+         *     shape on the project's canvas.
+         */
+        post: operations["start_project_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/threads/{thread}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One of the project's threads with its comments. */
+        get: operations["get_project_thread"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Comment on one of the project's threads. */
+        post: operations["comment_project_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote a project's thread to its decisions log. A thread is promoted once. */
+        post: operations["promote_project_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/updates": {
         parameters: {
             query?: never;
@@ -720,6 +1040,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company's threads, most recently active first. */
+        get: operations["list_company_threads"];
+        put?: never;
+        /**
+         * Start a thread about one of the company's records (a stakeholder, system, document or meeting
+         *     note) or a shape on its canvas.
+         */
+        post: operations["start_company_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/threads/{thread}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One of the company's threads with its comments. */
+        get: operations["get_company_thread"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/threads/{thread}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Comment on one of the company's threads. */
+        post: operations["comment_company_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me": {
         parameters: {
             query?: never;
@@ -843,6 +1218,46 @@ export interface components {
          * @enum {string}
          */
         CallerRole: "lead" | "engineer" | "admin";
+        CanvasBody: {
+            /**
+             * Format: int32
+             * @description The version this save was made on: the latest, or 0 for a canvas never saved.
+             */
+            base_version: number;
+            /**
+             * @description The canvas library's scene, a JSON object of at most 8 MiB and 64 levels; stored as sent.
+             *     Never parsed into a tree: a body of millions of tiny values would cost many times its size.
+             */
+            content: Record<string, never>;
+        };
+        CanvasOut: {
+            /** @description The scene; null for a canvas never saved. */
+            content?: Record<string, never> | null;
+            saved_at?: string | null;
+            saved_by?: string | null;
+            /**
+             * Format: int32
+             * @description 0 for a canvas never saved.
+             */
+            version: number;
+        };
+        CanvasVersionOut: {
+            saved_at: string;
+            saved_by: string;
+            /** Format: int32 */
+            size_bytes: number;
+            /** Format: int32 */
+            version: number;
+        };
+        CommentBody: {
+            body: string;
+        };
+        CommentOut: {
+            author: string;
+            body: string;
+            created_at: string;
+            id: string;
+        };
         CompanyBody: {
             industry?: string | null;
             /** @description 1 to 200 characters, no control characters. */
@@ -936,11 +1351,53 @@ export interface components {
         IngestState: "pending" | "ingested" | "failed";
         /** @enum {string} */
         ItemKind: "in" | "out";
+        LinkBody: {
+            /**
+             * @description The record's id. A stakeholder of the company; a scope item or access request of the
+             *     project, or on a company's canvas of any of its projects.
+             */
+            id: string;
+            kind: components["schemas"]["LinkKind"];
+        };
+        /**
+         * @description The kind of record a shape stands for.
+         * @enum {string}
+         */
+        LinkKind: "stakeholder" | "scope_item" | "access_request";
+        LinkOut: {
+            id: string;
+            kind: components["schemas"]["LinkKind"];
+            linked_at: string;
+            linked_by: string;
+            shape: string;
+        };
         MeOut: {
             organisation: components["schemas"]["NamedOut"];
             /** @description The caller's WorkOS role in the organisation. */
             role: components["schemas"]["OrgRole"];
             user: components["schemas"]["NamedOut"];
+        };
+        MeetingNoteBody: {
+            /** @description The workspace's users who took part; each must work on the company or project. */
+            attendees?: string[];
+            /** @description The notes, up to 20000 characters. */
+            body: string;
+            /** @description The day of the meeting, `YYYY-MM-DD`. */
+            held_on: string;
+            /** @description The company's stakeholders who took part. */
+            stakeholders?: string[];
+            title: string;
+        };
+        MeetingNoteOut: {
+            attendees: string[];
+            body: string;
+            created_at: string;
+            created_by: string;
+            held_on: string;
+            id: string;
+            stakeholders: string[];
+            title: string;
+            updated_at: string;
         };
         MemberIn: {
             role: components["schemas"]["MemberRole"];
@@ -986,6 +1443,16 @@ export interface components {
             id: string;
             name: string;
             stage: components["schemas"]["ProjectStage"];
+        };
+        PromoteBody: {
+            /** @description When, RFC 3339; defaults to now. */
+            decided_at?: string | null;
+            /** @description Who decided, often someone at the customer. */
+            decided_by: string;
+            /** @description Why; defaults to the thread's opening comment. */
+            rationale?: string | null;
+            /** @description What was decided. */
+            title: string;
         };
         /** @enum {string} */
         RunOutcomeOut: "succeeded" | "failed" | "rejected" | "cancelled";
@@ -1085,6 +1552,13 @@ export interface components {
          */
         StakeholderPart: "sponsor" | "champion" | "user" | "it" | "security" | "other";
         /** @enum {string} */
+        SubjectKind: "stakeholder" | "system" | "document" | "task" | "decision" | "access_request" | "scope_item" | "criterion" | "meeting_note" | "shape";
+        /** @description A record or a canvas shape, by kind and id. */
+        SubjectRef: {
+            id: string;
+            kind: components["schemas"]["SubjectKind"];
+        };
+        /** @enum {string} */
         SuggestionKindOut: "ready_to_deploy";
         SuggestionOut: {
             /** @description The eval run that showed it. */
@@ -1142,6 +1616,27 @@ export interface components {
         };
         /** @enum {string} */
         TaskState: "todo" | "in_progress" | "waiting_on_customer" | "blocked" | "done";
+        ThreadBody: {
+            /** @description The opening comment. */
+            body: string;
+            subject: components["schemas"]["SubjectRef"];
+        };
+        ThreadOut: {
+            /** Format: int32 */
+            comments: number;
+            created_at: string;
+            created_by: string;
+            /** @description The decision it was promoted to. */
+            decision?: string | null;
+            id: string;
+            last_comment_at: string;
+            subject: components["schemas"]["SubjectRef"];
+        };
+        ThreadWithComments: {
+            /** @description Oldest first. */
+            comments: components["schemas"]["CommentOut"][];
+            thread: components["schemas"]["ThreadOut"];
+        };
         /** @description Something that needs the FDE, tagged by `kind`. */
         TodayItemOut: {
             company: components["schemas"]["NamedOut"];
@@ -1469,6 +1964,312 @@ export interface operations {
             };
         };
     };
+    get_company_canvas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    save_company_canvas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CanvasBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasVersionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Another save came first */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Over 8 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_company_canvas_links: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    link_company_shape: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Shape id */
+                shape: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unlink_company_shape: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Shape id */
+                shape: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_company_canvas_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasVersionOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_company_canvas_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Version */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_documents: {
         parameters: {
             query?: never;
@@ -1600,6 +2401,232 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DocumentOut"];
                 };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_company_meeting_notes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    add_company_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeetingNoteBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_company_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_company_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeetingNoteBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_company_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Forbidden */
             403: {
@@ -2265,6 +3292,353 @@ export interface operations {
             };
         };
     };
+    get_project_canvas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    save_project_canvas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CanvasBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasVersionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Another save came first */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Over 8 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_project_canvas_links: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    link_project_shape: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Shape id */
+                shape: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unlink_project_shape: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Shape id */
+                shape: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_project_canvas_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasVersionOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_project_canvas_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Version */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_decisions: {
         parameters: {
             query?: never;
@@ -2343,6 +3717,251 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_project_meeting_notes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    add_project_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeetingNoteBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_project_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_project_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeetingNoteBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeetingNoteOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_project_meeting_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Meeting note id */
+                note: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Forbidden */
             403: {
@@ -3341,6 +4960,288 @@ export interface operations {
             };
         };
     };
+    list_project_threads: {
+        parameters: {
+            query?: {
+                /** @description Only threads about this kind of subject; needs `subject_id` too. */
+                subject_kind?: components["schemas"]["SubjectKind"];
+                subject_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    start_project_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThreadBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_project_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadWithComments"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    comment_project_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommentBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommentOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    promote_project_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromoteBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Already promoted */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_updates: {
         parameters: {
             query?: never;
@@ -4031,6 +5932,204 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_company_threads: {
+        parameters: {
+            query?: {
+                /** @description Only threads about this kind of subject; needs `subject_id` too. */
+                subject_kind?: components["schemas"]["SubjectKind"];
+                subject_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    start_company_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThreadBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_company_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadWithComments"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    comment_company_thread: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommentBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommentOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
             /** @description Forbidden */
             403: {

@@ -18,12 +18,16 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
+mod canvas;
 mod companies;
 mod documents;
 mod engine;
 mod grants;
 pub mod iam;
+mod ids;
+mod meetings;
 mod org;
+mod plan;
 mod projects;
 mod records;
 pub mod relay;
@@ -32,15 +36,23 @@ mod scope;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod updates;
+
+mod threads;
 mod views;
 mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
+pub use canvas::{
+    INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,
+};
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
 pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
 pub use engine::{Activity, ActivityIn, Suggestion, SuggestionKind, engine_actor};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
+pub use ids::{CommentId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
+pub use meetings::{MAX_NOTE_CHARS, MeetingNote, MeetingNoteIn, NoteText, NoteTextError};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
+pub use plan::PlanTx;
 pub use projects::{Assignee, Project, ProjectIn, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, StakeholderRole, System, SystemIn};
 pub use runs::{AgentApprovalRow, AgentBudget, AgentDecided, AgentDecision, AgentRunRow, AgentSpend};
@@ -50,6 +62,8 @@ pub use scope::{
 pub use updates::{
     DraftingLock, MAX_UPDATE_CHARS, UpdateBody, UpdateDraft, UpdateStatus, WeekFacts, week_bounds, week_of,
 };
+
+pub use threads::{Comment, PromoteIn, Subject, Thread};
 pub use views::{CompanySummary, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
 
