@@ -6,7 +6,7 @@ exclude = ["vendor/oryxa-platform"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94.1"
 license = "UNLICENSED"
 publish = false
 
