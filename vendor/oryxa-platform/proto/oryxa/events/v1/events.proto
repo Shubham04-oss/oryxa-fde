@@ -120,7 +120,7 @@ message ToolAuthorizationDecided {
   string capability = 1;
   string effect = 2;     // read | write | external | delete
   bool allowed = 3;
-  string reason = 4;     // allowed | not_invoker | not_acting_for_user | capability_not_on_agent | guardrail | authz_unavailable
+  string reason = 4;     // allowed | approved | not_invoker | not_acting_for_user | capability_not_on_agent | guardrail | needs_approval | authz_unavailable | approvals_unavailable
   string args_hash = 5;
 }
 
@@ -129,6 +129,27 @@ message AgentDelegated {
   AgentRef agent = 1;
   bool allowed = 2;
   string reason = 3;
+}
+
+// ===== approvals (source oryxa.gateway; written through the outbox with the approval row) =====
+
+// gateway.approval.requested.v1: a tool call waits for a member's decision.
+message ApprovalRequested {
+  string request_id = 1;
+  string capability = 2;
+  string effect = 3;      // external | delete | sandbox
+  string args_hash = 4;
+  string task_id = 5;     // empty when no runtime task made the call
+  string expires_at = 6;  // RFC 3339 UTC
+  string connection_id = 7;  // the connection the call would run on; empty when it names none
+}
+
+// gateway.approval.decided.v1
+message ApprovalDecided {
+  string request_id = 1;
+  string decision = 2;    // approved | denied
+  string decided_by = 3;  // user id of the member who decided
+  string task_id = 4;
 }
 
 // ===== integrations (source oryxa.connectors) =====

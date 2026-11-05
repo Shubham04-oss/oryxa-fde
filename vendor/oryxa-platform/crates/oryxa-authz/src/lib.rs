@@ -9,4 +9,6 @@ pub mod spicedb;
 pub use connection::may_use_connection;
 pub use guardrail::{GuardrailError, Guardrails};
 pub use ids::{ObjectRef, SubjectRef};
-pub use spicedb::{AuthzError, CheckItem, Consistency, Decision, Precondition, Relationship, SpiceDb, Write, ZedToken};
+pub use spicedb::{
+    AuthzError, CheckItem, Consistency, Decision, Precondition, Relationship, SpiceDb, Write, ZedToken, write_schema,
+};
