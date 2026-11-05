@@ -417,7 +417,10 @@ impl Store {
             .fetch_one(&mut *conn)
             .await?;
         // Unlocked, the connection goes back to the pool holding nothing.
-        Ok(locked.then(|| DraftingLock { conn: conn.detach(), key }))
+        Ok(locked.then(|| DraftingLock {
+            conn: conn.detach(),
+            key,
+        }))
     }
 }
 
