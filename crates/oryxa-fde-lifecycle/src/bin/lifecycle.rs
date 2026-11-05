@@ -8,16 +8,21 @@
 //! only through one (e.g. `<geo>.anthropic.claude-opus-5-5`; a `global.` profile leaves the
 //! region), so there is no default. `DIGEST_FROM` is the SES identity the digest is sent from and
 //! `WEB_ORIGIN` the web app its unsubscribe page is on; without `DIGEST_FROM` no digest is sent.
-//! It calls AWS only (SQS, Bedrock, SES).
+//! `SLACK_SECRET_PREFIX` (`oryxa-fde/<env>/slack/`) is where tenants' Slack bot tokens are, read
+//! only; without it no approved update is posted to Slack. It calls AWS (SQS, Bedrock, SES, Secrets
+//! Manager) and Slack's API, through the integrations' host allowlist.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use oryxa_events::Verifier;
 use oryxa_fde_events::inbox::sqs;
+use oryxa_fde_integrations::outbound::Outbound;
+use oryxa_fde_integrations::secrets::SecretsManager;
+use oryxa_fde_integrations::slack::SlackApp;
 use oryxa_fde_lifecycle::digest::{DigestConfig, Mailer, SesMailer, send_due};
 use oryxa_fde_lifecycle::drafts::{BedrockDrafter, DraftLimits, Drafter, draft_due};
-use oryxa_fde_lifecycle::rules::handle;
+use oryxa_fde_lifecycle::rules::{SlackPoster, handle_with};
 use oryxa_fde_store::Store;
 use tracing_subscriber::EnvFilter;
 
@@ -77,12 +82,26 @@ async fn main() -> Result<(), Error> {
         }
     });
 
+    let poster = match std::env::var("SLACK_SECRET_PREFIX") {
+        Ok(prefix) => Some(SlackPoster {
+            slack: Arc::new(SlackApp::for_posting(Outbound::new()?)),
+            secrets: Arc::new(
+                SecretsManager::reader(aws_sdk_secretsmanager::Client::new(&aws), &prefix)
+                    .ok_or("SLACK_SECRET_PREFIX must look like oryxa-fde/<env>/slack/")?,
+            ),
+        }),
+        Err(_) => {
+            tracing::info!("SLACK_SECRET_PREFIX is not set: no approved update is posted to Slack");
+            None
+        }
+    };
+
     let queue = env("LIFECYCLE_QUEUE_URL")?;
     let client = aws_sdk_sqs::Client::new(&aws);
     tracing::info!("lifecycle engine running");
     sqs::run(client, queue, |msg| {
-        let (store, verifier) = (&store, &verifier);
-        async move { handle(store, verifier, &msg).await }
+        let (store, verifier, poster) = (&store, &verifier, poster.as_ref());
+        async move { handle_with(store, verifier, poster, &msg).await }
     })
     .await;
     Ok(())

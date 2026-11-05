@@ -362,6 +362,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.125.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea7f719fbeab11b0215659f9b633649e2ebf94469d218304235368024174f7fc"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sesv2"
 version = "1.145.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3130,8 +3155,11 @@ dependencies = [
 name = "oryxa-fde-api"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-secretsmanager",
  "axum",
  "base64 0.23.1",
+ "hmac 0.12.1",
  "http-body-util",
  "jsonwebtoken",
  "oryxa-authn",
@@ -3142,6 +3170,7 @@ dependencies = [
  "oryxa-fde-context",
  "oryxa-fde-core",
  "oryxa-fde-events",
+ "oryxa-fde-integrations",
  "oryxa-fde-mcp",
  "oryxa-fde-store",
  "oryxa-spicedb-proto",
@@ -3237,8 +3266,27 @@ dependencies = [
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "oryxa-fde-integrations"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "aws-sdk-secretsmanager",
+ "base64 0.22.1",
+ "hmac 0.12.1",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "time",
+ "url",
 ]
 
 [[package]]
@@ -3247,6 +3295,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "aws-sdk-secretsmanager",
  "aws-sdk-sesv2",
  "aws-sdk-sqs",
  "ed25519-dalek",
@@ -3254,6 +3303,7 @@ dependencies = [
  "oryxa-events",
  "oryxa-fde-core",
  "oryxa-fde-events",
+ "oryxa-fde-integrations",
  "oryxa-fde-store",
  "rand 0.8.8",
  "serde",

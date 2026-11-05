@@ -185,6 +185,7 @@ pub fn facts_json(f: &WeekFacts) -> Value {
                             format!("An eval run: {passed} passed, {failed} failed")
                         }
                         ActivityIn::PullRequest { number } => format!("Pull request #{number} merged"),
+                        ActivityIn::PullRequestOpened { number } => format!("Pull request #{number} opened"),
                     })
                 })
                 .collect(),

@@ -17,6 +17,8 @@ name = "oryxa-fde-ops"
 path = "src/bin/ops.rs"
 
 [dependencies]
+aws-config.workspace = true
+aws-sdk-secretsmanager.workspace = true
 axum.workspace = true
 oryxa-authn.workspace = true
 oryxa-authz.workspace = true
@@ -26,6 +28,7 @@ oryxa-fde-agent = { path = "../oryxa-fde-agent" }
 oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events.workspace = true
+oryxa-fde-integrations.workspace = true
 oryxa-fde-store.workspace = true
 # Jitter for WorkOS retries; already in the tree.
 rand = "0.8"
@@ -45,6 +48,8 @@ utoipa-axum.workspace = true
 workos.workspace = true
 
 [dev-dependencies]
+hmac = "0.12"
+oryxa-fde-integrations = { workspace = true, features = ["testing"] }
 base64 = "0.23.1"
 http-body-util = "0.1.5"
 jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }

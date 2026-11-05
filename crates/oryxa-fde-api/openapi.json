@@ -970,7 +970,7 @@
         "tags": [
           "companies"
         ],
-        "summary": "The company's records as one JSON document: the company, its stakeholders, systems and\ndocuments (metadata), and each project with its scope, access requests, tasks, decisions and\nweekly updates; and the threads (with comments) and meeting notes of the company and of each\nproject. What the engine derives from events (activity, suggestions) and the canvases are left\nout.",
+        "summary": "The company's records as one JSON document: the company, its stakeholders, systems and\ndocuments (metadata), and each project with its scope, access requests, tasks, decisions and\nweekly updates; and the threads (with comments) and meeting notes of the company and of each\nproject; the company's Slack channel and each project's GitHub repositories. What the engine\nderives from events (activity, suggestions), the canvases, and what grants access (share links,\ninstallation claims, tokens) are left out.",
         "operationId": "export_company",
         "parameters": [
           {
@@ -1976,7 +1976,7 @@
         "tags": [
           "lifecycle"
         ],
-        "summary": "The project's activity: finished agent runs and eval runs and merged pull requests, newest\nfirst.",
+        "summary": "The project's activity: finished agent runs and eval runs, and pull requests opened and\nmerged, newest first.",
         "operationId": "list_activity",
         "parameters": [
           {
@@ -2867,6 +2867,245 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/github/repositories": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "The project's linked repositories.",
+        "operationId": "list_github_repositories",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GitHubRepositoryOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/github/repositories/{repository}": {
+      "put": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Link a repository to the project: it must be in one of the organisation's installations, as\nGitHub confirms. A repository links to one project only.",
+        "operationId": "link_github_repository",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "GitHub's repository id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositoryLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubRepositoryOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Unlink a repository from the project.",
+        "operationId": "unlink_github_repository",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repository",
+            "in": "path",
+            "description": "GitHub's repository id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Unlinked"
           },
           "403": {
             "description": "Forbidden",
@@ -6115,6 +6354,178 @@
         }
       }
     },
+    "/v1/companies/{company}/slack": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "The company's Slack channel, if linked.",
+        "operationId": "get_company_slack",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CompanySlackOut"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Link the channel the company's approved updates are posted to. Needs `manage` on the company;\nthe channel must be a public channel of the organisation's workspace, with the bot in it\n(otherwise 400 `bot_not_in_channel`: `/invite` the bot first).",
+        "operationId": "link_company_slack",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlackChannelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanySlackOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Unlink the company's channel. Needs `manage` on the company.",
+        "operationId": "unlink_company_slack",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Unlinked"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/stakeholders": {
       "get": {
         "tags": [
@@ -6937,6 +7348,150 @@
         ]
       }
     },
+    "/v1/github/install": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Start installing the GitHub App for the organisation. Needs `manage` on the workspace.",
+        "operationId": "start_github_install",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/github/installations": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "The organisation's GitHub App installations.",
+        "operationId": "list_github_installations",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GitHubInstallationOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Claim the installation GitHub's redirect names, with its one-time code and the install's state.\nThe installation must be one the user can reach on GitHub; another organisation's claim gives\n409 and is never moved.",
+        "operationId": "claim_github_installation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitHubClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubInstallationOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -7275,6 +7830,240 @@
         }
       }
     },
+    "/v1/slack/channels": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "The public channels of the organisation's workspace, to choose a company's from.",
+        "operationId": "list_slack_channels",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SlackChannelOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/slack/install": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Start installing the Slack app into the organisation's workspace. Needs `manage` on the\nworkspace.",
+        "operationId": "start_slack_install",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/slack/installation": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "The organisation's Slack workspace, if installed.",
+        "operationId": "get_slack_installation",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/SlackInstallationOut"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Finish the Slack install with Slack's one-time code and the install's state. The bot token goes\nto Secrets Manager; a workspace installed before is replaced. A workspace is one organisation's:\nanother's gets 409 `rejected_slack_team_claimed` and nothing is stored.",
+        "operationId": "claim_slack_installation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlackClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackInstallationOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Forget the organisation's Slack workspace: its channel links go and its token is deleted.",
+        "operationId": "remove_slack_installation",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/today": {
       "get": {
         "tags": [
@@ -7314,6 +8103,136 @@
             }
           }
         }
+      }
+    },
+    "/webhooks/github": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "GitHub's webhook deliveries for our App. No sign-in: a delivery is used only if it is signed\nwith the webhook secret. A pull request opened or merged in a linked repository becomes an FDE\nevent, once; one older than an hour, or whose body or delivery id was seen before, is refused or\nchanges nothing. An installation deleted or suspended is unclaimed, and repositories removed\nfrom one are unlinked, once GitHub confirms it.",
+        "operationId": "github_webhook",
+        "requestBody": {
+          "description": "GitHub's JSON delivery, signed",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted (acted on or dropped)"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/webhooks/slack": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Slack's Events API. No sign-in: a request is used only if it is signed with our signing secret\nwithin the last five minutes. The app uninstalled or its tokens revoked forgets the workspace,\nits channel links and its token; every other event is acknowledged and dropped.",
+        "operationId": "slack_webhook",
+        "requestBody": {
+          "description": "Slack's JSON event, signed",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/SlackChallengeOut"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
       }
     }
   },
@@ -7415,6 +8334,7 @@
         "enum": [
           "agent_run_finished",
           "eval_run_finished",
+          "pull_request_opened",
           "pull_request_merged"
         ]
       },
@@ -7709,6 +8629,35 @@
         },
         "additionalProperties": false
       },
+      "CompanySlackOut": {
+        "type": "object",
+        "required": [
+          "team_id",
+          "channel_id",
+          "channel_name",
+          "linked_by",
+          "linked_at"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "channel_name": {
+            "type": "string",
+            "description": "The channel's name as Slack had it when linked."
+          },
+          "linked_at": {
+            "type": "string"
+          },
+          "linked_by": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string",
+            "description": "The organisation's Slack workspace."
+          }
+        }
+      },
       "CompanySummaryOut": {
         "allOf": [
           {
@@ -7999,6 +8948,17 @@
               "$ref": "#/components/schemas/ProjectExport"
             }
           },
+          "slack_channel": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CompanySlackOut",
+                "description": "The channel the company's approved updates are posted to, if linked."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stakeholders": {
             "type": "array",
             "items": {
@@ -8020,6 +8980,82 @@
           }
         }
       },
+      "GitHubClaimBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "installation_id",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "From GitHub's redirect after the install."
+          },
+          "installation_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GitHubInstallationOut": {
+        "type": "object",
+        "required": [
+          "installation_id",
+          "claimed_by",
+          "claimed_at"
+        ],
+        "properties": {
+          "claimed_at": {
+            "type": "string"
+          },
+          "claimed_by": {
+            "type": "string"
+          },
+          "installation_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GitHubRepositoryOut": {
+        "type": "object",
+        "required": [
+          "installation_id",
+          "repository_id",
+          "full_name",
+          "linked_by",
+          "linked_at"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string",
+            "description": "`owner/name`, as GitHub had it when linked."
+          },
+          "installation_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linked_at": {
+            "type": "string"
+          },
+          "linked_by": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "IngestState": {
         "type": "string",
         "enum": [
@@ -8027,6 +9063,18 @@
           "ingested",
           "failed"
         ]
+      },
+      "InstallStartOut": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Where to send the admin: the install page, carrying a state that works once, for 10 minutes."
+          }
+        }
       },
       "ItemKind": {
         "type": "string",
@@ -8298,7 +9346,8 @@
           "decisions",
           "updates",
           "threads",
-          "meeting_notes"
+          "meeting_notes",
+          "github_repositories"
         ],
         "properties": {
           "access_requests": {
@@ -8312,6 +9361,13 @@
             "items": {
               "$ref": "#/components/schemas/DecisionOut"
             }
+          },
+          "github_repositories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitHubRepositoryOut"
+            },
+            "description": "The GitHub repositories linked to the project."
           },
           "meeting_notes": {
             "type": "array",
@@ -8491,6 +9547,21 @@
             "type": "string"
           }
         }
+      },
+      "RepositoryLinkBody": {
+        "type": "object",
+        "required": [
+          "installation_id"
+        ],
+        "properties": {
+          "installation_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "One of the organisation's installations, which the repository is in.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "RoomCriterionOut": {
         "type": "object",
@@ -8918,6 +9989,86 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "SlackChallengeOut": {
+        "type": "object",
+        "required": [
+          "challenge"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string"
+          }
+        }
+      },
+      "SlackChannelBody": {
+        "type": "object",
+        "required": [
+          "channel_id"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "description": "A public channel of the organisation's workspace, from `GET /v1/slack/channels`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SlackChannelOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "is_member"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "is_member": {
+            "type": "boolean",
+            "description": "Whether the bot is in the channel; only such a channel can be linked (`/invite` the bot)."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SlackClaimBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "From Slack's redirect after the install."
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SlackInstallationOut": {
+        "type": "object",
+        "required": [
+          "team_id",
+          "installed_by",
+          "installed_at"
+        ],
+        "properties": {
+          "installed_at": {
+            "type": "string"
+          },
+          "installed_by": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
           }
         }
       },
@@ -9574,6 +10725,10 @@
     {
       "name": "room",
       "description": "Share links, and the customer room a project's guests see"
+    },
+    {
+      "name": "integrations",
+      "description": "GitHub App installations, repositories linked to projects and GitHub's webhooks; the Slack workspace, a company's channel and Slack's events"
     }
   ]
 }

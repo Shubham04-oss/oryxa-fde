@@ -27,6 +27,7 @@ mod evals;
 mod grants;
 pub mod iam;
 mod ids;
+mod integrations;
 mod meetings;
 mod org;
 mod plan;
@@ -55,6 +56,10 @@ pub use engine::{Activity, ActivityIn, CriterionResult, Suggestion, SuggestionKi
 pub use evals::{EvalCaseResultRow, EvalCaseRow, EvalCriterionRow, EvalResults, EvalRunRow, EvalSuiteRow};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use ids::{CommentId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
+pub use integrations::{
+    Claimed, GitHubInstallation, GitHubRepository, RepositoryName, SlackChannel, SlackChannelId, SlackInstallation,
+    SlackPost, SlackTeamId,
+};
 pub use meetings::{MAX_NOTE_CHARS, MeetingNote, MeetingNoteIn, NoteText, NoteTextError};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use plan::PlanTx;

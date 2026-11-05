@@ -25,9 +25,22 @@ fn event_key(raw: &str) -> Result<&str, StoreError> {
 /// One entry of a project's activity: what happened, as ids, outcomes and counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityIn {
-    AgentRun { run: AgentRunId, outcome: RunOutcome },
-    EvalRun { run: EvalRunId, passed: u32, failed: u32 },
-    PullRequest { number: u32 },
+    AgentRun {
+        run: AgentRunId,
+        outcome: RunOutcome,
+    },
+    EvalRun {
+        run: EvalRunId,
+        passed: u32,
+        failed: u32,
+    },
+    /// A pull request merged.
+    PullRequest {
+        number: u32,
+    },
+    PullRequestOpened {
+        number: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +158,7 @@ impl ProjectTx {
                 Some(i32::try_from(*failed).map_err(|_| StoreError::Rejected("failed"))?),
             ),
             ActivityIn::PullRequest { number } => ("pull_request_merged", number.to_string(), None, None, None),
+            ActivityIn::PullRequestOpened { number } => ("pull_request_opened", number.to_string(), None, None, None),
         };
         sqlx::query(
             "insert into project_activity (tenant_id, company_id, project_id, event_id, kind, subject, outcome, passed,
@@ -466,6 +480,11 @@ fn activity(r: PgRow) -> Result<Activity, StoreError> {
             failed: count("failed")?,
         },
         "pull_request_merged" => ActivityIn::PullRequest {
+            number: subject
+                .parse()
+                .map_err(|_| StoreError::Corrupt("pull request number"))?,
+        },
+        "pull_request_opened" => ActivityIn::PullRequestOpened {
             number: subject
                 .parse()
                 .map_err(|_| StoreError::Corrupt("pull request number"))?,

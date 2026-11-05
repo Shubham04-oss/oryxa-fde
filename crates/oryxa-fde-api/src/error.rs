@@ -31,6 +31,10 @@ pub enum ApiError {
     /// The change breaks a rule of the record, e.g. a stage skipped or an empty scope signed off.
     #[error("rejected: {0}")]
     Rejected(&'static str),
+    /// The request can't be carried out until something is done elsewhere first; the code says
+    /// what, e.g. `bot_not_in_channel` (invite the Slack bot).
+    #[error("needs {0}")]
+    NeedsAction(&'static str),
     /// A dependency (SpiceDB, WorkOS keys) failed; the request is denied, never allowed.
     #[error("unavailable")]
     Unavailable,
@@ -56,6 +60,7 @@ impl ApiError {
             ApiError::UnsupportedType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
             ApiError::Conflict => (StatusCode::CONFLICT, "conflict"),
             ApiError::Rejected(_) => (StatusCode::CONFLICT, "rejected"),
+            ApiError::NeedsAction(what) => (StatusCode::BAD_REQUEST, *what),
             ApiError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -117,6 +122,12 @@ mod tests {
             ApiError::Rejected("stage_transition")
         ));
         assert_eq!(ApiError::Rejected("empty_scope").status().0, StatusCode::CONFLICT);
+        // What to do first is the code itself.
+        let needs = ApiError::NeedsAction("bot_not_in_channel");
+        assert_eq!(
+            (needs.status().0, needs.code().as_str()),
+            (StatusCode::BAD_REQUEST, "bot_not_in_channel")
+        );
         assert!(matches!(
             ApiError::from(StoreError::Corrupt("name")),
             ApiError::Internal

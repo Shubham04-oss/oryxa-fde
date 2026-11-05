@@ -14,12 +14,14 @@ path = "src/bin/lifecycle.rs"
 [dependencies]
 aws-config.workspace = true
 aws-sdk-bedrockruntime.workspace = true
+aws-sdk-secretsmanager.workspace = true
 aws-sdk-sesv2.workspace = true
 aws-sdk-sqs.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-events = { workspace = true, features = ["sqs"] }
+oryxa-fde-integrations.workspace = true
 oryxa-fde-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,6 +33,7 @@ tracing-subscriber.workspace = true
 url = "2"
 
 [dev-dependencies]
+oryxa-fde-integrations = { workspace = true, features = ["testing"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 rand = "0.8"

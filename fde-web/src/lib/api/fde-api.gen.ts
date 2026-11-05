@@ -230,8 +230,9 @@ export interface paths {
          * The company's records as one JSON document: the company, its stakeholders, systems and
          *     documents (metadata), and each project with its scope, access requests, tasks, decisions and
          *     weekly updates; and the threads (with comments) and meeting notes of the company and of each
-         *     project. What the engine derives from events (activity, suggestions) and the canvases are left
-         *     out.
+         *     project; the company's Slack channel and each project's GitHub repositories. What the engine
+         *     derives from events (activity, suggestions), the canvases, and what grants access (share links,
+         *     installation claims, tokens) are left out.
          */
         get: operations["export_company"];
         put?: never;
@@ -391,8 +392,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The project's activity: finished agent runs and eval runs and merged pull requests, newest
-         *     first.
+         * The project's activity: finished agent runs and eval runs, and pull requests opened and
+         *     merged, newest first.
          */
         get: operations["list_activity"];
         put?: never;
@@ -538,6 +539,44 @@ export interface paths {
         /** Record a decision: what, who decided, when and why. The log is append-only. */
         post: operations["record_decision"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/github/repositories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's linked repositories. */
+        get: operations["list_github_repositories"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/github/repositories/{repository}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Link a repository to the project: it must be in one of the organisation's installations, as
+         *     GitHub confirms. A repository links to one project only.
+         */
+        put: operations["link_github_repository"];
+        post?: never;
+        /** Unlink a repository from the project. */
+        delete: operations["unlink_github_repository"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1089,6 +1128,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/slack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The company's Slack channel, if linked. */
+        get: operations["get_company_slack"];
+        /**
+         * Link the channel the company's approved updates are posted to. Needs `manage` on the company;
+         *     the channel must be a public channel of the organisation's workspace, with the bot in it
+         *     (otherwise 400 `bot_not_in_channel`: `/invite` the bot first).
+         */
+        put: operations["link_company_slack"];
+        post?: never;
+        /** Unlink the company's channel. Needs `manage` on the company. */
+        delete: operations["unlink_company_slack"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/stakeholders": {
         parameters: {
             query?: never;
@@ -1232,6 +1294,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/github/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start installing the GitHub App for the organisation. Needs `manage` on the workspace. */
+        post: operations["start_github_install"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/github/installations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The organisation's GitHub App installations. */
+        get: operations["list_github_installations"];
+        put?: never;
+        /**
+         * Claim the installation GitHub's redirect names, with its one-time code and the install's state.
+         *     The installation must be one the user can reach on GitHub; another organisation's claim gives
+         *     409 and is never moved.
+         */
+        post: operations["claim_github_installation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me": {
         parameters: {
             query?: never;
@@ -1322,6 +1423,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/slack/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The public channels of the organisation's workspace, to choose a company's from. */
+        get: operations["list_slack_channels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/slack/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start installing the Slack app into the organisation's workspace. Needs `manage` on the
+         *     workspace.
+         */
+        post: operations["start_slack_install"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/slack/installation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The organisation's Slack workspace, if installed. */
+        get: operations["get_slack_installation"];
+        put?: never;
+        /**
+         * Finish the Slack install with Slack's one-time code and the install's state. The bot token goes
+         *     to Secrets Manager; a workspace installed before is replaced. A workspace is one organisation's:
+         *     another's gets 409 `rejected_slack_team_claimed` and nothing is stored.
+         */
+        post: operations["claim_slack_installation"];
+        /** Forget the organisation's Slack workspace: its channel links go and its token is deleted. */
+        delete: operations["remove_slack_installation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/today": {
         parameters: {
             query?: never;
@@ -1333,6 +1494,50 @@ export interface paths {
         get: operations["get_today"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhooks/github": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * GitHub's webhook deliveries for our App. No sign-in: a delivery is used only if it is signed
+         *     with the webhook secret. A pull request opened or merged in a linked repository becomes an FDE
+         *     event, once; one older than an hour, or whose body or delivery id was seen before, is refused or
+         *     changes nothing. An installation deleted or suspended is unclaimed, and repositories removed
+         *     from one are unlinked, once GitHub confirms it.
+         */
+        post: operations["github_webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhooks/slack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Slack's Events API. No sign-in: a request is used only if it is signed with our signing secret
+         *     within the last five minutes. The app uninstalled or its tokens revoked forgets the workspace,
+         *     its channel links and its token; every other event is acknowledged and dropped.
+         */
+        post: operations["slack_webhook"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1369,7 +1574,7 @@ export interface components {
         /** @enum {string} */
         AccessState: "requested" | "in_progress" | "granted" | "denied" | "revoked";
         /** @enum {string} */
-        ActivityKind: "agent_run_finished" | "eval_run_finished" | "pull_request_merged";
+        ActivityKind: "agent_run_finished" | "eval_run_finished" | "pull_request_opened" | "pull_request_merged";
         ActivityOut: {
             /** Format: int32 */
             failed?: number | null;
@@ -1460,6 +1665,15 @@ export interface components {
             region?: string | null;
             summary?: string | null;
         };
+        CompanySlackOut: {
+            channel_id: string;
+            /** @description The channel's name as Slack had it when linked. */
+            channel_name: string;
+            linked_at: string;
+            linked_by: string;
+            /** @description The organisation's Slack workspace. */
+            team_id: string;
+        };
         /** @description A company in the caller's list: the company, the caller's role and its projects. */
         CompanySummaryOut: components["schemas"]["CompanyOut"] & {
             projects: components["schemas"]["ProjectSummaryOut"][];
@@ -1538,13 +1752,41 @@ export interface components {
             exported_at: string;
             meeting_notes: components["schemas"]["MeetingNoteOut"][];
             projects: components["schemas"]["ProjectExport"][];
+            slack_channel?: components["schemas"]["CompanySlackOut"] | null;
             stakeholders: components["schemas"]["StakeholderOut"][];
             systems: components["schemas"]["SystemOut"][];
             /** @description The company's own threads, each with its comments, and meeting notes. */
             threads: components["schemas"]["ThreadWithComments"][];
         };
+        GitHubClaimBody: {
+            /** @description From GitHub's redirect after the install. */
+            code: string;
+            /** Format: int64 */
+            installation_id: number;
+            state: string;
+        };
+        GitHubInstallationOut: {
+            claimed_at: string;
+            claimed_by: string;
+            /** Format: int64 */
+            installation_id: number;
+        };
+        GitHubRepositoryOut: {
+            /** @description `owner/name`, as GitHub had it when linked. */
+            full_name: string;
+            /** Format: int64 */
+            installation_id: number;
+            linked_at: string;
+            linked_by: string;
+            /** Format: int64 */
+            repository_id: number;
+        };
         /** @enum {string} */
         IngestState: "pending" | "ingested" | "failed";
+        InstallStartOut: {
+            /** @description Where to send the admin: the install page, carrying a state that works once, for 10 minutes. */
+            url: string;
+        };
         /** @enum {string} */
         ItemKind: "in" | "out";
         LinkBody: {
@@ -1626,6 +1868,8 @@ export interface components {
         ProjectExport: {
             access_requests: components["schemas"]["AccessRequestOut"][];
             decisions: components["schemas"]["DecisionOut"][];
+            /** @description The GitHub repositories linked to the project. */
+            github_repositories: components["schemas"]["GitHubRepositoryOut"][];
             meeting_notes: components["schemas"]["MeetingNoteOut"][];
             project: components["schemas"]["ProjectOut"];
             scope: components["schemas"]["ScopeOut"];
@@ -1672,6 +1916,13 @@ export interface components {
         RedeemedOut: {
             company: string;
             project: string;
+        };
+        RepositoryLinkBody: {
+            /**
+             * Format: int64
+             * @description One of the organisation's installations, which the repository is in.
+             */
+            installation_id: number;
         };
         RoomCriterionOut: {
             criterion: components["schemas"]["CriterionOut"];
@@ -1811,6 +2062,29 @@ export interface components {
             stakeholder: string;
             /** Format: int32 */
             version: number;
+        };
+        SlackChallengeOut: {
+            challenge: string;
+        };
+        SlackChannelBody: {
+            /** @description A public channel of the organisation's workspace, from `GET /v1/slack/channels`. */
+            channel_id: string;
+        };
+        SlackChannelOut: {
+            id: string;
+            /** @description Whether the bot is in the channel; only such a channel can be linked (`/invite` the bot). */
+            is_member: boolean;
+            name: string;
+        };
+        SlackClaimBody: {
+            /** @description From Slack's redirect after the install. */
+            code: string;
+            state: string;
+        };
+        SlackInstallationOut: {
+            installed_at: string;
+            installed_by: string;
+            team_id: string;
         };
         StageBody: {
             /** @description One stage forward, or back to any earlier stage. */
@@ -4081,6 +4355,168 @@ export interface operations {
             };
         };
     };
+    list_github_repositories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubRepositoryOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    link_github_repository: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description GitHub's repository id */
+                repository: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RepositoryLinkBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubRepositoryOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unlink_github_repository: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description GitHub's repository id */
+                repository: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unlinked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_project_meeting_notes: {
         parameters: {
             query?: never;
@@ -6270,6 +6706,140 @@ export interface operations {
             };
         };
     };
+    get_company_slack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanySlackOut"] | null;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    link_company_slack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SlackChannelBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanySlackOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unlink_company_slack: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unlinked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_stakeholders: {
         parameters: {
             query?: never;
@@ -6874,6 +7444,133 @@ export interface operations {
             };
         };
     };
+    start_github_install: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallStartOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_github_installations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubInstallationOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    claim_github_installation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitHubClaimBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubInstallationOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     get_me: {
         parameters: {
             query?: never;
@@ -7152,6 +7849,216 @@ export interface operations {
             };
         };
     };
+    list_slack_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlackChannelOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    start_slack_install: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallStartOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_slack_installation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlackInstallationOut"] | null;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    claim_slack_installation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SlackClaimBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlackInstallationOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_slack_installation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     get_today: {
         parameters: {
             query?: never;
@@ -7168,6 +8075,108 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TodayOut"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    github_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description GitHub's JSON delivery, signed */
+        requestBody: {
+            content: {
+                "text/plain": string;
+            };
+        };
+        responses: {
+            /** @description Accepted (acted on or dropped) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    slack_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Slack's JSON event, signed */
+        requestBody: {
+            content: {
+                "text/plain": string;
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SlackChallengeOut"] | null;
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Unauthorized */
