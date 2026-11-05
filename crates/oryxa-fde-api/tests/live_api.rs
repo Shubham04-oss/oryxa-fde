@@ -3379,9 +3379,20 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["project"]["id"], json!(a.project));
     // Every record but the organisation's security answers, the share links, which grant access
-    // rather than record the work, the suggestions the engine derives from events, and the canvas.
+    // rather than record the work, the GitHub and Slack links, which connect outside systems for the
+    // same reason, the suggestions the engine derives from events, and the canvas.
+    let left_out = [
+        "{answer}",
+        "{link}",
+        "{repository}",
+        "{installation}",
+        "{channel}",
+        "{kind}",
+        "{shape}",
+        "{version}",
+    ];
     for (placeholder, id) in &a.records {
-        if !["{answer}", "{link}", "{kind}", "{shape}", "{version}"].contains(placeholder) {
+        if !left_out.contains(placeholder) {
             assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
         }
     }
