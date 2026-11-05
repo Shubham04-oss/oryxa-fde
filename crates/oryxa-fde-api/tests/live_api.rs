@@ -1243,12 +1243,12 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         json!({"code": code, "installation_id": installation, "state": state_of(started["url"].as_str().unwrap())});
     w.ok(&admin, "POST", "/v1/github/installations", Some(claim), StatusCode::OK)
         .await;
-    let link = json!({"installation_id": installation});
+    let repository_link = json!({"installation_id": installation});
     w.ok(
         &lead,
         "PUT",
         &format!("{pbase}/github/repositories/{repository}"),
-        Some(link),
+        Some(repository_link),
         StatusCode::OK,
     )
     .await;
