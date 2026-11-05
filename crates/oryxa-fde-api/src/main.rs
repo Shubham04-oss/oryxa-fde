@@ -1,8 +1,9 @@
 //! oryxa-fde-api on ECS Fargate: the HTTP API, the outbox relay and the grant reconciler.
 //! Configuration comes from the environment; ECS injects the secrets (SpiceDB key, WorkOS key,
-//! event signing key) from Secrets Manager. The only third-party host it calls is WorkOS, for the
-//! JWKS of `WORKOS_ISSUER`. Uploads go to S3 (`DOCUMENTS_BUCKET`); search queries are embedded on
-//! Bedrock (`EMBEDDING_*`).
+//! event signing key) from Secrets Manager. It calls WorkOS, for the JWKS of `WORKOS_ISSUER`; uploads
+//! go to S3 (`DOCUMENTS_BUCKET`); search queries are embedded on Bedrock (`EMBEDDING_*`). GitHub and
+//! Slack are off unless configured (`integrations::Integrations::from_env`): their calls go through
+//! the integrations' host allowlist, and Slack bot tokens to Secrets Manager.
 //!
 //! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
 //! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; `SESSION_PASSWORD_PREVIOUS`
@@ -73,7 +74,8 @@ async fn main() -> Result<(), Error> {
     tokio::spawn(relay::run(store.clone(), signer, publisher));
 
     let context = Context::from_env().await?;
-    let app = App::with_sign_in(store, authz, tokens, context, sign_in);
+    let integrations = oryxa_fde_api::integrations::Integrations::from_env(&env("WEB_ORIGIN")?).await?;
+    let app = App::with_integrations(store, authz, tokens, context, Some(sign_in), integrations);
     tokio::spawn(run_reconciler(app.clone()));
 
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());

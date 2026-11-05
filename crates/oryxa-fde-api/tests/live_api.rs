@@ -18,9 +18,14 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use oryxa_authz::SpiceDb;
 use oryxa_core::TenantId;
+use oryxa_fde_api::integrations::{GitHubIntegration, Integrations, SlackIntegration};
 use oryxa_fde_api::{App, SignIn, openapi, reconcile_grants, router};
 use oryxa_fde_context::Context;
 use oryxa_fde_core::{CompanyId, CompanyScope, DocumentId};
+use oryxa_fde_integrations::github::WebhookSecret;
+use oryxa_fde_integrations::slack::{BotToken, Channel, ChannelId, SigningSecret, TeamId};
+use oryxa_fde_integrations::state::StateKey;
+use oryxa_fde_integrations::testing::{FakeGitHub, FakeSecrets, FakeSlack};
 use oryxa_fde_store::{Store, new_id, testing};
 use oryxa_spicedb_proto::v1::{WriteSchemaRequest, schema_service_client::SchemaServiceClient};
 use serde_json::{Value, json};
@@ -33,6 +38,10 @@ const WEB: &str = "https://fde.test";
 
 struct World {
     router: Router,
+    /// GitHub, Slack and Secrets Manager, faked.
+    github: Arc<FakeGitHub>,
+    slack: Arc<FakeSlack>,
+    secrets: Arc<FakeSecrets>,
     /// The MCP server on the same app.
     mcp: Router,
     app: Arc<App>,
@@ -50,6 +59,54 @@ fn sign_in_config(authkit: &Arc<support::FakeAuthKit>, password: &str) -> SignIn
     SignIn::new(WEB, password, authkit.clone()).unwrap()
 }
 
+const WEBHOOK_SECRET: &str = "github-webhook-secret-for-the-tests";
+const SIGNING_SECRET: &str = "slack-signing-secret-for-the-tests";
+
+fn integrations(github: &Arc<FakeGitHub>, slack: &Arc<FakeSlack>, secrets: &Arc<FakeSecrets>) -> Integrations {
+    let state = || StateKey::new("install-state-key-for-the-tests-0123456789").unwrap();
+    Integrations {
+        github: Some(GitHubIntegration {
+            api: github.clone(),
+            webhook: WebhookSecret::new(WEBHOOK_SECRET).unwrap(),
+            state: state(),
+        }),
+        slack: Some(SlackIntegration {
+            api: slack.clone(),
+            signing: SigningSecret::new(SIGNING_SECRET).unwrap(),
+            secrets: secrets.clone(),
+            state: state(),
+        }),
+    }
+}
+
+/// The `state` in an install URL.
+fn state_of(url: &str) -> String {
+    url.split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+/// A fresh GitHub id, unique in this run of the tests.
+fn github_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let base = 1_000_000 + u64::from(rand::random::<u32>());
+    base * 1000 + NEXT.fetch_add(1, Ordering::SeqCst)
+}
+
+fn hmac_hex(secret: &str, parts: &[&[u8]]) -> String {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    for p in parts {
+        mac.update(p);
+    }
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 async fn world() -> World {
     let store = testing::store().await;
 
@@ -65,16 +122,25 @@ async fn world() -> World {
     let context = Context::fake();
     let authkit = Arc::new(support::FakeAuthKit::default());
     let password = format!("{}{}", new_id("x").replace("x_", ""), new_id("x").replace("x_", ""));
-    let app = App::with_sign_in(
+    let (github, slack, secrets) = (
+        Arc::new(FakeGitHub::default()),
+        Arc::new(FakeSlack::default()),
+        Arc::new(FakeSecrets::default()),
+    );
+    let app = App::with_integrations(
         store.clone(),
         authz.clone(),
         support::verifier(),
         context.clone(),
-        sign_in_config(&authkit, &password),
+        Some(sign_in_config(&authkit, &password)),
+        integrations(&github, &slack, &secrets),
     );
 
     World {
         router: router(app.clone()),
+        github,
+        slack,
+        secrets,
         mcp: oryxa_fde_mcp::router(app.clone(), Vec::new()),
         app,
         store,
@@ -88,12 +154,13 @@ async fn world() -> World {
 impl World {
     /// Another replica of the API: same database and SpiceDB, its own caches.
     fn replica(&self) -> Router {
-        router(App::with_sign_in(
+        router(App::with_integrations(
             self.store.clone(),
             self.authz.clone(),
             support::verifier(),
             self.context.clone(),
-            sign_in_config(&self.authkit, &self.password),
+            Some(sign_in_config(&self.authkit, &self.password)),
+            integrations(&self.github, &self.slack, &self.secrets),
         ))
     }
 
@@ -566,6 +633,18 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
     ("POST", "/auth/logout"),
+    // The organisation's own: installs and workspace, under its admins or members.
+    ("POST", "/v1/github/install"),
+    ("GET", "/v1/github/installations"),
+    ("POST", "/v1/github/installations"),
+    ("POST", "/v1/slack/install"),
+    ("GET", "/v1/slack/installation"),
+    ("POST", "/v1/slack/installation"),
+    ("DELETE", "/v1/slack/installation"),
+    ("GET", "/v1/slack/channels"),
+    // No sign-in: signed by GitHub or Slack, routed by what they name.
+    ("POST", "/webhooks/github"),
+    ("POST", "/webhooks/slack"),
 ];
 
 /// Every route that names a company, project, record or answer, with a body that would succeed if
@@ -868,6 +947,28 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ),
     ("GET", "/v1/room/companies/{company}/projects/{project}", None),
     (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/github/repositories",
+        None,
+    ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/github/repositories/{repository}",
+        Some(r#"{"installation_id":{installation}}"#),
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/github/repositories/{repository}",
+        None,
+    ),
+    ("GET", "/v1/companies/{company}/slack", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/slack",
+        Some(r#"{"channel_id":"{channel}"}"#),
+    ),
+    ("DELETE", "/v1/companies/{company}/slack", None),
+    (
         "PUT",
         "/v1/security-answers/{answer}",
         Some(r#"{"question":"pwned","answer":"pwned"}"#),
@@ -904,6 +1005,8 @@ const RECORDS: &[&str] = &[
     "{thread}",
     "{note}",
     "{link}",
+    "{repository}",
+    "{installation}",
 ];
 
 /// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
@@ -1125,6 +1228,53 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         planning.push((thread, note));
     }
     let [(thread, note), (project_thread, project_note)] = <[_; 2]>::try_from(planning).unwrap();
+
+    // GitHub: the organisation's admin installs the App and claims it; the lead links a repository.
+    let (installation, repository) = (github_id(), github_id());
+    let started = w.ok(&admin, "POST", "/v1/github/install", None, StatusCode::OK).await;
+    let code = new_id("ghc");
+    w.github.codes.lock().unwrap().insert(code.clone(), vec![installation]);
+    w.github
+        .repositories
+        .lock()
+        .unwrap()
+        .insert((installation, repository), format!("{name}/support-rag"));
+    let claim =
+        json!({"code": code, "installation_id": installation, "state": state_of(started["url"].as_str().unwrap())});
+    w.ok(&admin, "POST", "/v1/github/installations", Some(claim), StatusCode::OK)
+        .await;
+    let link = json!({"installation_id": installation});
+    w.ok(
+        &lead,
+        "PUT",
+        &format!("{pbase}/github/repositories/{repository}"),
+        Some(link),
+        StatusCode::OK,
+    )
+    .await;
+    // Slack: the admin installs the organisation's workspace; the lead links a channel.
+    let started = w.ok(&admin, "POST", "/v1/slack/install", None, StatusCode::OK).await;
+    let code = new_id("slc");
+    let team = TeamId::new(&slack_team(org)).unwrap();
+    let token = BotToken::new(format!("xoxb-{org}")).unwrap();
+    w.slack.codes.lock().unwrap().insert(code.clone(), (team, token));
+    let channel = format!("C{}", github_id());
+    w.slack.channels.lock().unwrap().push(Channel {
+        id: ChannelId::new(&channel).unwrap(),
+        name: name.to_owned(),
+    });
+    let claim = json!({"code": code, "state": state_of(started["url"].as_str().unwrap())});
+    w.ok(&admin, "POST", "/v1/slack/installation", Some(claim), StatusCode::OK)
+        .await;
+    w.ok(
+        &lead,
+        "PUT",
+        &format!("{base}/slack"),
+        Some(json!({"channel_id": channel})),
+        StatusCode::OK,
+    )
+    .await;
+
     Tenant {
         org: org.to_owned(),
         lead,
@@ -1154,8 +1304,20 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             ("{shape}", "shape-1".into()),
             ("{version}", "1".into()),
             ("{link}", link),
+            ("{repository}", repository.to_string()),
+            ("{installation}", installation.to_string()),
+            ("{channel}", channel),
         ],
     }
+}
+
+/// The fixture organisation's Slack team.
+fn slack_team(org: &str) -> String {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(org.as_bytes());
+    format!(
+        "T{}",
+        digest.iter().take(5).map(|b| format!("{b:02X}")).collect::<String>()
+    )
 }
 
 /// The week each fixture's drafted update covers.
@@ -1204,6 +1366,10 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/threads"),
         format!("{project}/threads/{}", t.record("{project_thread}")),
         format!("{project}/meeting-notes"),
+        format!("{project}/github/repositories"),
+        format!("{base}/slack"),
+        "/v1/github/installations".into(),
+        "/v1/slack/installation".into(),
     ] {
         let mut got = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
         // Time spent waiting moves on its own; nothing else may.
@@ -3639,4 +3805,469 @@ async fn a_sponsor_unsubscribes_from_the_digest_with_the_link_alone() {
     assert_eq!(unsubscribe(&token).await.0, StatusCode::NO_CONTENT);
     let listed = w.ok(&t.lead, "GET", &stakeholders, None, StatusCode::OK).await;
     assert!(row(&listed)["digest_unsubscribed_at"].is_string());
+}
+
+/// A GitHub delivery to the webhook, signed with the webhook secret unless `signature` is given.
+async fn github_delivery(w: &World, event: &str, delivery: &str, body: &str, signature: Option<&str>) -> StatusCode {
+    let sig = signature
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("sha256={}", hmac_hex(WEBHOOK_SECRET, &[body.as_bytes()])));
+    let req = Request::post("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", event)
+        .header("x-github-delivery", delivery)
+        .header("x-hub-signature-256", sig)
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    w.send(req).await.0
+}
+
+fn pull_request(
+    action: &str,
+    merged: bool,
+    installation: u64,
+    repository: u64,
+    number: u32,
+    at: time::OffsetDateTime,
+) -> String {
+    let at = at.format(&time::format_description::well_known::Rfc3339).unwrap();
+    json!({"action": action, "number": number,
+        "pull_request": {"merged": merged, "updated_at": at, "title": "Refund flow"},
+        "repository": {"id": repository}, "installation": {"id": installation}})
+    .to_string()
+}
+
+fn delivery() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_github_installation_is_claimed_once_and_only_by_whoever_proves_it() {
+    let w = world().await;
+    let org = new_id("org");
+    let admin = user(&org, "gh_admin", "admin");
+    let other_admin = user(&org, "gh_admin2", "admin");
+    let member = user(&org, "gh_member", "member");
+    let installation = github_id();
+    let start = async |who: &User| {
+        let started = w.ok(who, "POST", "/v1/github/install", None, StatusCode::OK).await;
+        state_of(started["url"].as_str().unwrap())
+    };
+    let code = |reachable: Vec<u64>| {
+        let c = new_id("ghc");
+        w.github.codes.lock().unwrap().insert(c.clone(), reachable);
+        c
+    };
+    let claim = async |who: &User, code: String, state: &str| {
+        let body = json!({"code": code, "installation_id": installation, "state": state});
+        w.call(Some(&who.token), "POST", "/v1/github/installations", Some(body))
+            .await
+    };
+
+    // Only an admin of the organisation starts an install.
+    assert_eq!(
+        w.status(&member, "POST", "/v1/github/install", None).await,
+        StatusCode::FORBIDDEN
+    );
+
+    // A state that is forged, someone else's or used before is refused; so is an installation the
+    // user cannot reach on GitHub.
+    let state = start(&admin).await;
+    let forged = state.replacen(&org, &new_id("org"), 1);
+    assert_eq!(
+        claim(&admin, code(vec![installation]), &forged).await.1["error"],
+        "invalid_state"
+    );
+    assert_eq!(
+        claim(&other_admin, code(vec![installation]), &state).await.1["error"],
+        "invalid_state"
+    );
+    let unreachable = start(&admin).await;
+    assert_eq!(
+        claim(&admin, code(vec![installation + 1]), &unreachable).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let bad_code = start(&admin).await;
+    assert_eq!(
+        claim(&admin, "spent".into(), &bad_code).await.1["error"],
+        "invalid_code"
+    );
+
+    let (status, claimed) = claim(&admin, code(vec![installation]), &state).await;
+    assert_eq!(
+        (status, &claimed["installation_id"]),
+        (StatusCode::OK, &json!(installation))
+    );
+    assert_eq!(
+        claim(&admin, code(vec![installation]), &state).await.1["error"],
+        "invalid_state",
+        "used once"
+    );
+    let listed = w
+        .ok(&member, "GET", "/v1/github/installations", None, StatusCode::OK)
+        .await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    // Another organisation proving the same installation gets 409; the claim never moves.
+    let org2 = new_id("org");
+    let thief = user(&org2, "gh_thief", "admin");
+    let state = start(&thief).await;
+    let (status, body) = claim(&thief, code(vec![installation]), &state).await;
+    assert_eq!(
+        (status, &body["error"]),
+        (StatusCode::CONFLICT, &json!("rejected_installation_claimed"))
+    );
+    let theirs = w
+        .ok(&thief, "GET", "/v1/github/installations", None, StatusCode::OK)
+        .await;
+    assert_eq!(theirs, json!([]));
+    // Claiming again from the owner changes nothing.
+    let state = start(&other_admin).await;
+    assert_eq!(
+        claim(&other_admin, code(vec![installation]), &state).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_linked_repositorys_pull_requests_become_events_once_and_removals_unlink() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let other = company(&w, &new_id("org"), "gamma").await;
+    let installation: u64 = t.record("{installation}").parse().unwrap();
+    let repository: u64 = t.record("{repository}").parse().unwrap();
+    let project = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let repos = format!("{project}/github/repositories");
+
+    // Linking: only a repository GitHub puts in one of the organisation's own installations, and
+    // only to one project.
+    let listed = w.ok(&t.lead, "GET", &repos, None, StatusCode::OK).await;
+    assert_eq!(listed[0]["full_name"], "alpha/support-rag");
+    let link = async |path: &str, installation: &str| {
+        let body: Value = serde_json::from_str(&format!(r#"{{"installation_id":{installation}}}"#)).unwrap();
+        w.call(Some(&t.lead.token), "PUT", path, Some(body)).await
+    };
+    let unknown = github_id();
+    let (status, body) = link(&format!("{repos}/{unknown}"), &installation.to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (_, body) = link(&format!("{repos}/{unknown}"), &github_id().to_string()).await;
+    assert_eq!(body["error"], "invalid_installation", "an installation no one claimed");
+    let (_, body) = link(&format!("{repos}/{unknown}"), other.record("{installation}")).await;
+    assert_eq!(
+        body["error"], "invalid_installation",
+        "another organisation's installation"
+    );
+    let second = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("/v1/companies/{}/projects", t.company),
+            Some(json!({"name": "Second"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let second_repos = format!(
+        "/v1/companies/{}/projects/{}/github/repositories",
+        t.company,
+        second["id"].as_str().unwrap()
+    );
+    let (status, _) = link(&format!("{second_repos}/{repository}"), &installation.to_string()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "a repository links to one project");
+
+    // A signed, recent pull request opened becomes an event, once.
+    let now = time::OffsetDateTime::now_utc();
+    let count = |list: &[String], detail: &str| list.iter().filter(|d| d.as_str() == detail).count();
+    let before = w.events(&org).await;
+    let opened = pull_request("opened", false, installation, repository, 42, now);
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &opened, None).await,
+        StatusCode::ACCEPTED
+    );
+    let after = w.events(&org).await;
+    assert_eq!(
+        count(&after, "fde.pull-request.opened.v1"),
+        count(&before, "fde.pull-request.opened.v1") + 1
+    );
+    // Replayed: the same body under a new delivery id, or the same delivery id: nothing more.
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &opened, None).await,
+        StatusCode::ACCEPTED
+    );
+    let again = w.events(&org).await;
+    assert_eq!(again.len(), after.len(), "a replayed body is no new event");
+    // Unsigned, wrongly signed, stale or for an unlinked repository: refused or dropped.
+    let wrong = format!(
+        "sha256={}",
+        hmac_hex("another-secret-of-thirty-two-bytes!", &[opened.as_bytes()])
+    );
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &opened, Some(&wrong)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &opened, Some("")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let stale = pull_request(
+        "opened",
+        false,
+        installation,
+        repository,
+        43,
+        now - time::Duration::hours(2),
+    );
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &stale, None).await,
+        StatusCode::BAD_REQUEST
+    );
+    let unlinked = pull_request("opened", false, installation, github_id(), 44, now);
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &unlinked, None).await,
+        StatusCode::ACCEPTED
+    );
+    let closed = pull_request("closed", false, installation, repository, 45, now);
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &closed, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        w.events(&org).await.len(),
+        after.len(),
+        "stale, unlinked or unmerged: no event"
+    );
+    let merged = pull_request("closed", true, installation, repository, 42, now);
+    assert_eq!(
+        github_delivery(&w, "pull_request", &delivery(), &merged, None).await,
+        StatusCode::ACCEPTED
+    );
+    let merged_events = w.events(&org).await;
+    assert_eq!(
+        count(&merged_events, "fde.pull-request.merged.v1"),
+        count(&after, "fde.pull-request.merged.v1") + 1
+    );
+    assert!(
+        w.events(&other.org)
+            .await
+            .iter()
+            .all(|d| !d.starts_with("fde.pull-request"))
+    );
+
+    // A repository removed from the installation is unlinked once GitHub no longer has it in.
+    let removed = json!({"action": "removed", "installation": {"id": installation},
+        "repositories_removed": [{"id": repository}]})
+    .to_string();
+    assert_eq!(
+        github_delivery(&w, "installation_repositories", &delivery(), &removed, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        w.ok(&t.lead, "GET", &repos, None, StatusCode::OK)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "GitHub still has it"
+    );
+    w.github
+        .repositories
+        .lock()
+        .unwrap()
+        .remove(&(installation, repository));
+    assert_eq!(
+        github_delivery(&w, "installation_repositories", &delivery(), &removed, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(w.ok(&t.lead, "GET", &repos, None, StatusCode::OK).await, json!([]));
+
+    // An installation deleted is unclaimed once GitHub confirms it, with every repository of it.
+    let again_repo = github_id();
+    w.github
+        .repositories
+        .lock()
+        .unwrap()
+        .insert((installation, again_repo), "alpha/api".into());
+    let (status, _) = link(&format!("{repos}/{again_repo}"), &installation.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let deleted = json!({"action": "deleted", "installation": {"id": installation}}).to_string();
+    assert_eq!(
+        github_delivery(&w, "installation", &delivery(), &deleted, None).await,
+        StatusCode::ACCEPTED
+    );
+    let listed = w
+        .ok(&t.admin, "GET", "/v1/github/installations", None, StatusCode::OK)
+        .await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "GitHub says it is still installed");
+    w.github.gone.lock().unwrap().push(installation);
+    assert_eq!(
+        github_delivery(&w, "installation", &delivery(), &deleted, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        w.ok(&t.admin, "GET", "/v1/github/installations", None, StatusCode::OK)
+            .await,
+        json!([])
+    );
+    assert_eq!(w.ok(&t.lead, "GET", &repos, None, StatusCode::OK).await, json!([]));
+    // The other organisation's installation and links are untouched.
+    let theirs = format!(
+        "/v1/companies/{}/projects/{}/github/repositories",
+        other.company, other.project
+    );
+    assert_eq!(
+        w.ok(&other.lead, "GET", &theirs, None, StatusCode::OK)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A Slack event to the webhook, signed with the signing secret at `ts` unless `signature` is given.
+async fn slack_event(w: &World, body: &str, ts: i64, signature: Option<&str>) -> (StatusCode, Value) {
+    let ts = ts.to_string();
+    let sig = signature.map(str::to_owned).unwrap_or_else(|| {
+        format!(
+            "v0={}",
+            hmac_hex(SIGNING_SECRET, &[format!("v0:{ts}:").as_bytes(), body.as_bytes()])
+        )
+    });
+    let req = Request::post("/webhooks/slack")
+        .header("content-type", "application/json")
+        .header("x-slack-request-timestamp", ts)
+        .header("x-slack-signature", sig)
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let (status, _, body) = w.send(req).await;
+    (status, body)
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_slack_workspace_links_a_channel_and_an_uninstall_forgets_it() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let other = company(&w, &new_id("org"), "gamma").await;
+    let slack = format!("/v1/companies/{}/slack", t.company);
+    let installed = w
+        .ok(&t.lead, "GET", "/v1/slack/installation", None, StatusCode::OK)
+        .await;
+    assert_eq!(installed["team_id"], json!(slack_team(&org)));
+    assert!(installed.get("secret_arn").is_none(), "the secret's ARN stays inside");
+    let arn = FakeSecrets::arn(&org);
+    assert!(
+        w.secrets.secrets.lock().unwrap().contains_key(&arn),
+        "the token is in Secrets Manager"
+    );
+    let linked = w.ok(&t.engineer, "GET", &slack, None, StatusCode::OK).await;
+    assert_eq!(linked["channel_id"], json!(t.record("{channel}")));
+    let channels = w.ok(&t.lead, "GET", "/v1/slack/channels", None, StatusCode::OK).await;
+    assert!(
+        channels
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == json!(t.record("{channel}")))
+    );
+
+    // A channel must be one of the workspace's, and only who manages the company links it.
+    let (_, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &slack,
+            Some(json!({"channel_id": "C0NOTOURS"})),
+        )
+        .await;
+    assert_eq!(body["error"], "invalid_channel");
+    let (_, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &slack,
+            Some(json!({"channel_id": "c lower"})),
+        )
+        .await;
+    assert_eq!(body["error"], "invalid_channel");
+    let again = json!({"channel_id": t.record("{channel}")});
+    assert_eq!(
+        w.status(&t.engineer, "PUT", &slack, Some(again)).await,
+        StatusCode::FORBIDDEN
+    );
+    // A Slack install's state is spent too.
+    let started = w.ok(&t.admin, "POST", "/v1/slack/install", None, StatusCode::OK).await;
+    let state = state_of(started["url"].as_str().unwrap());
+    let code = new_id("slc");
+    w.slack.codes.lock().unwrap().insert(
+        code.clone(),
+        (
+            TeamId::new(&slack_team(&org)).unwrap(),
+            BotToken::new("xoxb-again").unwrap(),
+        ),
+    );
+    let claim = json!({"code": code, "state": state});
+    w.ok(
+        &t.admin,
+        "POST",
+        "/v1/slack/installation",
+        Some(claim.clone()),
+        StatusCode::OK,
+    )
+    .await;
+    let (_, body) = w
+        .call(Some(&t.admin.token), "POST", "/v1/slack/installation", Some(claim))
+        .await;
+    assert_eq!(body["error"], "invalid_state");
+
+    // Slack's events: signed and recent only.
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let challenge = r#"{"type":"url_verification","challenge":"abc123"}"#;
+    assert_eq!(
+        slack_event(&w, challenge, now, None).await,
+        (StatusCode::OK, json!({"challenge": "abc123"}))
+    );
+    assert_eq!(
+        slack_event(&w, challenge, now, Some("v0=00")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        slack_event(&w, challenge, now - 600, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Uninstalled: the workspace, its channel links and its token are gone; nobody else's are.
+    let uninstalled = format!(
+        r#"{{"type":"event_callback","team_id":"{}","event":{{"type":"app_uninstalled"}}}}"#,
+        slack_team(&org)
+    );
+    assert_eq!(slack_event(&w, &uninstalled, now, None).await.0, StatusCode::OK);
+    assert_eq!(
+        w.ok(&t.lead, "GET", "/v1/slack/installation", None, StatusCode::OK)
+            .await,
+        Value::Null
+    );
+    assert_eq!(w.ok(&t.lead, "GET", &slack, None, StatusCode::OK).await, Value::Null);
+    assert!(w.secrets.deleted.lock().unwrap().contains(&arn));
+    assert!(!w.secrets.secrets.lock().unwrap().contains_key(&arn));
+    let theirs = format!("/v1/companies/{}/slack", other.company);
+    assert!(
+        w.ok(&other.lead, "GET", &theirs, None, StatusCode::OK)
+            .await
+            .is_object()
+    );
+    // With no workspace, a channel cannot be linked.
+    let (_, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &slack,
+            Some(json!({"channel_id": t.record("{channel}")})),
+        )
+        .await;
+    assert_eq!(body["error"], "invalid_slack");
 }

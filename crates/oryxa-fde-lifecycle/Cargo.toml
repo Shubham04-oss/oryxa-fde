@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 url = "2"
 
 [dev-dependencies]
+oryxa-fde-integrations = { workspace = true, features = ["testing"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 rand = "0.8"

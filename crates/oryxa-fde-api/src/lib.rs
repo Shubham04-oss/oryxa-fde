@@ -30,6 +30,7 @@ mod documents;
 mod engine;
 mod error;
 mod export;
+pub mod integrations;
 mod lifecycle;
 mod meetings;
 mod plan;
@@ -60,6 +61,8 @@ pub struct App {
     roles: auth::RoleCache,
     /// Browser sign-in; without it only bearer tokens are accepted.
     sign_in: Option<SignIn>,
+    /// GitHub and Slack, each off unless configured.
+    integrations: integrations::Integrations,
 }
 
 impl App {
@@ -78,12 +81,14 @@ impl App {
         Self::make(store, authz, tokens, context, Some(sign_in))
     }
 
-    fn make(
+    /// With browser sign-in if given, and GitHub and Slack as configured.
+    pub fn with_integrations(
         store: Store,
         authz: SpiceDb,
         tokens: impl VerifyToken,
         context: Context,
         sign_in: Option<SignIn>,
+        integrations: integrations::Integrations,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -92,7 +97,25 @@ impl App {
             tokens: Box::new(tokens),
             roles: auth::RoleCache::default(),
             sign_in,
+            integrations,
         })
+    }
+
+    fn make(
+        store: Store,
+        authz: SpiceDb,
+        tokens: impl VerifyToken,
+        context: Context,
+        sign_in: Option<SignIn>,
+    ) -> Arc<Self> {
+        Self::with_integrations(
+            store,
+            authz,
+            tokens,
+            context,
+            sign_in,
+            integrations::Integrations::default(),
+        )
     }
 }
 
@@ -194,6 +217,35 @@ fn routes() -> OpenApiRouter<Arc<App>> {
                 .routes(routes!(documents::upload))
                 .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES)),
         )
+        .routes(routes!(integrations::start_github_install))
+        .routes(routes!(
+            integrations::github_installations,
+            integrations::claim_github_installation
+        ))
+        .routes(routes!(integrations::github_repositories))
+        .routes(routes!(
+            integrations::link_github_repository,
+            integrations::unlink_github_repository
+        ))
+        .routes(routes!(integrations::start_slack_install))
+        .routes(routes!(
+            integrations::slack_installation,
+            integrations::claim_slack_installation,
+            integrations::remove_slack_installation
+        ))
+        .routes(routes!(integrations::slack_channels))
+        .routes(routes!(
+            integrations::company_slack,
+            integrations::link_company_slack,
+            integrations::unlink_company_slack
+        ))
+        // Webhook bodies are read whole to check their signature: 1 MiB at most.
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(integrations::github_webhook))
+                .routes(routes!(integrations::slack_webhook))
+                .layer(DefaultBodyLimit::max(oryxa_fde_integrations::github::MAX_BODY)),
+        )
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(canvas::company_canvas, canvas::save_company_canvas))
@@ -259,6 +311,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             for a company and for each project"),
 
         (name = "room", description = "Share links, and the customer room a project's guests see"),
+        (name = "integrations", description = "GitHub App installations, repositories linked to projects and \
+            GitHub's webhooks; the Slack workspace, a company's channel and Slack's events"),
     )
 )]
 struct ApiDoc;
