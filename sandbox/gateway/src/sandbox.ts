@@ -51,6 +51,8 @@ export type InstanceType = z.infer<typeof InstanceType>;
 
 export interface SandboxStatus {
   running: boolean;
+  /** A harness started here may still run: its exit has not been seen, and the sandbox has not stopped since. */
+  harness: boolean;
 }
 
 export type SandboxContainer = Pick<
@@ -88,7 +90,10 @@ export class CompanySandbox extends DurableObject<Env> {
   }
 
   status(): SandboxStatus {
-    return { running: this.container().running };
+    return {
+      running: this.container().running,
+      harness: this.ctx.storage.kv.get<string>(HARNESS_LIVE_KEY) !== undefined,
+    };
   }
 
   async start(scope: CompanyScope, instance: InstanceType, lease: number): Promise<SandboxStatus> {
@@ -96,7 +101,7 @@ export class CompanySandbox extends DurableObject<Env> {
     this.#fence(lease);
     const outbound = this.ctx.exports.Outbound({ props: { tenant: scope.tenant, company: scope.company } });
     await startContainer(this.container(), scope, outbound, { instance, idleTimeoutMs: idleTimeoutMs(this.env) });
-    return { running: true };
+    return this.status();
   }
 
   async stop(lease: number): Promise<SandboxStatus> {
@@ -107,7 +112,7 @@ export class CompanySandbox extends DurableObject<Env> {
     this.#closeAllGrants();
     this.ctx.storage.kv.delete(HARNESS_RUN_KEY);
     this.ctx.storage.kv.delete(HARNESS_LIVE_KEY);
-    return { running: false };
+    return { running: false, harness: false };
   }
 
   exec(req: ExecRequest, lease: number): Promise<ExecResult> {

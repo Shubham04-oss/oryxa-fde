@@ -14,7 +14,7 @@ permission on the company before it calls. The tenant and company ids follow the
 
 | Method and path under `/v1/sandboxes/<tenant>/<company>`           | Does                                                                                                                                     |
 | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /`                                                            | `{ "running": bool }`                                                                                                                    |
+| `GET /`                                                            | `{ "running": bool, "harness": bool }`: `harness` while a started harness may still run.                                                 |
 | `POST /start`                                                      | Starts the container. Optional body `{ "instance": "standard-1".."standard-4" }`; the default is `SANDBOX_INSTANCE`.                     |
 | `POST /stop`                                                       | Destroys the container. Its disk is lost.                                                                                                |
 | `POST /exec`                                                       | `{ argv, cwd?, env?, timeoutMs? }`. Returns `{ exitCode, stdout, stderr, truncated, timedOut }`, keeping up to 1 MiB of each stream.     |

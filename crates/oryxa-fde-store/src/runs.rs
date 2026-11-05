@@ -627,6 +627,11 @@ impl ProjectTx {
         if !self.keep_alive(run, ttl).await? {
             return Ok(false);
         }
+        self.renew_lease(run.as_str(), ttl).await
+    }
+
+    /// Extends `holder`'s lease on the company's sandbox; `false` if they no longer hold it.
+    pub(crate) async fn renew_lease(&mut self, holder: &str, ttl: Duration) -> Result<bool, StoreError> {
         let (t, c, _) = self.keys();
         let updated = sqlx::query(
             "update agent_sandbox_leases set expires_at = now() + make_interval(secs => $4)
@@ -634,7 +639,7 @@ impl ProjectTx {
         )
         .bind(&t)
         .bind(&c)
-        .bind(run.as_str())
+        .bind(holder)
         .bind(ttl.as_secs_f64())
         .execute(&mut *self.tx)
         .await?
@@ -644,7 +649,7 @@ impl ProjectTx {
 
     /// The company's sandbox lease for `holder` (an agent or eval run), if it is free, lapsed or already theirs, with
     /// its generation: one more than the last holder's whenever it changes hands.
-    async fn lease_sandbox(&mut self, holder: &str, ttl: Duration) -> Result<Option<u64>, StoreError> {
+    pub(crate) async fn lease_sandbox(&mut self, holder: &str, ttl: Duration) -> Result<Option<u64>, StoreError> {
         let (t, c, _) = self.keys();
         let generation: Option<i64> = sqlx::query_scalar(
             "insert into agent_sandbox_leases (tenant_id, company_id, holder, expires_at)
@@ -664,7 +669,7 @@ impl ProjectTx {
         generation.map(|g| uncount(g, "lease generation")).transpose()
     }
 
-    async fn release_sandbox(&mut self, holder: &str) -> Result<(), StoreError> {
+    pub(crate) async fn release_sandbox(&mut self, holder: &str) -> Result<(), StoreError> {
         let (t, c, _) = self.keys();
         sqlx::query(
             "update agent_sandbox_leases set expires_at = now()

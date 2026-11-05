@@ -64,6 +64,7 @@ impl Access for FakeAccess {
         let name = match permission {
             Permission::Work => "work",
             Permission::Manage => "manage",
+            Permission::View => "view",
         };
         Ok(caller.tenant == *scope.tenant()
             && in_company
@@ -209,6 +210,10 @@ impl Sandbox for FakeSandbox {
         self.harness_out.lock().unwrap().take();
         self.stdin.lock().unwrap().take();
         Ok(())
+    }
+
+    async fn harness_may_run(&self, _: &CompanyScope) -> Result<bool, SandboxError> {
+        Ok(self.harness_running.load(Ordering::SeqCst))
     }
 
     async fn exec(&self, _: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {

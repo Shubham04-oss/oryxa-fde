@@ -75,6 +75,9 @@ pub trait Sandbox: Send + Sync + 'static {
     -> impl Future<Output = Result<(), SandboxError>> + Send;
     /// Destroys the container: the hard stop for a harness that does not stop when told to.
     fn stop(&self, company: &CompanyScope, lease: LeaseToken) -> impl Future<Output = Result<(), SandboxError>> + Send;
+    /// Whether a harness started in the sandbox may still run: its exit has not been seen, and the sandbox has not
+    /// stopped since.
+    fn harness_may_run(&self, company: &CompanyScope) -> impl Future<Output = Result<bool, SandboxError>> + Send;
     fn exec(
         &self,
         company: &CompanyScope,
@@ -277,6 +280,11 @@ struct Digest {
 }
 
 #[derive(Deserialize)]
+struct Status {
+    harness: bool,
+}
+
+#[derive(Deserialize)]
 struct Policy {
     hosts: Vec<PolicyHost>,
 }
@@ -298,6 +306,15 @@ impl Sandbox for GatewayClient {
         let request = self.held(self.http.post(self.url(company, "stop")), lease);
         self.send(request, "stop").await?;
         Ok(())
+    }
+
+    async fn harness_may_run(&self, company: &CompanyScope) -> Result<bool, SandboxError> {
+        let response = self.send(self.http.get(self.url(company, "")), "status").await?;
+        let status: Status = response
+            .json()
+            .await
+            .map_err(|_| SandboxError::Invalid { route: "status" })?;
+        Ok(status.harness)
     }
 
     async fn exec(&self, company: &CompanyScope, exec: Exec, lease: LeaseToken) -> Result<ExecOutput, SandboxError> {

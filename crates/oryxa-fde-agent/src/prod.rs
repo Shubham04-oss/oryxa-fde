@@ -11,6 +11,8 @@
 //! | `AGENT_RUN_MAX_MINUTES` | 60 |
 //! | `AGENT_BUDGET_MINUTES`, `AGENT_BUDGET_USD` | 600 minutes and 100 dollars per project without a budget of its own |
 //! | `AGENT_PRICE_INPUT_USD_PER_MTOK`, `AGENT_PRICE_OUTPUT_USD_PER_MTOK` | 15 and 75 |
+//! | `EVAL_JUDGE_MODEL` | `AGENT_MODEL`: the model the eval judge grader uses, in `AGENT_REGION` |
+//! | `EVAL_JUDGE_MAX_CALLS` | 200 model calls per eval run; an eval run also ends at `AGENT_RUN_MAX_MINUTES` |
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -24,6 +26,7 @@ use oryxa_fde_store::Store;
 use crate::access::PlatformAccess;
 use crate::api;
 use crate::context::{AgentConfig, ApprovalRule};
+use crate::evals::{self, EvalDeps, Evals, JudgeConfig};
 use crate::gateway::GatewayClient;
 use crate::live::{LiveError, LiveOutput, Offline, RealtimeClient};
 use crate::project_context::StoreContext;
@@ -38,6 +41,10 @@ impl<K: KeySource + 'static> Deps for Production<K> {
     type Live = Live;
     type Context = StoreContext;
     type Access = PlatformAccess<K>;
+}
+
+impl<K: KeySource + 'static> EvalDeps for Production<K> {
+    type Evals = Store;
 }
 
 pub enum Live {
@@ -107,8 +114,8 @@ fn default_approvals() -> Vec<ApprovalRule> {
     ]
 }
 
-/// The run router, or an empty one when `SANDBOX_GATEWAY_URL` is unset. Secrets come from the task's environment
-/// (Secrets Manager through ECS); none is logged.
+/// The agent run and eval routers, or an empty one when `SANDBOX_GATEWAY_URL` is unset. Secrets come from the task's
+/// environment (Secrets Manager through ECS); none is logged.
 pub fn router_from_env<K: KeySource + 'static>(
     store: Store,
     authz: SpiceDb,
@@ -144,6 +151,11 @@ pub fn router_from_env<K: KeySource + 'static>(
         max_turns: number("AGENT_MAX_TURNS", 100)?,
         approvals,
     };
+    let judge = JudgeConfig {
+        model: var("EVAL_JUDGE_MODEL").unwrap_or_else(|| agent.model.clone()),
+        region: agent.region.clone(),
+        max_calls: number("EVAL_JUDGE_MAX_CALLS", 200)?,
+    };
     let config = RunsConfig {
         pricing: Pricing {
             input_usd_micros_per_mtok: dollars("AGENT_PRICE_INPUT_USD_PER_MTOK", 15)?,
@@ -165,7 +177,7 @@ pub fn router_from_env<K: KeySource + 'static>(
         store.clone(),
         sandbox,
         live,
-        StoreContext::new(store, agent, Vec::new()),
+        StoreContext::new(store.clone(), agent, Vec::new()),
         PlatformAccess::new(tokens, authz),
         config,
     );
@@ -177,7 +189,8 @@ pub fn router_from_env<K: KeySource + 'static>(
             tokio::time::sleep(sweeper.config.lease).await;
         }
     });
-    Ok(api::router(runs))
+    let evals = Evals::new(runs.clone(), store, judge);
+    Ok(api::router(runs).merge(evals::router(evals)))
 }
 
 #[cfg(test)]

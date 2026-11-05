@@ -22,6 +22,7 @@ mod canvas;
 mod companies;
 mod documents;
 mod engine;
+mod evals;
 mod grants;
 pub mod iam;
 mod ids;
@@ -48,6 +49,7 @@ pub use canvas::{
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
 pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
 pub use engine::{Activity, ActivityIn, Suggestion, SuggestionKind, engine_actor};
+pub use evals::{EvalCaseResultRow, EvalCaseRow, EvalCriterionRow, EvalResults, EvalRunRow, EvalSuiteRow};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use ids::{CommentId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
 pub use meetings::{MAX_NOTE_CHARS, MeetingNote, MeetingNoteIn, NoteText, NoteTextError};
