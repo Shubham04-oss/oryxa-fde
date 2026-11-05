@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 
 use crate::ids::{CommentId, MeetingNoteId, ShapeId, ThreadId};
 use crate::plan::{AT, PlanTx};
-use crate::{Actor, Decision, DecisionIn, Name, ProjectTx, StoreError, Text, id, text, unique_violation};
+use crate::{Actor, Decision, DecisionIn, Name, ProjectTx, StoreError, Text, id, name, text, unique_violation};
 
 /// What a thread is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +121,9 @@ pub struct Thread {
     pub created_at: OffsetDateTime,
     pub comments: u32,
     pub last_comment_at: OffsetDateTime,
+    /// A question for the customer, shown in the project's room, and when it was asked. Only a
+    /// project thread not yet promoted has one.
+    pub customer_question: Option<(Name, OffsetDateTime)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,12 +144,56 @@ pub struct PromoteIn {
 }
 
 const THREAD: &str = "t.thread_id, t.subject_kind, t.subject_id, t.decision_id, t.created_by, t.created_at,
+    t.customer_question, t.asked_at,
     (select count(*) from thread_comments m where m.tenant_id = t.tenant_id and m.thread_id = t.thread_id) as comments,
     (select max(m.created_at) from thread_comments m where m.tenant_id = t.tenant_id and m.thread_id = t.thread_id)
         as last_comment_at";
 const COMMENT: &str = "comment_id, body, author, created_at";
 
 impl PlanTx {
+    /// Sets the question a project thread puts to the customer, or clears it (`None`) once
+    /// answered; setting the same question again keeps when it was asked. `None` if the thread is
+    /// not at this place; `Rejected("not_a_project_thread")` at a company, whose threads have no
+    /// room; `Rejected("already_promoted")` once it is a decision.
+    pub async fn ask_customer(
+        &mut self,
+        id: &ThreadId,
+        question: Option<&Name>,
+        by: &Actor,
+    ) -> Result<Option<Thread>, StoreError> {
+        if self.project().is_none() {
+            return Err(StoreError::Rejected("not_a_project_thread"));
+        }
+        let (t, c, p) = self.keys();
+        let changed = sqlx::query(&format!(
+            "update threads set customer_question = $5::text,
+                 asked_at = case when $5::text is null then null
+                     when customer_question = $5::text then asked_at else now() end
+             where {AT} and thread_id = $4 and decision_id is null"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .bind(question.map(Name::as_str))
+        .execute(self.conn())
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return match self.thread(id).await? {
+                Some(_) => Err(StoreError::Rejected("already_promoted")),
+                None => Ok(None),
+            };
+        }
+        let action = if question.is_some() {
+            "thread.customer_question_set"
+        } else {
+            "thread.customer_question_cleared"
+        };
+        self.audit(by, action, id.as_str()).await?;
+        self.thread(id).await
+    }
+
     /// The place's threads, most recently active first; only those about `subject` if given.
     pub async fn threads(&mut self, subject: Option<&Subject>) -> Result<Vec<Thread>, StoreError> {
         let (t, c, p) = self.keys();
@@ -321,6 +368,30 @@ impl PlanTx {
 }
 
 impl ProjectTx {
+    /// The questions the project's threads put to the customer, oldest first: for the room.
+    pub async fn customer_questions(&mut self) -> Result<Vec<(Name, OffsetDateTime)>, StoreError> {
+        let (t, c, p) = self.keys();
+        sqlx::query(
+            "select customer_question, asked_at from threads
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and customer_question is not null
+                 and decision_id is null
+             order by asked_at, thread_id",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(|r| {
+            Ok((
+                name(r.try_get("customer_question")?, "customer question")?,
+                r.try_get("asked_at")?,
+            ))
+        })
+        .collect()
+    }
+
     /// Records the thread as a decision and marks it promoted. `None` if the thread is not in this
     /// project; `Rejected("already_promoted")` the second time.
     pub async fn promote_thread(
@@ -363,8 +434,9 @@ impl ProjectTx {
         let Some(recorded) = self.record_decision(decision, &input, by).await? else {
             return Ok(None);
         };
+        // Decided, the thread no longer waits on the customer.
         sqlx::query(
-            "update threads set decision_id = $5
+            "update threads set decision_id = $5, customer_question = null, asked_at = null
              where tenant_id = $1 and company_id = $2 and project_id = $3 and thread_id = $4",
         )
         .bind(&t)
@@ -402,6 +474,14 @@ fn thread(r: PgRow) -> Result<Thread, StoreError> {
         created_at,
         comments: u32::try_from(comments).map_err(|_| StoreError::Corrupt("comment count"))?,
         last_comment_at: last.unwrap_or(created_at),
+        customer_question: match (
+            r.try_get::<Option<String>, _>("customer_question")?,
+            r.try_get::<Option<OffsetDateTime>, _>("asked_at")?,
+        ) {
+            (Some(q), Some(at)) => Some((name(q, "customer question")?, at)),
+            (None, None) => None,
+            _ => return Err(StoreError::Corrupt("customer question")),
+        },
     })
 }
 

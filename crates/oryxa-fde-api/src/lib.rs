@@ -172,6 +172,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(threads::project_thread))
         .routes(routes!(threads::comment_project_thread))
         .routes(routes!(threads::promote_project_thread))
+        .routes(routes!(threads::ask_customer))
         .routes(routes!(meetings::company_notes, meetings::add_company_note))
         .routes(routes!(
             meetings::company_note,

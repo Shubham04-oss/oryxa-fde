@@ -93,6 +93,8 @@ pub struct RoomOut {
     pub criteria_passing: u32,
     /// The scope as it stands is waiting for the customer's sign-off.
     pub scope_awaits_sign_off: bool,
+    /// Questions the team put to the customer, oldest first, until answered.
+    pub questions: Vec<RoomQuestionOut>,
     /// The newest update an FDE approved; never a draft.
     pub latest_update: Option<RoomUpdateOut>,
 }
@@ -105,6 +107,12 @@ pub struct RoomCriterionOut {
     /// Whether that value meets the target; null until measured.
     pub passing: Option<bool>,
     pub measured_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomQuestionOut {
+    pub question: String,
+    pub asked_at: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -294,6 +302,7 @@ pub(crate) async fn room(
     let found = tx.get().await?.ok_or(ApiError::NotFound)?;
     let scope = tx.scope_of_work().await?.ok_or(ApiError::NotFound)?;
     let results = tx.criterion_results().await?;
+    let questions = tx.customer_questions().await?;
     // Newest week first: the first approved one is the latest.
     let approved = tx
         .update_drafts()
@@ -323,6 +332,13 @@ pub(crate) async fn room(
         stages: Stage::ALL.len() as u32,
         scope_awaits_sign_off: !scope.items.is_empty()
             && scope.sign_off.as_ref().map(|so| so.version) != Some(scope.version),
+        questions: questions
+            .into_iter()
+            .map(|(q, at)| RoomQuestionOut {
+                question: q.as_str().to_owned(),
+                asked_at: ts(at),
+            })
+            .collect(),
         criteria_passing: criteria.iter().filter(|c| c.passing == Some(true)).count() as u32,
         criteria,
         latest_update: approved.map(|u| RoomUpdateOut {

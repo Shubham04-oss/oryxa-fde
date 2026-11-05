@@ -219,6 +219,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The company's records as one JSON document: the company, its stakeholders, systems and
+         *     documents (metadata), and each project with its scope, access requests, tasks, decisions and
+         *     weekly updates; and the threads (with comments) and meeting notes of the company and of each
+         *     project. What the engine derives from events (activity, suggestions) and the canvases are left
+         *     out.
+         */
+        get: operations["export_company"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/meeting-notes": {
         parameters: {
             query?: never;
@@ -692,6 +715,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/share-links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's share links, newest first; never their tokens. */
+        get: operations["list_share_links"];
+        put?: never;
+        /** Make a link to the project for a customer person. The token is in this response only. */
+        post: operations["create_share_link"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/share-links/{link}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke a link: its guests lose the project at once, unless another live link keeps one. */
+        delete: operations["revoke_share_link"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/stage": {
         parameters: {
             query?: never;
@@ -864,6 +922,26 @@ export interface paths {
         put?: never;
         /** Comment on one of the project's threads. */
         post: operations["comment_project_thread"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/customer-question": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put a question to the customer from one of the project's threads, or clear it. The room lists
+         *     open questions by their text and date; the thread's comments stay internal.
+         */
+        put: operations["ask_customer"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1095,6 +1173,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/digest/unsubscribe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unsubscribe a sponsor from the weekly digest, from the link in a digest they were sent. No
+         *     sign-in: the token is the permission, and it does this one thing. A token that is malformed,
+         *     unknown or not the latest sent for its delivery is refused alike; again is no change.
+         */
+        post: operations["unsubscribe_digest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me": {
         parameters: {
             query?: never;
@@ -1104,6 +1203,26 @@ export interface paths {
         };
         /** Who is signed in. */
         get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/room/companies/{company}/projects/{project}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The customer room of one project: what its guests may see. Needs `work` on the project, or
+         *     `view` with a live share link the caller redeemed.
+         */
+        get: operations["get_room"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1140,6 +1259,26 @@ export interface paths {
         put: operations["update_security_answer"];
         post?: never;
         delete: operations["remove_security_answer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/share-links/redeem": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem a share link: the caller, signed in to the organisation, becomes a guest of its project.
+         *     A token that is malformed, unknown, expired or revoked is refused alike.
+         */
+        post: operations["redeem_share_link"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1308,6 +1447,13 @@ export interface components {
             unit?: string | null;
             updated_at: string;
         };
+        CustomerQuestionBody: {
+            /**
+             * @description What the thread asks the customer, as the room shows it (1 to 200 characters); null clears
+             *     it once answered.
+             */
+            question?: string | null;
+        };
         DecisionBody: {
             /** @description When, RFC 3339; defaults to now. */
             decided_at?: string | null;
@@ -1346,6 +1492,18 @@ export interface components {
         ErrorBody: {
             /** @description A short machine-readable code, e.g. `forbidden`. */
             error: string;
+        };
+        ExportOut: {
+            company: components["schemas"]["CompanyOut"];
+            /** @description Metadata only; the files stay where they are. */
+            documents: components["schemas"]["DocumentOut"][];
+            exported_at: string;
+            meeting_notes: components["schemas"]["MeetingNoteOut"][];
+            projects: components["schemas"]["ProjectExport"][];
+            stakeholders: components["schemas"]["StakeholderOut"][];
+            systems: components["schemas"]["SystemOut"][];
+            /** @description The company's own threads, each with its comments, and meeting notes. */
+            threads: components["schemas"]["ThreadWithComments"][];
         };
         /** @enum {string} */
         IngestState: "pending" | "ingested" | "failed";
@@ -1414,6 +1572,11 @@ export interface components {
             id: string;
             name: string;
         };
+        NewShareLinkOut: {
+            link: components["schemas"]["ShareLinkOut"];
+            /** @description Shown once, never stored: the only way to redeem the link. */
+            token: string;
+        };
         /** @enum {string} */
         OrgRole: "admin" | "member";
         ProjectBody: {
@@ -1421,6 +1584,17 @@ export interface components {
             name: string;
             /** @description Up to 4000 characters. */
             summary?: string | null;
+        };
+        ProjectExport: {
+            access_requests: components["schemas"]["AccessRequestOut"][];
+            decisions: components["schemas"]["DecisionOut"][];
+            meeting_notes: components["schemas"]["MeetingNoteOut"][];
+            project: components["schemas"]["ProjectOut"];
+            scope: components["schemas"]["ScopeOut"];
+            tasks: components["schemas"]["TaskOut"][];
+            threads: components["schemas"]["ThreadWithComments"][];
+            /** @description The weekly updates, newest first, drafts included. */
+            updates: components["schemas"]["UpdateOut"][];
         };
         ProjectOut: {
             company: string;
@@ -1453,6 +1627,59 @@ export interface components {
             rationale?: string | null;
             /** @description What was decided. */
             title: string;
+        };
+        RedeemBody: {
+            token: string;
+        };
+        RedeemedOut: {
+            company: string;
+            project: string;
+        };
+        RoomCriterionOut: {
+            criterion: components["schemas"]["CriterionOut"];
+            /**
+             * Format: double
+             * @description The latest value an eval run measured; null until one has.
+             */
+            latest?: number | null;
+            measured_at?: string | null;
+            /** @description Whether that value meets the target; null until measured. */
+            passing?: boolean | null;
+        };
+        /** @description What a guest may see of a project. */
+        RoomOut: {
+            /** @description The success criteria, each with its latest measured result. */
+            criteria: components["schemas"]["RoomCriterionOut"][];
+            /**
+             * Format: int32
+             * @description How many criteria the latest results meet.
+             */
+            criteria_passing: number;
+            latest_update?: components["schemas"]["RoomUpdateOut"] | null;
+            name: string;
+            /**
+             * Format: int32
+             * @description Stages reached, from 1 (discover) to `stages` (operate).
+             */
+            progress: number;
+            project: string;
+            /** @description Questions the team put to the customer, oldest first, until answered. */
+            questions: components["schemas"]["RoomQuestionOut"][];
+            /** @description The scope as it stands is waiting for the customer's sign-off. */
+            scope_awaits_sign_off: boolean;
+            stage: components["schemas"]["ProjectStage"];
+            /** Format: int32 */
+            stages: number;
+        };
+        RoomQuestionOut: {
+            asked_at: string;
+            question: string;
+        };
+        RoomUpdateOut: {
+            approved_at?: string | null;
+            body: string;
+            /** @description The Monday of the week it covers, `YYYY-MM-DD`. */
+            week: string;
         };
         /** @enum {string} */
         RunOutcomeOut: "succeeded" | "failed" | "rejected" | "cancelled";
@@ -1517,6 +1744,25 @@ export interface components {
             question: string;
             updated_at: string;
         };
+        ShareLinkBody: {
+            /**
+             * Format: int32
+             * @description Days until it expires, 1 to 90; 14 if not given.
+             */
+            expires_in_days?: number | null;
+        };
+        ShareLinkOut: {
+            created_at: string;
+            created_by: string;
+            expires_at: string;
+            /**
+             * Format: int32
+             * @description How many people redeemed it.
+             */
+            guests: number;
+            id: string;
+            revoked_at?: string | null;
+        };
         SignOffBody: {
             /** @description The person at the customer who signed off. */
             stakeholder: string;
@@ -1533,6 +1779,11 @@ export interface components {
             stage: components["schemas"]["ProjectStage"];
         };
         StakeholderBody: {
+            /**
+             * @description Where a sponsor's weekly digest goes. Replacing it with another address subscribes that
+             *     address again.
+             */
+            email?: string | null;
             name: string;
             /** @description Their part in the engagement; `other` if left out. */
             role?: components["schemas"]["StakeholderPart"];
@@ -1540,6 +1791,9 @@ export interface components {
             title?: string | null;
         };
         StakeholderOut: {
+            /** @description When they unsubscribed from the weekly digest, if they did. */
+            digest_unsubscribed_at?: string | null;
+            email?: string | null;
             id: string;
             name: string;
             role: components["schemas"]["StakeholderPart"];
@@ -1622,10 +1876,16 @@ export interface components {
             subject: components["schemas"]["SubjectRef"];
         };
         ThreadOut: {
+            asked_at?: string | null;
             /** Format: int32 */
             comments: number;
             created_at: string;
             created_by: string;
+            /**
+             * @description The question it puts to the customer, shown in the project's room until cleared or
+             *     promoted; only a project thread has one.
+             */
+            customer_question?: string | null;
             /** @description The decision it was promoted to. */
             decision?: string | null;
             id: string;
@@ -1654,6 +1914,10 @@ export interface components {
         };
         TodayOut: {
             items: components["schemas"]["TodayItemOut"][];
+        };
+        UnsubscribeBody: {
+            /** @description From the fragment of the link in a weekly digest. */
+            token: string;
         };
         UpdateBodyIn: {
             /** @description The update's text: 1 to 20,000 characters. */
@@ -2400,6 +2664,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    export_company: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportOut"];
                 };
             };
             /** @description Forbidden */
@@ -4505,6 +4810,148 @@ export interface operations {
             };
         };
     };
+    list_share_links: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareLinkOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_share_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareLinkBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewShareLinkOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_share_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Share link id */
+                link: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     change_stage: {
         parameters: {
             query?: never;
@@ -5166,6 +5613,73 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    ask_customer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Thread id */
+                thread: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CustomerQuestionBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThreadOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Already promoted */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6151,6 +6665,37 @@ export interface operations {
             };
         };
     };
+    unsubscribe_digest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnsubscribeBody"];
+            };
+        };
+        responses: {
+            /** @description Unsubscribed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     get_me: {
         parameters: {
             query?: never;
@@ -6180,6 +6725,49 @@ export interface operations {
             };
             /** @description Service Unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoomOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6340,6 +6928,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    redeem_share_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedeemBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedeemedOut"];
                 };
             };
             /** @description Not Found */

@@ -128,6 +128,10 @@ pub struct ThreadOut {
     pub created_at: String,
     pub comments: u32,
     pub last_comment_at: String,
+    /// The question it puts to the customer, shown in the project's room until cleared or
+    /// promoted; only a project thread has one.
+    pub customer_question: Option<String>,
+    pub asked_at: Option<String>,
 }
 
 impl From<Thread> for ThreadOut {
@@ -140,6 +144,8 @@ impl From<Thread> for ThreadOut {
             created_at: ts(t.created_at),
             comments: t.comments,
             last_comment_at: ts(t.last_comment_at),
+            customer_question: t.customer_question.as_ref().map(|(q, _)| q.as_str().to_owned()),
+            asked_at: t.customer_question.map(|(_, at)| ts(at)),
         }
     }
 }
@@ -381,6 +387,40 @@ pub(crate) async fn comment_project_thread(
         StatusCode::CREATED,
         Json(comment(&app, &who, Place::project(&who, c, p), t, body).await?),
     ))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomerQuestionBody {
+    /// What the thread asks the customer, as the room shows it (1 to 200 characters); null clears
+    /// it once answered.
+    pub question: Option<String>,
+}
+
+/// Put a question to the customer from one of the project's threads, or clear it. The room lists
+/// open questions by their text and date; the thread's comments stay internal.
+#[utoipa::path(put, operation_id = "ask_customer",
+    path = "/v1/companies/{company}/projects/{project}/threads/{thread}/customer-question", tag = "planning",
+    request_body = CustomerQuestionBody,
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
+        ("thread" = String, Path, description = "Thread id")),
+    responses((status = 200, body = ThreadOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody), (status = 409, description = "Already promoted", body = ErrorBody)))]
+pub(crate) async fn ask_customer(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p, t)): Path<(CompanyId, ProjectId, String)>,
+    Json(body): Json<CustomerQuestionBody>,
+) -> Result<Json<ThreadOut>, ApiError> {
+    let thread = thread_id(t)?;
+    let question = body.question.map(|q| name(q, "question")).transpose()?;
+    let mut tx = Place::project(&who, c, p).enter(&app, &who).await?;
+    let changed = tx
+        .ask_customer(&thread, question.as_ref(), &who.actor())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(changed.into()))
 }
 
 /// Promote a project's thread to its decisions log. A thread is promoted once.

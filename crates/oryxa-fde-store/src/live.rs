@@ -2960,3 +2960,61 @@ async fn a_guest_grant_is_pending_only_while_its_link_is_live() {
             .is_err()
     );
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn only_an_open_project_thread_puts_a_question_to_the_customer() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    planning_records(&store, &p).await;
+    let by = actor("alice");
+    let question = Name::new("Who approves refunds?").unwrap();
+
+    // A company thread has no room to show a question in.
+    let mut tx = PlanTx::from(store.company(&p.company).await.unwrap());
+    let company_thread = tx.threads(None).await.unwrap().remove(0).id;
+    assert!(matches!(
+        tx.ask_customer(&company_thread, Some(&question), &by).await,
+        Err(StoreError::Rejected("not_a_project_thread"))
+    ));
+    drop(tx);
+
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    let thread = tx.threads(None).await.unwrap().remove(0).id;
+    assert!(
+        tx.ask_customer(&company_thread, Some(&question), &by)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let asked = tx.ask_customer(&thread, Some(&question), &by).await.unwrap().unwrap();
+    let (q, at) = asked.customer_question.clone().unwrap();
+    assert_eq!(q, question);
+    // Asking the same again keeps when it was asked.
+    let again = tx.ask_customer(&thread, Some(&question), &by).await.unwrap().unwrap();
+    assert_eq!(again.customer_question.unwrap().1, at);
+    tx.commit().await.unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    assert_eq!(tx.customer_questions().await.unwrap(), vec![(question.clone(), at)]);
+
+    // Promoted, the thread is a decision and asks nothing more.
+    let v = PromoteIn {
+        title: Name::new("Sam approves").unwrap(),
+        rationale: None,
+        decided_by: Name::new("Sam").unwrap(),
+        decided_at: time::OffsetDateTime::now_utc(),
+    };
+    let decision = oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap();
+    tx.promote_thread(&thread, &decision, &v, &by).await.unwrap().unwrap();
+    assert!(tx.customer_questions().await.unwrap().is_empty());
+    let mut tx = PlanTx::from(tx);
+    assert_eq!(tx.thread(&thread).await.unwrap().unwrap().customer_question, None);
+    assert!(matches!(
+        tx.ask_customer(&thread, Some(&question), &by).await,
+        Err(StoreError::Rejected("already_promoted"))
+    ));
+    assert!(matches!(
+        tx.ask_customer(&thread, None, &by).await,
+        Err(StoreError::Rejected("already_promoted"))
+    ));
+}

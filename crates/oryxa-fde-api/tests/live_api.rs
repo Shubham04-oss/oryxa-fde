@@ -818,6 +818,11 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         "/v1/companies/{company}/projects/{project}/threads/{thread}/promote",
         Some(r#"{"title":"pwned","decided_by":"pwned"}"#),
     ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/threads/{thread}/customer-question",
+        Some(r#"{"question":"pwned?"}"#),
+    ),
     ("GET", "/v1/companies/{company}/projects/{project}/meeting-notes", None),
     (
         "POST",
@@ -887,7 +892,6 @@ const RECORDS: &[&str] = &[
     "{answer}",
     "{thread}",
     "{note}",
-
     "{link}",
 ];
 
@@ -1134,7 +1138,6 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             // Not records: the same in every company, so they name the victim's only with its path.
             ("{shape}", "shape-1".into()),
             ("{version}", "1".into()),
-
             ("{link}", link),
         ],
     }
@@ -3161,7 +3164,10 @@ async fn a_thread_promotes_into_the_decisions_log_and_a_note_names_only_people_o
     let read = format!("{project}/meeting-notes/{}", added["id"].as_str().unwrap());
     let after = w.ok(&t.lead, "GET", &read, None, StatusCode::OK).await;
     assert_eq!(after["stakeholders"], json!([]));
+}
 
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     let w = world().await;
     let org = new_id("org");
@@ -3177,16 +3183,18 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["project"]["id"], json!(a.project));
     // Every record but the organisation's security answers, the share links, which grant access
-    // rather than record the work, and the suggestions the engine derives from events.
+    // rather than record the work, the suggestions the engine derives from events, and the canvas.
     for (placeholder, id) in &a.records {
-        if !["{answer}", "{link}", "{kind}"].contains(placeholder) {
+        if !["{answer}", "{link}", "{kind}", "{shape}", "{version}"].contains(placeholder) {
             assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
         }
     }
     assert!(!text.contains(a.record("{link}")));
     assert!(!text.contains(&b.company) && !text.contains(&b.project));
-    // Every company's fixture shares its week and suggestion kind: those name no record of B's.
-    for (placeholder, id) in b.records.iter().filter(|(p, _)| !["{week}", "{kind}"].contains(p)) {
+    // Every company's fixture shares its week, suggestion kind, shape and canvas version: those
+    // name no record of B's.
+    let shared = ["{week}", "{kind}", "{shape}", "{version}"];
+    for (placeholder, id) in b.records.iter().filter(|(p, _)| !shared.contains(p)) {
         assert!(!text.contains(id.as_str()), "B's {placeholder} {id} is in A's export");
     }
     // The organisation's security answers are not the company's records.
@@ -3253,10 +3261,83 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
         ),
         (&json!(95.0), &json!(true), &json!(1))
     );
+    // A project thread puts a question to the customer: the room shows its text and date only,
+    // never the thread's comments, until it is cleared or the thread becomes a decision.
+    assert_eq!(seen["questions"], json!([]));
+    let thread = format!("{project_path}/threads/{}", t.record("{project_thread}"));
+    let ask = format!("{thread}/customer-question");
+    let asked = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &ask,
+            Some(json!({"question": "Who approves refunds over 500?"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(asked["customer_question"], json!("Who approves refunds over 500?"));
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(
+        seen["questions"][0]["question"],
+        json!("Who approves refunds over 500?")
+    );
+    assert_eq!(seen["questions"][0]["asked_at"], asked["asked_at"]);
     let text = seen.to_string();
-    for internal in ["Index tickets", "API token", "Tier-1 tickets", "Use Bedrock", "Zendesk"] {
+    for internal in [
+        "Index tickets",
+        "API token",
+        "Tier-1 tickets",
+        "Use Bedrock",
+        "Zendesk",
+        "Who owns this?",
+        "Refund rules",
+    ] {
         assert!(!text.contains(internal), "the room shows {internal}");
     }
+    for bad in [json!({"question": ""}), json!({"question": "x".repeat(201)})] {
+        assert_eq!(
+            w.status(&t.lead, "PUT", &ask, Some(bad.clone())).await,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    // A company thread has no room, so no question, under any project's path.
+    let company_thread = format!("{project_path}/threads/{}/customer-question", t.record("{thread}"));
+    assert_eq!(
+        w.status(&t.lead, "PUT", &company_thread, Some(json!({"question": "Q?"})))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    w.ok(&t.lead, "PUT", &ask, Some(json!({"question": null})), StatusCode::OK)
+        .await;
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["questions"], json!([]));
+    w.ok(
+        &t.lead,
+        "PUT",
+        &ask,
+        Some(json!({"question": "Who signs?"})),
+        StatusCode::OK,
+    )
+    .await;
+    let promote = json!({"title": "Sam signs", "decided_by": "Sam"});
+    w.ok(
+        &t.lead,
+        "POST",
+        &format!("{thread}/promote"),
+        Some(promote),
+        StatusCode::CREATED,
+    )
+    .await;
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["questions"], json!([]), "a decided thread waits on no one");
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &ask, Some(json!({"question": "Again?"})))
+        .await;
+    assert_eq!(
+        (status, &body["error"]),
+        (StatusCode::CONFLICT, &json!("rejected_already_promoted"))
+    );
     // Every other route of its own company and project is refused to the guest.
     let records = &t.records;
     let fill = |s: &str| {

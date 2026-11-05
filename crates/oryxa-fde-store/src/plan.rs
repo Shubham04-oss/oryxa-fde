@@ -44,6 +44,14 @@ impl PlanTx {
         }
     }
 
+    /// Back to the company's transaction: a project's is turned into its company's.
+    pub fn into_company(self) -> CompanyTx {
+        match self {
+            PlanTx::Company(t) => t,
+            PlanTx::Project(t) => t.into_company(),
+        }
+    }
+
     pub async fn commit(self) -> Result<(), StoreError> {
         match self {
             PlanTx::Company(t) => t.commit().await,
