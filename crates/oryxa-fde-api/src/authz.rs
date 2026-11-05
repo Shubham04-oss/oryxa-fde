@@ -53,6 +53,7 @@ pub(crate) fn relationship(g: &Grant) -> Relationship {
         Grant::Member(c, u, role) => rel(company(c), role.as_str(), user(&c.tenant, u)),
         Grant::ProjectCompany(p) => rel(project(p), "company", SubjectRef::object(company(&p.company))),
         Grant::Assignee(p, u) => rel(project(p), "assignee", user(p.tenant(), u)),
+        Grant::Guest(p, u, _) => rel(project(p), "guest", user(p.tenant(), u)),
     }
 }
 
@@ -179,6 +180,20 @@ impl App {
                 tracing::error!(error = %e, permission, "authz check failed");
                 Err(ApiError::Unavailable)
             }
+        }
+    }
+
+    /// Whether the caller has `permission`: `false` on a deny, 503 on any error, never an allow.
+    pub(crate) async fn allowed(
+        &self,
+        who: &Principal,
+        resource: ObjectRef,
+        permission: &'static str,
+    ) -> Result<bool, ApiError> {
+        match self.require(who, resource, permission).await {
+            Ok(()) => Ok(true),
+            Err(ApiError::Forbidden) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 

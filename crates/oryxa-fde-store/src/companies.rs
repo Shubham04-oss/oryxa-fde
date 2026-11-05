@@ -7,6 +7,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
+use crate::ProjectTx;
 use crate::projects::{self, Project};
 use crate::{Actor, Name, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
 
@@ -87,6 +88,13 @@ impl CompanyTx {
         &self.scope
     }
 
+    /// The same transaction, for one project of this company: row-level security still limits it
+    /// to this company, and every query filters by the project too.
+    pub fn into_project(self, project: oryxa_fde_core::ProjectId) -> ProjectTx {
+        let scope = self.scope.project(project);
+        ProjectTx::new(self.tx, scope)
+    }
+
     #[cfg(test)]
     pub(crate) fn conn(&mut self) -> &mut PgConnection {
         &mut self.tx
@@ -125,6 +133,21 @@ impl CompanyTx {
         audit(&mut self.tx, s, None, by, "company.created", Some(s.company.as_str())).await?;
         enqueue(&mut self.tx, s, by, &CompanyCreated::new(s)).await?;
         Ok(company)
+    }
+
+    /// Audits that `by` exported the company's records; `false` if there is no such company.
+    pub async fn record_export(&mut self, by: &Actor) -> Result<bool, StoreError> {
+        let s = self.scope.clone();
+        let exists: bool =
+            sqlx::query_scalar("select exists (select 1 from companies where tenant_id = $1 and company_id = $2)")
+                .bind(s.tenant.as_str())
+                .bind(s.company.as_str())
+                .fetch_one(&mut *self.tx)
+                .await?;
+        if exists {
+            audit(&mut self.tx, &s, None, by, "company.exported", Some(s.company.as_str())).await?;
+        }
+        Ok(exists)
     }
 
     pub async fn get(&mut self) -> Result<Option<Company>, StoreError> {

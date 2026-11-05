@@ -518,6 +518,7 @@ async fn add_stakeholder(store: &Store, c: &CompanyScope) -> oryxa_fde_core::Sta
         name: Name::new("Sam Sponsor").unwrap(),
         title: Some(Name::new("VP Engineering").unwrap()),
         role: StakeholderRole::Sponsor,
+        email: None,
     };
     tx.add_stakeholder(&id, &v, &actor("alice")).await.unwrap().unwrap();
     tx.commit().await.unwrap();
@@ -782,6 +783,16 @@ async fn row_level_security_covers_every_lifecycle_table() {
     for p in [&a, &b] {
         let stakeholder = add_stakeholder(&store, &p.company).await;
         let mut tx = store.company(&p.company).await.unwrap();
+        let with_email = StakeholderIn {
+            name: Name::new("Sam Sponsor").unwrap(),
+            title: None,
+            role: StakeholderRole::Sponsor,
+            email: Some(EmailAddress::new("sam@acme.example").unwrap()),
+        };
+        tx.update_stakeholder(&stakeholder, &with_email, &by)
+            .await
+            .unwrap()
+            .unwrap();
         let sys = oryxa_fde_core::SystemId::new(new_id("sys")).unwrap();
         let v = SystemIn {
             name: Name::new("Zendesk").unwrap(),
@@ -809,6 +820,22 @@ async fn row_level_security_covers_every_lifecycle_table() {
         let criterion = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
         tx.add_criterion(&criterion, &crit, &by).await.unwrap().unwrap();
         tx.sign_off(&stakeholder, &by).await.unwrap().unwrap();
+        // A share link a guest redeemed, the project's sponsor, and the week's digest claimed for them.
+        let link = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
+        tx.create_share_link(&link, &"ab".repeat(32), 7, &by)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.redeem_share_link(&link, &"ab".repeat(32), &UserId::new("guest_1").unwrap(), &by)
+            .await
+            .unwrap();
+        tx.add_project_sponsor(&stakeholder, &by).await.unwrap().unwrap();
+        let monday = time::macros::date!(2026 - 11 - 02);
+        tx.add_update_draft(monday, &UpdateBody::new("Done this week").unwrap(), "echo")
+            .await
+            .unwrap();
+        tx.decide_update_draft(monday, true, &by).await.unwrap().unwrap();
+        assert!(tx.claim_digest(monday, &stakeholder).await.unwrap().is_some());
         let access = AccessRequestIn {
             description: Text::new("Zendesk token").unwrap(),
             system: Some(sys),
@@ -960,6 +987,10 @@ async fn row_level_security_covers_every_lifecycle_table() {
         "eval_runs",
         "eval_case_results",
         "eval_criterion_results",
+        "share_links",
+        "share_link_guests",
+        "project_sponsors",
+        "digest_deliveries",
     ] {
         let companies: Vec<String> = sqlx::query_scalar(&format!("select company_id from {table}"))
             .fetch_all(tx.conn())
@@ -2858,4 +2889,198 @@ async fn a_meeting_note_names_people_of_its_company_only() {
     assert!(tx.meeting_note(&id).await.unwrap().unwrap().stakeholders.is_empty());
     assert!(tx.remove_meeting_note(&id, &by).await.unwrap());
     assert!(tx.meeting_notes().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_guest_grant_is_pending_only_while_its_link_is_live() {
+    let store = store().await;
+    let admin = admin().await;
+    let by = actor("alice");
+    let (t, p) = project_world(&store).await;
+    let b = {
+        let c = scope(&t, &new_id("cmp"));
+        create_company(&store, &c).await;
+        add_project(&store, &c, "B").await
+    };
+    let guest = UserId::new("guest_1").unwrap();
+    let link = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    tx.create_share_link(&link, &"ab".repeat(32), 1, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    // The table holds a link to 1 to 90 days, whatever writes it.
+    for days in [0, 91] {
+        let other = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
+        assert!(
+            tx.create_share_link(&other, &"cd".repeat(32), days, &by).await.is_err(),
+            "{days}"
+        );
+    }
+
+    // The wrong secret is refused; the right one makes a guest whose grant is pending.
+    assert_eq!(
+        tx.redeem_share_link(&link, &"cd".repeat(32), &guest, &by)
+            .await
+            .unwrap(),
+        Redeemed::Refused
+    );
+    let Redeemed::Guest(row) = tx
+        .redeem_share_link(&link, &"ab".repeat(32), &guest, &by)
+        .await
+        .unwrap()
+    else {
+        panic!("not redeemed");
+    };
+    assert!(tx.live_guest(&guest).await.unwrap());
+    tx.commit().await.unwrap();
+    // Another company's link with the same id is not this one.
+    let mut other = store.project(&b).await.unwrap();
+    assert_eq!(
+        other
+            .redeem_share_link(&link, &"ab".repeat(32), &guest, &by)
+            .await
+            .unwrap(),
+        Redeemed::Refused
+    );
+    drop(other);
+
+    let pending = store.pending_grants(&t, 10).await.unwrap();
+    let expected = Grant::Guest(p.clone(), guest.clone(), link.clone());
+    assert!(pending.grants().contains(&expected), "{:?}", pending.grants());
+    drop(pending);
+    assert_eq!(
+        store.lock_grant(&row).await.unwrap().map(|g| g.grant().clone()),
+        Some(expected.clone())
+    );
+
+    // Expired, it justifies nothing: not pending, not lockable, not live.
+    sqlx::query("update share_links set created_at = now() - interval '1 day', expires_at = now() - interval '1 second' where link_id = $1")
+        .bind(link.as_str())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let pending = store.pending_grants(&t, 10).await.unwrap();
+    assert!(!pending.grants().contains(&expected));
+    drop(pending);
+    assert!(store.lock_grant(&row).await.unwrap().is_none());
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(!tx.live_guest(&guest).await.unwrap());
+    // Revoked: its guests are gone, and they are no one's guest any more.
+    assert_eq!(
+        tx.revoke_share_link(&link, &by).await.unwrap(),
+        Some(vec![guest.clone()])
+    );
+    assert_eq!(tx.share_links().await.unwrap()[0].guests, 0);
+    tx.commit().await.unwrap();
+
+    // Row-level security: B's transaction sees none of it.
+    let mut tx = store.company(&b.company).await.unwrap();
+    for table in ["share_links", "share_link_guests"] {
+        let n: i64 = sqlx::query_scalar(&format!("select count(*) from {table}"))
+            .fetch_one(tx.conn())
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    drop(tx);
+    // The reconciler's role reads whether a link is live, never its secret.
+    let mut tx = store.pool.begin().await.unwrap();
+    sqlx::query("set local role oryxa_fde_grants")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("select secret_sha256 from share_links")
+            .execute(&mut *tx)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn only_an_open_project_thread_puts_a_question_to_the_customer() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    planning_records(&store, &p).await;
+    let by = actor("alice");
+    let question = Name::new("Who approves refunds?").unwrap();
+
+    // A company thread has no room to show a question in.
+    let mut tx = PlanTx::from(store.company(&p.company).await.unwrap());
+    let company_thread = tx.threads(None).await.unwrap().remove(0).id;
+    assert!(matches!(
+        tx.ask_customer(&company_thread, Some(&question), &by).await,
+        Err(StoreError::Rejected("not_a_project_thread"))
+    ));
+    drop(tx);
+
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    let thread = tx.threads(None).await.unwrap().remove(0).id;
+    assert!(
+        tx.ask_customer(&company_thread, Some(&question), &by)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let asked = tx.ask_customer(&thread, Some(&question), &by).await.unwrap().unwrap();
+    let (q, at) = asked.customer_question.clone().unwrap();
+    assert_eq!(q, question);
+    // Asking the same again keeps when it was asked.
+    let again = tx.ask_customer(&thread, Some(&question), &by).await.unwrap().unwrap();
+    assert_eq!(again.customer_question.unwrap().1, at);
+    tx.commit().await.unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    assert_eq!(tx.customer_questions().await.unwrap(), vec![(question.clone(), at)]);
+
+    // Promoted, the thread is a decision and asks nothing more.
+    let v = PromoteIn {
+        title: Name::new("Sam approves").unwrap(),
+        rationale: None,
+        decided_by: Name::new("Sam").unwrap(),
+        decided_at: time::OffsetDateTime::now_utc(),
+    };
+    let decision = oryxa_fde_core::DecisionId::new(new_id("dec")).unwrap();
+    tx.promote_thread(&thread, &decision, &v, &by).await.unwrap().unwrap();
+    assert!(tx.customer_questions().await.unwrap().is_empty());
+    let mut tx = PlanTx::from(tx);
+    assert_eq!(tx.thread(&thread).await.unwrap().unwrap().customer_question, None);
+    assert!(matches!(
+        tx.ask_customer(&thread, Some(&question), &by).await,
+        Err(StoreError::Rejected("already_promoted"))
+    ));
+    assert!(matches!(
+        tx.ask_customer(&thread, None, &by).await,
+        Err(StoreError::Rejected("already_promoted"))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_share_link_lives_one_to_ninety_days_whatever_writes_it() {
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let link = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    let made = tx
+        .create_share_link(&link, &"ab".repeat(32), 90, &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(made.expires_at > made.created_at + time::Duration::days(89));
+    // Even the owner cannot stretch it, or end it before it began.
+    let owner = admin().await;
+    for set in ["created_at + interval '91 days'", "created_at"] {
+        let changed = sqlx::query(&format!(
+            "update share_links set expires_at = {set} where tenant_id = $1 and link_id = $2"
+        ))
+        .bind(t.as_str())
+        .bind(link.as_str())
+        .execute(&owner)
+        .await;
+        assert!(changed.is_err(), "{set}");
+    }
 }

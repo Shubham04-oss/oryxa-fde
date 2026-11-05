@@ -558,6 +558,10 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/security-answers"),
     ("POST", "/v1/security-answers"),
     ("GET", "/v1/me"),
+    // Names nothing: the token is the permission, and only in the caller's own tenant.
+    ("POST", "/v1/share-links/redeem"),
+    // No sign-in: the token in a digest's link names its one delivery, in its own tenant.
+    ("POST", "/v1/digest/unsubscribe"),
     ("GET", "/v1/today"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
@@ -570,6 +574,7 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}", None),
     ("PATCH", "/v1/companies/{company}", Some(r#"{"name":"pwned"}"#)),
     ("GET", "/v1/companies/{company}/members", None),
+    ("GET", "/v1/companies/{company}/export", None),
     (
         "PUT",
         "/v1/companies/{company}/members/{user}",
@@ -622,6 +627,17 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}/projects/{project}/search", None),
     ("GET", "/v1/companies/{company}/projects/{project}/stakeholders", None),
     ("GET", "/v1/companies/{company}/projects/{project}/systems", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/sponsors", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}",
+        None,
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}",
+        None,
+    ),
     (
         "PUT",
         "/v1/companies/{company}/projects/{project}/stage",
@@ -813,6 +829,11 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         "/v1/companies/{company}/projects/{project}/threads/{thread}/promote",
         Some(r#"{"title":"pwned","decided_by":"pwned"}"#),
     ),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/threads/{thread}/customer-question",
+        Some(r#"{"question":"pwned?"}"#),
+    ),
     ("GET", "/v1/companies/{company}/projects/{project}/meeting-notes", None),
     (
         "POST",
@@ -834,6 +855,18 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         "/v1/companies/{company}/projects/{project}/meeting-notes/{note}",
         None,
     ),
+    (
+        "POST",
+        "/v1/companies/{company}/projects/{project}/share-links",
+        Some("{}"),
+    ),
+    ("GET", "/v1/companies/{company}/projects/{project}/share-links", None),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/share-links/{link}",
+        None,
+    ),
+    ("GET", "/v1/room/companies/{company}/projects/{project}", None),
     (
         "PUT",
         "/v1/security-answers/{answer}",
@@ -870,6 +903,7 @@ const RECORDS: &[&str] = &[
     "{answer}",
     "{thread}",
     "{note}",
+    "{link}",
 ];
 
 /// One company in `org`, led by `lead`, with a project, an engineer, a project assignee and one of
@@ -883,6 +917,8 @@ struct Tenant {
     engineer: User,
     assignee: User,
     admin: User,
+    /// A customer person who redeemed `{link}`: a guest of `project`.
+    guest: User,
     company: String,
     project: String,
     /// Placeholder -> id of this company's record.
@@ -907,6 +943,8 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     let engineer = user(org, &format!("{name}_eng"), "member");
     let assignee = user(org, &format!("{name}_asg"), "member");
     let admin = user(org, &format!("{name}_admin"), "admin");
+    // A customer person: WorkOS role `guest`, no member of the organisation's workspace.
+    let guest = user(org, &format!("{name}_guest"), "guest");
     let c = w
         .ok(
             &lead,
@@ -966,9 +1004,12 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     .await;
     let stakeholder = add(
         format!("{base}/stakeholders"),
-        json!({"name": "Pat", "title": "Head of Support"}),
+        json!({"name": "Pat", "title": "Head of Support", "role": "sponsor"}),
     )
     .await;
+    // Pat sponsors the project, so its weekly digest goes to them.
+    let sponsor = format!("{pbase}/sponsors/{stakeholder}");
+    w.ok(&lead, "PUT", &sponsor, None, StatusCode::OK).await;
     let access_request = add(
         format!("{pbase}/access-requests"),
         json!({"description": "API token", "status": "requested", "owner": stakeholder, "system": system}),
@@ -989,12 +1030,32 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         json!({"question": format!("{name}: encrypted at rest?"), "answer": "Yes"}),
     )
     .await;
+    let made = w
+        .ok(
+            &lead,
+            "POST",
+            &format!("{pbase}/share-links"),
+            Some(json!({})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let link = made["link"]["id"].as_str().unwrap().to_owned();
+    let token = made["token"].clone();
+    w.ok(
+        &guest,
+        "POST",
+        "/v1/share-links/redeem",
+        Some(json!({"token": token})),
+        StatusCode::OK,
+    )
+    .await;
     let mut sessions = Vec::new();
     for (who, role) in [
         (&lead, "member"),
         (&engineer, "member"),
         (&assignee, "member"),
         (&admin, "admin"),
+        (&guest, "member"),
     ] {
         let (status, headers, body) = w.sign_in_as(Some(org), &who.id, role).await;
         assert_eq!(status, StatusCode::FOUND, "{body}");
@@ -1070,6 +1131,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
         engineer,
         assignee,
         admin,
+        guest,
         sessions,
         company,
         project,
@@ -1091,6 +1153,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
             // Not records: the same in every company, so they name the victim's only with its path.
             ("{shape}", "shape-1".into()),
             ("{version}", "1".into()),
+            ("{link}", link),
         ],
     }
 }
@@ -1116,6 +1179,7 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         project.clone(),
         format!("{project}/assignees"),
         format!("{project}/stakeholders"),
+        format!("{project}/sponsors"),
         format!("{project}/systems"),
         format!("{project}/scope"),
         format!("{project}/scope/changes"),
@@ -1125,6 +1189,8 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         format!("{project}/activity"),
         format!("{project}/suggestions"),
         format!("{project}/updates"),
+        format!("{project}/share-links"),
+        format!("/v1/room/companies/{}/projects/{}", t.company, t.project),
         "/v1/security-answers".into(),
         format!("{base}/canvas"),
         format!("{base}/canvas/versions"),
@@ -1234,7 +1300,7 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
     // admin manages every company of their own tenant, so they attack the other tenant only.
     let mut attacks = Vec::new();
     for (own, victims) in [(&a, vec![&b, &c]), (&c, vec![&a])] {
-        for who in [&own.lead, &own.engineer, &own.assignee, &own.admin] {
+        for who in [&own.lead, &own.engineer, &own.assignee, &own.admin, &own.guest] {
             for v in &victims {
                 let cross_tenant = v.org != own.org;
                 if who.id == own.admin.id && !cross_tenant {
@@ -1700,6 +1766,8 @@ async fn every_documented_route_is_served() {
             "/auth/login" => StatusCode::FOUND,
             "/auth/callback" => StatusCode::BAD_REQUEST,
             "/auth/logout" => StatusCode::NO_CONTENT,
+            // Needs no sign-in, only a token, which `{}` lacks.
+            "/v1/digest/unsubscribe" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::UNAUTHORIZED,
         };
         assert_eq!(status, want, "{method} {template}");
@@ -3112,4 +3180,463 @@ async fn a_thread_promotes_into_the_decisions_log_and_a_note_names_only_people_o
     let read = format!("{project}/meeting-notes/{}", added["id"].as_str().unwrap());
     let after = w.ok(&t.lead, "GET", &read, None, StatusCode::OK).await;
     assert_eq!(after["stakeholders"], json!([]));
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
+    let w = world().await;
+    let org = new_id("org");
+    let a = company(&w, &org, "alpha").await;
+    let b = company(&w, &org, "beta").await;
+    let path = format!("/v1/companies/{}/export", a.company);
+
+    let export = w.ok(&a.lead, "GET", &path, None, StatusCode::OK).await;
+    let text = export.to_string();
+    // Every export is audited: who, for which company; a refused one is not.
+    let exported = async || -> Vec<String> {
+        sqlx::query_scalar(
+            "select actor from audit_log where tenant_id = $1 and company_id = $2 and action = 'company.exported'
+             order by at",
+        )
+        .bind(&org)
+        .bind(&a.company)
+        .fetch_all(&testing::admin().await)
+        .await
+        .unwrap()
+    };
+    assert_eq!(exported().await, std::slice::from_ref(&a.lead.id));
+    // Every record of A is in it, under its project; nothing of B's is.
+    assert_eq!(export["company"]["id"], json!(a.company));
+    let projects = export["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["project"]["id"], json!(a.project));
+    // Every record but the organisation's security answers, the share links, which grant access
+    // rather than record the work, the suggestions the engine derives from events, and the canvas.
+    for (placeholder, id) in &a.records {
+        if !["{answer}", "{link}", "{kind}", "{shape}", "{version}"].contains(placeholder) {
+            assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
+        }
+    }
+    assert!(!text.contains(a.record("{link}")));
+    assert!(!text.contains(&b.company) && !text.contains(&b.project));
+    // Every company's fixture shares its week, suggestion kind, shape and canvas version: those
+    // name no record of B's.
+    let shared = ["{week}", "{kind}", "{shape}", "{version}"];
+    for (placeholder, id) in b.records.iter().filter(|(p, _)| !shared.contains(p)) {
+        assert!(!text.contains(id.as_str()), "B's {placeholder} {id} is in A's export");
+    }
+    // The organisation's security answers are not the company's records.
+    assert!(!text.contains(a.record("{answer}")));
+    // Only those who manage the company export it: its lead and the organisation's admins.
+    w.ok(&a.admin, "GET", &path, None, StatusCode::OK).await;
+    for who in [&a.engineer, &a.assignee, &b.lead] {
+        assert_eq!(
+            w.status(who, "GET", &path, None).await,
+            StatusCode::FORBIDDEN,
+            "{}",
+            who.id
+        );
+    }
+    assert_eq!(
+        exported().await,
+        [a.lead.id.clone(), a.admin.id.clone()],
+        "a refused export is not"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_closed() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let room = format!("/v1/room/companies/{}/projects/{}", t.company, t.project);
+
+    // The fixture's guest redeemed a link: the room shows room-safe fields only.
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(
+        (&seen["project"], &seen["stage"]),
+        (&json!(t.project), &json!("discover"))
+    );
+    assert_eq!((&seen["progress"], &seen["stages"]), (&json!(1), &json!(8)));
+    assert_eq!(seen["criteria"].as_array().unwrap().len(), 1);
+    assert_eq!(seen["scope_awaits_sign_off"], json!(true));
+    // The fixture's update is a draft: the room shows none until an FDE approves it.
+    assert_eq!(seen["latest_update"], Value::Null);
+    assert_eq!(
+        (&seen["criteria"][0]["passing"], &seen["criteria_passing"]),
+        (&Value::Null, &json!(0))
+    );
+    let project_path = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let approve = format!("{project_path}/updates/{}/approve", t.record("{week}"));
+    w.ok(&t.lead, "POST", &approve, None, StatusCode::OK).await;
+    // An eval run measured 95 against "at least 90": the criterion passes.
+    let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap())
+        .project(oryxa_fde_core::ProjectId::new(&t.project).unwrap());
+    let mut tx = w.store.project(&scope).await.unwrap();
+    let criterion = oryxa_fde_core::CriterionId::new(t.record("{criterion}")).unwrap();
+    let run = oryxa_fde_core::EvalRunId::new(new_id("evr")).unwrap();
+    assert!(tx.record_criterion_result(&criterion, &run, 95.0).await.unwrap());
+    tx.commit().await.unwrap();
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["latest_update"]["week"], json!(t.record("{week}")));
+    assert!(
+        seen["latest_update"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("done this week")
+    );
+    assert_eq!(
+        (
+            &seen["criteria"][0]["latest"],
+            &seen["criteria"][0]["passing"],
+            &seen["criteria_passing"]
+        ),
+        (&json!(95.0), &json!(true), &json!(1))
+    );
+    // A project thread puts a question to the customer: the room shows its text and date only,
+    // never the thread's comments, until it is cleared or the thread becomes a decision.
+    assert_eq!(seen["questions"], json!([]));
+    let thread = format!("{project_path}/threads/{}", t.record("{project_thread}"));
+    let ask = format!("{thread}/customer-question");
+    let asked = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &ask,
+            Some(json!({"question": "Who approves refunds over 500?"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(asked["customer_question"], json!("Who approves refunds over 500?"));
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(
+        seen["questions"][0]["question"],
+        json!("Who approves refunds over 500?")
+    );
+    assert_eq!(seen["questions"][0]["asked_at"], asked["asked_at"]);
+    let text = seen.to_string();
+    for internal in [
+        "Index tickets",
+        "API token",
+        "Tier-1 tickets",
+        "Use Bedrock",
+        "Zendesk",
+        "Who owns this?",
+        "Refund rules",
+    ] {
+        assert!(!text.contains(internal), "the room shows {internal}");
+    }
+    for bad in [json!({"question": ""}), json!({"question": "x".repeat(201)})] {
+        assert_eq!(
+            w.status(&t.lead, "PUT", &ask, Some(bad.clone())).await,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    // A company thread has no room, so no question, under any project's path.
+    let company_thread = format!("{project_path}/threads/{}/customer-question", t.record("{thread}"));
+    assert_eq!(
+        w.status(&t.lead, "PUT", &company_thread, Some(json!({"question": "Q?"})))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    w.ok(&t.lead, "PUT", &ask, Some(json!({"question": null})), StatusCode::OK)
+        .await;
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["questions"], json!([]));
+    w.ok(
+        &t.lead,
+        "PUT",
+        &ask,
+        Some(json!({"question": "Who signs?"})),
+        StatusCode::OK,
+    )
+    .await;
+    let promote = json!({"title": "Sam signs", "decided_by": "Sam"});
+    w.ok(
+        &t.lead,
+        "POST",
+        &format!("{thread}/promote"),
+        Some(promote),
+        StatusCode::CREATED,
+    )
+    .await;
+    let seen = w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    assert_eq!(seen["questions"], json!([]), "a decided thread waits on no one");
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &ask, Some(json!({"question": "Again?"})))
+        .await;
+    assert_eq!(
+        (status, &body["error"]),
+        (StatusCode::CONFLICT, &json!("rejected_already_promoted"))
+    );
+    // Every other route of its own company and project is refused to the guest, and so is everything
+    // the organisation's own people may do: a guest is no member of its workspace.
+    let records = &t.records;
+    let fill = |s: &str| {
+        let mut out = s
+            .replace("{company}", &t.company)
+            .replace("{project}", &t.project)
+            .replace("{user}", &t.guest.id);
+        for (placeholder, id) in records {
+            out = out.replace(placeholder, id);
+        }
+        out
+    };
+    for (method, template, body) in TARGETED {
+        if template.starts_with("/v1/room/") {
+            continue;
+        }
+        let body = body
+            .filter(|b| !b.starts_with("RAW:"))
+            .map(|b| serde_json::from_str::<Value>(&fill(b)).unwrap());
+        let path = fill(template) + query_for(method, template);
+        let (status, resp) = w.call(Some(&t.guest.token), method, &path, body).await;
+        assert!(
+            !status.is_success(),
+            "the guest reached {method} {path}: {status} {resp}"
+        );
+    }
+    for (method, path, body) in [
+        ("GET", "/v1/security-answers", None),
+        (
+            "POST",
+            "/v1/security-answers",
+            Some(json!({"question": "Do you encrypt at rest?", "answer": "pwned"})),
+        ),
+        ("POST", "/v1/companies", Some(json!({"name": "Guest Corp"}))),
+        ("GET", "/v1/companies", None),
+    ] {
+        let (status, resp) = w.call(Some(&t.guest.token), method, path, body).await;
+        assert!(
+            status == StatusCode::FORBIDDEN || (method == "GET" && path == "/v1/companies" && resp == json!([])),
+            "the guest reached {method} {path}: {status} {resp}"
+        );
+    }
+    // Another project of the same company is not theirs.
+    let other = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("/v1/companies/{}/projects", t.company),
+            Some(json!({"name": "Other"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let other_room = format!(
+        "/v1/room/companies/{}/projects/{}",
+        t.company,
+        other["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        w.status(&t.guest, "GET", &other_room, None).await,
+        StatusCode::FORBIDDEN
+    );
+
+    // Expired: refused at once, though SpiceDB still holds the guest relation.
+    let owner = testing::admin().await;
+    sqlx::query(
+        "update share_links set created_at = now() - interval '1 day', expires_at = now() - interval '1 second' where tenant_id = $1 and link_id = $2",
+    )
+    .bind(&org)
+    .bind(t.record("{link}"))
+    .execute(&owner)
+    .await
+    .unwrap();
+    assert_eq!(w.status(&t.guest, "GET", &room, None).await, StatusCode::FORBIDDEN);
+
+    // A new link: redeemed, then revoked; the revoked token is refused afterwards.
+    let links = format!("/v1/companies/{}/projects/{}/share-links", t.company, t.project);
+    let made = w
+        .ok(
+            &t.lead,
+            "POST",
+            &links,
+            Some(json!({"expires_in_days": 1})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let token = made["token"].clone();
+    let redeem = Some(json!({"token": token}));
+    w.ok(
+        &t.guest,
+        "POST",
+        "/v1/share-links/redeem",
+        redeem.clone(),
+        StatusCode::OK,
+    )
+    .await;
+    w.ok(&t.guest, "GET", &room, None, StatusCode::OK).await;
+    let listed = w.ok(&t.lead, "GET", &links, None, StatusCode::OK).await;
+    assert!(
+        listed.to_string().find(token.as_str().unwrap()).is_none(),
+        "tokens are never listed"
+    );
+    let revoke = format!("{links}/{}", made["link"]["id"].as_str().unwrap());
+    w.ok(&t.lead, "DELETE", &revoke, None, StatusCode::NO_CONTENT).await;
+    assert_eq!(w.status(&t.guest, "GET", &room, None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        w.status(&t.guest, "POST", "/v1/share-links/redeem", redeem.clone())
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    // Revoked, the guest relation itself is gone from SpiceDB: the earlier link has expired, so
+    // no live link keeps it.
+    let tenant = TenantId::new(&org).unwrap();
+    let item = oryxa_authz::CheckItem {
+        resource: oryxa_authz::ObjectRef::new(&tenant, "fde_project", &t.project),
+        permission: "view",
+        subject: oryxa_authz::SubjectRef::object(oryxa_authz::ObjectRef::new(&tenant, "user", &t.guest.id)),
+        context: None,
+    };
+    let decision = w
+        .authz
+        .check(&tenant, &item, &oryxa_authz::Consistency::FullyConsistent)
+        .await
+        .unwrap();
+    assert!(!decision.allowed(), "{decision:?}");
+
+    // A live token in another tenant's hands, and malformed ones, are refused alike.
+    let made = w
+        .ok(&t.lead, "POST", &links, Some(json!({})), StatusCode::CREATED)
+        .await;
+    let stranger = user(&new_id("org"), "stranger", "member");
+    let foreign = Some(json!({"token": made["token"]}));
+    assert_eq!(
+        w.status(&stranger, "POST", "/v1/share-links/redeem", foreign).await,
+        StatusCode::NOT_FOUND
+    );
+    let secret = made["token"].as_str().unwrap().rsplit('.').next().unwrap().to_owned();
+    for bad in [
+        String::from("nonsense"),
+        format!("{}.{}.shr_none.{secret}", t.company, t.project),
+        format!(
+            "{}.{}.{}.{}",
+            t.company,
+            t.project,
+            made["link"]["id"].as_str().unwrap(),
+            "0".repeat(64)
+        ),
+    ] {
+        let body = Some(json!({"token": bad}));
+        assert_eq!(
+            w.status(&t.guest, "POST", "/v1/share-links/redeem", body).await,
+            StatusCode::NOT_FOUND,
+            "{bad}"
+        );
+    }
+    for (days, ok) in [(0, false), (91, false), (90, true)] {
+        let status = w
+            .status(&t.lead, "POST", &links, Some(json!({"expires_in_days": days})))
+            .await;
+        assert_eq!(status.is_success(), ok, "{days} days");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_sponsor_unsubscribes_from_the_digest_with_the_link_alone() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "alpha").await;
+    let stakeholders = format!("/v1/companies/{}/stakeholders", t.company);
+
+    // An address is checked, then kept and shown to whoever works on the company.
+    for bad in [
+        "Sam <sam@acme.example>",
+        "sam@acme",
+        "sam@acme.example\r\nBcc: eve@evil.example",
+    ] {
+        let body = json!({"name": "Sam", "role": "sponsor", "email": bad});
+        assert_eq!(
+            w.status(&t.lead, "POST", &stakeholders, Some(body)).await,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    let body = json!({"name": "Sam", "role": "sponsor", "email": "sam@acme.example"});
+    let sam = w
+        .ok(&t.lead, "POST", &stakeholders, Some(body), StatusCode::CREATED)
+        .await;
+    assert_eq!(
+        (&sam["email"], &sam["digest_unsubscribed_at"]),
+        (&json!("sam@acme.example"), &Value::Null)
+    );
+
+    // The fixture's update, approved, and Sam's mail of it claimed as the digest claims it: only
+    // once Sam sponsors this project, not merely the company.
+    let project_path = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let approve = format!("{project_path}/updates/{}/approve", t.record("{week}"));
+    w.ok(&t.lead, "POST", &approve, None, StatusCode::OK).await;
+    let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap())
+        .project(oryxa_fde_core::ProjectId::new(&t.project).unwrap());
+    let sam_id = oryxa_fde_core::StakeholderId::new(sam["id"].as_str().unwrap()).unwrap();
+    let mut tx = w.store.project(&scope).await.unwrap();
+    assert!(tx.claim_digest(fixture_week(), &sam_id).await.unwrap().is_none());
+    drop(tx);
+    let sponsors = format!("{project_path}/sponsors");
+    w.ok(
+        &t.lead,
+        "PUT",
+        &format!("{sponsors}/{}", sam["id"].as_str().unwrap()),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let listed = w.ok(&t.assignee, "GET", &sponsors, None, StatusCode::OK).await;
+    assert!(listed.as_array().unwrap().iter().any(|s| s["id"] == sam["id"]));
+    // Only a stakeholder whose part is sponsor sponsors a project.
+    let other = w
+        .ok(
+            &t.lead,
+            "POST",
+            &stakeholders,
+            Some(json!({"name": "Eng", "role": "it"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &format!("{sponsors}/{}", other["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, &body["error"]),
+        (StatusCode::CONFLICT, &json!("rejected_not_a_sponsor"))
+    );
+    let mut tx = w.store.project(&scope).await.unwrap();
+    let claim = tx.claim_digest(fixture_week(), &sam_id).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    let token = claim.unsubscribe.to_string();
+
+    // A wrong secret, a malformed token, or the same token naming another tenant: refused alike.
+    let last = if token.ends_with('0') { "1" } else { "0" };
+    let forged = format!("{}{last}", &token[..token.len() - 1]);
+    let elsewhere = token.replacen(&org, &new_id("org"), 1);
+    let unsubscribe = |token: &str| w.call(None, "POST", "/v1/digest/unsubscribe", Some(json!({"token": token})));
+    for bad in [forged.as_str(), "", "not.a.token", elsewhere.as_str()] {
+        assert_eq!(unsubscribe(bad).await.0, StatusCode::NOT_FOUND, "{bad}");
+    }
+    let listed = w.ok(&t.lead, "GET", &stakeholders, None, StatusCode::OK).await;
+    let row = |listed: &Value| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == sam["id"])
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&listed)["digest_unsubscribed_at"], Value::Null);
+
+    // The link alone unsubscribes Sam; again is no change.
+    assert_eq!(unsubscribe(&token).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(unsubscribe(&token).await.0, StatusCode::NO_CONTENT);
+    let listed = w.ok(&t.lead, "GET", &stakeholders, None, StatusCode::OK).await;
+    assert!(row(&listed)["digest_unsubscribed_at"].is_string());
 }

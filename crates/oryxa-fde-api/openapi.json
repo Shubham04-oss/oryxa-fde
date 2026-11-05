@@ -965,6 +965,58 @@
         }
       }
     },
+    "/v1/companies/{company}/export": {
+      "get": {
+        "tags": [
+          "companies"
+        ],
+        "summary": "The company's records as one JSON document: the company, its stakeholders, systems and\ndocuments (metadata), and each project with its scope, access requests, tasks, decisions and\nweekly updates; and the threads (with comments) and meeting notes of the company and of each\nproject. What the engine derives from events (activity, suggestions) and the canvases are left\nout.",
+        "operationId": "export_company",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/meeting-notes": {
       "get": {
         "tags": [
@@ -3969,6 +4021,417 @@
         }
       }
     },
+    "/v1/companies/{company}/projects/{project}/share-links": {
+      "get": {
+        "tags": [
+          "room"
+        ],
+        "summary": "The project's share links, newest first; never their tokens.",
+        "operationId": "list_share_links",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ShareLinkOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "room"
+        ],
+        "summary": "Make a link to the project for a customer person. The token is in this response only.",
+        "operationId": "create_share_link",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewShareLinkOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/share-links/{link}": {
+      "delete": {
+        "tags": [
+          "room"
+        ],
+        "summary": "Revoke a link: its guests lose the project at once, unless another live link keeps one.",
+        "operationId": "revoke_share_link",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "link",
+            "in": "path",
+            "description": "Share link id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/sponsors": {
+      "get": {
+        "tags": [
+          "records"
+        ],
+        "summary": "The project's sponsors: who its weekly digest goes to.",
+        "operationId": "list_project_sponsors",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StakeholderOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}": {
+      "put": {
+        "tags": [
+          "records"
+        ],
+        "summary": "Name one of the company's sponsors a sponsor of this project, so its weekly digest goes to them.\nA stakeholder whose part is not sponsor gets 409.",
+        "operationId": "add_project_sponsor",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "stakeholder",
+            "in": "path",
+            "description": "Stakeholder id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StakeholderOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "records"
+        ],
+        "summary": "Stop the project's weekly digest going to this sponsor.",
+        "operationId": "remove_project_sponsor",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "stakeholder",
+            "in": "path",
+            "description": "Stakeholder id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/projects/{project}/stage": {
       "put": {
         "tags": [
@@ -4944,6 +5407,106 @@
           },
           "404": {
             "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/threads/{thread}/customer-question": {
+      "put": {
+        "tags": [
+          "planning"
+        ],
+        "summary": "Put a question to the customer from one of the project's threads, or clear it. The room lists\nopen questions by their text and date; the thread's comments stay internal.",
+        "operationId": "ask_customer",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerQuestionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already promoted",
             "content": {
               "application/json": {
                 "schema": {
@@ -6337,6 +6900,43 @@
         }
       }
     },
+    "/v1/digest/unsubscribe": {
+      "post": {
+        "tags": [
+          "room"
+        ],
+        "summary": "Unsubscribe a sponsor from the weekly digest, from the link in a digest they were sent. No\nsign-in: the token is the permission, and it does this one thing. A token that is malformed,\nunknown or not the latest sent for its delivery is refused alike; again is no change.",
+        "operationId": "unsubscribe_digest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnsubscribeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Unsubscribed"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -6367,6 +6967,67 @@
           },
           "503": {
             "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/room/companies/{company}/projects/{project}": {
+      "get": {
+        "tags": [
+          "room"
+        ],
+        "summary": "The customer room of one project: what its guests may see. Needs `work` on the project, or\n`view` with a live share link the caller redeemed.",
+        "operationId": "get_room",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -6556,6 +7217,47 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/share-links/redeem": {
+      "post": {
+        "tags": [
+          "room"
+        ],
+        "summary": "Redeem a share link: the caller, signed in to the organisation, becomes a guest of its project.\nA token that is malformed, unknown, expired or revoked is refused alike.",
+        "operationId": "redeem_share_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RedeemBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedeemedOut"
                 }
               }
             }
@@ -7110,6 +7812,19 @@
           }
         }
       },
+      "CustomerQuestionBody": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the thread asks the customer, as the room shows it (1 to 200 characters); null clears\nit once answered."
+          }
+        },
+        "additionalProperties": false
+      },
       "DecisionBody": {
         "type": "object",
         "required": [
@@ -7243,6 +7958,65 @@
           "error": {
             "type": "string",
             "description": "A short machine-readable code, e.g. `forbidden`."
+          }
+        }
+      },
+      "ExportOut": {
+        "type": "object",
+        "required": [
+          "exported_at",
+          "company",
+          "stakeholders",
+          "systems",
+          "documents",
+          "threads",
+          "meeting_notes",
+          "projects"
+        ],
+        "properties": {
+          "company": {
+            "$ref": "#/components/schemas/CompanyOut"
+          },
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentOut"
+            },
+            "description": "Metadata only; the files stay where they are."
+          },
+          "exported_at": {
+            "type": "string"
+          },
+          "meeting_notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MeetingNoteOut"
+            }
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectExport"
+            }
+          },
+          "stakeholders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StakeholderOut"
+            }
+          },
+          "systems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SystemOut"
+            }
+          },
+          "threads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadWithComments"
+            },
+            "description": "The company's own threads, each with its comments, and meeting notes."
           }
         }
       },
@@ -7471,6 +8245,22 @@
           }
         }
       },
+      "NewShareLinkOut": {
+        "type": "object",
+        "required": [
+          "link",
+          "token"
+        ],
+        "properties": {
+          "link": {
+            "$ref": "#/components/schemas/ShareLinkOut"
+          },
+          "token": {
+            "type": "string",
+            "description": "Shown once, never stored: the only way to redeem the link."
+          }
+        }
+      },
       "OrgRole": {
         "type": "string",
         "enum": [
@@ -7497,6 +8287,64 @@
           }
         },
         "additionalProperties": false
+      },
+      "ProjectExport": {
+        "type": "object",
+        "required": [
+          "project",
+          "scope",
+          "access_requests",
+          "tasks",
+          "decisions",
+          "updates",
+          "threads",
+          "meeting_notes"
+        ],
+        "properties": {
+          "access_requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessRequestOut"
+            }
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DecisionOut"
+            }
+          },
+          "meeting_notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MeetingNoteOut"
+            }
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectOut"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeOut"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskOut"
+            }
+          },
+          "threads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadWithComments"
+            }
+          },
+          "updates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpdateOut"
+            },
+            "description": "The weekly updates, newest first, drafts included."
+          }
+        }
       },
       "ProjectOut": {
         "type": "object",
@@ -7615,6 +8463,173 @@
           "title": {
             "type": "string",
             "description": "What was decided."
+          }
+        }
+      },
+      "RedeemBody": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "RedeemedOut": {
+        "type": "object",
+        "required": [
+          "company",
+          "project"
+        ],
+        "properties": {
+          "company": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          }
+        }
+      },
+      "RoomCriterionOut": {
+        "type": "object",
+        "required": [
+          "criterion"
+        ],
+        "properties": {
+          "criterion": {
+            "$ref": "#/components/schemas/CriterionOut"
+          },
+          "latest": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The latest value an eval run measured; null until one has."
+          },
+          "measured_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "passing": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether that value meets the target; null until measured."
+          }
+        }
+      },
+      "RoomOut": {
+        "type": "object",
+        "description": "What a guest may see of a project.",
+        "required": [
+          "project",
+          "name",
+          "stage",
+          "progress",
+          "stages",
+          "criteria",
+          "criteria_passing",
+          "scope_awaits_sign_off",
+          "questions"
+        ],
+        "properties": {
+          "criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomCriterionOut"
+            },
+            "description": "The success criteria, each with its latest measured result."
+          },
+          "criteria_passing": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many criteria the latest results meet.",
+            "minimum": 0
+          },
+          "latest_update": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoomUpdateOut",
+                "description": "The newest update an FDE approved; never a draft."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stages reached, from 1 (discover) to `stages` (operate).",
+            "minimum": 0
+          },
+          "project": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomQuestionOut"
+            },
+            "description": "Questions the team put to the customer, oldest first, until answered."
+          },
+          "scope_awaits_sign_off": {
+            "type": "boolean",
+            "description": "The scope as it stands is waiting for the customer's sign-off."
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ProjectStage"
+          },
+          "stages": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "RoomQuestionOut": {
+        "type": "object",
+        "required": [
+          "question",
+          "asked_at"
+        ],
+        "properties": {
+          "asked_at": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          }
+        }
+      },
+      "RoomUpdateOut": {
+        "type": "object",
+        "required": [
+          "week",
+          "body"
+        ],
+        "properties": {
+          "approved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "week": {
+            "type": "string",
+            "description": "The Monday of the week it covers, `YYYY-MM-DD`."
           }
         }
       },
@@ -7818,6 +8833,56 @@
           }
         }
       },
+      "ShareLinkBody": {
+        "type": "object",
+        "properties": {
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days until it expires, 1 to 90; 14 if not given.",
+            "minimum": 0
+          }
+        }
+      },
+      "ShareLinkOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "expires_at",
+          "created_by",
+          "created_at",
+          "guests"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "guests": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many people redeemed it.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SignOffBody": {
         "type": "object",
         "required": [
@@ -7875,6 +8940,13 @@
           "name"
         ],
         "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where a sponsor's weekly digest goes. Replacing it with another address subscribes that\naddress again."
+          },
           "name": {
             "type": "string"
           },
@@ -7901,6 +8973,19 @@
           "updated_at"
         ],
         "properties": {
+          "digest_unsubscribed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When they unsubscribed from the weekly digest, if they did."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -8207,6 +9292,12 @@
           "last_comment_at"
         ],
         "properties": {
+          "asked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "comments": {
             "type": "integer",
             "format": "int32",
@@ -8217,6 +9308,13 @@
           },
           "created_by": {
             "type": "string"
+          },
+          "customer_question": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The question it puts to the customer, shown in the project's room until cleared or\npromoted; only a project thread has one."
           },
           "decision": {
             "type": [
@@ -8331,6 +9429,18 @@
             "items": {
               "$ref": "#/components/schemas/TodayItemOut"
             }
+          }
+        }
+      },
+      "UnsubscribeBody": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "From the fragment of the link in a weekly digest."
           }
         }
       },
@@ -8460,6 +9570,10 @@
     {
       "name": "planning",
       "description": "Canvases and their shape links, comment threads and meeting notes, for a company and for each project"
+    },
+    {
+      "name": "room",
+      "description": "Share links, and the customer room a project's guests see"
     }
   ]
 }

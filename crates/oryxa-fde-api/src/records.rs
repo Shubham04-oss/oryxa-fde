@@ -9,8 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_fde_core::{CompanyId, ProjectId, SecurityAnswerId, StakeholderId, SystemId};
 use oryxa_fde_store::{
-    CompanyTx, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn, StakeholderRole, System,
-    SystemIn, Text, new_id,
+    CompanyTx, EmailAddress, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn,
+    StakeholderRole, System, SystemIn, Text, new_id,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -90,6 +90,9 @@ pub struct StakeholderBody {
     /// Their part in the engagement; `other` if left out.
     #[serde(default)]
     pub role: StakeholderPart,
+    /// Where a sponsor's weekly digest goes. Replacing it with another address subscribes that
+    /// address again.
+    pub email: Option<String>,
 }
 
 impl StakeholderBody {
@@ -98,6 +101,10 @@ impl StakeholderBody {
             name: name(self.name, "name")?,
             title: self.title.map(|t| name(t, "title")).transpose()?,
             role: self.role.into(),
+            email: self
+                .email
+                .map(|e| EmailAddress::new(e).map_err(|_| ApiError::Invalid("email")))
+                .transpose()?,
         })
     }
 }
@@ -108,6 +115,9 @@ pub struct StakeholderOut {
     pub name: String,
     pub title: Option<String>,
     pub role: StakeholderPart,
+    pub email: Option<String>,
+    /// When they unsubscribed from the weekly digest, if they did.
+    pub digest_unsubscribed_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -118,6 +128,8 @@ impl From<Stakeholder> for StakeholderOut {
             name: s.name.as_str().to_owned(),
             title: s.title.map(|t| t.as_str().to_owned()),
             role: s.role.into(),
+            email: s.email.map(|e| e.as_str().to_owned()),
+            digest_unsubscribed_at: s.digest_opt_out_at.map(ts),
             updated_at: ts(s.updated_at),
         }
     }
@@ -359,6 +371,63 @@ pub(crate) async fn project_stakeholders(
     let list = tx.company_stakeholders().await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok(Json(list.into_iter().map(Into::into).collect()))
+}
+
+/// The project's sponsors: who its weekly digest goes to.
+#[utoipa::path(get, operation_id = "list_project_sponsors", path = "/v1/companies/{company}/projects/{project}/sponsors",
+    tag = "records",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
+    responses((status = 200, body = [StakeholderOut]), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn project_sponsors(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p)): Path<(CompanyId, ProjectId)>,
+) -> Result<Json<Vec<StakeholderOut>>, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let list = tx.project_sponsors().await?;
+    tx.commit().await?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
+}
+
+/// Name one of the company's sponsors a sponsor of this project, so its weekly digest goes to them.
+/// A stakeholder whose part is not sponsor gets 409.
+#[utoipa::path(put, operation_id = "add_project_sponsor",
+    path = "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}", tag = "records",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
+        ("stakeholder" = String, Path, description = "Stakeholder id")),
+    responses((status = 200, body = StakeholderOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody)))]
+pub(crate) async fn add_project_sponsor(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p, sh)): Path<(CompanyId, ProjectId, StakeholderId)>,
+) -> Result<Json<StakeholderOut>, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let added = tx
+        .add_project_sponsor(&sh, &who.actor())
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(added.into()))
+}
+
+/// Stop the project's weekly digest going to this sponsor.
+#[utoipa::path(delete, operation_id = "remove_project_sponsor",
+    path = "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}", tag = "records",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
+        ("stakeholder" = String, Path, description = "Stakeholder id")),
+    responses((status = 204, description = "Removed"), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn remove_project_sponsor(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p, sh)): Path<(CompanyId, ProjectId, StakeholderId)>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    if !tx.remove_project_sponsor(&sh, &who.actor()).await? {
+        return Err(ApiError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The company's systems, for anyone who works on this project.

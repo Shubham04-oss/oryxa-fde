@@ -1,7 +1,7 @@
 [package]
 name = "oryxa-fde-lifecycle"
 version = "0.1.0"
-description = "The lifecycle engine: rules on FDE events, the project activity feed, and drafted weekly updates"
+description = "The lifecycle engine: rules on FDE events, the project activity feed, drafted weekly updates and the digest"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ path = "src/bin/lifecycle.rs"
 [dependencies]
 aws-config.workspace = true
 aws-sdk-bedrockruntime.workspace = true
+aws-sdk-sesv2.workspace = true
 aws-sdk-sqs.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
@@ -27,6 +28,7 @@ time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url = "2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }

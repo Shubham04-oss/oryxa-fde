@@ -60,6 +60,11 @@ impl ProjectTx {
         &self.scope
     }
 
+    /// The same transaction, back at the project's company.
+    pub fn into_company(self) -> crate::CompanyTx {
+        crate::CompanyTx::new(self.tx, self.scope.company)
+    }
+
     /// Tenant, company and project ids as bind values, owned so they outlive borrows of `tx`.
     pub(crate) fn keys(&self) -> (String, String, String) {
         let s = &self.scope;

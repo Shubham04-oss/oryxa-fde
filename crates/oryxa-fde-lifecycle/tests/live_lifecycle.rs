@@ -1,7 +1,7 @@
 //! The lifecycle engine against a real Postgres (see `oryxa_fde_store::testing`):
 //!   DATABASE_URL=postgres://postgres:oryxa@localhost:55432/oryxa_fde cargo test -p oryxa-fde-lifecycle -- --ignored
 //! Events are signed as the relay signs them and handed over as SQS delivers them. Drafts use a
-//! fake model that echoes what it was given.
+//! fake model that echoes what it was given, and the digest a fake mail server.
 
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
@@ -10,17 +10,19 @@ use oryxa_core::{TenantId, UserId};
 use oryxa_events::{Event, Signer, Verifier, encode, new_envelope};
 use oryxa_fde_core::{
     AccessRequestId, AgentRunId, CompanyId, CompanyScope, CriterionId, DecisionId, EvalRunId, ProjectId, ProjectScope,
-    Stage, TaskId,
+    Stage, StakeholderId, TaskId,
 };
 use oryxa_fde_events::inbox::{Message, Outcome};
 use oryxa_fde_events::{
     AccessRequestStatusChanged, AccessStatus, AgentRunFinished, EvalRunFinished, PullRequestMerged, RunOutcome,
 };
+use oryxa_fde_lifecycle::digest::{DigestConfig, Mail, Mailer, send_due, send_project};
 use oryxa_fde_lifecycle::drafts::{DraftLimits, Drafted, Drafter, EchoDrafter, draft_due, draft_week};
 use oryxa_fde_lifecycle::rules::handle;
 use oryxa_fde_store::{
-    AccessRequestIn, ActivityIn, Actor, CompanyIn, Comparator, CriterionIn, DecisionIn, Name, ProjectIn, Store,
-    StoreError, SuggestionKind, TaskIn, TaskStatus, Text, UpdateStatus, new_id, testing, week_of,
+    AccessRequestIn, ActivityIn, Actor, CompanyIn, Comparator, CriterionIn, DIGEST_ATTEMPTS, DIGEST_WINDOW, DecisionIn,
+    EmailAddress, Name, ProjectIn, StakeholderIn, StakeholderRole, Store, StoreError, SuggestionKind, TaskIn,
+    TaskStatus, Text, UnsubscribeToken, UpdateBody, UpdateStatus, new_id, testing, week_of,
 };
 use serde::Serialize;
 use time::{Duration, OffsetDateTime};
@@ -727,4 +729,289 @@ async fn the_week_lists_the_tasks_that_moved_to_done_in_it_not_those_only_touche
     let facts = tx.week_facts(monday).await.unwrap().unwrap();
     let done: Vec<&str> = facts.done.iter().map(|n| n.as_str()).collect();
     assert_eq!(done, ["Done this week"]);
+}
+
+/// A mail server that keeps what it is sent, or refuses it.
+#[derive(Default)]
+struct Outbox {
+    sent: std::sync::Mutex<Vec<Mail>>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl Outbox {
+    fn take(&self) -> Vec<Mail> {
+        std::mem::take(&mut *self.sent.lock().unwrap())
+    }
+}
+
+impl Mailer for Outbox {
+    fn send<'a>(
+        &'a self,
+        mail: &'a Mail,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), oryxa_fde_lifecycle::LifecycleError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(oryxa_fde_lifecycle::LifecycleError::Mail("MessageRejected".into()));
+            }
+            self.sent.lock().unwrap().push(mail.clone());
+            Ok(())
+        })
+    }
+}
+
+async fn stakeholder(
+    store: &Store,
+    c: &CompanyScope,
+    name: &str,
+    role: StakeholderRole,
+    email: Option<&str>,
+) -> StakeholderId {
+    let id = StakeholderId::new(new_id("stk")).unwrap();
+    let v = StakeholderIn {
+        name: Name::new(name).unwrap(),
+        title: None,
+        role,
+        email: email.map(|e| EmailAddress::new(e).unwrap()),
+    };
+    let mut tx = store.company(c).await.unwrap();
+    tx.add_stakeholder(&id, &v, &actor()).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+
+async fn approve(store: &Store, p: &ProjectScope, monday: time::Date, body: &str) {
+    let mut tx = store.project(p).await.unwrap();
+    assert!(
+        tx.add_update_draft(monday, &UpdateBody::new(body).unwrap(), "echo")
+            .await
+            .unwrap()
+    );
+    tx.decide_update_draft(monday, true, &actor()).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Lets another copy claim the project's unsent mails again, as if their claims were old.
+async fn claims_expire(p: &ProjectScope) {
+    sqlx::query(
+        "update digest_deliveries set claimed_at = claimed_at - interval '1 hour'
+         where tenant_id = $1 and project_id = $2",
+    )
+    .bind(p.tenant().as_str())
+    .bind(p.project.as_str())
+    .execute(&testing::admin().await)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it() {
+    let store = testing::store().await;
+    let cfg = DigestConfig::new("https://app.oryxa.example").unwrap();
+    let outbox = Outbox::default();
+    let t = TenantId::new(new_id("org")).unwrap();
+    let now = OffsetDateTime::now_utc();
+    let monday = week_of(now.date()) - Duration::weeks(1);
+    let a = project(&store, &t).await;
+    let b = project(&store, &t).await;
+    let sam = stakeholder(
+        &store,
+        &a.company,
+        "Sam Sponsor",
+        StakeholderRole::Sponsor,
+        Some("sam@acme.example"),
+    )
+    .await;
+    let pat = stakeholder(
+        &store,
+        &a.company,
+        "Pat Sponsor",
+        StakeholderRole::Sponsor,
+        Some("pat@acme.example"),
+    )
+    .await;
+    let no_mail = stakeholder(&store, &a.company, "No Mail", StakeholderRole::Sponsor, None).await;
+    let eng = stakeholder(
+        &store,
+        &a.company,
+        "Eng Lead",
+        StakeholderRole::Other,
+        Some("eng@acme.example"),
+    )
+    .await;
+    // A sponsor of the company, but not of this project: none of its digest.
+    stakeholder(
+        &store,
+        &a.company,
+        "Other Project",
+        StakeholderRole::Sponsor,
+        Some("other@acme.example"),
+    )
+    .await;
+    let bea = stakeholder(
+        &store,
+        &b.company,
+        "Bea Sponsor",
+        StakeholderRole::Sponsor,
+        Some("bea@beta.example"),
+    )
+    .await;
+    let sponsor = async |p: &ProjectScope, s: &StakeholderId| {
+        let mut tx = store.project(p).await.unwrap();
+        let added = tx.add_project_sponsor(s, &actor()).await;
+        tx.commit().await.unwrap();
+        added.map(|s| s.is_some())
+    };
+    for s in [&sam, &pat, &no_mail] {
+        assert!(sponsor(&a, s).await.unwrap());
+    }
+    assert!(matches!(
+        sponsor(&a, &eng).await,
+        Err(StoreError::Rejected("not_a_sponsor"))
+    ));
+    assert!(!sponsor(&a, &bea).await.unwrap(), "another company's stakeholder");
+    assert!(sponsor(&b, &bea).await.unwrap());
+
+    // A draft is never sent; nor is anything before an FDE approves it.
+    let mut tx = store.project(&a).await.unwrap();
+    tx.add_update_draft(monday, &UpdateBody::new("Draft only").unwrap(), "echo")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(send_project(&store, &outbox, &cfg, &a, now).await.unwrap(), 0);
+    let mut tx = store.project(&a).await.unwrap();
+    tx.decide_update_draft(monday, true, &actor()).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    approve(&store, &b, monday, "Beta's week").await;
+
+    // Each of A's sponsors with an address gets A's update, once; B's goes to B's sponsor only.
+    assert_eq!(send_project(&store, &outbox, &cfg, &a, now).await.unwrap(), 2);
+    let mut mails = outbox.take();
+    mails.sort_by(|x, y| x.to.as_str().cmp(y.to.as_str()));
+    let to: Vec<&str> = mails.iter().map(|m| m.to.as_str()).collect();
+    assert_eq!(to, ["pat@acme.example", "sam@acme.example"]);
+    assert!(
+        mails
+            .iter()
+            .all(|m| m.text.contains("Draft only") && !m.text.contains("Beta"))
+    );
+    assert_eq!(send_project(&store, &outbox, &cfg, &a, now).await.unwrap(), 0);
+    claims_expire(&a).await;
+    assert_eq!(
+        send_project(&store, &outbox, &cfg, &a, now).await.unwrap(),
+        0,
+        "sent is final"
+    );
+    assert_eq!(send_project(&store, &outbox, &cfg, &b, now).await.unwrap(), 1);
+    assert_eq!(outbox.take()[0].to.as_str(), "bea@beta.example");
+
+    // An update approved more than a week ago is not sent to a sponsor added since.
+    assert!(
+        send_project(&store, &outbox, &cfg, &a, now + DIGEST_WINDOW + Duration::hours(1))
+            .await
+            .unwrap()
+            == 0
+    );
+
+    // The link in Sam's mail unsubscribes Sam, from this and every later update; nothing else does.
+    let sams = mails.iter().find(|m| m.to.as_str() == "sam@acme.example").unwrap();
+    let raw = sams.unsubscribe.split_once('#').unwrap().1;
+    assert!(sams.text.contains(&sams.unsubscribe));
+    let token = UnsubscribeToken::parse(raw).unwrap();
+    assert_eq!((&token.scope, &token.stakeholder, token.week), (&a, &sam, monday));
+    let forged = UnsubscribeToken::parse(&format!(
+        "{}{}",
+        &raw[..raw.len() - 1],
+        if raw.ends_with('0') { '1' } else { '0' }
+    ))
+    .unwrap();
+    let mut tx = store.project(&a).await.unwrap();
+    assert!(!tx.unsubscribe_digest(&forged, "req_1").await.unwrap(), "wrong secret");
+    // Under another project's scope the token names no delivery.
+    let mut other = store.project(&b).await.unwrap();
+    assert!(!other.unsubscribe_digest(&token, "req_1").await.unwrap());
+    drop(other);
+    assert!(tx.unsubscribe_digest(&token, "req_1").await.unwrap());
+    assert!(
+        tx.unsubscribe_digest(&token, "req_1").await.unwrap(),
+        "again is no change"
+    );
+    tx.commit().await.unwrap();
+    let next = monday + Duration::weeks(1);
+    approve(&store, &a, next, "Next week").await;
+    assert_eq!(send_project(&store, &outbox, &cfg, &a, now).await.unwrap(), 1);
+    assert_eq!(outbox.take()[0].to.as_str(), "pat@acme.example");
+
+    // A new address is subscribed again.
+    let mut tx = store.company(&a.company).await.unwrap();
+    let v = StakeholderIn {
+        name: Name::new("Sam Sponsor").unwrap(),
+        title: None,
+        role: StakeholderRole::Sponsor,
+        email: Some(EmailAddress::new("sam@new.example").unwrap()),
+    };
+    let s = tx.update_stakeholder(&sam, &v, &actor()).await.unwrap().unwrap();
+    assert_eq!(s.digest_opt_out_at, None);
+    tx.commit().await.unwrap();
+
+    // A refused mail is claimed again only once its claim is old, and at most DIGEST_ATTEMPTS times.
+    outbox.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(send_project(&store, &outbox, &cfg, &a, now).await.unwrap(), 0);
+    let attempts = || async {
+        let n: i32 = sqlx::query_scalar(
+            "select attempts from digest_deliveries where tenant_id = $1 and stakeholder_id = $2 and week = $3",
+        )
+        .bind(t.as_str())
+        .bind(sam.as_str())
+        .bind(next)
+        .fetch_one(&testing::admin().await)
+        .await
+        .unwrap();
+        n
+    };
+    assert_eq!(attempts().await, 1);
+    send_project(&store, &outbox, &cfg, &a, now).await.unwrap();
+    assert_eq!(attempts().await, 1, "a recent claim may still be sending");
+    for _ in 0..3 {
+        claims_expire(&a).await;
+        send_project(&store, &outbox, &cfg, &a, now).await.unwrap();
+    }
+    assert_eq!(attempts().await, DIGEST_ATTEMPTS as i32);
+    outbox.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    claims_expire(&a).await;
+    assert_eq!(
+        send_project(&store, &outbox, &cfg, &a, now).await.unwrap(),
+        0,
+        "tries used up"
+    );
+    assert!(outbox.take().is_empty());
+
+    // The weekly job sends whatever is due, and is idle after.
+    let c = project(&store, &t).await;
+    let cy = stakeholder(
+        &store,
+        &c.company,
+        "Cy Sponsor",
+        StakeholderRole::Sponsor,
+        Some("cy@gamma.example"),
+    )
+    .await;
+    assert!(sponsor(&c, &cy).await.unwrap());
+    approve(&store, &c, monday, "Gamma's week").await;
+    assert!(send_due(&store, &outbox, &cfg, now).await.unwrap() >= 1);
+    assert!(outbox.take().iter().any(|m| m.to.as_str() == "cy@gamma.example"));
+    send_project(&store, &outbox, &cfg, &c, now).await.unwrap();
+    assert!(outbox.take().is_empty());
+
+    // Access is checked again when the mail is claimed: a sponsor removed from the project after the
+    // recipients were listed gets nothing.
+    let third = next + Duration::weeks(1);
+    approve(&store, &a, third, "Third week").await;
+    let mut tx = store.project(&a).await.unwrap();
+    let due = tx.due_digest(now).await.unwrap().unwrap();
+    assert!(due.recipients.contains(&pat));
+    assert!(tx.remove_project_sponsor(&pat, &actor()).await.unwrap());
+    assert!(tx.claim_digest(third, &pat).await.unwrap().is_none());
+    drop(tx);
 }

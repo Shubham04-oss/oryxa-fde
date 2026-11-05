@@ -6,7 +6,8 @@ use sqlx::{PgConnection, Row};
 use time::OffsetDateTime;
 
 use crate::{
-    Actor, CompanyTx, Name, ProjectTx, StoreError, Text, audit, id, in_use, name, opt, text, unique_violation,
+    Actor, CompanyTx, EmailAddress, Name, ProjectTx, StoreError, Text, audit, id, in_use, name, opt, text,
+    unique_violation,
 };
 
 /// The part a stakeholder plays in the engagement.
@@ -56,6 +57,10 @@ pub struct Stakeholder {
     /// Their job at the customer, e.g. "VP Engineering".
     pub title: Option<Name>,
     pub role: StakeholderRole,
+    /// For the weekly digest, sent to the project's sponsors who have one.
+    pub email: Option<EmailAddress>,
+    /// Unsubscribed from the digest, and when.
+    pub digest_opt_out_at: Option<OffsetDateTime>,
     pub updated_at: OffsetDateTime,
 }
 
@@ -64,6 +69,7 @@ pub struct StakeholderIn {
     pub name: Name,
     pub title: Option<Name>,
     pub role: StakeholderRole,
+    pub email: Option<EmailAddress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +89,7 @@ pub struct SystemIn {
     pub description: Option<Text>,
 }
 
-const STAKEHOLDER: &str = "stakeholder_id, name, title, role, updated_at";
+const STAKEHOLDER: &str = "stakeholder_id, name, title, role, email, digest_opt_out_at, updated_at";
 const SYSTEM: &str = "system_id, name, kind, description, updated_at";
 
 impl CompanyTx {
@@ -99,8 +105,8 @@ impl CompanyTx {
     ) -> Result<Option<Stakeholder>, StoreError> {
         let s = &self.scope;
         let row = sqlx::query(&format!(
-            "insert into stakeholders (tenant_id, company_id, stakeholder_id, name, title, role, created_by)
-             select $1, $2, $3, $4, $5, $6, $7
+            "insert into stakeholders (tenant_id, company_id, stakeholder_id, name, title, role, created_by, email)
+             select $1, $2, $3, $4, $5, $6, $7, $8
              where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
              returning {STAKEHOLDER}"
         ))
@@ -111,6 +117,7 @@ impl CompanyTx {
         .bind(v.title.as_ref().map(Name::as_str))
         .bind(v.role.as_str())
         .bind(by.user.as_str())
+        .bind(v.email.as_ref().map(EmailAddress::as_str))
         .fetch_optional(&mut *self.tx)
         .await
         .map_err(|e| {
@@ -133,7 +140,9 @@ impl CompanyTx {
     ) -> Result<Option<Stakeholder>, StoreError> {
         let s = &self.scope;
         let row = sqlx::query(&format!(
-            "update stakeholders set name = $4, title = $5, role = $6, updated_at = now()
+            "update stakeholders set name = $4, title = $5, role = $6, email = $7,
+                 digest_opt_out_at = case when email is distinct from $7 then null else digest_opt_out_at end,
+                 updated_at = now()
              where tenant_id = $1 and company_id = $2 and stakeholder_id = $3 returning {STAKEHOLDER}"
         ))
         .bind(s.tenant.as_str())
@@ -142,6 +151,7 @@ impl CompanyTx {
         .bind(v.name.as_str())
         .bind(v.title.as_ref().map(Name::as_str))
         .bind(v.role.as_str())
+        .bind(v.email.as_ref().map(EmailAddress::as_str))
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -247,6 +257,109 @@ impl CompanyTx {
 /// Read-only views of the company's records for whoever works on one of its projects: an assignee
 /// signs off with a stakeholder and names owners and systems on access requests.
 impl ProjectTx {
+    /// The project's sponsors, who get its weekly digest.
+    pub async fn project_sponsors(&mut self) -> Result<Vec<Stakeholder>, StoreError> {
+        let (t, c, p) = self.keys();
+        let cols = STAKEHOLDER
+            .split(", ")
+            .map(|col| format!("s.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sqlx::query(&format!(
+            "select {cols} from stakeholders s
+             join project_sponsors ps on ps.tenant_id = s.tenant_id and ps.company_id = s.company_id
+                 and ps.stakeholder_id = s.stakeholder_id
+             where ps.tenant_id = $1 and ps.company_id = $2 and ps.project_id = $3
+             order by s.name, s.stakeholder_id"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(stakeholder)
+        .collect()
+    }
+
+    /// Names a stakeholder of the company, whose part is sponsor, a sponsor of this project. `None`
+    /// if the project or the stakeholder is not in this company; `Rejected("not_a_sponsor")` for a
+    /// stakeholder whose part is another.
+    pub async fn add_project_sponsor(
+        &mut self,
+        id: &StakeholderId,
+        by: &Actor,
+    ) -> Result<Option<Stakeholder>, StoreError> {
+        let (t, c, p) = self.keys();
+        let role: Option<String> = sqlx::query_scalar(
+            "select s.role from stakeholders s
+             where s.tenant_id = $1 and s.company_id = $2 and s.stakeholder_id = $3
+                 and exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $4)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(id.as_str())
+        .bind(&p)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        match role.as_deref() {
+            None => return Ok(None),
+            Some(r) if r != StakeholderRole::Sponsor.as_str() => return Err(StoreError::Rejected("not_a_sponsor")),
+            Some(_) => {}
+        }
+        sqlx::query(
+            "insert into project_sponsors (tenant_id, company_id, project_id, stakeholder_id, added_by)
+             values ($1, $2, $3, $4, $5) on conflict do nothing",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .bind(by.user.as_str())
+        .execute(&mut *self.tx)
+        .await?;
+        let s = self.scope.clone();
+        audit(
+            &mut self.tx,
+            &s.company,
+            Some(&s.project),
+            by,
+            "project.sponsor_added",
+            Some(id.as_str()),
+        )
+        .await?;
+        Ok(self.project_sponsors().await?.into_iter().find(|s| &s.id == id))
+    }
+
+    /// `false` if the stakeholder was not a sponsor of this project.
+    pub async fn remove_project_sponsor(&mut self, id: &StakeholderId, by: &Actor) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let n = sqlx::query(
+            "delete from project_sponsors
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and stakeholder_id = $4",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        if n == 1 {
+            let s = self.scope.clone();
+            audit(
+                &mut self.tx,
+                &s.company,
+                Some(&s.project),
+                by,
+                "project.sponsor_removed",
+                Some(id.as_str()),
+            )
+            .await?;
+        }
+        Ok(n == 1)
+    }
+
     /// `None` if the project is not in this company.
     pub async fn company_stakeholders(&mut self) -> Result<Option<Vec<Stakeholder>>, StoreError> {
         if !self.exists().await? {
@@ -296,6 +409,11 @@ fn stakeholder(r: PgRow) -> Result<Stakeholder, StoreError> {
         name: name(r.try_get("name")?, "name")?,
         title: opt(r.try_get("title")?, "title", name)?,
         role: StakeholderRole::parse(r.try_get("role")?)?,
+        email: r
+            .try_get::<Option<String>, _>("email")?
+            .map(|e| EmailAddress::new(e).map_err(|_| StoreError::Corrupt("email")))
+            .transpose()?,
+        digest_opt_out_at: r.try_get("digest_opt_out_at")?,
         updated_at: r.try_get("updated_at")?,
     })
 }

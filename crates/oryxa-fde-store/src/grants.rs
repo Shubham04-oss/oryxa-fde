@@ -6,7 +6,7 @@
 //! [`Store::pending_grants`] hands it to the reconciler.
 
 use oryxa_core::{TenantId, UserId};
-use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, ShareLinkId};
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 
 use crate::companies::Role;
@@ -19,6 +19,8 @@ pub enum GrantRow {
     Member(CompanyScope, UserId),
     Project(ProjectScope),
     Assignee(ProjectScope, UserId),
+    /// A guest through one share link.
+    Guest(ProjectScope, UserId, ShareLinkId),
 }
 
 /// A relationship a row justifies, as the row says now.
@@ -31,20 +33,22 @@ pub enum Grant {
     /// The project belongs to its company.
     ProjectCompany(ProjectScope),
     Assignee(ProjectScope, UserId),
+    /// `guest` on the project, justified by one live share link the user redeemed.
+    Guest(ProjectScope, UserId, ShareLinkId),
 }
 
 impl Grant {
     pub fn tenant(&self) -> &TenantId {
         match self {
             Grant::CompanyWorkspace(c) | Grant::Member(c, ..) => &c.tenant,
-            Grant::ProjectCompany(p) | Grant::Assignee(p, _) => p.tenant(),
+            Grant::ProjectCompany(p) | Grant::Assignee(p, _) | Grant::Guest(p, ..) => p.tenant(),
         }
     }
 
     fn company(&self) -> &CompanyId {
         match self {
             Grant::CompanyWorkspace(c) | Grant::Member(c, ..) => &c.company,
-            Grant::ProjectCompany(p) | Grant::Assignee(p, _) => &p.company.company,
+            Grant::ProjectCompany(p) | Grant::Assignee(p, _) | Grant::Guest(p, ..) => &p.company.company,
         }
     }
 }
@@ -53,7 +57,7 @@ impl GrantRow {
     fn company(&self) -> &CompanyScope {
         match self {
             GrantRow::Company(c) | GrantRow::Member(c, _) => c,
-            GrantRow::Project(p) | GrantRow::Assignee(p, _) => &p.company,
+            GrantRow::Project(p) | GrantRow::Assignee(p, _) | GrantRow::Guest(p, ..) => &p.company,
         }
     }
 }
@@ -162,6 +166,22 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?
             .map(|_| Grant::Assignee(p.clone(), u.clone())),
+            // Only while the link is live: an expired link justifies no grant.
+            GrantRow::Guest(p, u, link) => sqlx::query(
+                "select 1 from share_link_guests g join share_links l
+                     on l.tenant_id = g.tenant_id and l.link_id = g.link_id
+                 where g.tenant_id = $1 and g.company_id = $2 and g.project_id = $3 and g.link_id = $4
+                     and g.user_id = $5 and l.revoked_at is null and l.expires_at > now()
+                 for update of g",
+            )
+            .bind(p.tenant().as_str())
+            .bind(p.company.company.as_str())
+            .bind(p.project.as_str())
+            .bind(link.as_str())
+            .bind(u.as_str())
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|_| Grant::Guest(p.clone(), u.clone(), link.clone())),
         };
         Ok(grant.map(|grant| PendingGrant { tx, grant }))
     }
@@ -178,6 +198,7 @@ impl Store {
                  union all select tenant_id, grant_retry_at from company_members where {due}
                  union all select tenant_id, grant_retry_at from projects where {due}
                  union all select tenant_id, grant_retry_at from project_assignees where {due}
+                 union all select tenant_id, grant_retry_at from share_link_guests where {due}
              ) pending
              group by tenant_id
              order by bool_or(grant_retry_at is null) desc, min(grant_retry_at), tenant_id limit $1"
@@ -247,6 +268,24 @@ impl Store {
             let user = id("user id", UserId::new, r.try_get("user_id")?)?;
             grants.push(Grant::Assignee(project_scope(&r)?, user));
         }
+        // A guest of an expired or revoked link is not written; it no longer justifies access.
+        for r in sqlx::query(
+            "select g.tenant_id, g.company_id, g.project_id, g.link_id, g.user_id from share_link_guests g
+             join share_links l on l.tenant_id = g.tenant_id and l.link_id = g.link_id
+             where g.tenant_id = $2 and g.granted_at is null and (g.grant_retry_at is null or g.grant_retry_at <= now())
+                 and l.revoked_at is null and l.expires_at > now()
+             order by g.grant_retry_at nulls first, g.tenant_id, g.link_id, g.user_id limit $1
+             for update of g skip locked",
+        )
+        .bind(limit)
+        .bind(tenant.as_str())
+        .fetch_all(&mut *tx)
+        .await?
+        {
+            let user = id("user id", UserId::new, r.try_get("user_id")?)?;
+            let link = id("share link id", ShareLinkId::new, r.try_get("link_id")?)?;
+            grants.push(Grant::Guest(project_scope(&r)?, user, link));
+        }
         Ok(PendingGrants { tx, grants })
     }
 }
@@ -258,6 +297,7 @@ async fn mark(conn: &mut PgConnection, grant: &Grant) -> Result<(), StoreError> 
 /// Updates the row behind `grant` with `set`, a constant assignment list.
 async fn update(conn: &mut PgConnection, grant: &Grant, set: &'static str) -> Result<(), StoreError> {
     let (t, c) = (grant.tenant().as_str(), grant.company().as_str());
+    let mut link = None;
     let (sql, project, user) = match grant {
         Grant::CompanyWorkspace(_) => (
             format!("update companies set {set} where tenant_id = $1 and company_id = $2"),
@@ -282,6 +322,17 @@ async fn update(conn: &mut PgConnection, grant: &Grant, set: &'static str) -> Re
             Some(&p.project),
             Some(u),
         ),
+        Grant::Guest(p, u, l) => {
+            link = Some(l);
+            (
+                format!(
+                    "update share_link_guests set {set}
+                     where tenant_id = $1 and company_id = $2 and project_id = $3 and user_id = $4 and link_id = $5"
+                ),
+                Some(&p.project),
+                Some(u),
+            )
+        }
     };
     let mut q = sqlx::query(&sql).bind(t).bind(c);
     if let Some(p) = project {
@@ -289,6 +340,9 @@ async fn update(conn: &mut PgConnection, grant: &Grant, set: &'static str) -> Re
     }
     if let Some(u) = user {
         q = q.bind(u.as_str());
+    }
+    if let Some(l) = link {
+        q = q.bind(l.as_str());
     }
     q.execute(conn).await?;
     Ok(())

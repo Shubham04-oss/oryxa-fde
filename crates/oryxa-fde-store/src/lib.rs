@@ -20,6 +20,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 mod access;
 mod canvas;
 mod companies;
+mod digest;
 mod documents;
 mod engine;
 mod evals;
@@ -34,6 +35,7 @@ mod records;
 pub mod relay;
 mod runs;
 mod scope;
+mod share;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod updates;
@@ -47,8 +49,9 @@ pub use canvas::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,
 };
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
+pub use digest::{DIGEST_ATTEMPTS, DIGEST_WINDOW, DigestClaim, DueDigest, UnsubscribeToken};
 pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
-pub use engine::{Activity, ActivityIn, Suggestion, SuggestionKind, engine_actor};
+pub use engine::{Activity, ActivityIn, CriterionResult, Suggestion, SuggestionKind, engine_actor};
 pub use evals::{EvalCaseResultRow, EvalCaseRow, EvalCriterionRow, EvalResults, EvalRunRow, EvalSuiteRow};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
 pub use ids::{CommentId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
@@ -66,6 +69,8 @@ pub use updates::{
 };
 
 pub use threads::{Comment, PromoteIn, Subject, Thread};
+
+pub use share::{Redeemed, ShareLink};
 pub use views::{CompanySummary, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
 
@@ -192,6 +197,45 @@ impl fmt::Debug for Text {
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("an email address must be local@domain.tld, at most 254 characters, with no spaces")]
+pub struct EmailError;
+
+/// An email address of someone at the customer, for the weekly digest. Customer data: it stays in
+/// Postgres and the mail sent to it, never in SpiceDB, events or logs, so `Debug` hides it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EmailAddress(String);
+
+impl EmailAddress {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, EmailError> {
+        let v = value.as_ref().trim();
+        let Some((local, domain)) = v.split_once('@') else {
+            return Err(EmailError);
+        };
+        let printable = v
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '<' | '>' | ',' | ';' | '"' | '(' | ')' | '\\' | '[' | ']'));
+        let ok = v.len() <= 254
+            && printable
+            && (1..=64).contains(&local.len())
+            && !domain.contains('@')
+            && domain.contains('.')
+            && !domain.starts_with('.')
+            && !domain.ends_with('.')
+            && !domain.contains("..");
+        if ok { Ok(Self(v.to_owned())) } else { Err(EmailError) }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for EmailAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EmailAddress(<hidden>)")
+    }
+}
+
 /// A fresh id for a new record, e.g. `cmp_0192…`. Server-generated, so always in the id charset.
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::now_v7().simple())
@@ -285,6 +329,13 @@ impl Store {
         Ok(CompanyTx::new(tx, scope.clone()))
     }
 
+    /// A read-only transaction limited to one company that sees one moment of it throughout, for
+    /// an export: its projects are read in the same transaction ([`CompanyTx::into_project`]).
+    pub async fn company_snapshot(&self, scope: &CompanyScope) -> Result<CompanyTx, StoreError> {
+        let tx = self.open_scoped(&scope.tenant, &[&scope.company], true).await?;
+        Ok(CompanyTx::new(tx, scope.clone()))
+    }
+
     /// A transaction limited to one project of one company.
     pub async fn project(&self, scope: &ProjectScope) -> Result<ProjectTx, StoreError> {
         let tx = self.scoped(&scope.company.tenant, &[&scope.company.company]).await?;
@@ -303,7 +354,23 @@ impl Store {
         tenant: &TenantId,
         companies: &[&CompanyId],
     ) -> Result<Transaction<'static, Postgres>, StoreError> {
+        self.open_scoped(tenant, companies, false).await
+    }
+
+    /// [`Store::scoped`]; a `snapshot` is read-only and sees one moment throughout.
+    async fn open_scoped(
+        &self,
+        tenant: &TenantId,
+        companies: &[&CompanyId],
+        snapshot: bool,
+    ) -> Result<Transaction<'static, Postgres>, StoreError> {
         let mut tx = self.pool.begin().await?;
+        if snapshot {
+            // Must come before any other statement of the transaction.
+            sqlx::query("set transaction isolation level repeatable read, read only")
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("set local role oryxa_fde_app").execute(&mut *tx).await?;
         // Company ids are [a-zA-Z0-9_-], so a comma cannot appear inside one.
         let ids = companies.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(",");
@@ -473,6 +540,34 @@ mod tests {
         ] {
             assert!(!transient.is_permanent(), "{transient:?}");
         }
+    }
+
+    #[test]
+    fn email_addresses_are_plain_and_stay_out_of_debug_output() {
+        assert_eq!(
+            EmailAddress::new(" sam@acme.example ").unwrap().as_str(),
+            "sam@acme.example"
+        );
+        for bad in [
+            "",
+            "sam",
+            "sam@",
+            "@acme.example",
+            "sam@acme",
+            "sam@@acme.example",
+            "sam@acme..example",
+            "sam smith@acme.example",
+            "Sam <sam@acme.example>",
+            "sam@acme.example\r\nBcc: x@evil.example",
+            "sam,eve@acme.example",
+        ] {
+            assert_eq!(EmailAddress::new(bad), Err(EmailError), "{bad:?}");
+        }
+        assert!(EmailAddress::new(format!("{}@acme.example", "a".repeat(65))).is_err());
+        assert_eq!(
+            format!("{:?}", EmailAddress::new("sam@acme.example").unwrap()),
+            "EmailAddress(<hidden>)"
+        );
     }
 
     #[test]
