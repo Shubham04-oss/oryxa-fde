@@ -32,10 +32,21 @@ const Injection = z.strictObject({
     .default(""),
 });
 
+/**
+ * Signs requests with AWS Signature Version 4 using short-lived credentials from `credentials` (see `aws.ts`),
+ * so the sandbox needs no Bedrock API key. Only Bedrock's runtime host in the named region can be signed for.
+ */
+const Signing = z.strictObject({
+  service: z.literal("bedrock"),
+  region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/, "invalid AWS region"),
+  credentials: SecretRef,
+});
+
 const HostRule = z
   .strictObject({
     host: HostPattern,
     inject: z.array(Injection).max(4).default([]),
+    sign: Signing.optional(),
     /**
      * An action on the company's approval list (`deploy`, `customer_send`). Requests to this host are refused unless
      * an FDE approved that action and its grant is still open, so an agent that skips the approval prompt (an
@@ -48,7 +59,15 @@ const HostRule = z
   })
   // A wildcard covers hosts nobody has checked (`*.amazonaws.com` includes anyone's API Gateway), so secrets go
   // only to exact hosts.
-  .refine((r) => r.inject.length === 0 || !r.host.startsWith("*."), "secrets are only added for exact hosts");
+  .refine((r) => r.inject.length === 0 || !r.host.startsWith("*."), "secrets are only added for exact hosts")
+  .refine((r) => r.sign === undefined || r.inject.length === 0, "a host is signed or has secrets added, not both")
+  .refine(
+    (r) =>
+      r.sign === undefined ||
+      r.host === `bedrock-runtime.${r.sign.region}.amazonaws.com` ||
+      r.host === `bedrock-runtime-fips.${r.sign.region}.amazonaws.com`,
+    "requests are only signed for Bedrock's runtime host in the signing region",
+  );
 export type HostRule = z.infer<typeof HostRule>;
 
 /** A company's outbound rules. Hosts not listed are refused. */

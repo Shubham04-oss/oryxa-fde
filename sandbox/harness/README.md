@@ -38,9 +38,9 @@ into the system prompt as fenced data, not as instructions.
 
 - **No credentials.** The SDK runs with `CLAUDE_CODE_USE_BEDROCK=1` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`, and
   its environment is built from an explicit list (`PATH`, locale, the CA variables, and `HOME=/home/agent`).
-  Nothing else from the sandbox is inherited. The gateway's outbound handler adds the Bedrock credential to requests for the
-  allowed `bedrock-runtime.<region>.amazonaws.com` host, using a Bedrock API key as a bearer token. There is no
-  claude.ai login.
+  Nothing else from the sandbox is inherited. The gateway's outbound handler authenticates requests to the
+  allowed `bedrock-runtime.<region>.amazonaws.com` host: it signs them with short-lived IAM credentials (SigV4,
+  see `sandbox/gateway/README.md`), or adds a Bedrock API key as a bearer token. There is no claude.ai login.
 - **No repository settings.** The run passes `settingSources: []`. The SDK otherwise loads `.claude/` settings
   and hooks from the repository, and their allow rules would skip approvals.
 - **A coding tool set.** Read, Write, Edit, NotebookEdit, Glob, Grep, Bash, WebFetch and the task tools. The

@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { handleOutbound, type OutboundDeps } from "../src/outbound.js";
+import { CredentialsUnavailable } from "../src/aws.js";
+import { handleOutbound, MAX_SIGNED_BODY, type OutboundDeps } from "../src/outbound.js";
 import { OutboundPolicy } from "../src/policy.js";
 import { companyScope, type CompanyScope } from "../src/scope.js";
 import { DevSecretResolver, SecretUnavailable } from "../src/secrets.js";
+import { sign } from "../src/sigv4.js";
 
 const A = companyScope("org_a", "cmp_1");
 const B = companyScope("org_b", "cmp_1");
@@ -40,6 +42,8 @@ function deps(overrides: Partial<OutboundDeps> = {}) {
     policy: async () => githubPolicy,
     approved: async () => false,
     secrets,
+    credentials: { credentials: () => Promise.reject(new CredentialsUnavailable("none in this test")) },
+    now: () => Date.parse("2026-11-04T12:00:00Z"),
     upstream,
     log: (entry) => logs.push(entry),
     ...overrides,
@@ -219,6 +223,98 @@ describe("hosts held for an approval", () => {
       expect((await send(A, "https://hooks.slack.com/services/x", d)).status).toBe(403);
       expect(upstream).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("hosts signed with AWS credentials", () => {
+  const BEDROCK =
+    "https://bedrock-runtime.eu-west-1.amazonaws.com/model/anthropic.claude-opus-5-5/invoke-with-response-stream";
+  const bedrockPolicy = OutboundPolicy.parse({
+    hosts: [
+      {
+        host: "bedrock-runtime.eu-west-1.amazonaws.com",
+        sign: { service: "bedrock", region: "eu-west-1", credentials: "bedrock" },
+      },
+    ],
+  });
+  // Sample values in AWS's example format; none is a real key.
+  const TEMP = {
+    accessKeyId: "ASIASAMPLETEMPKEY0001",
+    secretAccessKey: "sample/temp+secret/0123456789",
+    sessionToken: "SampleSessionToken+/=",
+    expiration: new Date("2026-11-04T13:00:00Z"),
+  };
+  const credentials = vi.fn(async () => TEMP);
+  const body = JSON.stringify({ anthropic_version: "bedrock-2023-05-31", max_tokens: 10, messages: [] });
+
+  it("sign the request with short-lived credentials, so the sandbox needs none", async () => {
+    credentials.mockClear();
+    const { d, seen } = deps({ policy: async () => bedrockPolicy, credentials: { credentials } });
+    const response = await send(A, BEDROCK, d, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "sample",
+        authorization: "Bearer guessed-by-the-agent",
+        "x-amz-security-token": "planted-by-the-agent",
+        "x-amz-date": "19700101T000000Z",
+      },
+      body,
+    });
+    expect(response.status).toBe(200);
+    expect(credentials).toHaveBeenCalledWith(A, "bedrock", "eu-west-1");
+    const sent = seen[0]!;
+    expect(await sent.text()).toBe(body);
+    expect(sent.headers.get("x-amz-date")).toBe("20261104T120000Z");
+    expect(sent.headers.get("x-amz-security-token")).toBe(TEMP.sessionToken);
+    expect(sent.headers.get("anthropic-beta")).toBe("sample");
+    // The signature verifies: it is exactly what SigV4 gives for this request with these credentials.
+    const expected = await sign(
+      {
+        method: "POST",
+        path: "/model/anthropic.claude-opus-5-5/invoke-with-response-stream",
+        query: "",
+        headers: [
+          ["host", "bedrock-runtime.eu-west-1.amazonaws.com"],
+          ["content-type", "application/json"],
+        ],
+        body: new TextEncoder().encode(body),
+      },
+      { service: "bedrock", region: "eu-west-1", credentials: TEMP, date: new Date("2026-11-04T12:00:00Z") },
+    );
+    expect(sent.headers.get("authorization")).toBe(expected.headers.find(([n]) => n === "authorization")![1]);
+    expect(sent.headers.get("authorization")).toContain(
+      "Credential=ASIASAMPLETEMPKEY0001/20261104/eu-west-1/bedrock/aws4_request",
+    );
+  });
+
+  it("never hand the sandbox a credential, even one the upstream echoes", async () => {
+    const { d, logs } = deps({ policy: async () => bedrockPolicy, credentials: { credentials } });
+    const response = await send(A, BEDROCK, d, { method: "POST", body });
+    const text = await response.text();
+    for (const value of [TEMP.accessKeyId, TEMP.sessionToken, TEMP.secretAccessKey]) {
+      expect(text).not.toContain(value);
+      expect([...response.headers].join()).not.toContain(value);
+      expect(JSON.stringify(logs)).not.toContain(value);
+    }
+    expect(text).toContain("[redacted]");
+    expect(logs).toContainEqual(expect.objectContaining({ event: "outbound.allowed", signed: true }));
+  });
+
+  it("fail closed when credentials are unavailable or expired", async () => {
+    const { d, upstream, logs } = deps({ policy: async () => bedrockPolicy });
+    const response = await send(A, BEDROCK, d, { method: "POST", body });
+    expect(response.status).toBe(502);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(logs).toContainEqual(expect.objectContaining({ reason: "credentials_unavailable" }));
+  });
+
+  it("sign only over https, and only bodies it can hold", async () => {
+    const { d, upstream } = deps({ policy: async () => bedrockPolicy, credentials: { credentials } });
+    expect((await send(A, BEDROCK.replace("https:", "http:"), d, { method: "POST", body })).status).toBe(403);
+    const huge = new Uint8Array(MAX_SIGNED_BODY + 1);
+    expect((await send(A, BEDROCK, d, { method: "POST", body: huge })).status).toBe(413);
+    expect(upstream).not.toHaveBeenCalled();
   });
 });
 

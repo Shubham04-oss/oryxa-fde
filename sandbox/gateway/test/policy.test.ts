@@ -12,6 +12,25 @@ const policy = OutboundPolicy.parse({
 });
 
 describe("outbound policy", () => {
+  it("signs only for Bedrock's runtime host in the signing region, never alongside injected secrets", () => {
+    const sign = { service: "bedrock", region: "eu-west-1", credentials: "bedrock" };
+    const parse = (rule: unknown) => OutboundPolicy.safeParse({ hosts: [rule] }).success;
+    expect(parse({ host: "bedrock-runtime.eu-west-1.amazonaws.com", sign })).toBe(true);
+    expect(parse({ host: "bedrock-runtime-fips.eu-west-1.amazonaws.com", sign })).toBe(true);
+    for (const host of ["bedrock-runtime.us-east-1.amazonaws.com", "*.amazonaws.com", "api.example.com"])
+      expect(parse({ host, sign }), host).toBe(false);
+    expect(parse({ host: "bedrock-runtime.eu-west-1.amazonaws.com", sign: { ...sign, service: "s3" } })).toBe(false);
+    expect(parse({ host: "bedrock-runtime.eu-west-1.amazonaws.com", sign: { ...sign, region: "eu-west-1;x" } })).toBe(
+      false,
+    );
+    const both = {
+      host: "bedrock-runtime.eu-west-1.amazonaws.com",
+      sign,
+      inject: [{ header: "authorization", secret: "k" }],
+    };
+    expect(parse(both)).toBe(false);
+  });
+
   it("holds a host for an action on the approval list", () => {
     const parse = (approval: unknown) => OutboundPolicy.safeParse({ hosts: [{ host: "a.example.com", approval }] });
     expect(parse("deploy").success).toBe(true);
