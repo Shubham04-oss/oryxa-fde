@@ -270,6 +270,7 @@ async fn post_update(
         // Refused for good: keep the claim, so the update is not posted twice nor retried forever.
         Err((true, why)) => Ok(Posted::Refused(why)),
         Err((false, why)) => {
+            // ponytail: a post Slack took but that timed out here is released and posted again.
             tx.finish_slack_post(week, false).await?;
             Err(why)
         }
