@@ -80,6 +80,12 @@ pub(crate) async fn export(
 ) -> Result<Json<ExportOut>, ApiError> {
     let s = who.company(c);
     app.require(&who, company(&s), "manage").await?;
+    // Recorded, and committed, before anything is read: an export that fails half way is audited too.
+    let mut audit = app.store.company(&s).await?;
+    if !audit.record_export(&who.actor()).await? {
+        return Err(ApiError::NotFound);
+    }
+    audit.commit().await?;
     let exported_at = ts(time::OffsetDateTime::now_utc());
     let mut tx = app.store.company_snapshot(&s).await?;
     let found = tx.get().await?.ok_or(ApiError::NotFound)?;

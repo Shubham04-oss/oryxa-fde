@@ -750,6 +750,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/projects/{project}/sponsors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The project's sponsors: who its weekly digest goes to. */
+        get: operations["list_project_sponsors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Name one of the company's sponsors a sponsor of this project, so its weekly digest goes to them.
+         *     A stakeholder whose part is not sponsor gets 409.
+         */
+        put: operations["add_project_sponsor"];
+        post?: never;
+        /** Stop the project's weekly digest going to this sponsor. */
+        delete: operations["remove_project_sponsor"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/projects/{project}/stage": {
         parameters: {
             query?: never;
@@ -4926,6 +4964,146 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_project_sponsors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StakeholderOut"][];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    add_project_sponsor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Stakeholder id */
+                stakeholder: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StakeholderOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_project_sponsor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+                /** @description Stakeholder id */
+                stakeholder: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
             204: {
                 headers: {
                     [name: string]: unknown;

@@ -257,6 +257,109 @@ impl CompanyTx {
 /// Read-only views of the company's records for whoever works on one of its projects: an assignee
 /// signs off with a stakeholder and names owners and systems on access requests.
 impl ProjectTx {
+    /// The project's sponsors, who get its weekly digest.
+    pub async fn project_sponsors(&mut self) -> Result<Vec<Stakeholder>, StoreError> {
+        let (t, c, p) = self.keys();
+        let cols = STAKEHOLDER
+            .split(", ")
+            .map(|col| format!("s.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sqlx::query(&format!(
+            "select {cols} from stakeholders s
+             join project_sponsors ps on ps.tenant_id = s.tenant_id and ps.company_id = s.company_id
+                 and ps.stakeholder_id = s.stakeholder_id
+             where ps.tenant_id = $1 and ps.company_id = $2 and ps.project_id = $3
+             order by s.name, s.stakeholder_id"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .fetch_all(&mut *self.tx)
+        .await?
+        .into_iter()
+        .map(stakeholder)
+        .collect()
+    }
+
+    /// Names a stakeholder of the company, whose part is sponsor, a sponsor of this project. `None`
+    /// if the project or the stakeholder is not in this company; `Rejected("not_a_sponsor")` for a
+    /// stakeholder whose part is another.
+    pub async fn add_project_sponsor(
+        &mut self,
+        id: &StakeholderId,
+        by: &Actor,
+    ) -> Result<Option<Stakeholder>, StoreError> {
+        let (t, c, p) = self.keys();
+        let role: Option<String> = sqlx::query_scalar(
+            "select s.role from stakeholders s
+             where s.tenant_id = $1 and s.company_id = $2 and s.stakeholder_id = $3
+                 and exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $4)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(id.as_str())
+        .bind(&p)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        match role.as_deref() {
+            None => return Ok(None),
+            Some(r) if r != StakeholderRole::Sponsor.as_str() => return Err(StoreError::Rejected("not_a_sponsor")),
+            Some(_) => {}
+        }
+        sqlx::query(
+            "insert into project_sponsors (tenant_id, company_id, project_id, stakeholder_id, added_by)
+             values ($1, $2, $3, $4, $5) on conflict do nothing",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .bind(by.user.as_str())
+        .execute(&mut *self.tx)
+        .await?;
+        let s = self.scope.clone();
+        audit(
+            &mut self.tx,
+            &s.company,
+            Some(&s.project),
+            by,
+            "project.sponsor_added",
+            Some(id.as_str()),
+        )
+        .await?;
+        Ok(self.project_sponsors().await?.into_iter().find(|s| &s.id == id))
+    }
+
+    /// `false` if the stakeholder was not a sponsor of this project.
+    pub async fn remove_project_sponsor(&mut self, id: &StakeholderId, by: &Actor) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let n = sqlx::query(
+            "delete from project_sponsors
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and stakeholder_id = $4",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        if n == 1 {
+            let s = self.scope.clone();
+            audit(
+                &mut self.tx,
+                &s.company,
+                Some(&s.project),
+                by,
+                "project.sponsor_removed",
+                Some(id.as_str()),
+            )
+            .await?;
+        }
+        Ok(n == 1)
+    }
+
     /// `None` if the project is not in this company.
     pub async fn company_stakeholders(&mut self) -> Result<Option<Vec<Stakeholder>>, StoreError> {
         if !self.exists().await? {

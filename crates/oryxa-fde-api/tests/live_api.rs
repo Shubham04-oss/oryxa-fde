@@ -627,6 +627,17 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}/projects/{project}/search", None),
     ("GET", "/v1/companies/{company}/projects/{project}/stakeholders", None),
     ("GET", "/v1/companies/{company}/projects/{project}/systems", None),
+    ("GET", "/v1/companies/{company}/projects/{project}/sponsors", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}",
+        None,
+    ),
+    (
+        "DELETE",
+        "/v1/companies/{company}/projects/{project}/sponsors/{stakeholder}",
+        None,
+    ),
     (
         "PUT",
         "/v1/companies/{company}/projects/{project}/stage",
@@ -932,7 +943,8 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     let engineer = user(org, &format!("{name}_eng"), "member");
     let assignee = user(org, &format!("{name}_asg"), "member");
     let admin = user(org, &format!("{name}_admin"), "admin");
-    let guest = user(org, &format!("{name}_guest"), "member");
+    // A customer person: WorkOS role `guest`, no member of the organisation's workspace.
+    let guest = user(org, &format!("{name}_guest"), "guest");
     let c = w
         .ok(
             &lead,
@@ -992,9 +1004,12 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     .await;
     let stakeholder = add(
         format!("{base}/stakeholders"),
-        json!({"name": "Pat", "title": "Head of Support"}),
+        json!({"name": "Pat", "title": "Head of Support", "role": "sponsor"}),
     )
     .await;
+    // Pat sponsors the project, so its weekly digest goes to them.
+    let sponsor = format!("{pbase}/sponsors/{stakeholder}");
+    w.ok(&lead, "PUT", &sponsor, None, StatusCode::OK).await;
     let access_request = add(
         format!("{pbase}/access-requests"),
         json!({"description": "API token", "status": "requested", "owner": stakeholder, "system": system}),
@@ -1164,6 +1179,7 @@ async fn snapshot(w: &World, t: &Tenant) -> Value {
         project.clone(),
         format!("{project}/assignees"),
         format!("{project}/stakeholders"),
+        format!("{project}/sponsors"),
         format!("{project}/systems"),
         format!("{project}/scope"),
         format!("{project}/scope/changes"),
@@ -3177,6 +3193,19 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
 
     let export = w.ok(&a.lead, "GET", &path, None, StatusCode::OK).await;
     let text = export.to_string();
+    // Every export is audited: who, for which company; a refused one is not.
+    let exported = async || -> Vec<String> {
+        sqlx::query_scalar(
+            "select actor from audit_log where tenant_id = $1 and company_id = $2 and action = 'company.exported'
+             order by at",
+        )
+        .bind(&org)
+        .bind(&a.company)
+        .fetch_all(&testing::admin().await)
+        .await
+        .unwrap()
+    };
+    assert_eq!(exported().await, std::slice::from_ref(&a.lead.id));
     // Every record of A is in it, under its project; nothing of B's is.
     assert_eq!(export["company"]["id"], json!(a.company));
     let projects = export["projects"].as_array().unwrap();
@@ -3209,6 +3238,11 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
             who.id
         );
     }
+    assert_eq!(
+        exported().await,
+        [a.lead.id.clone(), a.admin.id.clone()],
+        "a refused export is not"
+    );
 }
 
 #[tokio::test]
@@ -3338,7 +3372,8 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
         (status, &body["error"]),
         (StatusCode::CONFLICT, &json!("rejected_already_promoted"))
     );
-    // Every other route of its own company and project is refused to the guest.
+    // Every other route of its own company and project is refused to the guest, and so is everything
+    // the organisation's own people may do: a guest is no member of its workspace.
     let records = &t.records;
     let fill = |s: &str| {
         let mut out = s
@@ -3351,7 +3386,7 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
         out
     };
     for (method, template, body) in TARGETED {
-        if template.starts_with("/v1/room/") || template.starts_with("/v1/security-answers") {
+        if template.starts_with("/v1/room/") {
             continue;
         }
         let body = body
@@ -3361,6 +3396,22 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
         let (status, resp) = w.call(Some(&t.guest.token), method, &path, body).await;
         assert!(
             !status.is_success(),
+            "the guest reached {method} {path}: {status} {resp}"
+        );
+    }
+    for (method, path, body) in [
+        ("GET", "/v1/security-answers", None),
+        (
+            "POST",
+            "/v1/security-answers",
+            Some(json!({"question": "Do you encrypt at rest?", "answer": "pwned"})),
+        ),
+        ("POST", "/v1/companies", Some(json!({"name": "Guest Corp"}))),
+        ("GET", "/v1/companies", None),
+    ] {
+        let (status, resp) = w.call(Some(&t.guest.token), method, path, body).await;
+        assert!(
+            status == StatusCode::FORBIDDEN || (method == "GET" && path == "/v1/companies" && resp == json!([])),
             "the guest reached {method} {path}: {status} {resp}"
         );
     }
@@ -3387,7 +3438,7 @@ async fn a_guest_sees_one_projects_room_and_nothing_else_and_a_dead_link_fails_c
     // Expired: refused at once, though SpiceDB still holds the guest relation.
     let owner = testing::admin().await;
     sqlx::query(
-        "update share_links set expires_at = now() - interval '1 second' where tenant_id = $1 and link_id = $2",
+        "update share_links set created_at = now() - interval '1 day', expires_at = now() - interval '1 second' where tenant_id = $1 and link_id = $2",
     )
     .bind(&org)
     .bind(t.record("{link}"))
@@ -3514,13 +3565,50 @@ async fn a_sponsor_unsubscribes_from_the_digest_with_the_link_alone() {
         (&json!("sam@acme.example"), &Value::Null)
     );
 
-    // The fixture's update, approved, and Sam's mail of it claimed as the digest claims it.
+    // The fixture's update, approved, and Sam's mail of it claimed as the digest claims it: only
+    // once Sam sponsors this project, not merely the company.
     let project_path = format!("/v1/companies/{}/projects/{}", t.company, t.project);
     let approve = format!("{project_path}/updates/{}/approve", t.record("{week}"));
     w.ok(&t.lead, "POST", &approve, None, StatusCode::OK).await;
     let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap())
         .project(oryxa_fde_core::ProjectId::new(&t.project).unwrap());
     let sam_id = oryxa_fde_core::StakeholderId::new(sam["id"].as_str().unwrap()).unwrap();
+    let mut tx = w.store.project(&scope).await.unwrap();
+    assert!(tx.claim_digest(fixture_week(), &sam_id).await.unwrap().is_none());
+    drop(tx);
+    let sponsors = format!("{project_path}/sponsors");
+    w.ok(
+        &t.lead,
+        "PUT",
+        &format!("{sponsors}/{}", sam["id"].as_str().unwrap()),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let listed = w.ok(&t.assignee, "GET", &sponsors, None, StatusCode::OK).await;
+    assert!(listed.as_array().unwrap().iter().any(|s| s["id"] == sam["id"]));
+    // Only a stakeholder whose part is sponsor sponsors a project.
+    let other = w
+        .ok(
+            &t.lead,
+            "POST",
+            &stakeholders,
+            Some(json!({"name": "Eng", "role": "it"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &format!("{sponsors}/{}", other["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, &body["error"]),
+        (StatusCode::CONFLICT, &json!("rejected_not_a_sponsor"))
+    );
     let mut tx = w.store.project(&scope).await.unwrap();
     let claim = tx.claim_digest(fixture_week(), &sam_id).await.unwrap().unwrap();
     tx.commit().await.unwrap();

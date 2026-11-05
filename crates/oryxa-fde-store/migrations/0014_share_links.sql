@@ -13,6 +13,8 @@ create table share_links (
     revoked_at    timestamptz,
     created_by    text not null,
     created_at    timestamptz not null default now(),
+    -- The API allows 1 to 90 days; the database holds it to that too.
+    check (expires_at > created_at and expires_at <= created_at + interval '90 days'),
     primary key (tenant_id, link_id),
     unique (tenant_id, company_id, project_id, link_id),
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)

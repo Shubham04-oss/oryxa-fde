@@ -41,19 +41,23 @@ pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl ProjectTx {
-    /// A new link; `None` if the project is not in this company.
+    /// A new link that expires `days` (1 to 90) from now, by the database's clock, which the table's
+    /// check also uses. `None` if the project is not in this company.
     pub async fn create_share_link(
         &mut self,
         id: &ShareLinkId,
         secret_sha256: &str,
-        expires_at: OffsetDateTime,
+        days: u32,
         by: &Actor,
     ) -> Result<Option<ShareLink>, StoreError> {
+        if !(1..=90).contains(&days) {
+            return Err(StoreError::Rejected("expires_in_days"));
+        }
         let (t, c, p) = self.keys();
         let inserted = sqlx::query(
             "insert into share_links (tenant_id, company_id, project_id, link_id, secret_sha256, expires_at,
                  created_by)
-             select $1, $2, $3, $4, $5, $6, $7
+             select $1, $2, $3, $4, $5, now() + make_interval(days => $6), $7
              where exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)",
         )
         .bind(&t)
@@ -61,7 +65,7 @@ impl ProjectTx {
         .bind(&p)
         .bind(id.as_str())
         .bind(secret_sha256)
-        .bind(expires_at)
+        .bind(i32::try_from(days).map_err(|_| StoreError::Rejected("expires_in_days"))?)
         .bind(by.user.as_str())
         .execute(&mut *self.tx)
         .await

@@ -80,12 +80,12 @@ impl Principal {
         let org = claims.org_id.as_deref().ok_or(ApiError::NoOrganisation)?;
         let tenant = TenantId::new(org).map_err(|_| ApiError::Unauthorized)?;
         let user = UserId::new(claims.sub).map_err(|_| ApiError::Unauthorized)?;
-        let admin = claims.role.as_deref() == Some("admin");
-        app.sync_workspace_role(&tenant, &user, admin, writes).await?;
+        let role = WorkspaceRole::of(claims.role.as_deref());
+        app.sync_workspace_role(&tenant, &user, role, writes).await?;
         Ok(Principal {
             tenant,
             user,
-            admin,
+            admin: role == WorkspaceRole::Admin,
             request_id: new_id("req"),
         })
     }
@@ -100,6 +100,27 @@ impl FromRequestParts<Arc<App>> for Principal {
     }
 }
 
+/// What a WorkOS role makes someone in the tenant's workspace. Only `admin` and `member` are the
+/// organisation's own people; any other role (a customer's `guest`, a role added in WorkOS later, or
+/// none) gets no workspace relation at all, so it reaches only what is granted to it directly, such
+/// as a project's room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceRole {
+    Admin,
+    Member,
+    Outsider,
+}
+
+impl WorkspaceRole {
+    pub(crate) fn of(role: Option<&str>) -> Self {
+        match role {
+            Some("admin") => WorkspaceRole::Admin,
+            Some("member") => WorkspaceRole::Member,
+            _ => WorkspaceRole::Outsider,
+        }
+    }
+}
+
 /// How long a replica trusts its last mirror of a user's workspace role before writing it again.
 /// Short against a WorkOS access token's lifetime, which bounds how stale a role can be anyway.
 pub(crate) const ROLE_TTL: Duration = Duration::from_secs(30);
@@ -108,52 +129,56 @@ const ROLE_CACHE_PRUNE_AT: usize = 10_000;
 
 /// The roles this replica mirrored to SpiceDB recently, by user.
 #[derive(Default)]
-pub(crate) struct RoleCache(Mutex<HashMap<(TenantId, UserId), (bool, Instant)>>);
+pub(crate) struct RoleCache(Mutex<HashMap<(TenantId, UserId), (WorkspaceRole, Instant)>>);
 
 impl RoleCache {
-    fn fresh(&self, key: &(TenantId, UserId), admin: bool, now: Instant) -> bool {
+    fn fresh(&self, key: &(TenantId, UserId), role: WorkspaceRole, now: Instant) -> bool {
         let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        matches!(seen.get(key), Some(&(a, at)) if a == admin && now.saturating_duration_since(at) < ROLE_TTL)
+        matches!(seen.get(key), Some(&(r, at)) if r == role && now.saturating_duration_since(at) < ROLE_TTL)
     }
 
-    fn record(&self, key: (TenantId, UserId), admin: bool, now: Instant) {
+    fn record(&self, key: (TenantId, UserId), role: WorkspaceRole, now: Instant) {
         let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if seen.len() >= ROLE_CACHE_PRUNE_AT {
             seen.retain(|_, (_, at)| now.saturating_duration_since(*at) < ROLE_TTL);
         }
-        seen.insert(key, (admin, now));
+        seen.insert(key, (role, now));
     }
 }
 
 impl App {
-    /// Mirrors the token's role onto `workspace:<tenant>|root`: admin or member, never both. Skipped
-    /// only for a read whose role this replica mirrored less than [`ROLE_TTL`] ago: another replica
-    /// may have mirrored a different role since, so no mirror is trusted for long.
+    /// Mirrors the token's role onto `workspace:<tenant>|root`: admin or member, never both, and
+    /// neither for anyone else. Skipped only for a read whose role this replica mirrored less than
+    /// [`ROLE_TTL`] ago: another replica may have mirrored a different role since, so no mirror is
+    /// trusted for long.
     async fn sync_workspace_role(
         &self,
         tenant: &TenantId,
         u: &UserId,
-        admin: bool,
+        role: WorkspaceRole,
         writes: bool,
     ) -> Result<(), ApiError> {
         let key = (tenant.clone(), u.clone());
-        if !writes && self.roles.fresh(&key, admin, Instant::now()) {
+        if !writes && self.roles.fresh(&key, role, Instant::now()) {
             return Ok(());
         }
-        let (grant, revoke) = if admin {
-            ("admin", "member")
-        } else {
-            ("member", "admin")
-        };
-        self.write(
-            tenant,
-            &[
-                Write::Touch(rel(workspace(tenant), grant, user(tenant, u))),
-                Write::Delete(rel(workspace(tenant), revoke, user(tenant, u))),
+        let ws = || workspace(tenant);
+        let writes = match role {
+            WorkspaceRole::Admin => vec![
+                Write::Touch(rel(ws(), "admin", user(tenant, u))),
+                Write::Delete(rel(ws(), "member", user(tenant, u))),
             ],
-        )
-        .await?;
-        self.roles.record(key, admin, Instant::now());
+            WorkspaceRole::Member => vec![
+                Write::Touch(rel(ws(), "member", user(tenant, u))),
+                Write::Delete(rel(ws(), "admin", user(tenant, u))),
+            ],
+            WorkspaceRole::Outsider => vec![
+                Write::Delete(rel(ws(), "admin", user(tenant, u))),
+                Write::Delete(rel(ws(), "member", user(tenant, u))),
+            ],
+        };
+        self.write(tenant, &writes).await?;
+        self.roles.record(key, role, Instant::now());
         Ok(())
     }
 }
@@ -167,16 +192,27 @@ mod tests {
         let cache = RoleCache::default();
         let key = (TenantId::new("org_1").unwrap(), UserId::new("user_1").unwrap());
         let t0 = Instant::now();
-        assert!(!cache.fresh(&key, false, t0), "nothing mirrored yet");
-        cache.record(key.clone(), true, t0);
-        assert!(cache.fresh(&key, true, t0 + Duration::from_secs(1)));
+        let (admin, member) = (WorkspaceRole::Admin, WorkspaceRole::Member);
+        assert!(!cache.fresh(&key, member, t0), "nothing mirrored yet");
+        cache.record(key.clone(), admin, t0);
+        assert!(cache.fresh(&key, admin, t0 + Duration::from_secs(1)));
         assert!(
-            !cache.fresh(&key, false, t0 + Duration::from_secs(1)),
+            !cache.fresh(&key, member, t0 + Duration::from_secs(1)),
             "a role change re-mirrors"
         );
-        assert!(!cache.fresh(&key, true, t0 + ROLE_TTL), "expired");
+        assert!(!cache.fresh(&key, WorkspaceRole::Outsider, t0 + Duration::from_secs(1)));
+        assert!(!cache.fresh(&key, admin, t0 + ROLE_TTL), "expired");
         let other = (TenantId::new("org_2").unwrap(), UserId::new("user_1").unwrap());
-        assert!(!cache.fresh(&other, true, t0), "per tenant");
+        assert!(!cache.fresh(&other, admin, t0), "per tenant");
+    }
+
+    #[test]
+    fn only_admin_and_member_are_the_organisations_own() {
+        assert_eq!(WorkspaceRole::of(Some("admin")), WorkspaceRole::Admin);
+        assert_eq!(WorkspaceRole::of(Some("member")), WorkspaceRole::Member);
+        for other in [Some("guest"), Some("Admin"), Some("owner"), Some(""), None] {
+            assert_eq!(WorkspaceRole::of(other), WorkspaceRole::Outsider, "{other:?}");
+        }
     }
 
     #[test]
@@ -188,12 +224,12 @@ mod tests {
                 TenantId::new("org_1").unwrap(),
                 UserId::new(format!("user_{i}")).unwrap(),
             );
-            cache.record(key, false, t0);
+            cache.record(key, WorkspaceRole::Member, t0);
         }
         let later = t0 + ROLE_TTL + Duration::from_secs(1);
         cache.record(
             (TenantId::new("org_1").unwrap(), UserId::new("new").unwrap()),
-            true,
+            WorkspaceRole::Admin,
             later,
         );
         assert_eq!(cache.0.lock().unwrap().len(), 1);

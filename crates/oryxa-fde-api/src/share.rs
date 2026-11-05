@@ -17,7 +17,6 @@ use oryxa_fde_store::{CriterionResult, Redeemed, ShareLink, UnsubscribeToken, Up
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use time::{Duration, OffsetDateTime};
 use utoipa::ToSchema;
 
 use crate::authz::{project, rel, user};
@@ -166,9 +165,8 @@ pub(crate) async fn create(
     let mut secret = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut secret);
     let secret: String = secret.iter().map(|b| format!("{b:02x}")).collect();
-    let expires_at = OffsetDateTime::now_utc() + Duration::days(i64::from(days));
     let link = tx
-        .create_share_link(&id, &sha256(&secret), expires_at, &who.actor())
+        .create_share_link(&id, &sha256(&secret), days, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;

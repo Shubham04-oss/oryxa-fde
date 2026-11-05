@@ -135,6 +135,21 @@ impl CompanyTx {
         Ok(company)
     }
 
+    /// Audits that `by` exported the company's records; `false` if there is no such company.
+    pub async fn record_export(&mut self, by: &Actor) -> Result<bool, StoreError> {
+        let s = self.scope.clone();
+        let exists: bool =
+            sqlx::query_scalar("select exists (select 1 from companies where tenant_id = $1 and company_id = $2)")
+                .bind(s.tenant.as_str())
+                .bind(s.company.as_str())
+                .fetch_one(&mut *self.tx)
+                .await?;
+        if exists {
+            audit(&mut self.tx, &s, None, by, "company.exported", Some(s.company.as_str())).await?;
+        }
+        Ok(exists)
+    }
+
     pub async fn get(&mut self) -> Result<Option<Company>, StoreError> {
         self.read("").await
     }

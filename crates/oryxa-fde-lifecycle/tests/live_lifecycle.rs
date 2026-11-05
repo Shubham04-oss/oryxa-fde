@@ -823,7 +823,7 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         Some("sam@acme.example"),
     )
     .await;
-    stakeholder(
+    let pat = stakeholder(
         &store,
         &a.company,
         "Pat Sponsor",
@@ -831,8 +831,8 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         Some("pat@acme.example"),
     )
     .await;
-    stakeholder(&store, &a.company, "No Mail", StakeholderRole::Sponsor, None).await;
-    stakeholder(
+    let no_mail = stakeholder(&store, &a.company, "No Mail", StakeholderRole::Sponsor, None).await;
+    let eng = stakeholder(
         &store,
         &a.company,
         "Eng Lead",
@@ -840,7 +840,16 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         Some("eng@acme.example"),
     )
     .await;
+    // A sponsor of the company, but not of this project: none of its digest.
     stakeholder(
+        &store,
+        &a.company,
+        "Other Project",
+        StakeholderRole::Sponsor,
+        Some("other@acme.example"),
+    )
+    .await;
+    let bea = stakeholder(
         &store,
         &b.company,
         "Bea Sponsor",
@@ -848,6 +857,21 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         Some("bea@beta.example"),
     )
     .await;
+    let sponsor = async |p: &ProjectScope, s: &StakeholderId| {
+        let mut tx = store.project(p).await.unwrap();
+        let added = tx.add_project_sponsor(s, &actor()).await;
+        tx.commit().await.unwrap();
+        added.map(|s| s.is_some())
+    };
+    for s in [&sam, &pat, &no_mail] {
+        assert!(sponsor(&a, s).await.unwrap());
+    }
+    assert!(matches!(
+        sponsor(&a, &eng).await,
+        Err(StoreError::Rejected("not_a_sponsor"))
+    ));
+    assert!(!sponsor(&a, &bea).await.unwrap(), "another company's stakeholder");
+    assert!(sponsor(&b, &bea).await.unwrap());
 
     // A draft is never sent; nor is anything before an FDE approves it.
     let mut tx = store.project(&a).await.unwrap();
@@ -965,7 +989,7 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
 
     // The weekly job sends whatever is due, and is idle after.
     let c = project(&store, &t).await;
-    stakeholder(
+    let cy = stakeholder(
         &store,
         &c.company,
         "Cy Sponsor",
@@ -973,9 +997,21 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         Some("cy@gamma.example"),
     )
     .await;
+    assert!(sponsor(&c, &cy).await.unwrap());
     approve(&store, &c, monday, "Gamma's week").await;
     assert!(send_due(&store, &outbox, &cfg, now).await.unwrap() >= 1);
     assert!(outbox.take().iter().any(|m| m.to.as_str() == "cy@gamma.example"));
     send_project(&store, &outbox, &cfg, &c, now).await.unwrap();
     assert!(outbox.take().is_empty());
+
+    // Access is checked again when the mail is claimed: a sponsor removed from the project after the
+    // recipients were listed gets nothing.
+    let third = next + Duration::weeks(1);
+    approve(&store, &a, third, "Third week").await;
+    let mut tx = store.project(&a).await.unwrap();
+    let due = tx.due_digest(now).await.unwrap().unwrap();
+    assert!(due.recipients.contains(&pat));
+    assert!(tx.remove_project_sponsor(&pat, &actor()).await.unwrap());
+    assert!(tx.claim_digest(third, &pat).await.unwrap().is_none());
+    drop(tx);
 }

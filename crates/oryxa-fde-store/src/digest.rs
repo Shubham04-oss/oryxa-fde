@@ -1,7 +1,8 @@
-//! The weekly digest: a project's newest approved update, emailed once to each of the company's
-//! sponsors who has an address and has not unsubscribed (stakeholders are the company's; a project
-//! has no list of its own). Each mail is claimed here before it is sent, and the claim holds the
-//! SHA-256 of the secret in that mail's unsubscribe link.
+//! The weekly digest: a project's newest approved update, emailed once to each of that project's
+//! sponsors (stakeholders of its company named for it, [`ProjectTx::add_project_sponsor`]) who has
+//! an address and has not unsubscribed. Each mail is claimed here right before it is sent, and the
+//! claim checks all of that again; it holds the SHA-256 of the secret in that mail's unsubscribe
+//! link.
 //!
 //! An unsubscribe token is `<tenant>.<company>.<project>.<week>.<stakeholder>.<secret>`: ids are
 //! `[A-Za-z0-9_-]` and the week is `YYYY-MM-DD`, so the dots split it, and the secret is 32 random
@@ -160,6 +161,8 @@ impl ProjectTx {
         }
         let recipients: Vec<String> = sqlx::query_scalar(
             "select s.stakeholder_id from stakeholders s
+             join project_sponsors ps on ps.tenant_id = s.tenant_id and ps.company_id = s.company_id
+                 and ps.stakeholder_id = s.stakeholder_id and ps.project_id = $3
              where s.tenant_id = $1 and s.company_id = $2 and s.role = 'sponsor' and s.email is not null
                  and s.digest_opt_out_at is null
                  and not exists (
@@ -191,8 +194,8 @@ impl ProjectTx {
 
     /// Claims the mail of the week's update to one sponsor, with a fresh unsubscribe secret, and
     /// returns where it goes. `None` if it was sent, its tries are used up, another claim is under
-    /// 15 minutes old and may still be sending, or the stakeholder is no longer a sponsor with an
-    /// address who wants it.
+    /// 15 minutes old and may still be sending, or the stakeholder is no longer this project's
+    /// sponsor with an address who wants it: checked here, right before the send.
     pub async fn claim_digest(
         &mut self,
         week: Date,
@@ -206,6 +209,8 @@ impl ProjectTx {
                  select name, email from stakeholders
                  where tenant_id = $1 and company_id = $2 and stakeholder_id = $5 and role = 'sponsor'
                      and email is not null and digest_opt_out_at is null
+                     and exists (select 1 from project_sponsors where tenant_id = $1 and company_id = $2
+                         and project_id = $3 and stakeholder_id = $5)
              ), claimed as (
                  insert into digest_deliveries (tenant_id, company_id, project_id, week, stakeholder_id,
                      unsubscribe_sha256)

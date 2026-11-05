@@ -5,6 +5,21 @@ alter table stakeholders
     add column email text check (email is null or (length(email) between 3 and 254 and email !~ '\s')),
     add column digest_opt_out_at timestamptz;
 
+-- A project's sponsors: stakeholders of its company whose part is sponsor, named for this project.
+-- The project's digest goes to them only. Removing the stakeholder removes them here.
+create table project_sponsors (
+    tenant_id      text not null,
+    company_id     text not null,
+    project_id     text not null,
+    stakeholder_id text not null,
+    added_by       text not null,
+    added_at       timestamptz not null default now(),
+    primary key (tenant_id, project_id, stakeholder_id),
+    foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id),
+    foreign key (tenant_id, company_id, stakeholder_id)
+        references stakeholders (tenant_id, company_id, stakeholder_id) on delete cascade
+);
+
 -- One row per update and recipient, claimed before the mail is sent, so a recipient gets each
 -- update once whichever copy of the service sends it. A claim holds the SHA-256 of the secret in
 -- that mail's unsubscribe link, never the secret; a failed send may be claimed again, up to a few
@@ -24,6 +39,11 @@ create table digest_deliveries (
     foreign key (tenant_id, company_id, stakeholder_id)
         references stakeholders (tenant_id, company_id, stakeholder_id) on delete cascade
 );
+
+alter table project_sponsors enable row level security;
+alter table project_sponsors force row level security;
+create policy in_scope on project_sponsors to oryxa_fde_app using (fde_in_scope(tenant_id, company_id));
+grant select, insert, delete on project_sponsors to oryxa_fde_app;
 
 alter table digest_deliveries enable row level security;
 alter table digest_deliveries force row level security;
