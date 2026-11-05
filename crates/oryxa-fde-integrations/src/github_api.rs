@@ -2,12 +2,13 @@
 //! changes:
 //! - which installations a user who just installed the App can reach, through their one-time OAuth
 //!   code; the user token is used once here and dropped;
-//! - whether a repository is in an installation, through an installation token;
+//! - which repositories an installation holds, through one installation token for every page;
 //! - whether an installation is still active, through an App JWT.
 //!
 //! The App JWT is RS256, signed with `aws-lc-rs` (constant time) and never with the `rsa` crate,
 //! which `deny.toml` admits only for public-key use (RUSTSEC-2023-0071).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -26,6 +27,10 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Most pages of a user's installations read (100 each).
 const MAX_PAGES: u32 = 10;
+/// Most pages of an installation's repositories read (100 each).
+// ponytail: past 3,000 repositories in one installation, the rest cannot be linked, and a removal
+// of one of them unlinks it (the safe way round).
+const MAX_REPOSITORY_PAGES: u32 = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitHubError {
@@ -53,14 +58,32 @@ pub trait GitHub: Send + Sync + 'static {
     fn install_url(&self, state: &str) -> String;
     /// The installations the user behind a one-time OAuth `code` can reach.
     fn user_installations<'a>(&'a self, code: &'a str) -> BoxFuture<'a, Result<Vec<u64>, GitHubError>>;
-    /// The repository's `owner/name` if it is in the installation; `None` if it is not.
-    fn repository<'a>(
+    /// The repositories in the installation, by id, with their `owner/name`. This is membership:
+    /// `GET /repositories/{id}` answers for any public repository, in the installation or not.
+    fn installation_repositories<'a>(
         &'a self,
         installation: u64,
-        repository: u64,
-    ) -> BoxFuture<'a, Result<Option<String>, GitHubError>>;
+    ) -> BoxFuture<'a, Result<HashMap<u64, String>, GitHubError>>;
     /// Whether the installation still exists and is not suspended.
     fn installation_active<'a>(&'a self, installation: u64) -> BoxFuture<'a, Result<bool, GitHubError>>;
+}
+
+/// Adds one page of `GET /installation/repositories` to `into`; whether it was the last.
+fn add_repositories(into: &mut HashMap<u64, String>, page: &[u8]) -> Result<bool, GitHubError> {
+    #[derive(Deserialize)]
+    struct Page {
+        total_count: u64,
+        repositories: Vec<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        id: u64,
+        full_name: String,
+    }
+    let p: Page = serde_json::from_slice(page).map_err(|_| GitHubError::Unreadable)?;
+    let last = p.repositories.len() < 100;
+    into.extend(p.repositories.into_iter().map(|r| (r.id, r.full_name)));
+    Ok(last || into.len() as u64 >= p.total_count)
 }
 
 /// Our GitHub App, from config.
@@ -226,32 +249,31 @@ impl GitHub for GitHubApp {
         })
     }
 
-    fn repository<'a>(
+    fn installation_repositories<'a>(
         &'a self,
         installation: u64,
-        repository: u64,
-    ) -> BoxFuture<'a, Result<Option<String>, GitHubError>> {
+    ) -> BoxFuture<'a, Result<HashMap<u64, String>, GitHubError>> {
         Box::pin(async move {
-            #[derive(Deserialize)]
-            struct Repo {
-                full_name: String,
-            }
+            // One token for every page.
             let token = self.installation_token(installation).await?;
-            let resp = self
-                .api(Method::GET, &format!("/repositories/{repository}"))?
-                .bearer_auth(token)
-                .send()
-                .await?;
-            match resp.status() {
-                StatusCode::OK => Ok(Some(
-                    resp.json::<Repo>()
-                        .await
-                        .map_err(|_| GitHubError::Unreadable)?
-                        .full_name,
-                )),
-                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => Ok(None),
-                s => Err(GitHubError::Status(s.as_u16())),
+            let mut repositories = HashMap::new();
+            for page in 1..=MAX_REPOSITORY_PAGES {
+                let resp = self
+                    .api(
+                        Method::GET,
+                        &format!("/installation/repositories?per_page=100&page={page}"),
+                    )?
+                    .bearer_auth(&token)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    return Err(GitHubError::Status(resp.status().as_u16()));
+                }
+                if add_repositories(&mut repositories, &resp.bytes().await?)? {
+                    break;
+                }
             }
+            Ok(repositories)
         })
     }
 
@@ -345,6 +367,33 @@ mod tests {
             ("oryxa-fde", pem(b"not a key")),
         ] {
             assert!(GitHubApp::new(42, slug, &key, "Iv1.abc", "s", Outbound::new().unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn an_installations_repositories_are_read_page_by_page() {
+        let page = |from: u64, n: u64, total: u64| {
+            let repos: Vec<_> = (from..from + n)
+                .map(|id| json!({"id": id, "full_name": format!("acme/r{id}"), "private": false}))
+                .collect();
+            serde_json::to_vec(&json!({"total_count": total, "repositories": repos})).unwrap()
+        };
+        let mut got = HashMap::new();
+        assert!(!add_repositories(&mut got, &page(1, 100, 150)).unwrap(), "more to come");
+        assert!(add_repositories(&mut got, &page(101, 50, 150)).unwrap());
+        assert_eq!((got.len(), got.get(&150).map(String::as_str)), (150, Some("acme/r150")));
+        // A full last page ends on the count, not on one more empty page.
+        let mut exact = HashMap::new();
+        assert!(add_repositories(&mut exact, &page(1, 100, 100)).unwrap());
+        for bad in [
+            &b"{}"[..],
+            br#"{"total_count":1,"repositories":[{"id":"1"}]}"#,
+            b"not json",
+        ] {
+            assert!(matches!(
+                add_repositories(&mut HashMap::new(), bad),
+                Err(GitHubError::Unreadable)
+            ));
         }
     }
 }

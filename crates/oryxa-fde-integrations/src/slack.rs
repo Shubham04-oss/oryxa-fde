@@ -207,6 +207,9 @@ pub fn plain(text: &str) -> String {
 pub struct Channel {
     pub id: ChannelId,
     pub name: String,
+    /// Whether the bot is in the channel. `chat:write` posts only where it is, so a channel it is
+    /// not in cannot be linked.
+    pub is_member: bool,
 }
 
 /// What the service asks Slack. A trait so tests use a fake.
@@ -344,6 +347,9 @@ impl Slack for SlackApp {
             struct Raw {
                 id: String,
                 name: String,
+                // Absent reads as not a member, so such a channel is never linked.
+                #[serde(default)]
+                is_member: bool,
             }
             #[derive(Deserialize)]
             struct Meta {
@@ -368,6 +374,7 @@ impl Slack for SlackApp {
                     Some(Channel {
                         id: ChannelId::new(&c.id)?,
                         name: c.name.chars().take(80).collect(),
+                        is_member: c.is_member,
                     })
                 }));
                 cursor = p.response_metadata.and_then(|m| m.next_cursor).unwrap_or_default();

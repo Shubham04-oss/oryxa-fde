@@ -3134,8 +3134,10 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
         Err(StoreError::Missing("installation"))
     ));
 
-    // Slack: a workspace each, a channel for A.
-    let team1 = SlackTeamId::new("T0001").unwrap();
+    // Slack: a workspace each, a channel for A. Team ids are unique in the database the tests
+    // share, as a team is one organisation's.
+    let team = || SlackTeamId::new(&format!("T{}", new_id("x")[2..14].to_uppercase())).unwrap();
+    let team1 = team();
     let mut org1 = store.organisation(&t1).await.unwrap();
     assert_eq!(
         org1.set_slack_installation(&team1, "arn:aws:secretsmanager:x:1:secret:s1", &by)
@@ -3144,14 +3146,19 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
         None
     );
     org1.commit().await.unwrap();
+    // Another organisation can't take a team that is claimed.
     let mut org2 = store.organisation(&t2).await.unwrap();
-    org2.set_slack_installation(
-        &SlackTeamId::new("T0002").unwrap(),
-        "arn:aws:secretsmanager:x:1:secret:s2",
-        &by,
-    )
-    .await
-    .unwrap();
+    assert!(matches!(
+        org2.set_slack_installation(&team1, "arn:aws:secretsmanager:x:1:secret:s2", &by)
+            .await,
+        Err(StoreError::Rejected("slack_team_claimed"))
+    ));
+    drop(org2);
+    let mut org2 = store.organisation(&t2).await.unwrap();
+    org2.lock_slack_team(&team1).await.unwrap();
+    org2.set_slack_installation(&team(), "arn:aws:secretsmanager:x:1:secret:s2", &by)
+        .await
+        .unwrap();
     org2.commit().await.unwrap();
     let mut ca = store.company(&pa.company).await.unwrap();
     ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), &by)
@@ -3204,10 +3211,8 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
     assert_eq!(store.github_route(i2, r2).await.unwrap(), Some(pc.clone()));
     assert_eq!(store.github_route(i2, r1).await.unwrap(), None);
     assert_eq!(store.github_installation_tenant(i2).await.unwrap(), Some(t2.clone()));
-    assert_eq!(
-        store.slack_team_tenants(&team1).await.unwrap(),
-        std::slice::from_ref(&t1)
-    );
+    assert_eq!(store.slack_team_tenant(&team1).await.unwrap(), Some(t1.clone()));
+    assert_eq!(store.slack_team_tenant(&team()).await.unwrap(), None);
     let mut tx = store.pool.begin().await.unwrap();
     sqlx::query("set local role oryxa_fde_grants")
         .execute(&mut *tx)

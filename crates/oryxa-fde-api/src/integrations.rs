@@ -233,6 +233,8 @@ impl From<SlackInstallation> for SlackInstallationOut {
 pub struct SlackChannelOut {
     pub id: String,
     pub name: String,
+    /// Whether the bot is in the channel; only such a channel can be linked (`/invite` the bot).
+    pub is_member: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -432,11 +434,13 @@ pub(crate) async fn link_github_repository(
     if !ours {
         return Err(ApiError::Invalid("installation"));
     }
+    // Membership, as the installation lists it: a public repository outside it is refused.
     let name = gh
         .api
-        .repository(body.installation_id, repository)
+        .installation_repositories(body.installation_id)
         .await
         .map_err(github_error)?
+        .remove(&repository)
         .ok_or(ApiError::NotFound)?;
     let name = RepositoryName::new(&name).ok_or(ApiError::Unavailable)?;
     let mut tx = project_tx(&app, &who, c, p).await?;
@@ -528,17 +532,24 @@ pub(crate) async fn github_webhook(
             installation,
             repositories,
         }) => {
+            let mut linked = Vec::new();
             for repository in repositories.into_iter().take(MAX_REMOVED) {
-                let Some(scope) = app.store.github_route(installation, repository).await? else {
-                    continue;
-                };
-                if gh
-                    .api
-                    .repository(installation, repository)
-                    .await
-                    .map_err(github_error)?
-                    .is_some()
-                {
+                if let Some(scope) = app.store.github_route(installation, repository).await? {
+                    linked.push((repository, scope));
+                }
+            }
+            if linked.is_empty() {
+                return Ok(StatusCode::ACCEPTED);
+            }
+            // One listing (one installation token) for the whole delivery; only a repository GitHub
+            // no longer lists in the installation is unlinked.
+            let still = gh
+                .api
+                .installation_repositories(installation)
+                .await
+                .map_err(github_error)?;
+            for (repository, scope) in linked {
+                if still.contains_key(&repository) {
                     continue;
                 }
                 let mut tx = app.store.project(&scope).await?;
@@ -568,11 +579,12 @@ pub(crate) async fn start_slack_install(
 }
 
 /// Finish the Slack install with Slack's one-time code and the install's state. The bot token goes
-/// to Secrets Manager; a workspace installed before is replaced.
+/// to Secrets Manager; a workspace installed before is replaced. A workspace is one organisation's:
+/// another's gets 409 `rejected_slack_team_claimed` and nothing is stored.
 #[utoipa::path(post, operation_id = "claim_slack_installation", path = "/v1/slack/installation", tag = "integrations",
     request_body = SlackClaimBody,
     responses((status = 200, body = SlackInstallationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 503, body = ErrorBody)))]
+        (status = 409, body = ErrorBody), (status = 503, body = ErrorBody)))]
 pub(crate) async fn claim_slack_installation(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -586,12 +598,23 @@ pub(crate) async fn claim_slack_installation(
     }
     let (team, token) = sl.api.exchange(&body.code).await.map_err(slack_error)?;
     let team = SlackTeamId::new(team.as_str()).ok_or(ApiError::Unavailable)?;
+    // The team's claim is checked under its lock, held to commit, before any token is stored; a
+    // token for another organisation's team is dropped, never revoked (it is theirs too).
+    let mut tx = app.store.organisation(&who.tenant).await?;
+    tx.lock_slack_team(&team).await?;
+    if app
+        .store
+        .slack_team_tenant(&team)
+        .await?
+        .is_some_and(|owner| owner != who.tenant)
+    {
+        return Err(ApiError::Rejected("slack_team_claimed"));
+    }
     let arn = sl.secrets.put(who.tenant.as_str(), &token).await.map_err(|e| {
         tracing::warn!(error = %e, "Slack token not stored");
         ApiError::Unavailable
     })?;
     drop(token);
-    let mut tx = app.store.organisation(&who.tenant).await?;
     let replaced = tx.set_slack_installation(&team, &arn, &who.actor()).await?;
     let installed = tx.slack_installation().await?.ok_or(ApiError::Internal)?;
     tx.commit().await?;
@@ -669,6 +692,7 @@ pub(crate) async fn slack_channels(
             .map(|c| SlackChannelOut {
                 id: c.id.as_str().to_owned(),
                 name: c.name,
+                is_member: c.is_member,
             })
             .collect(),
     ))
@@ -692,7 +716,8 @@ pub(crate) async fn company_slack(
 }
 
 /// Link the channel the company's approved updates are posted to. Needs `manage` on the company;
-/// the channel must be a public channel of the organisation's workspace.
+/// the channel must be a public channel of the organisation's workspace, with the bot in it
+/// (otherwise 400 `bot_not_in_channel`: `/invite` the bot first).
 #[utoipa::path(put, operation_id = "link_company_slack", path = "/v1/companies/{company}/slack", tag = "integrations",
     request_body = SlackChannelBody, params(("company" = String, Path, description = "Company id")),
     responses((status = 200, body = CompanySlackOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
@@ -709,8 +734,13 @@ pub(crate) async fn link_company_slack(
     let wanted = ChannelId::new(&body.channel_id).ok_or(ApiError::Invalid("channel"))?;
     let token = bot_token(&app, sl, &who).await?;
     let channels = sl.api.channels(&token).await.map_err(slack_error)?;
-    if !channels.iter().any(|ch| ch.id == wanted) {
-        return Err(ApiError::Invalid("channel"));
+    let found = channels
+        .iter()
+        .find(|ch| ch.id == wanted)
+        .ok_or(ApiError::Invalid("channel"))?;
+    // Slack refuses a post where the bot isn't, for good, so every update would go unposted.
+    if !found.is_member {
+        return Err(ApiError::NeedsAction("bot_not_in_channel"));
     }
     let channel = SlackChannelId::new(wanted.as_str()).ok_or(ApiError::Invalid("channel"))?;
     let mut tx = app.store.company(&s).await?;
@@ -775,7 +805,7 @@ pub(crate) async fn slack_webhook(
         SlackEvent::Uninstalled(team) => {
             let team = SlackTeamId::new(team.as_str()).ok_or(ApiError::Invalid("event"))?;
             let event = sha256_hex(&body);
-            for tenant in app.store.slack_team_tenants(&team).await? {
+            if let Some(tenant) = app.store.slack_team_tenant(&team).await? {
                 let mut tx = app.store.organisation(&tenant).await?;
                 let arn = tx.remove_slack_team(&team, &event[..32]).await?;
                 tx.commit().await?;

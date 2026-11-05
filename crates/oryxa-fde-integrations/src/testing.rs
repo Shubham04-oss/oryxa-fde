@@ -17,6 +17,8 @@ pub struct FakeGitHub {
     pub repositories: Mutex<HashMap<(u64, u64), String>>,
     /// Installations deleted or suspended on GitHub.
     pub gone: Mutex<Vec<u64>>,
+    /// How many times an installation's repositories were listed (each one installation token).
+    pub listings: Mutex<u32>,
 }
 
 impl GitHub for FakeGitHub {
@@ -30,17 +32,19 @@ impl GitHub for FakeGitHub {
         Box::pin(async move { found.ok_or(GitHubError::Refused) })
     }
 
-    fn repository<'a>(
+    fn installation_repositories<'a>(
         &'a self,
         installation: u64,
-        repository: u64,
-    ) -> BoxFuture<'a, Result<Option<String>, GitHubError>> {
+    ) -> BoxFuture<'a, Result<HashMap<u64, String>, GitHubError>> {
+        *self.listings.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         let found = self
             .repositories
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(installation, repository))
-            .cloned();
+            .iter()
+            .filter(|((i, _), _)| *i == installation)
+            .map(|((_, r), name)| (*r, name.clone()))
+            .collect();
         Box::pin(async move { Ok(found) })
     }
 

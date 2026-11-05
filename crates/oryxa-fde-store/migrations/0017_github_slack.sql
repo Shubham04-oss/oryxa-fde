@@ -49,10 +49,11 @@ create table github_deliveries (
     foreign key (tenant_id, company_id, project_id) references projects (tenant_id, company_id, project_id)
 );
 
--- A tenant's Slack workspace: its team and the ARN of the secret holding the bot token.
+-- A tenant's Slack workspace: its team and the ARN of the secret holding the bot token. A team
+-- belongs to one tenant, as an installation does, so Slack's uninstall acts on that one alone.
 create table slack_installations (
     tenant_id    text primary key,
-    team_id      text not null check (team_id ~ '^[A-Z0-9]{1,32}$'),
+    team_id      text not null unique check (team_id ~ '^[A-Z0-9]{1,32}$'),
     secret_arn   text not null check (secret_arn like 'arn:%'),
     installed_by text not null,
     installed_at timestamptz not null default now()

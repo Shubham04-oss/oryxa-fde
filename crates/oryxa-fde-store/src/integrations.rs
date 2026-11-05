@@ -228,7 +228,18 @@ impl OrgTx {
         .transpose()
     }
 
-    /// Records the organisation's Slack workspace; returns the secret it replaces, if another.
+    /// Holds `team`'s claim lock, across tenants, until this transaction ends: two organisations
+    /// installing the same workspace at once are told apart before either stores a token.
+    pub async fn lock_slack_team(&mut self, team: &SlackTeamId) -> Result<(), StoreError> {
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("oryxa-fde|slack-team|{}", team.as_str()))
+            .execute(&mut *self.tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Records the organisation's Slack workspace; returns the secret it replaces, if another. A
+    /// team another organisation has is refused (`slack_team_claimed`).
     pub async fn set_slack_installation(
         &mut self,
         team: &SlackTeamId,
@@ -246,7 +257,14 @@ impl OrgTx {
         .bind(secret_arn)
         .bind(by.user.as_str())
         .execute(&mut *self.tx)
-        .await?;
+        .await
+        .map_err(|e| {
+            if unique_violation(&e) {
+                StoreError::Rejected("slack_team_claimed")
+            } else {
+                e.into()
+            }
+        })?;
         self.audit(by, "slack.installed", team.as_str()).await?;
         Ok(before.filter(|arn| arn != secret_arn))
     }
@@ -643,17 +661,16 @@ impl Store {
         tenant.map(|t| id("tenant id", TenantId::new, t)).transpose()
     }
 
-    /// The organisations whose Slack workspace is `team`, across tenants.
-    pub async fn slack_team_tenants(&self, team: &SlackTeamId) -> Result<Vec<TenantId>, StoreError> {
+    /// The organisation whose Slack workspace is `team`, across tenants.
+    pub async fn slack_team_tenant(&self, team: &SlackTeamId) -> Result<Option<TenantId>, StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("set local role oryxa_fde_grants").execute(&mut *tx).await?;
-        let tenants: Vec<String> =
-            sqlx::query_scalar("select tenant_id from slack_installations where team_id = $1 order by tenant_id")
-                .bind(team.as_str())
-                .fetch_all(&mut *tx)
-                .await?;
+        let tenant: Option<String> = sqlx::query_scalar("select tenant_id from slack_installations where team_id = $1")
+            .bind(team.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
         tx.commit().await?;
-        tenants.into_iter().map(|t| id("tenant id", TenantId::new, t)).collect()
+        tenant.map(|t| id("tenant id", TenantId::new, t)).transpose()
     }
 }
 

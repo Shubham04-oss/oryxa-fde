@@ -1037,9 +1037,9 @@ async fn an_approved_update_is_posted_to_its_companys_channel_once() {
         .await
         .unwrap();
     let mut org = store.organisation(&t).await.unwrap();
-    org.set_slack_installation(&SlackTeamId::new("T0ACME").unwrap(), &arn, &actor())
-        .await
-        .unwrap();
+    // Unique per run: a team is one organisation's in the database the tests share.
+    let team = SlackTeamId::new(&format!("T{}", new_id("x")[2..14].to_uppercase())).unwrap();
+    org.set_slack_installation(&team, &arn, &actor()).await.unwrap();
     org.commit().await.unwrap();
     let mut tx = store.company(&p.company).await.unwrap();
     tx.set_slack_channel(&SlackChannelId::new("C0ACME").unwrap(), &actor())

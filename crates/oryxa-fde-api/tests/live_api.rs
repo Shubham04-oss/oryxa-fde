@@ -1262,6 +1262,7 @@ async fn company(w: &World, org: &str, name: &str) -> Tenant {
     w.slack.channels.lock().unwrap().push(Channel {
         id: ChannelId::new(&channel).unwrap(),
         name: name.to_owned(),
+        is_member: true,
     });
     let claim = json!({"code": code, "state": state_of(started["url"].as_str().unwrap())});
     w.ok(&admin, "POST", "/v1/slack/installation", Some(claim), StatusCode::OK)
@@ -3953,6 +3954,11 @@ async fn a_linked_repositorys_pull_requests_become_events_once_and_removals_unli
     let unknown = github_id();
     let (status, body) = link(&format!("{repos}/{unknown}"), &installation.to_string()).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    // A repository that exists on GitHub but is not in the installation (here another
+    // organisation's, as a public one would be) is refused: membership is what GitHub lists.
+    let theirs_repo = other.record("{repository}");
+    let (status, body) = link(&format!("{repos}/{theirs_repo}"), &installation.to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     let (_, body) = link(&format!("{repos}/{unknown}"), &github_id().to_string()).await;
     assert_eq!(body["error"], "invalid_installation", "an installation no one claimed");
     let (_, body) = link(&format!("{repos}/{unknown}"), other.record("{installation}")).await;
@@ -4055,33 +4061,50 @@ async fn a_linked_repositorys_pull_requests_become_events_once_and_removals_unli
             .all(|d| !d.starts_with("fde.pull-request"))
     );
 
-    // A repository removed from the installation is unlinked once GitHub no longer has it in.
+    // Repositories removed from the installation are unlinked once GitHub no longer lists them in
+    // it, with one listing (one installation token) per delivery, however many it names.
+    let extra = github_id();
+    w.github
+        .repositories
+        .lock()
+        .unwrap()
+        .insert((installation, extra), "alpha/web".into());
+    let (status, _) = link(&format!("{repos}/{extra}"), &installation.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
     let removed = json!({"action": "removed", "installation": {"id": installation},
-        "repositories_removed": [{"id": repository}]})
+        "repositories_removed": [{"id": repository}, {"id": extra}, {"id": theirs_repo.parse::<u64>().unwrap()}]})
     .to_string();
+    let listings = || *w.github.listings.lock().unwrap();
+    let before = listings();
     assert_eq!(
         github_delivery(&w, "installation_repositories", &delivery(), &removed, None).await,
         StatusCode::ACCEPTED
     );
+    assert_eq!(listings(), before + 1, "one listing for the delivery");
     assert_eq!(
         w.ok(&t.lead, "GET", &repos, None, StatusCode::OK)
             .await
             .as_array()
             .unwrap()
             .len(),
-        1,
-        "GitHub still has it"
+        2,
+        "GitHub still has them"
     );
-    w.github
-        .repositories
-        .lock()
-        .unwrap()
-        .remove(&(installation, repository));
+    for r in [repository, extra] {
+        w.github.repositories.lock().unwrap().remove(&(installation, r));
+    }
     assert_eq!(
         github_delivery(&w, "installation_repositories", &delivery(), &removed, None).await,
         StatusCode::ACCEPTED
     );
+    assert_eq!(listings(), before + 2);
     assert_eq!(w.ok(&t.lead, "GET", &repos, None, StatusCode::OK).await, json!([]));
+    // Nothing of ours is linked any more: a delivery naming them asks GitHub nothing.
+    assert_eq!(
+        github_delivery(&w, "installation_repositories", &delivery(), &removed, None).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(listings(), before + 2);
 
     // An installation deleted is unclaimed once GitHub confirms it, with every repository of it.
     let again_repo = github_id();
@@ -4194,6 +4217,47 @@ async fn a_slack_workspace_links_a_channel_and_an_uninstall_forgets_it() {
         )
         .await;
     assert_eq!(body["error"], "invalid_channel");
+    // A channel the bot isn't in is listed as such and can't be linked, since Slack would refuse
+    // every post there; once the bot is invited, it links.
+    let outside = format!("C{}", github_id());
+    w.slack.channels.lock().unwrap().push(Channel {
+        id: ChannelId::new(&outside).unwrap(),
+        name: "outside".into(),
+        is_member: false,
+    });
+    let channels = w.ok(&t.lead, "GET", "/v1/slack/channels", None, StatusCode::OK).await;
+    let listed = channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == json!(outside))
+        .cloned();
+    assert_eq!(listed.map(|c| c["is_member"].clone()), Some(json!(false)));
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &slack, Some(json!({"channel_id": outside})))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("bot_not_in_channel"))
+    );
+    assert_eq!(
+        w.ok(&t.engineer, "GET", &slack, None, StatusCode::OK).await["channel_id"],
+        json!(t.record("{channel}")),
+        "the link is unchanged"
+    );
+    for c in w.slack.channels.lock().unwrap().iter_mut() {
+        c.is_member |= c.id.as_str() == outside;
+    }
+    w.ok(
+        &t.lead,
+        "PUT",
+        &slack,
+        Some(json!({"channel_id": outside})),
+        StatusCode::OK,
+    )
+    .await;
+    let back = json!({"channel_id": t.record("{channel}")});
+    w.ok(&t.lead, "PUT", &slack, Some(back), StatusCode::OK).await;
     let again = json!({"channel_id": t.record("{channel}")});
     assert_eq!(
         w.status(&t.engineer, "PUT", &slack, Some(again)).await,
@@ -4223,6 +4287,57 @@ async fn a_slack_workspace_links_a_channel_and_an_uninstall_forgets_it() {
         .call(Some(&t.admin.token), "POST", "/v1/slack/installation", Some(claim))
         .await;
     assert_eq!(body["error"], "invalid_state");
+    // A workspace is one organisation's: another's install of it gets 409 and stores no token.
+    let theirs_arn = FakeSecrets::arn(&other.org);
+    let token_of = |arn: &str| {
+        w.secrets
+            .secrets
+            .lock()
+            .unwrap()
+            .get(arn)
+            .map(|t| t.expose().to_owned())
+    };
+    let before = token_of(&theirs_arn);
+    let started = w
+        .ok(&other.admin, "POST", "/v1/slack/install", None, StatusCode::OK)
+        .await;
+    let code = new_id("slc");
+    w.slack.codes.lock().unwrap().insert(
+        code.clone(),
+        (
+            TeamId::new(&slack_team(&org)).unwrap(),
+            BotToken::new("xoxb-taken").unwrap(),
+        ),
+    );
+    let claim = json!({"code": code, "state": state_of(started["url"].as_str().unwrap())});
+    let (status, body) = w
+        .call(Some(&other.admin.token), "POST", "/v1/slack/installation", Some(claim))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_slack_team_claimed"))
+    );
+    assert_eq!(token_of(&theirs_arn), before, "their own token is untouched");
+    assert!(
+        w.secrets
+            .secrets
+            .lock()
+            .unwrap()
+            .values()
+            .all(|t| t.expose() != "xoxb-taken"),
+        "the claimed team's token is stored nowhere"
+    );
+    assert_eq!(
+        w.ok(&other.lead, "GET", "/v1/slack/installation", None, StatusCode::OK)
+            .await["team_id"],
+        json!(slack_team(&other.org))
+    );
+    assert_eq!(
+        w.ok(&t.lead, "GET", "/v1/slack/installation", None, StatusCode::OK)
+            .await["team_id"],
+        json!(slack_team(&org)),
+        "the claim stays put"
+    );
 
     // Slack's events: signed and recent only.
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
