@@ -230,8 +230,9 @@ export interface paths {
          * The company's records as one JSON document: the company, its stakeholders, systems and
          *     documents (metadata), and each project with its scope, access requests, tasks, decisions and
          *     weekly updates; and the threads (with comments) and meeting notes of the company and of each
-         *     project. What the engine derives from events (activity, suggestions) and the canvases are left
-         *     out.
+         *     project; the company's Slack channel and each project's GitHub repositories. What the engine
+         *     derives from events (activity, suggestions), the canvases, and what grants access (share links,
+         *     installation claims, tokens) are left out.
          */
         get: operations["export_company"];
         put?: never;
@@ -1666,8 +1667,12 @@ export interface components {
         };
         CompanySlackOut: {
             channel_id: string;
+            /** @description The channel's name as Slack had it when linked. */
+            channel_name: string;
             linked_at: string;
             linked_by: string;
+            /** @description The organisation's Slack workspace. */
+            team_id: string;
         };
         /** @description A company in the caller's list: the company, the caller's role and its projects. */
         CompanySummaryOut: components["schemas"]["CompanyOut"] & {
@@ -1747,6 +1752,7 @@ export interface components {
             exported_at: string;
             meeting_notes: components["schemas"]["MeetingNoteOut"][];
             projects: components["schemas"]["ProjectExport"][];
+            slack_channel?: components["schemas"]["CompanySlackOut"] | null;
             stakeholders: components["schemas"]["StakeholderOut"][];
             systems: components["schemas"]["SystemOut"][];
             /** @description The company's own threads, each with its comments, and meeting notes. */
@@ -1862,6 +1868,8 @@ export interface components {
         ProjectExport: {
             access_requests: components["schemas"]["AccessRequestOut"][];
             decisions: components["schemas"]["DecisionOut"][];
+            /** @description The GitHub repositories linked to the project. */
+            github_repositories: components["schemas"]["GitHubRepositoryOut"][];
             meeting_notes: components["schemas"]["MeetingNoteOut"][];
             project: components["schemas"]["ProjectOut"];
             scope: components["schemas"]["ScopeOut"];

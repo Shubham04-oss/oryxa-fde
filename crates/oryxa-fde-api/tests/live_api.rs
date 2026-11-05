@@ -3379,24 +3379,24 @@ async fn an_export_holds_its_own_companys_records_only_and_needs_manage() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["project"]["id"], json!(a.project));
     // Every record but the organisation's security answers, the share links, which grant access
-    // rather than record the work, the GitHub and Slack links, which connect outside systems for the
-    // same reason, the suggestions the engine derives from events, and the canvas.
-    let left_out = [
-        "{answer}",
-        "{link}",
-        "{repository}",
-        "{installation}",
-        "{channel}",
-        "{kind}",
-        "{shape}",
-        "{version}",
-    ];
+    // rather than record the work, the suggestions the engine derives from events, and the canvas.
+    // The GitHub and Slack links describe the work, so they are in: each project's repositories
+    // (with their installation) and the company's channel.
+    let left_out = ["{answer}", "{link}", "{kind}", "{shape}", "{version}"];
     for (placeholder, id) in &a.records {
         if !left_out.contains(placeholder) {
             assert!(text.contains(id.as_str()), "{placeholder} {id} missing");
         }
     }
     assert!(!text.contains(a.record("{link}")));
+    assert_eq!(projects[0]["github_repositories"][0]["full_name"], "alpha/support-rag");
+    let channel = &export["slack_channel"];
+    assert_eq!(
+        (&channel["channel_id"], &channel["channel_name"], &channel["team_id"]),
+        (&json!(a.record("{channel}")), &json!("alpha"), &json!(slack_team(&org)))
+    );
+    // What grants access is not: the Slack token, nor where it is kept.
+    assert!(!text.contains(&FakeSecrets::arn(&org)) && !text.contains("xoxb-"));
     assert!(!text.contains(&b.company) && !text.contains(&b.project));
     // Every company's fixture shares its week, suggestion kind, shape and canvas version: those
     // name no record of B's.
@@ -4199,7 +4199,10 @@ async fn a_slack_workspace_links_a_channel_and_an_uninstall_forgets_it() {
         "the token is in Secrets Manager"
     );
     let linked = w.ok(&t.engineer, "GET", &slack, None, StatusCode::OK).await;
-    assert_eq!(linked["channel_id"], json!(t.record("{channel}")));
+    assert_eq!(
+        (&linked["channel_id"], &linked["channel_name"], &linked["team_id"]),
+        (&json!(t.record("{channel}")), &json!("alpha"), &json!(slack_team(&org)))
+    );
     let channels = w.ok(&t.lead, "GET", "/v1/slack/channels", None, StatusCode::OK).await;
     assert!(
         channels

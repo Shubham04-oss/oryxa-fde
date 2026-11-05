@@ -59,13 +59,15 @@ create table slack_installations (
     installed_at timestamptz not null default now()
 );
 
--- The channel a company's approved updates are posted to. Uninstalling removes it.
+-- The channel a company's approved updates are posted to, and its name as Slack had it when linked
+-- (for the company's export). Uninstalling removes it.
 create table slack_channels (
-    tenant_id  text not null,
-    company_id text not null,
-    channel_id text not null check (channel_id ~ '^[A-Z0-9]{1,32}$'),
-    linked_by  text not null,
-    linked_at  timestamptz not null default now(),
+    tenant_id    text not null,
+    company_id   text not null,
+    channel_id   text not null check (channel_id ~ '^[A-Z0-9]{1,32}$'),
+    channel_name text not null check (char_length(channel_name) between 1 and 80),
+    linked_by    text not null,
+    linked_at    timestamptz not null default now(),
     primary key (tenant_id, company_id),
     foreign key (tenant_id) references slack_installations (tenant_id) on delete cascade,
     foreign key (tenant_id, company_id) references companies (tenant_id, company_id)
@@ -127,6 +129,6 @@ grant select, insert on install_states to oryxa_fde_app;
 grant select, insert, delete on github_installations, github_repositories, github_deliveries to oryxa_fde_app;
 grant select, insert, delete on slack_installations, slack_channels to oryxa_fde_app;
 grant update (team_id, secret_arn, installed_by, installed_at) on slack_installations to oryxa_fde_app;
-grant update (channel_id, linked_by, linked_at) on slack_channels to oryxa_fde_app;
+grant update (channel_id, channel_name, linked_by, linked_at) on slack_channels to oryxa_fde_app;
 grant select, insert, delete on slack_posts to oryxa_fde_app;
 grant update (posted_at) on slack_posts to oryxa_fde_app;

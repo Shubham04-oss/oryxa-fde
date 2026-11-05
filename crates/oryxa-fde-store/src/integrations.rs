@@ -113,6 +113,10 @@ pub struct SlackInstallation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackChannel {
     pub channel: SlackChannelId,
+    /// As Slack had it when linked.
+    pub name: String,
+    /// The organisation's workspace.
+    pub team: SlackTeamId,
     pub linked_by: UserId,
     pub linked_at: OffsetDateTime,
 }
@@ -549,7 +553,9 @@ impl ProjectTx {
 impl CompanyTx {
     pub async fn slack_channel(&mut self) -> Result<Option<SlackChannel>, StoreError> {
         sqlx::query(
-            "select channel_id, linked_by, linked_at from slack_channels where tenant_id = $1 and company_id = $2",
+            "select c.channel_id, c.channel_name, i.team_id, c.linked_by, c.linked_at
+             from slack_channels c join slack_installations i on i.tenant_id = c.tenant_id
+             where c.tenant_id = $1 and c.company_id = $2",
         )
         .bind(self.scope.tenant.as_str())
         .bind(self.scope.company.as_str())
@@ -558,6 +564,8 @@ impl CompanyTx {
         .map(|r| {
             Ok(SlackChannel {
                 channel: SlackChannelId::new(r.try_get("channel_id")?).ok_or(StoreError::Corrupt("slack channel"))?,
+                name: r.try_get("channel_name")?,
+                team: SlackTeamId::new(r.try_get("team_id")?).ok_or(StoreError::Corrupt("slack team"))?,
                 linked_by: user(&r, "linked_by")?,
                 linked_at: r.try_get("linked_at")?,
             })
@@ -570,8 +578,12 @@ impl CompanyTx {
     pub async fn set_slack_channel(
         &mut self,
         channel: &SlackChannelId,
+        name: &str,
         by: &Actor,
     ) -> Result<Option<SlackChannel>, StoreError> {
+        if !(1..=80).contains(&name.chars().count()) {
+            return Err(StoreError::Missing("channel_name"));
+        }
         let s = self.scope.clone();
         let installed: bool =
             sqlx::query_scalar("select exists (select 1 from slack_installations where tenant_id = $1)")
@@ -582,14 +594,16 @@ impl CompanyTx {
             return Err(StoreError::Missing("slack"));
         }
         let n = sqlx::query(
-            "insert into slack_channels (tenant_id, company_id, channel_id, linked_by)
-             select $1, $2, $3, $4 where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
+            "insert into slack_channels (tenant_id, company_id, channel_id, channel_name, linked_by)
+             select $1, $2, $3, $4, $5 where exists (select 1 from companies where tenant_id = $1 and company_id = $2)
              on conflict (tenant_id, company_id) do update
-                 set channel_id = excluded.channel_id, linked_by = excluded.linked_by, linked_at = now()",
+                 set channel_id = excluded.channel_id, channel_name = excluded.channel_name,
+                     linked_by = excluded.linked_by, linked_at = now()",
         )
         .bind(s.tenant.as_str())
         .bind(s.company.as_str())
         .bind(channel.as_str())
+        .bind(name)
         .bind(by.user.as_str())
         .execute(&mut *self.tx)
         .await?

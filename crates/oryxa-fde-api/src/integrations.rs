@@ -246,7 +246,11 @@ pub struct SlackChannelBody {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CompanySlackOut {
+    /// The organisation's Slack workspace.
+    pub team_id: String,
     pub channel_id: String,
+    /// The channel's name as Slack had it when linked.
+    pub channel_name: String,
     pub linked_by: String,
     pub linked_at: String,
 }
@@ -254,7 +258,9 @@ pub struct CompanySlackOut {
 impl From<SlackChannel> for CompanySlackOut {
     fn from(c: SlackChannel) -> Self {
         Self {
+            team_id: c.team.as_str().to_owned(),
             channel_id: c.channel.as_str().to_owned(),
+            channel_name: c.name,
             linked_by: c.linked_by.to_string(),
             linked_at: ts(c.linked_at),
         }
@@ -745,7 +751,7 @@ pub(crate) async fn link_company_slack(
     let channel = SlackChannelId::new(wanted.as_str()).ok_or(ApiError::Invalid("channel"))?;
     let mut tx = app.store.company(&s).await?;
     let linked = tx
-        .set_slack_channel(&channel, &who.actor())
+        .set_slack_channel(&channel, &found.name, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;

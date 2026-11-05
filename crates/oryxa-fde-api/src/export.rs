@@ -1,7 +1,8 @@
 //! A company's records as one JSON document, for the customer to keep. Needs `manage` on the
 //! company. Read in one read-only transaction of that company's scope, so it is one moment of it
 //! and holds nothing of another company. Documents are listed by their metadata; their bytes stay
-//! in S3.
+//! in S3. The GitHub and Slack links describe the work and are in it; what grants access (share
+//! links, installation claims, install states, webhook deliveries, Slack tokens) is not.
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::authz::company;
 use crate::companies::CompanyOut;
 use crate::documents::DocumentOut;
 use crate::engine::UpdateOut;
+use crate::integrations::{CompanySlackOut, GitHubRepositoryOut};
 use crate::lifecycle::{AccessRequestOut, DecisionOut, ScopeOut, TaskOut};
 use crate::meetings::MeetingNoteOut;
 use crate::projects::ProjectOut;
@@ -34,6 +36,8 @@ pub struct ExportOut {
     /// The company's own threads, each with its comments, and meeting notes.
     pub threads: Vec<ThreadWithComments>,
     pub meeting_notes: Vec<MeetingNoteOut>,
+    /// The channel the company's approved updates are posted to, if linked.
+    pub slack_channel: Option<CompanySlackOut>,
     pub projects: Vec<ProjectExport>,
 }
 
@@ -48,6 +52,8 @@ pub struct ProjectExport {
     pub updates: Vec<UpdateOut>,
     pub threads: Vec<ThreadWithComments>,
     pub meeting_notes: Vec<MeetingNoteOut>,
+    /// The GitHub repositories linked to the project.
+    pub github_repositories: Vec<GitHubRepositoryOut>,
 }
 
 /// A place's threads, each with its comments, and its meeting notes.
@@ -68,8 +74,9 @@ async fn planning(tx: &mut PlanTx) -> Result<(Vec<ThreadWithComments>, Vec<Meeti
 /// The company's records as one JSON document: the company, its stakeholders, systems and
 /// documents (metadata), and each project with its scope, access requests, tasks, decisions and
 /// weekly updates; and the threads (with comments) and meeting notes of the company and of each
-/// project. What the engine derives from events (activity, suggestions) and the canvases are left
-/// out.
+/// project; the company's Slack channel and each project's GitHub repositories. What the engine
+/// derives from events (activity, suggestions), the canvases, and what grants access (share links,
+/// installation claims, tokens) are left out.
 #[utoipa::path(get, operation_id = "export_company", path = "/v1/companies/{company}/export", tag = "companies",
     params(("company" = String, Path, description = "Company id")),
     responses((status = 200, body = ExportOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
@@ -92,6 +99,7 @@ pub(crate) async fn export(
     let stakeholders = tx.stakeholders().await?;
     let systems = tx.systems().await?;
     let documents = tx.documents().await?;
+    let slack_channel = tx.slack_channel().await?;
     let mut place = PlanTx::from(tx);
     let (threads, meeting_notes) = planning(&mut place).await?;
     let mut tx = place.into_company();
@@ -103,6 +111,7 @@ pub(crate) async fn export(
         let tasks = ptx.tasks().await?;
         let decisions = ptx.decisions().await?;
         let updates = ptx.update_drafts().await?;
+        let github_repositories = ptx.github_repositories().await?;
         let mut place = PlanTx::from(ptx);
         let (project_threads, project_notes) = planning(&mut place).await?;
         tx = place.into_company();
@@ -115,6 +124,7 @@ pub(crate) async fn export(
             updates: updates.into_iter().map(Into::into).collect(),
             threads: project_threads,
             meeting_notes: project_notes,
+            github_repositories: github_repositories.into_iter().map(Into::into).collect(),
         });
     }
     tx.commit().await?;
@@ -126,6 +136,7 @@ pub(crate) async fn export(
         documents: documents.into_iter().map(Into::into).collect(),
         threads,
         meeting_notes,
+        slack_channel: slack_channel.map(Into::into),
         projects,
     }))
 }

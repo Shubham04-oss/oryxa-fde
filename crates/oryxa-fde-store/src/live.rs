@@ -3161,10 +3161,18 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
         .unwrap();
     org2.commit().await.unwrap();
     let mut ca = store.company(&pa.company).await.unwrap();
-    ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), &by)
+    // A channel needs its name as Slack has it; the link reads back with the workspace's team.
+    assert!(matches!(
+        ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), "", &by)
+            .await,
+        Err(StoreError::Missing("channel_name"))
+    ));
+    let linked = ca
+        .set_slack_channel(&SlackChannelId::new("C0001").unwrap(), "acme-rollout", &by)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!((linked.name.as_str(), &linked.team), ("acme-rollout", &team1));
     ca.commit().await.unwrap();
 
     // Deliveries: once by delivery id, once by body.
@@ -3287,7 +3295,8 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
     let mut ca = store.company(&pa.company).await.unwrap();
     assert!(ca.slack_channel().await.unwrap().is_none());
     assert!(matches!(
-        ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), &by).await,
+        ca.set_slack_channel(&SlackChannelId::new("C0001").unwrap(), "acme-rollout", &by)
+            .await,
         Err(StoreError::Missing("slack"))
     ));
 }

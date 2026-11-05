@@ -1042,7 +1042,7 @@ async fn an_approved_update_is_posted_to_its_companys_channel_once() {
     org.set_slack_installation(&team, &arn, &actor()).await.unwrap();
     org.commit().await.unwrap();
     let mut tx = store.company(&p.company).await.unwrap();
-    tx.set_slack_channel(&SlackChannelId::new("C0ACME").unwrap(), &actor())
+    tx.set_slack_channel(&SlackChannelId::new("C0ACME").unwrap(), "acme-updates", &actor())
         .await
         .unwrap()
         .unwrap();

@@ -970,7 +970,7 @@
         "tags": [
           "companies"
         ],
-        "summary": "The company's records as one JSON document: the company, its stakeholders, systems and\ndocuments (metadata), and each project with its scope, access requests, tasks, decisions and\nweekly updates; and the threads (with comments) and meeting notes of the company and of each\nproject. What the engine derives from events (activity, suggestions) and the canvases are left\nout.",
+        "summary": "The company's records as one JSON document: the company, its stakeholders, systems and\ndocuments (metadata), and each project with its scope, access requests, tasks, decisions and\nweekly updates; and the threads (with comments) and meeting notes of the company and of each\nproject; the company's Slack channel and each project's GitHub repositories. What the engine\nderives from events (activity, suggestions), the canvases, and what grants access (share links,\ninstallation claims, tokens) are left out.",
         "operationId": "export_company",
         "parameters": [
           {
@@ -8632,7 +8632,9 @@
       "CompanySlackOut": {
         "type": "object",
         "required": [
+          "team_id",
           "channel_id",
+          "channel_name",
           "linked_by",
           "linked_at"
         ],
@@ -8640,11 +8642,19 @@
           "channel_id": {
             "type": "string"
           },
+          "channel_name": {
+            "type": "string",
+            "description": "The channel's name as Slack had it when linked."
+          },
           "linked_at": {
             "type": "string"
           },
           "linked_by": {
             "type": "string"
+          },
+          "team_id": {
+            "type": "string",
+            "description": "The organisation's Slack workspace."
           }
         }
       },
@@ -8937,6 +8947,17 @@
             "items": {
               "$ref": "#/components/schemas/ProjectExport"
             }
+          },
+          "slack_channel": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CompanySlackOut",
+                "description": "The channel the company's approved updates are posted to, if linked."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "stakeholders": {
             "type": "array",
@@ -9325,7 +9346,8 @@
           "decisions",
           "updates",
           "threads",
-          "meeting_notes"
+          "meeting_notes",
+          "github_repositories"
         ],
         "properties": {
           "access_requests": {
@@ -9339,6 +9361,13 @@
             "items": {
               "$ref": "#/components/schemas/DecisionOut"
             }
+          },
+          "github_repositories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitHubRepositoryOut"
+            },
+            "description": "The GitHub repositories linked to the project."
           },
           "meeting_notes": {
             "type": "array",
