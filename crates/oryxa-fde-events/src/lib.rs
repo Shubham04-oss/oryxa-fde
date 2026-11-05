@@ -105,6 +105,14 @@ pub struct EvalRunFinished {
     pub failed: u32,
 }
 
+/// A pull request was opened in the project's repository: its number only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestOpened {
+    company: CompanyId,
+    project: ProjectId,
+    pub number: u32,
+}
+
 /// A pull request of the project's repository was merged: its number only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestMerged {
@@ -154,6 +162,7 @@ project_scoped!(
     AccessRequestStatusChanged,
     AgentRunFinished,
     EvalRunFinished,
+    PullRequestOpened,
     PullRequestMerged
 );
 
@@ -239,6 +248,16 @@ impl EvalRunFinished {
     }
 }
 
+impl PullRequestOpened {
+    pub fn new(s: &ProjectScope, number: u32) -> Self {
+        Self {
+            company: s.company.company.clone(),
+            project: s.project.clone(),
+            number,
+        }
+    }
+}
+
 impl PullRequestMerged {
     pub fn new(s: &ProjectScope, number: u32) -> Self {
         Self {
@@ -272,6 +291,7 @@ events! {
     DocumentUploaded => "fde.document.uploaded.v1", ordered by company;
     AgentRunFinished => "fde.agent-run.finished.v1", ordered by project;
     EvalRunFinished => "fde.eval-run.finished.v1", ordered by project;
+    PullRequestOpened => "fde.pull-request.opened.v1", ordered by project;
     PullRequestMerged => "fde.pull-request.merged.v1", ordered by project;
 }
 
@@ -349,6 +369,7 @@ mod tests {
                 RunOutcome::Succeeded,
             )),
             sample(EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 41, 2)),
+            sample(PullRequestOpened::new(&p, 127)),
             sample(PullRequestMerged::new(&p, 128)),
         ]
     }
@@ -386,6 +407,7 @@ mod tests {
             EvalRunFinished::new(&p, EvalRunId::new("evr_1").unwrap(), 9, 1),
             by_project.clone(),
         );
+        round_trip(PullRequestOpened::new(&p, 6), by_project.clone());
         round_trip(PullRequestMerged::new(&p, 7), by_project);
     }
 
