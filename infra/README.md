@@ -15,7 +15,7 @@ Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
   -> internal ALB -> oryxa-fde-api on Fargate
        -> RDS PostgreSQL 17 + pgvector    (IAM database auth, TLS, private)
        -> SpiceDB on Fargate              (spicedb.oryxa-fde-dev.internal:50051, Cloud Map, private)
-       -> S3 data bucket                  (KMS, tenants/<tenant>/companies/<company>/ prefix per company)
+       -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company)
        -> EventBridge v2 bus oryxa-fde-dev -> per-consumer SQS FIFO + DLQ + undelivered queue
 Everything outbound (AWS APIs, image pulls, WorkOS, the tunnel) leaves through one fck-nat instance.
 CloudTrail logs management events and object access on the data bucket.
@@ -241,7 +241,7 @@ What the API's task role may do, from what the code calls:
 | --- | --- | --- |
 | `rds-db:connect` as `oryxa_fde_api` | the store (`iam.rs`) | granted |
 | `events:PutEvents` on the bus | the outbox relay (`oryxa-events/src/lib.rs:234`) | granted |
-| `s3:GetObject`, `s3:PutObject` on `tenants/*/companies/*` | documents (`context/src/blob.rs:65`, `:81`; the code never deletes or lists) | granted; delete and list removed |
+| `s3:GetObject`, `s3:PutObject` on `*/*/documents/*` and `*/*/canvas/*` | documents and canvas snapshots at `<tenant>/<company>/documents/<id>` and `.../canvas/<id>` (`context/src/blob.rs:31`, `:37`, `:65`, `:81`; the code never deletes or lists) | granted; delete and list removed |
 | `kms:Decrypt`, `kms:GenerateDataKey`, only through S3 | the bucket's default encryption | granted |
 | `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
 | `secretsmanager:CreateSecret`, `TagResource`, `PutSecretValue`, `GetSecretValue`, `DeleteSecret` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt`, `kms:GenerateDataKey` only through Secrets Manager | Slack bot tokens (`integrations/src/secrets.rs:87`, `:99`, `:117`, `:134`) | only with `slack_client_id` |
@@ -491,7 +491,7 @@ These could not be checked without an account. Each one is flagged at the place 
 - Tasks may reach any host on 443 through the NAT. The application's outbound allowlist
   (CLAUDE.md) is the control; a network firewall is a prod decision.
 - **No per-company KMS keys in P0** (ADR 0003, amendment of 4 November). The bucket encrypts with
-  the environment key, and the API's role is limited to `tenants/*/companies/*`. A provisioning step
+  the environment key, and the API's role is limited to company documents and canvas snapshots. A provisioning step
   adds a key per company before the first real customer data (P1).
 - ECR lives in the dev stack until a second environment needs it.
 
@@ -513,7 +513,7 @@ These could not be checked without an account. Each one is flagged at the place 
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - It serves `GET /healthz` without auth (it does), keeps files under
-    `tenants/<tenant>/companies/<company>/`, and writes nothing to its root filesystem, which is
+    `<tenant>/<company>/` (`oryxa-fde-context/src/blob.rs`), and writes nothing to its root filesystem, which is
     read-only. Infra builds the image (`deploy-api`) from the `oryxa-fde-api` package's two binaries:
     `oryxa-fde-api` is the entrypoint, and the migrate task runs `/usr/local/bin/oryxa-fde-ops migrate`.
 - **Web (`fde-web/`, `realtime/`).** `deploy-workers` adds the `API` binding (`env.API`, the Workers

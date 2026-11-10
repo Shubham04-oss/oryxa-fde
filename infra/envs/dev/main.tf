@@ -184,7 +184,7 @@ resource "aws_service_discovery_service" "spicedb" {
 
 # ---------------------------------------------------------------- data
 
-# One prefix per company: tenants/<tenant id>/companies/<company id>/. The API's role can touch
+# One prefix per company: <tenant id>/<company id>/ (oryxa-fde-context blob.rs). The API's role can touch
 # objects under that shape only; which company a request may reach is the API's CompanyScope check.
 module "data_bucket" {
   source        = "../../modules/s3"
@@ -284,11 +284,11 @@ data "aws_iam_policy_document" "api" {
     resources = [local.db_user_arn["api"]]
   }
 
-  # What the code does with files is put and get (oryxa-fde-context blob.rs): no delete, no listing.
+  # The code puts and gets documents and canvas snapshots at the keys blob.rs builds: no delete, no listing.
   statement {
     sid       = "CompanyFiles"
     actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${module.data_bucket.arn}/tenants/*/companies/*"]
+    resources = ["${module.data_bucket.arn}/*/*/documents/*", "${module.data_bucket.arn}/*/*/canvas/*"]
   }
 
   # Document search embeds its query, and ingestion its text, on this one model.

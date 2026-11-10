@@ -120,6 +120,12 @@ run "api_task_with_every_feature_off" {
     error_message = "files are got and put, embeddings invoked: nothing else (the code never deletes or lists)"
   }
   assert {
+    condition = toset(flatten([
+      for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "CompanyFiles"
+    ])) == toset(["${module.data_bucket.arn}/*/*/documents/*", "${module.data_bucket.arn}/*/*/canvas/*"])
+    error_message = "the API's files are at the keys oryxa-fde-context blob.rs builds: <tenant>/<company>/documents and canvas"
+  }
+  assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"
     ]) == ["arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0"]
