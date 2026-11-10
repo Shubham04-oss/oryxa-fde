@@ -214,6 +214,36 @@ check "C does not approve" has "waiting for an approval"
 check "C cancels a run it stops on" logged "POST /api/v1/companies/cmp_1/projects/prj_1/agent-runs/run_1/cancel"
 unset SMOKE_AGENT_REPO
 
+# --- stage K -------------------------------------------------------------------------------------------------
+run_case - k
+check "K skips without SMOKE_COMPANY_KEYS and SMOKE_WORKERS" has "SKIP [k] company keys"
+check "K skipping exits 0" exits 0
+check "K skip makes no company" not_logged "POST /api/v1/companies"
+export SMOKE_WORKERS=1 SMOKE_COMPANY_KEYS=1 SMOKE_KEY_TIMEOUT=10
+run_case - k
+check "K passes" exits 0
+check "K reports k=passed" has "k=passed"
+check "K starts with a company that has no key" has "the new company has no key yet"
+check "K names the command and the ids to run" has "company-key.sh provision <company-keys.json> o1 cmp_1"
+check "K waits for the key" has "the company has a key"
+check "K ingests under the key" has "the document is ingested"
+check "K asks for the key more than once" logged_times "GET /api/v1/companies/cmp_1/key" 3
+check "K without SMOKE_KEYS_REQUIRED uploads once, after the key exists" logged_times "POST /api/v1/companies/cmp_1/documents" 1
+check "K never prints the session" no_secret
+check "K removes its temporary files" no_temp
+SMOKE_KEYS_REQUIRED=1 run_case keys-required k
+check "K with keys required sees the keyless upload refused" has "an upload without a key is refused (company_key_missing)"
+check "K with keys required still passes once the key exists" exits 0
+check "K with keys required uploads twice: refused, then stored" logged_times "POST /api/v1/companies/cmp_1/documents" 2
+SMOKE_KEYS_REQUIRED=1 run_case keys-required,already-keyed k
+check "K stops if a new company already has a key" has "already has a key"
+check "K already-keyed exits 1" exits 1
+SMOKE_KEY_TIMEOUT=1 run_case key-never k
+check "K times out when no key is ever provisioned" has "still none after 1s"
+check "K timeout exits 1" exits 1
+check "K timeout reports k=FAILED" has "result: k=FAILED"
+unset SMOKE_WORKERS SMOKE_COMPANY_KEYS SMOKE_KEY_TIMEOUT
+
 # --- all stages ----------------------------------------------------------------------------------------------
 SMOKE_WORKERS=1 SMOKE_AGENT_REPO=oryxa-sample/hello run_case - all
 check "all stages pass" exits 0

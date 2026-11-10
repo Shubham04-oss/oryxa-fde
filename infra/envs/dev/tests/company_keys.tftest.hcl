@@ -61,6 +61,27 @@ run "a_company_key_is_usable_only_through_s3_by_the_serving_roles_for_its_own_pr
     error_message = "use is only Decrypt and GenerateDataKey, by the named roles, through S3, under <tenant>/<company>/"
   }
 
+  # "Has this company a key?" is a DescribeKey by alias (#183). KMS authorises it against the key, whose own policy must
+  # allow the caller (an IAM policy naming the alias ARN does not reach the key): the serving roles, DescribeKey and
+  # nothing else, so the API's check works for every key made by the script, and no reader (the ingest worker) can describe.
+  assert {
+    condition = jsonencode([for s in output.config.key_policy.Statement : s if s.Sid == "ServingRolesCheckTheKeyExists"][0]) == jsonencode({
+      Sid       = "ServingRolesCheckTheKeyExists"
+      Effect    = "Allow"
+      Principal = { AWS = ["arn:aws:iam::111122223333:role/oryxa-fde-dev-api"] }
+      Action    = ["kms:DescribeKey"]
+      Resource  = ["*"]
+    })
+    error_message = "the API's role may DescribeKey on every company key through the key policy, and only that"
+  }
+  assert {
+    condition = alltrue([
+      for s in output.config.key_policy.Statement :
+      !contains(try(s.Action, []), "kms:DescribeKey") || s.Effect == "Allow" && !contains(s.Principal.AWS, "*")
+    ]) && length([for s in output.config.key_policy.Statement : s if s.Effect == "Allow" && contains(s.Action, "kms:DescribeKey")]) == 2
+    error_message = "DescribeKey is allowed to the serving roles and the offboarding role, and to no one else (the account root's Describe* is administration)"
+  }
+
   # The account administers the key but cannot use it, delete it or disable it, even through an IAM policy.
   assert {
     condition = jsonencode([for s in output.config.key_policy.Statement : s.Action if s.Sid == "AccountAdministersTheKeyButCannotUseIt"][0]) == jsonencode([

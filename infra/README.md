@@ -88,7 +88,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `company_key_operator_arns` | required | IAM users or roles of the account that may assume the company-key provisioning and offboarding roles (Company keys); at least one. To start, the founder's admin role only; no MFA condition for now |
 | `company_key_reader_role_arns` | `[]` | Roles other than the ingest worker's that only read company files. Not the MCP server: none of its tools reads a file, so its role has no S3 or KMS permission and is not a reader (oryxa-fde-mcp). The ingest worker's task role is always a reader, added by `envs/dev`, and listing it here is refused. Each reader is named in every company key's policy, so adding one means `company-key.sh sync` per company with a key |
 | `company_key_rotation` | `false` | Yearly automatic rotation of each company key. Off for now (Company keys, Cost): each rotation adds a billed key version, for little gain on S3 object data. Switch it on per environment; `provision` then switches it on for each key it checks |
-| `require_company_keys` | `false` | `false`: a company file written without naming a key lands under the environment key (sample data only). `true`: S3 refuses any write that does not name a company key, and the API's role loses `kms:GenerateDataKey` on the environment key. Set it before the first real customer data and after the API names company keys on write |
+| `require_company_keys` | `false` | `false`: a company file written without naming a key lands under the environment key (sample data only). `true`: S3 refuses any write that does not name a company key, and the API's role loses `kms:GenerateDataKey` on the environment key. The API has named company keys on write since #176 and both it and the ingest worker carry `COMPANY_KEY_ALIAS_ARN_PREFIX` (#183). Set it before the first real customer data, once the checks in Company keys, Before `require_company_keys` is switched on, pass |
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
 | `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
@@ -206,12 +206,12 @@ startup) needs this once, before the first deploy of the non-owner API (#39):
 ## The environment contract
 
 Read from the code, not from memory (each `Read at` is `file:line` in `crates/`; every table was checked against
-`main` at `8f16f6a`), and compared with what `envs/dev` sets. `tests/plan.tftest.hcl`
+`main` at `8f16f6a`; the `oryxa-fde-mcp` table and every `COMPANY_KEY_ALIAS_ARN_PREFIX` row again at `514d528`), and compared with what `envs/dev` sets. `tests/plan.tftest.hcl`
 reads the tables of `oryxa-fde-api`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle` and `oryxa-fde-mcp`: every `always` variable of the
 binary must be on its task definition, every variable the task definition sets must be in the table, and a secret
 must be injected from Secrets Manager, never set as plain config. Add or change a variable in the code, and the table and `envs/dev` change in the same PR.
-The line numbers are not tested: when a PR moves code a table points at, it refreshes them. Two things are also read from
-the source as text (`tests/code`): the `healthcheck` row of the `oryxa-fde-ops` table must give the command the API
+The line numbers are not tested: when a PR moves code a table points at, it refreshes them. Three things are also read from
+the source as text (`tests/code`): the shape `COMPANY_KEY_ALIAS_ARN_PREFIX` must have, built from the literals of `CompanyKeyPrefix::parse` in `context/src/keys.rs` and checked against the value on the API's and the ingest worker's tasks, with its Region equal to theirs; the `healthcheck` row of the `oryxa-fde-ops` table must give the command the API
 container's health check runs, and the `SHUTDOWN_GRACE_SECONDS` row's default and range must be the code's (`health.rs`,
 `shutdown.rs`), with the grace on the task inside that range and the stop timeouts derived from it. This couples the infra tests to
 the Rust source on purpose: a Rust PR that renames or reshapes those constants (or the Dockerfile's `COPY`) fails
@@ -255,7 +255,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
-| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none: no company key named, every file under the environment key | `context/src/lib.rs:130`, `context/src/keys.rs:40` | not set; output `company_key_alias_arn_prefix` (Company keys). A malformed prefix, or one in another Region than `AWS_REGION`, stops startup |
+| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none: no company key named, every file under the environment key | `context/src/lib.rs:130` (name: `context/src/keys.rs:18`, parsed at `keys.rs:40`, Region compared at `keys.rs:93`) | output `company_key_alias_arn_prefix`, always (Company keys): `arn:<partition>:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/`. A malformed prefix, or one in another Region than `AWS_REGION`, stops startup; `tests/code` reads the parser from the source and checks the value on the task against it |
 | `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:62` | `workos_issuer`; not set when null |
 | `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:75` | not set; add a secret when rotating |
 | `RUST_LOG` | optional | config | `info` | `main.rs:44` | not set |
@@ -296,7 +296,9 @@ What the API's task role may do, from what the code calls:
 | `events:PutEvents` on the bus | the outbox relay (`oryxa-events/src/lib.rs:234`) | granted |
 | `s3:GetObject`, `s3:PutObject` on `*/*/documents/*` and `*/*/canvas/*` | documents and canvas snapshots at `<tenant>/<company>/documents/<id>` and `.../canvas/<id>` (`context/src/blob.rs:31`, `:37`, `:65`, `:81`; the code never deletes or lists) | granted; delete and list removed |
 | `kms:Decrypt`, `kms:GenerateDataKey` on the environment key, only through S3 | the bucket's default encryption; files written before a company has a key | granted; `GenerateDataKey` removed with `require_company_keys` |
-| `kms:Decrypt`, `kms:GenerateDataKey`, `kms:DescribeKey` on each company's key | named in the **key's** policy, not in this role's IAM policy (Company keys): only through S3, only under that company's prefix | granted by the key policy, once the code names the key |
+| `kms:Decrypt`, `kms:GenerateDataKey` on each company's key | named in the **key's** policy, not in this role's IAM policy (Company keys): only through S3, only under that company's prefix | granted by the key policy |
+| `kms:DescribeKey` on each company's key | "has this company a key?": `DescribeKey` on the company's alias (`context/src/keys.rs:178`, `describe`). KMS authorises it against the key, so for a company that has a key it is the **key's** policy that allows it (`ServingRolesCheckTheKeyExists`, the API's role only), with no IAM grant on any key | granted by the key policy |
+| `kms:DescribeKey` on `alias/oryxa-fde-<env>/companies/*` | the same call for a company that has no key. An alias ARN in an IAM `Resource` names the alias and never a key, so this reaches no key at all; AWS's permissions reference lists only "KMS key" as `DescribeKey`'s resource, so by the documentation it grants nothing and is kept as harmless (Company keys, How the API's key check is authorised) | granted (`LookUpCompanyKeyAliases`) |
 | `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
 | `secretsmanager:CreateSecret`, `TagResource`, `PutSecretValue`, `GetSecretValue`, `DeleteSecret` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt`, `kms:GenerateDataKey` only through Secrets Manager | Slack bot tokens (`integrations/src/secrets.rs:87`, `:99`, `:117`, `:134`) | only with `slack_client_id` |
 | Bedrock for `AGENT_MODEL`, `EVAL_JUDGE_MODEL` | not the API: the judge is a `curl` run inside the sandbox (`agent/src/evals.rs:243`), signed by the gateway's outbound handler | not granted; the gateway's AWS identity is the agent stream's follow-up |
@@ -335,7 +337,7 @@ that is missing, or not valid, stops startup.
 | `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
-| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | not set: the worker only reads, and S3 knows each object's key; it is read because the worker builds the same context as the API |
+| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | output `company_key_alias_arn_prefix`, the API's value: the worker only reads, and S3 knows each object's key, so it never names a key or asks KMS (`has_key` has no caller in the worker); it builds the same context as the API, which parses and checks the value at start, so the two tasks carry one value |
 | `RUST_LOG` | optional | config | `info` | `ingest.rs:41` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
 
@@ -346,7 +348,7 @@ What the ingest role may do, from what the code calls. It calls AWS only (S3, SQ
 | `rds-db:connect` as `oryxa_fde_ingest` | the store (`iam.rs`) | granted |
 | `sqs:ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on the `context-ingestion` queue | long poll, delete when handled, extend the message's visibility while a handler runs (`oryxa-fde-events/src/inbox.rs:96`, `:159`, `:173`); never the dead-letter queue (SQS moves messages there) and never a send | granted |
 | `s3:GetObject` on `*/*/documents/*` | the document at `<tenant>/<company>/documents/<id>` (`context/src/blob.rs:31`, `:81`; `context/src/ingest.rs:60`). The worker builds the same blob store as the API but only calls `get`: no put, no canvas, no list, no delete | granted |
-| `kms:Decrypt` only through S3 | reading an object the bucket encrypted; no `GenerateDataKey`, since it never writes | granted on the environment key. A company's key (Company keys) lets it decrypt under that company's prefix, through S3 only: its task role is a reader in every company key's policy (`envs/dev` adds it to `company_key_reader_role_arns` itself, #171). A key made before that role was added needs `company-key.sh sync` for its company once, after the apply that added it |
+| `kms:Decrypt` only through S3 | reading an object the bucket encrypted; no `GenerateDataKey`, since it never writes, and no `DescribeKey`: nothing in the worker asks whether a company has a key, so neither its IAM policy nor the keys' policies grant it (`tests/plan.tftest.hcl` pins both) | granted on the environment key. A company's key (Company keys) lets it decrypt under that company's prefix, through S3 only: its task role is a reader in every company key's policy (`envs/dev` adds it to `company_key_reader_role_arns` itself, #171). A key made before that role was added needs `company-key.sh sync` for its company once, after the apply that added it |
 | `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
 
 ### `oryxa-fde-lifecycle`
@@ -400,17 +402,18 @@ WorkOS bearer token as the API does (`Principal::from_bearer`). A variable that 
 | `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
 | `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
 | `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_mcp`, its own login |
-| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:102` | `aws_region` |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:112` | `aws_region` |
 | `SPICEDB_ENDPOINT` | always | config | none | `mcp.rs:30` | Cloud Map name |
 | `SPICEDB_PRESHARED_KEY` | always | secret | none | `mcp.rs:31` | `shared/spicedb-preshared-key`, the API's |
 | `WORKOS_API_KEY` | always | secret | none | `mcp.rs:35` | `api/workos-api-key`, the API's |
 | `WORKOS_CLIENT_ID` | always | config | none | `mcp.rs:36` | `workos_client_id` |
 | `MCP_ALLOWED_HOSTS` | always | config | none; comma-separated `Host` values, none means the server accepts none that is not loopback | `mcp.rs:41` | `mcp.<domain>` only |
-| `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:103` (`Context::from_env`, `mcp.rs:40`) | the data bucket: the binary needs the name to start, and no tool reads a file |
+| `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:113` (`Context::from_env`, `mcp.rs:40`) | the data bucket: the binary needs the name to start, and no tool reads a file |
 | `LISTEN_ADDR` | optional | config | `0.0.0.0:8081` | `mcp.rs:47` | `127.0.0.1:8081`: the tunnel sidecar is the only client |
-| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
-| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:108` | `embedding_model` |
-| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
+| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
+| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:118` | `embedding_model` |
+| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
+| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | not set: no tool reads or writes a file, and the role has no KMS permission. The binary builds the same context as the API, so it would parse a value if given one, but it never names a key or asks KMS |
 | `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `mcp.rs:38` | `workos_issuer`; not set when null |
 | `RUST_LOG` | optional | config | `info` | `mcp.rs:26` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
@@ -420,8 +423,8 @@ What the MCP role may do, from what the code calls (AWS: Bedrock; SpiceDB over g
 | Permission | Why (`Read at`) | In dev |
 | --- | --- | --- |
 | `rds-db:connect` as `oryxa_fde_mcp` | the store (`iam.rs`) | granted with the server |
-| `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | `search_context` embeds the query (`context/src/search.rs:138`, `embed.rs:95`) | granted with the server |
-| S3 and KMS | **none**: the README used to list the API's S3 read and a place among the company keys' readers for this server, and the code does not need them. A tool's answer is built from rows (`oryxa-fde-api/src/reads.rs`, `context/src/search.rs`: `search_project` reads chunks and embeddings from the database); the only blob reads are the API's download and canvas routes and the ingest worker (`context/src/blob.rs` callers: `documents.rs:178`, `canvas.rs:136`, `ingest.rs:60`). `Context::from_env` builds an S3 client and needs the bucket's name, and never calls it | not granted. A tool that reads a file's bytes later needs `s3:GetObject` on `*/*/documents/*`, `kms:Decrypt` through S3, and a place in `company_key_reader_role_arns` with a `company-key.sh sync` per company, in the same change |
+| `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | `search_context` embeds the query (`context/src/search.rs:141`, `embed.rs:95`) | granted with the server |
+| S3 and KMS | **none**: the README used to list the API's S3 read and a place among the company keys' readers for this server, and the code does not need them. A tool's answer is built from rows (`oryxa-fde-api/src/reads.rs`, `context/src/search.rs`: `search_project` reads chunks and embeddings from the database); the only blob reads are the API's download and canvas routes and the ingest worker (`context/src/blob.rs` callers: `documents.rs:184`, `canvas.rs:136` and `:233`, `ingest.rs:61`). `Context::from_env` builds an S3 client and needs the bucket's name, and never calls it | not granted. A tool that reads a file's bytes later needs `s3:GetObject` on `*/*/documents/*`, `kms:Decrypt` through S3, and a place in `company_key_reader_role_arns` with a `company-key.sh sync` per company, in the same change |
 | Secrets Manager, SQS, SES, other models | none: nothing in the binary calls them (ECS reads the task's two secrets with the execution role) | not granted |
 
 The task's security group admits nothing and its egress is HTTPS (through the NAT: WorkOS, AWS), the database, SpiceDB's port and the
@@ -615,20 +618,22 @@ export SMOKE_SESSION_FILE=~/.oryxa-smoke-session         # the session cookie, s
 infra/scripts/smoke-test.sh a                            # stage A, the core (the default)
 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker runs and its subscriber exists (Apply order, steps 10 and 12)
 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh c   # stage C, once the agent routes are on
+SMOKE_COMPANY_KEYS=1 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh k   # stage K, company keys: waits for an operator (Company keys)
 SMOKE_WORKERS=1 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh all
 ```
 
-Stages run in the order given. B and C need a company and a project, so run alone they make their own; run
-together they share one. Every run first checks health and `/v1/me`.
+Stages run in the order given. B, C and K need a company (C a project too), so run alone they make their own; run
+together they share one. `all` is A, B and C: K waits for a person, so it is named. Every run first checks health and `/v1/me`.
 
 | Stage | Checks, in order |
 | --- | --- |
 | **A, core** | `GET /api/healthz` (no session); `GET /v1/me` (the session is accepted; prints the organisation and role); create a company; create a project (starts in `discover`); add a task; the task is on `GET /v1/today`; the stage checklist reads (`discover`); a move to `scope` with items open and no reason is refused (`409 rejected_checklist_open`), then the same move with a reason succeeds and the checklist now reads `scope`; the task is removed and gone from Today |
 | **B, workers** | Upload a small Markdown document with a one-off code word; poll until `status` is `ingested` with chunks (a `failed` status stops it, and so does `SMOKE_INGEST_TIMEOUT`, default 180 s); search for the code word and find that document's passage |
+| **K, company keys** | Needs `SMOKE_COMPANY_KEYS=1` (the API has `COMPANY_KEY_ALIAS_ARN_PREFIX`) and `SMOKE_WORKERS=1`. `GET /v1/companies/{c}/key` for the new company reads `false`; with `SMOKE_KEYS_REQUIRED=1` (`require_company_keys` is on) an upload is refused with `409 company_key_missing`; it prints the `company-key.sh provision` command for the tenant and company and polls the check until it reads `true` (`SMOKE_KEY_TIMEOUT`, default 300 s: you run `provision` meanwhile); then it runs B's upload, ingestion and search under the key |
 | **C, agent** | List the project's agent runs (a `404` means the agent routes are off); start a read-only run on the sample repository (`SMOKE_AGENT_BASE`, default `main`); poll until events arrive and the run is `finished` (`SMOKE_RUN_TIMEOUT`, default 900 s) with a `result` as its last event. A run that fails, or waits for an approval (the test never approves), stops it and is cancelled |
 
 **Skips.** B skips unless `SMOKE_WORKERS=1` (the script cannot tell a missing worker from a slow one, so you
-say it is deployed; then a document that never ingests is a failure). C skips without `SMOKE_AGENT_REPO`, and
+say it is deployed; then a document that never ingests is a failure). K skips unless both `SMOKE_COMPANY_KEYS=1` and `SMOKE_WORKERS=1` are set. C skips without `SMOKE_AGENT_REPO`, and
 when the agent routes answer a bare `404` (one with an error code fails). A skip prints `SKIP [stage] ...` and
 exits 0 for that stage; the last line, `result: a=passed b=skipped ...`, tells passes and skips apart.
 
@@ -664,12 +669,13 @@ whose `Origin` is not `WEB_ORIGIN` (`403 csrf`); that is why `SMOKE_BASE_URL` mu
 **What it makes, and what stays.** Everything is named `oryxa-smoke-<UTC time>-<random>`, with a summary saying
 it is safe to ignore. It removes the task it adds, on success and on failure (and cancels a run it stops on).
 The API has no delete for **companies, projects, documents or agent runs**, so each run leaves behind one company
-and one project (stage `scope`), a document after B and a finished run after C. The script prints their ids at
+and one project (stage `scope`), a document after B or K (and, after K, the company's KMS key: retire it with `company-key.sh offboard`) and a finished run after C. The script prints their ids at
 the end. They sit in the test organisation; do not point the script at an organisation anyone works in.
 
 `infra/scripts/test-smoke-test.sh` proves the script without a deployed environment: it starts
 `infra/scripts/smoke-stub.py` (answers the routes the script calls with canned responses, on a random loopback
-port, stopped afterwards) and runs every stage against it: full passes, failures in the middle (cleanup), an
+port, stopped afterwards) and runs every stage against it (K included: a key that appears while it waits, one that never does, a company that already has one,
+and an upload refused for want of a key): full passes, failures in the middle (cleanup), an
 interrupt, the skips, a session that rotates mid-run, and the session hand-over checks, including `bash -x` and
 a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
 `python3` only.
@@ -677,12 +683,13 @@ a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
 ## Company keys
 
 ADR 0003's amendment, issue #109, and the gate in ADR 0006: **no real customer data enters the product until
-the company it belongs to has its own KMS key.** Nothing here is applied. `require_company_keys` is `false`
-until the API names a company key on every write (below), so dev keeps working on sample data.
+the company it belongs to has its own KMS key.** Nothing here is applied. The API names a company key on every write
+(#166, #176) and the deployed tasks are wired for it (#183); `require_company_keys` stays `false` until the checks in
+Before `require_company_keys` is switched on pass, so dev keeps working on sample data.
 
 ### What the code does today
 
-Read from `crates/` at `5ce29b1`:
+Read from `crates/` at `5ce29b1`; the last bullet again at `514d528`, after the API named company keys (#176):
 
 - **Object keys.** `<tenant>/<company>/documents/<id>` and `<tenant>/<company>/canvas/<id>`
   (`oryxa-fde-context/src/blob.rs:25`, `:30`, `:36`). Both ids are validated types: `[A-Za-z0-9_-]`, a tenant up to 64,
@@ -690,8 +697,12 @@ Read from `crates/` at `5ce29b1`:
 - **Who writes and reads.** The API's task role writes and reads (`blob.rs:65`, `:81`: `put_object`, `get_object`; a
   document is one `PutObject`, 20 MiB at most, `lib.rs:26`; there is no multipart upload). The ingest worker will read
   (`oryxa-fde-context/src/ingest.rs:60`, `blobs.get`). The MCP server does not: none of its tools reads a file (oryxa-fde-mcp).
-- **How it names a key.** It does not. `put` sends no encryption header (`blob.rs:62`: SSE-KMS without a key id
-  would mean the account's `aws/s3` key), so the bucket's default applies: the environment key, with an S3 Bucket Key.
+- **How it names a key.** *(Changed by #176; the text at `5ce29b1` was "it does not".)* With
+  `COMPANY_KEY_ALIAS_ARN_PREFIX` set, `put` first asks whether the company has a key (`context/src/keys.rs`, `has_key`); if so it sends
+  `aws:kms`, the company's alias ARN (`<prefix><company>`, a validated `CompanyId`) and `bucket_key_enabled(false)`
+  (`blob.rs:131`); if not it sends no encryption header (SSE-KMS without a key id would mean the account's `aws/s3` key), so the
+  bucket's default applies, the environment key with an S3 Bucket Key, until `require_company_keys`, when S3 refuses that write and
+  the API answers `409 company_key_missing`. With the variable unset, as before #183, no key is ever named.
 
 ### How provisioning runs, and why
 
@@ -819,8 +830,9 @@ for a company only when that check passes.
 
 ### For the API stream (and the ingest worker)
 
-Not done here (no crate changes). It is issue #166; the same text is on #109. `require_company_keys` is switched on
-by the lead only after #166 merges and the deployed checks in Verify before apply pass.
+Done in #166 (PR #176); the text below is what was asked, kept as the contract the code is read against. Infra's half is #183: the
+prefix on the API's and the ingest worker's tasks, and the lookup grant (How the API's key check is authorised).
+`require_company_keys` is switched on by the lead only after the deployed checks below pass.
 
 1. **Name the company's key on write** (`oryxa-fde-context/src/blob.rs`, `S3Blobs::put`):
    `put_object().server_side_encryption(ServerSideEncryption::AwsKms).ssekms_key_id(<alias ARN>).bucket_key_enabled(false)`,
@@ -849,6 +861,123 @@ by the lead only after #166 merges and the deployed checks in Verify before appl
    errors in 4 as permanent for that event (quarantine it, like any event it can never process). It never writes S3.
 6. **Offboarding**: the operator runs `offboard`; the API's check in 2 turns the company off within the cache time.
    Deleting the company's rows and permissions is the API's, as ever.
+
+### How the API's key check is authorised
+
+The check is `kms:DescribeKey` with the company's alias ARN as the key id (`context/src/keys.rs`, `describe`). What IAM and KMS
+do with that, from the AWS KMS developer guide (read 10 November 2026: "Use aliases to control access to KMS keys", "KMS key access
+and permissions", the permissions reference, and the `DescribeKey` reference, "Required permissions: kms:DescribeKey (key policy)"):
+
+- **The permission is evaluated against the key the alias points to**, by the key's policy, not against the alias. An alias ARN
+  as an IAM `Resource` "applies to the alias resource, not to any KMS key that might be associated with it": no IAM statement can
+  say "the key behind this alias". The ways to scope an IAM grant by alias are the condition keys `kms:RequestAlias` (the alias
+  named in the request, as a name pattern, never an ARN) and `kms:ResourceAliases` (the aliases the key has), on a
+  `key/*` resource; the tag form is `aws:ResourceTag/purpose` and `/env` on `key/*`, as the provisioner's policy uses.
+- **So for a company that has a key, nothing in the API role's IAM policy is needed or granted.** Every company key's policy
+  already allows the API's role `kms:DescribeKey` (`ServingRolesCheckTheKeyExists`, #164; `tests/company_keys.tftest.hcl` pins the
+  statement), and a same-account principal named in a key policy needs no IAM grant. **The key policy is unchanged by #183**, so there is
+  no `company-key.sh sync` to run for this change. (`sync` is still needed after a serving or reading role is added or replaced, as
+  above: the ingest worker's role, #171, for any key made before it.) What this reaches: the API's role can describe every company key
+  of the environment, by alias or key ARN: key state, spec, dates, no policy, no tags and no use. It cannot describe any other key in the
+  account, because no IAM statement of its role grants `DescribeKey` on a key and no other key's policy names it (the account root's
+  `kms:Describe*` on a company key lets IAM grant, and the API's role has no such grant).
+- **For a company that has no key** the alias does not exist and KMS has no key to authorise against. #183 adds
+  `kms:DescribeKey` on `arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/*` (statement `LookUpCompanyKeyAliases`) for that
+  case, the same form as the provisioner's `LookUpTheCompanyAliases`. **By AWS's documentation it grants nothing:** the KMS developer
+  guide's permissions reference lists `DescribeKey` with the resource "KMS key" only, and the alias resource only for `CreateAlias`,
+  `DeleteAlias` and `UpdateAlias`. It is kept because it is harmless (an alias resource, one action, this environment's company aliases
+  only: it reaches no key and allows no other call) and because what KMS answers for an absent alias is not documented either way. If KMS
+  answers `NotFoundException`, the check reads "no key" quietly; if `AccessDenied`, it also reads "no key", with a warning in the API's
+  log on every check (the cache keeps a no for 5 seconds). Step 3 of Before `require_company_keys` is switched on shows which; neither is
+  unsafe, and an `AccessDenied` there is not fixed by any IAM grant (see Verify before apply).
+- **Why not `key/*` with a tag condition for the API**, the narrowest IAM form that reaches keys: it would repeat what the key
+  policy grants, and add a second place where the list of describable keys lives. It is also not narrower than the key policy's
+  statement, which names the API's role on keys this script made and on nothing else. **A tighter form exists and is not used:** a
+  `kms:RequestAlias` condition on the key policy statement would limit a describe to the key's own alias name. Whether a request that names
+  the alias by ARN satisfies an exact alias name there is not documented (AWS's example matches a pattern), and a wrong guess makes every
+  check answer no, so the key policy stays as reviewed in #164.
+
+The ingest worker gets none of this: its IAM policy has `kms:Decrypt` on the environment key through S3 only, and each key's policy
+gives it `kms:Decrypt` through S3 under any company's prefix and no other action (`ReadingRolesDecryptThroughS3`; `tests/plan.tftest.hcl` pins
+its action list). No describe, no `GenerateDataKey`, no write. The MCP server has no KMS permission at all.
+
+### Before `require_company_keys` is switched on
+
+Run these in order, in a deployed environment, with **sample data only**: a test organisation and a company made by the smoke test
+(Smoke test; `T` is its organisation's id, which `/v1/me` returns and stage K prints, and `C` the company). Each step says what a
+pass looks like; stop at the first that does not pass and read its "if not". `<cfg>` is the file from
+`tofu -chdir=infra/envs/dev output -json company_keys` (How provisioning runs, and why). The first six change nothing that stops dev working; step 7 is
+the switch itself.
+
+The order differs from the issue's list in one place: provisioning comes first, because the S3 and KMS checks need a company key to write under.
+
+1. **The wiring is on the tasks and the API started.** After the apply and once the services run the new task definition revisions (the
+   apply, or the next `deploy-api`, Deploys):
+   ```bash
+   for f in api:oryxa-fde-dev-api ingest:oryxa-fde-dev-ingest; do
+     aws ecs describe-task-definition --region <region> --task-definition "${f#*:}" |
+       jq -r --arg c "${f%%:*}" '.taskDefinition.containerDefinitions[] | select(.name == $c) | .environment[] | select(.name == "COMPANY_KEY_ALIAS_ARN_PREFIX") | .value'
+   done
+   tofu -chdir=infra/envs/dev output -raw company_key_alias_arn_prefix
+   aws ecs describe-services --region <region> --cluster "$(tofu -chdir=infra/envs/dev output -raw cluster)" --services oryxa-fde-api oryxa-fde-ingest \
+     --query 'services[].[serviceName, length(deployments), deployments[0].status, deployments[0].rolloutState, deployments[0].taskDefinition, runningCount]'
+   ```
+   Pass: three identical lines ending `:alias/oryxa-fde-dev/companies/`; each service has one deployment, `PRIMARY` and `COMPLETED`, on the
+   latest revision of `oryxa-fde-dev-api` or `oryxa-fde-dev-ingest` (the one the first command read), with tasks running; and `infra/scripts/smoke-test.sh a` passes. The deployment check matters: a
+   malformed prefix, or one in another Region than `AWS_REGION`, stops the new tasks at start while the old ones keep serving, so the smoke test alone
+   would pass. If not: the log group `/ecs/oryxa-fde-dev-api` (or `-ingest`) names `COMPANY_KEY_ALIAS_ARN_PREFIX`.
+2. **Keys that already exist have the current policy.** For every company that already has a key, as an administrator:
+   `infra/scripts/company-key.sh sync <cfg> <tenant> <company>`. Pass: `... already has the current policy`. (None in dev until step 4. #183 changes no key
+   policy, so this is only for a key made before the ingest worker's role was added, #171.)
+3. **A company with no key reads as no key, quietly.** Pick a company that has none (the smoke test's, `C`):
+   `GET /api/v1/companies/C/key` through the app. Pass: `{"has_key":false}`, and none of
+   `aws logs filter-log-events --region <region> --log-group-name /ecs/oryxa-fde-dev-api --filter-pattern '"company key check failed"' --start-time $(( ($(date +%s) - 600) * 1000 ))`
+   names `C`. If not: the log line's `code` is `AccessDenied`: KMS answers a lookup of an absent alias with a denial, which no IAM grant changes (AWS
+   documents no alias resource for `DescribeKey`). The API still reads it as no key, so nothing is unsafe, only noisy; but expect `provision` in step 4 to
+   stop at its lookup for the same reason, and apply the fallback in Verify before apply (The API's key check) first.
+4. **Provision a key for the sample company, and the API sees it.** As the provisioning role: `infra/scripts/company-key.sh provision <cfg> T C`;
+   then `GET /api/v1/companies/C/key` within about ten seconds. Pass: `provision` ends `... is provisioned`, `status` exits 0, and the check answers `{"has_key":true}`.
+   If not and it stays false: the log line's `code` says why (`AccessDenied` on a key that exists means the key's policy does not
+   name the API's role: `sync`; `KMSInvalidStateException` or disabled: the key is not enabled).
+5. **An upload and its ingestion succeed under that key** (this is also where S3 is shown to accept the alias ARN in the bucket policy's
+   key condition, to let a request turn the Bucket Key off, and to hand KMS the object's ARN as the encryption context). Upload a small sample
+   document to `C` through the app, or let the smoke test's stage K do steps 3 to 5 in one run: it makes a company, checks it has no key, prints the `provision`
+   command of step 4 and waits for it while you run it, then uploads and waits for ingestion: `SMOKE_COMPANY_KEYS=1 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh k`.
+   Then, as an administrator:
+   ```bash
+   aws s3api head-object --region <region> --bucket <data bucket> --key T/C/documents/<document id>
+   aws cloudtrail lookup-events --region <region> --lookup-attributes AttributeKey=EventName,AttributeValue=GenerateDataKey --max-results 10   # events lag by up to 15 minutes
+   ```
+   Pass: the upload answers `201`, the document reaches `ingested` and a search finds it (the ingest worker decrypted it through its reader entry);
+   `head-object` shows `ServerSideEncryption` `aws:kms`, `SSEKMSKeyId` the company key's ARN (not the environment key's), and no `BucketKeyEnabled`
+   (or `false`); the CloudTrail `GenerateDataKey` by the API's role has `requestParameters.encryptionContext["aws:s3:arn"]` equal to
+   `arn:aws:s3:::<data bucket>/T/C/documents/<document id>` (the object, not the bucket). If not: an upload that is `AccessDenied` from S3 means S3
+   compares the resolved key ARN rather than the alias in the bucket policy; an `AccessDenied` that names `kms:GenerateDataKey` means the key policy's
+   context condition did not match (a Bucket Key was in play): the two fallbacks are in Verify before apply, and neither is applied before the checks are understood.
+6. **A write naming company A's alias under company B's prefix is refused by KMS.** This cannot be driven through the API: it builds the alias and the
+   object key from one `CompanyScope`, so they always name the same company, and the only other client is a deliberately broken one. An operator cannot make the
+   write directly either: only ECS tasks may assume the API's role (its trust says so, and the image has no shell or AWS CLI), and widening that
+   trust for a test is a change for the lead, not for this step. What stands in for it: the key policy's context condition
+   (`kms:EncryptionContext:aws:s3:arn` on `<bucket>/<tenant>/<company>/*`, with `kms:ViaService`) is pinned by `tests/company_keys.tftest.hcl` for every key; step 4 checks that a real key
+   has the current policy (`provision` compares it); and step 5 shows the precondition the condition relies on, that S3 sends the object's ARN as the context.
+   Together they say a write under B naming A's key is refused whenever S3 behaves as documented. **It is not exercised end to end, and only a real
+   refusal would show it**: the first time an API build writes under the wrong alias, or a test role added to one key's policy by an administrator for the purpose.
+   Follow-up, not a gate for step 7: an operator can run the negative test without widening any trust, as a one-off task in the private subnets with
+   an image that has the AWS CLI (pinned by digest) and `taskRoleArn` overridden to the API's task role (ECS may assume it; the operator needs `iam:PassRole`
+   on it). Its one call, a sample `put-object` to `T/B/documents/...` naming A's alias with `--bucket-key-enabled false`, must fail with `AccessDenied`
+   from KMS; if it succeeds it writes one sample object and shows the hole. That is a new `run-task.sh` command and task definition, an infra issue.
+7. **Switch on, then check the refusals** (still sample data). Set `require_company_keys = true`, plan (the bucket policy gains `DenyWriteWithoutCompanyKey` and
+   `DenyWriteNotUsingKms`; the API role loses `kms:GenerateDataKey` on the environment key), apply. Then:
+   - a company with no key is refused by the API: `SMOKE_KEYS_REQUIRED=1 SMOKE_COMPANY_KEYS=1 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh k` passes
+     its first half (`an upload without a key is refused (company_key_missing)`) and, once the operator step is done, its second;
+   - the bucket policy refuses a write that names no key or the environment key, for any caller. As an administrator, once with no encryption option and once with
+     `--server-side-encryption aws:kms --ssekms-key-id <the environment key's ARN>`: `aws s3api put-object --region <region> --bucket <data bucket> --key T/C/documents/refused-sample --body /dev/null [options]`.
+     Pass: `AccessDenied`, and for these two the message says "explicit deny in a resource-based policy" (the bucket policy, not a lack of rights), and
+     `head-object` on that key is `404`. Before the switch the first one succeeds and writes a (sample) object, which is the difference this step shows;
+     a delete marker removes it from view and leaves the version.
+   If not: set `require_company_keys` back to `false` and apply: it repairs a mistake, since nothing is denied on reads.
+
+After step 7 passes, `require_company_keys` stays `true` and real customer data may follow, ADR 0006's generic routes included, one company at a time as each gets its key.
 
 ### Cost
 
@@ -1291,6 +1420,23 @@ These could not be checked without an account. Each one is flagged at the place 
     in the KMS developer guide's condition key list (read 10 November). The first `provision` shows whether `CreateKey`
     with its tags and `TagResource` pass the provisioner's conditions (AWS needs `kms:TagResource` as well as
     `kms:CreateKey` when tags go on at creation).
+  - **The API's key check (#183).** Documented (KMS developer guide, read 10 November 2026): `DescribeKey` is authorised against the key an
+    alias points to, by the key policy ("Required permissions: kms:DescribeKey (key policy)"); "You can use the key policy alone to control
+    access if the key and the IAM principal are in the same AWS account" ("KMS key access and permissions"), and `ServingRolesCheckTheKeyExists`
+    names the API's role directly, not through the account root; an alias ARN as an IAM `Resource` "applies to the alias resource, not to any
+    KMS key that might be associated with it" ("Use aliases to control access to KMS keys"); and the permissions reference lists only "KMS key"
+    as `DescribeKey`'s resource (the alias resource is for `CreateAlias`, `DeleteAlias`, `UpdateAlias`), so `LookUpCompanyKeyAliases`, like the
+    provisioner's `LookUpTheCompanyAliases`, is documented to grant nothing. Not documented, so confirmed only on the account: (1) what a lookup
+    of an alias that does not exist answers, `NotFoundException` or `AccessDenied` (step 3 of Before `require_company_keys` is switched on shows
+    it: a `company key check failed` warning with `AccessDenied` for a company with no key). If `AccessDenied`: the API still answers "no key",
+    only noisily, and no IAM grant changes it, so accept the warning (do not quieten `AccessDenied` in the code, which is also how a key whose
+    policy misses the API's role shows); but `company-key.sh`'s `lookup` stops on anything but `NotFoundException`, so `provision` would stop
+    for every new company at step 4, and the provisioner then needs `kms:ListAliases` (resource `*`) and the script a `list-aliases` check
+    for the alias before it describes, in an infra PR. (2) A lookup of an alias that exists, by alias ARN with no IAM grant on any key, succeeds
+    (documented as above; step 4 shows it). If it fails, the API role needs an IAM `DescribeKey` on `key/*` with `aws:ResourceTag/purpose`
+    `company-data` and `aws:ResourceTag/env`: the form the provisioner uses (the account root's `kms:Describe*` in each key policy lets IAM grant
+    it). (3) `DescribeKey` is evaluated as the eventually consistent API AWS says it is, so a key provisioned seconds ago may read as absent for a
+    moment (the cache keeps a no for 5 s).
   - **A multipart upload** names its key only in `CreateMultipartUpload`, so a `UploadPart` would meet
     `DenyWriteWithoutCompanyKey`. The API uses single `PutObject` calls; test `UploadPart` before anything else uploads in parts.
 - **Secrets Manager with the environment key.** `CreateSecret` with `KmsKeyId` needs `kms:GenerateDataKey` and
@@ -1389,7 +1535,9 @@ These could not be checked without an account. Each one is flagged at the place 
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - **Company keys** (#109): write each company's files under its own key, and check that the company has one before
-    storing customer content (ADR 0006). The exact changes are in Company keys, "For the API stream", and on issue #166.
+    storing customer content (ADR 0006). Done in #176; the API and the ingest worker carry `COMPANY_KEY_ALIAS_ARN_PREFIX` (#183), and what the
+    API's role may call is in Company keys, How the API's key check is authorised. A change to `keys.rs`'s parser or variable name fails
+    `tofu test` until `envs/dev` follows (`tests/code`).
   - It serves `GET /healthz` without auth (it does; the container health check and the deploy rely on
     it), listens where `LISTEN_ADDR` says (`127.0.0.1:<api_port>` in dev; the tunnel sidecar is its only
     client), keeps files under
