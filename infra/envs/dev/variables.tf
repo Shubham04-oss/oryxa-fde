@@ -74,6 +74,27 @@ variable "data_bucket_name" {
   type        = string
 }
 
+variable "company_key_operator_arns" {
+  description = "IAM users or roles of this account that may assume the company-key provisioning and offboarding roles (infra/README.md, Company keys). Role ARNs of SSO roles carry their path."
+  type        = list(string)
+  validation {
+    condition     = length(var.company_key_operator_arns) > 0 && alltrue([for a in var.company_key_operator_arns : can(regex("^arn:aws:iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+$", a))])
+    error_message = "company_key_operator_arns must hold at least one IAM user or role ARN."
+  }
+}
+
+variable "company_key_reader_role_arns" {
+  description = "Roles that only read company files (the ingest worker, the MCP server) once they run. Each is named in every company key's policy, so adding one means `company-key.sh sync` for each company that has a key."
+  type        = list(string)
+  default     = []
+}
+
+variable "require_company_keys" {
+  description = "false: a company file written without naming a key lands under the environment key, which is right for sample data only. true: S3 refuses any write that does not name a company key. Set it true before the first real customer data, and only after the API names company keys on write."
+  type        = bool
+  default     = false
+}
+
 variable "cloudtrail_bucket_name" {
   description = "Globally unique S3 bucket name for CloudTrail logs."
   type        = string

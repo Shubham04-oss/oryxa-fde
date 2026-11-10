@@ -15,7 +15,7 @@ Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
   -> one Fargate task in a private subnet: cloudflared (sidecar) -> 127.0.0.1:8080 -> oryxa-fde-api
        -> RDS PostgreSQL 17 + pgvector    (IAM database auth, TLS, private)
        -> SpiceDB on Fargate              (spicedb.oryxa-fde-dev.internal:50051, Cloud Map, private)
-       -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company)
+       -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company, one KMS key per company: Company keys)
        -> EventBridge v2 bus oryxa-fde-dev -> per-consumer SQS FIFO + DLQ + undelivered queue
 Everything outbound (AWS APIs, image pulls, WorkOS, the tunnel) leaves through one fck-nat instance.
 CloudTrail logs management events and object access on the data bucket.
@@ -35,7 +35,8 @@ says what replaced it).
 | `modules/postgres` | RDS for PostgreSQL 17, encrypted, IAM auth, `rds.force_ssl`, master password managed by RDS in Secrets Manager |
 | `modules/fargate_service` | One ARM64 main container, with optional health check and sidecars: task definition, log group, execution and task roles, security group, optional ECS service |
 | `modules/internal_alb` | Internal ALB, target group (`ip`), HTTP listener reachable from named security groups only. **Not used by `envs/dev` since #145**; kept, with its test, for a production environment that fronts a service with a load balancer (pair it with `fargate_service`'s `load_balancer`) |
-| `modules/s3` | Private bucket: KMS, versioned, public access blocked, TLS only; `force_destroy` for teardown only |
+| `modules/s3` | Private bucket: KMS, versioned, public access blocked, TLS only; `force_destroy` for teardown only; takes extra policy statements (the company key rules) |
+| `modules/company_keys` | The parts of per-company KMS keys that are the same for every company (Company keys): the provisioning and offboarding roles, the policy every key gets, the bucket's write rules. It creates no key |
 | `modules/sqs_fifo` | FIFO queue, FIFO DLQ, optional undelivered queue (names and attributes match the platform's consumer kit) |
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
@@ -43,6 +44,7 @@ says what replaced it).
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the API environment contract below); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
 | `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot, plus a static `busybox` that only the container health check runs |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
+| `scripts/company-key.sh` | Creates, checks, syncs and offboards one company's KMS key; `scripts/test-company-key.sh` tests it against a fake `aws` (`scripts/test-company-key-fake-aws.py`) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
 | `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
 | `sql/02-api-owns-nothing.sql` | Once, only on a database the first bootstrap let `oryxa_fde_api` own: hands its objects to the migrator and drops its old grants |
@@ -71,6 +73,9 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `event_signing_kid` | `k1` | Key id of the API's event signing key (`EVENT_SIGNING_KID`); change it when the key rotates |
 | `data_bucket_name` | required | Globally unique name for the customer data bucket |
 | `cloudtrail_bucket_name` | required | Globally unique name for the CloudTrail log bucket |
+| `company_key_operator_arns` | required | IAM users or roles of the account that may assume the company-key provisioning and offboarding roles (Company keys); at least one |
+| `company_key_reader_role_arns` | `[]` | Roles that only read company files (the ingest worker, the MCP server) once they run; each is named in every company key's policy, so adding one means `company-key.sh sync` per company with a key |
+| `require_company_keys` | `false` | `false`: a company file written without naming a key lands under the environment key (sample data only). `true`: S3 refuses any write that does not name a company key, and the API's role loses `kms:GenerateDataKey` on the environment key. Set it before the first real customer data and after the API names company keys on write |
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
 | `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
@@ -248,7 +253,8 @@ What the API's task role may do, from what the code calls:
 | `rds-db:connect` as `oryxa_fde_api` | the store (`iam.rs`) | granted |
 | `events:PutEvents` on the bus | the outbox relay (`oryxa-events/src/lib.rs:234`) | granted |
 | `s3:GetObject`, `s3:PutObject` on `*/*/documents/*` and `*/*/canvas/*` | documents and canvas snapshots at `<tenant>/<company>/documents/<id>` and `.../canvas/<id>` (`context/src/blob.rs:31`, `:37`, `:65`, `:81`; the code never deletes or lists) | granted; delete and list removed |
-| `kms:Decrypt`, `kms:GenerateDataKey`, only through S3 | the bucket's default encryption | granted |
+| `kms:Decrypt`, `kms:GenerateDataKey` on the environment key, only through S3 | the bucket's default encryption; files written before a company has a key | granted; `GenerateDataKey` removed with `require_company_keys` |
+| `kms:Decrypt`, `kms:GenerateDataKey`, `kms:DescribeKey` on each company's key | named in the **key's** policy, not in this role's IAM policy (Company keys): only through S3, only under that company's prefix | granted by the key policy, once the code names the key |
 | `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
 | `secretsmanager:CreateSecret`, `TagResource`, `PutSecretValue`, `GetSecretValue`, `DeleteSecret` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt`, `kms:GenerateDataKey` only through Secrets Manager | Slack bot tokens (`integrations/src/secrets.rs:87`, `:99`, `:117`, `:134`) | only with `slack_client_id` |
 | Bedrock for `AGENT_MODEL`, `EVAL_JUDGE_MODEL` | not the API: the judge is a `curl` run inside the sandbox (`agent/src/evals.rs:232`), signed by the gateway's outbound handler | not granted; the gateway's AWS identity is the agent stream's follow-up |
@@ -269,7 +275,7 @@ These have no image and no task definition yet; the facts for the issue that add
 
 | Binary | Variables (Read at) | Permissions it will need |
 | --- | --- | --- |
-| `oryxa-fde-ingest` | `DATABASE_URL` (`oryxa-fde-context/src/bin/ingest.rs:38`: **a password URL, no IAM auth; the API stream must switch it to `Store::from_env()`** before it can run on ECS), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:39`, as the API), `EVENT_SIGNING_KID` (`:41`), `EVENT_PUBLIC_KEY` (`:43`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:45`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
+| `oryxa-fde-ingest` | `DATABASE_URL` (`oryxa-fde-context/src/bin/ingest.rs:38`: **a password URL, no IAM auth; the API stream must switch it to `Store::from_env()`** before it can run on ECS), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:39`, as the API), `EVENT_SIGNING_KID` (`:41`), `EVENT_PUBLIC_KEY` (`:43`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:45`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix, and its role in `company_key_reader_role_arns` so each company key lets it decrypt (Company keys); `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
 | `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
 | `oryxa-fde-mcp` | `DATABASE_URL` (`oryxa-fde-mcp/src/bin/mcp.rs:27`: same code gap as ingest), `SPICEDB_ENDPOINT` (`:29`), `SPICEDB_PRESHARED_KEY` (`:30`), `WORKOS_API_KEY` (`:34`), `WORKOS_CLIENT_ID` (`:35`), `MCP_ALLOWED_HOSTS` (`:40`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:39`); optional `WORKOS_ISSUER` (`:37`), `LISTEN_ADDR` (`:46`, default `0.0.0.0:8081`) | as the API's database, S3 read and embedding permissions; a route to it (its own load balancer listener or service, or a second tunnel route), which dev does not have |
 | `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
@@ -329,6 +335,9 @@ workflows (Deploys, below), not from the owner's machine.
     shows healthy in the Cloudflare dashboard, `https://app.<domain>` reaches the API through the
     binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
     Then run stage A of the scripted smoke test (next section).
+14. **Company keys, before the first real customer data.** Set `company_key_operator_arns`, apply, and follow
+    Company keys: provision each company's key, then (once the API names it on every write) set
+    `require_company_keys = true`. The roles exist after step 4; no key does until you make one.
 
 When a consumer lands (wave 2), create its FIFO subscriber into `oryxa-fde-dev-<consumer>.fifo`,
 with the `-undelivered` queue as its on-failure target and `tofu output eventbus_delivery_role_arn`
@@ -405,6 +414,211 @@ port, stopped afterwards) and runs every stage against it: full passes, failures
 interrupt, the skips, a session that rotates mid-run, and the session hand-over checks, including `bash -x` and
 a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
 `python3` only.
+
+## Company keys
+
+ADR 0003's amendment, issue #109, and the gate in ADR 0006: **no real customer data enters the product until
+the company it belongs to has its own KMS key.** Nothing here is applied. `require_company_keys` is `false`
+until the API names a company key on every write (below), so dev keeps working on sample data.
+
+### What the code does today
+
+Read from `crates/` at `7308580`:
+
+- **Object keys.** `<tenant>/<company>/documents/<id>` and `<tenant>/<company>/canvas/<id>`
+  (`oryxa-fde-context/src/blob.rs:25`, `:30`, `:36`). Both ids are validated types: `[A-Za-z0-9_-]`, a tenant up to 64,
+  a company up to 128, so neither can hold `/`, `*` or `?`. The code never lists or deletes.
+- **Who writes and reads.** The API's task role writes and reads (`blob.rs:65`, `:81`: `put_object`, `get_object`; a
+  document is one `PutObject`, 20 MiB at most, `lib.rs:26`; there is no multipart upload). The ingest worker will read
+  (`oryxa-fde-context/src/ingest.rs:60`, `blobs.get`) and so will the MCP server; neither runs yet.
+- **How it names a key.** It does not. `put` sends no encryption header (`blob.rs:62`: SSE-KMS without a key id
+  would mean the account's `aws/s3` key), so the bucket's default applies: the environment key, with an S3 Bucket Key.
+
+### How provisioning runs, and why
+
+**An operator runs `infra/scripts/company-key.sh`** (`provision`, `status`, `sync`, `offboard`), the way they run
+`create-event-bus.sh` and `run-task.sh`. The standing parts (the two roles that may run it, the policy every key
+gets, the bucket's write rules) are OpenTofu in `modules/company_keys`, and the script reads them from
+`tofu output -json company_keys`, so the policy is written once and `tofu test` pins it.
+
+Why not the other two ways:
+
+- **One OpenTofu resource per company** means an apply per customer, a customer list in tfvars, and an offboarding
+  that is a deleted line in a diff. A company is created by a user at run time; the infra state should not
+  follow it.
+- **A one-off ECS task** needs an image with the AWS CLI, a task definition and a task role that can create keys,
+  for the same operator-run step, and adds nothing the script lacks. When creating companies is frequent, the way to automate this is a worker (not the API) that holds the provisioning role and acts on
+  the company-created event: the provisioning identity below is made for that, and its trust list already takes a task
+  role.
+
+What the script guarantees, and `test-company-key.sh` proves against a fake `aws`:
+
+- Ids are checked against `[A-Za-z0-9_-]{1,128}` before anything else, so there is no AWS call for a bad one.
+  The script takes no raw string from a request; the tenant and company come from the operator's command line, and
+  reach the policy, the alias and the tags only after that check.
+- It refuses any account but the one in the config (`account_id`, from `data.aws_caller_identity`), and
+  refuses to run as the wrong role: `provision` as the provisioning role, `offboard` as the offboarding role.
+- **Idempotent.** An existing alias is checked, never changed: the key must be a single-Region symmetric
+  customer managed key, tagged for this environment, this tenant and this company (an alias that points at another
+  company's key is refused), enabled, with the current policy. Only rotation switched off is switched back on.
+  A changed policy is reported, and `sync` (an administrator, not the provisioner) puts it.
+- `--dry-run` makes the reads and prints what it would write. It writes nothing.
+- A key created and not yet named (the alias call failed) is reported with the command that finishes the job.
+  A re-run would make a second key.
+
+```bash
+# once per apply, then per company:
+tofu -chdir=infra/envs/dev output -json company_keys > "$XDG_RUNTIME_DIR/company-keys.json"   # ARNs and a policy, no secret
+# assume the provisioning role (tofu output company_keys: provisioner_role), then:
+infra/scripts/company-key.sh provision "$XDG_RUNTIME_DIR/company-keys.json" <tenant id> <company id> [--dry-run]
+infra/scripts/company-key.sh status    "$XDG_RUNTIME_DIR/company-keys.json" <tenant id> <company id>   # 0 enabled, 3 none, 4 other
+# assume the offboarding role, then:
+infra/scripts/company-key.sh offboard  "$XDG_RUNTIME_DIR/company-keys.json" <tenant id> <company id> --confirm <tenant>/<company>
+```
+
+### The key policy, in words
+
+Every company key gets this policy, with the tenant and company filled in (`modules/company_keys`, `key_policy`):
+
+- **Use only through S3, by the serving roles.** The API's task role (and each reader role added later) may
+  `kms:Decrypt` (the API also `kms:GenerateDataKey`) only with `kms:ViaService` = `s3.<region>.amazonaws.com`, from this
+  account, and only with the encryption context `aws:s3:arn` matching `arn:aws:s3:::<bucket>/<tenant>/<company>/*`.
+  S3 sends the object's ARN as the context when no Bucket Key is used, so **this company's key cannot encrypt or
+  decrypt another company's object**, even for a role that may read both.
+- **The account administers the key and cannot use it.** The account root may describe, read, tag, name, rotate and
+  `PutKeyPolicy`, and nothing else, so no IAM policy can grant use. An explicit Deny closes use outside S3 and every
+  grant for everyone, the root included.
+- **Deletion belongs to the offboarding role.** Only it may schedule deletion, cancel it or disable the key (an
+  explicit Deny for everyone else), and a wait under 30 days, the longest KMS allows, is denied for all.
+- Tags: `project=oryxa-fde`, `env`, `purpose=company-data`, `tenant`, `company`. Alias:
+  `alias/oryxa-fde-<env>/companies/<company>`. Rotation on. Waiting period 30 days.
+
+The serving roles are named in each key's policy when the key is made, so a role has to exist first, and a role
+that is replaced (a new role with the same name has a new id) or added (the ingest worker) needs `company-key.sh sync`
+for each company that has a key.
+
+**The two identities**, both assumed by the operators in `company_key_operator_arns`, for an hour:
+
+| Role | May | May not |
+| --- | --- | --- |
+| `oryxa-fde-<env>-company-key-provisioner` | `kms:CreateKey` and `kms:TagResource` with exactly the five tags and `tenant` and `company` present, symmetric and single-Region only; `kms:CreateAlias` on `alias/oryxa-fde-<env>/companies/*` and only for a key tagged as this environment's company key; rotation and reads of those keys | use a key, `PutKeyPolicy`, update or delete an alias, disable, schedule deletion, create a grant, `kms:*` |
+| `oryxa-fde-<env>-company-key-offboarder` | `kms:ScheduleKeyDeletion` (30 days or more) and `kms:CancelKeyDeletion` on company keys of this environment; reads | create, tag, use |
+
+The provisioner can fill the company alias namespace with company keys and nothing else, which is what lets the
+bucket policy trust that namespace.
+
+### The bucket policy, in words, and what it cannot do
+
+A bucket policy is one static document. It cannot take the company out of the object key and compare it with
+the key a write names, and one statement per company would pass S3's 20 KB policy limit at about 50 companies.
+So the rules are split:
+
+- **The bucket policy** (`modules/company_keys`, `bucket_policy_statements`, added to `modules/s3`) refuses a
+  `PutObject` that names a key outside `arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/*`: the
+  environment key (by ARN, id or alias), another account's key and `aws/s3` are all refused, because the only
+  string that passes is an alias in the namespace the provisioner fills. It also refuses SSE-S3. With
+  `require_company_keys = true` it refuses a write that names no key at all, which means the environment key by
+  default, and any value but `aws:kms`.
+- **The key's own policy** is what ties a company's key to its prefix (above): a write under company B's prefix
+  that names company A's alias passes the bucket policy and is refused by KMS, because A's key allows only A's
+  prefix. This is why the API must write company objects **without an S3 Bucket Key** (`bucket_key_enabled(false)`):
+  with one S3 sends the bucket's ARN as the context, and the key policy refuses it (an object would have no per-prefix
+  binding). The cost is below.
+- **It cannot lock the environment out.** The rules deny `s3:PutObject` only: nothing is denied on reads, so every
+  object written under the environment key stays readable, by the API role that keeps `kms:Decrypt` on it.
+  The bucket default stays the environment key with a Bucket Key. Changing the policy needs no object write, so
+  turning `require_company_keys` back to `false` and applying always repairs a mistake. The statements apply to
+  every object in the bucket, not only the company shape, so a stray write elsewhere is refused too.
+- **Objects written before a company has a key stay under the environment key**, and offboarding cannot make
+  them unreadable. That is why `require_company_keys` must be on before real data: with it on, no such object
+  can be written.
+
+### A company without a key
+
+| | `require_company_keys = false` (dev today) | `true` (before the first real engagement) |
+| --- | --- | --- |
+| Write that names no key | lands under the environment key: sample data only | refused by S3 (`AccessDenied`) |
+| Write naming a company alias | allowed if the alias exists and the key policy allows it | same |
+| Write naming anything else | refused | refused |
+| Read of an older object | works | works |
+| API role on the environment key | `Decrypt`, `GenerateDataKey` | `Decrypt` only |
+
+The API must not rely on S3 to find out: it checks first (next section). ADR 0006's generic routes (webhook bodies,
+results uploads, forwarded email, pasted notes) and every route that stores customer content in S3 are switched on
+for a company only when that check passes.
+
+### For the API stream (and the ingest worker)
+
+Not done here (no crate changes). To be taken as its own issue; the same text is on #109.
+
+1. **Name the company's key on write** (`oryxa-fde-context/src/blob.rs`, `S3Blobs::put`):
+   `put_object().server_side_encryption(ServerSideEncryption::AwsKms).ssekms_key_id(<alias ARN>).bucket_key_enabled(false)`,
+   where the alias ARN is `<prefix><company>` and the company is the `CompanyScope`'s validated `CompanyId`, never a
+   raw string. The prefix is new API config, `COMPANY_KEY_ALIAS_ARN_PREFIX`, equal to the output
+   `company_key_alias_arn_prefix`
+   (`arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/`). Infra adds the variable to the API's task and to the
+   contract table in the same PR that makes the code read it. `put` needs the scope, so `BlobStore::put` takes it
+   (or a resolved key reference). The API reads with `get_object` as now: S3 knows the object's key.
+2. **How a company is marked as having a key: the alias.** `kms:DescribeKey` on `<prefix><company>` (the key's policy
+   lets the API's role do it): the company has a key when the call succeeds, `KeyMetadata.KeyState` is `Enabled`, and
+   `KeyUsage` is `ENCRYPT_DECRYPT`. **Every other outcome means no key** (not found, access denied, throttled, a key
+   pending deletion or disabled): fail closed. Cache a yes for about a minute and a no for a few seconds. A key that
+   is scheduled for deletion cannot be used from that moment, so a cached yes can only cost one failed write.
+   Put it in `oryxa-fde-context` beside `BlobStore` (a `CompanyKeys` trait with an S3/KMS implementation and a
+   fake), and call it before any route stores customer content in S3 or switches a generic inbound route on (ADR 0006).
+   `company-key.sh status` is the same check for an operator.
+3. **When it is missing:** refuse the request with a stable error (a 409 `company_key_missing`), store nothing, and do
+   not retry. Sample data may still use the environment key while `require_company_keys` is `false`, if the company is
+   marked as sample data only.
+4. **Map the S3 and KMS failures.** `AccessDenied` on `put` under `require_company_keys` and a KMS
+   `DisabledException` or `KMSInvalidStateException` on a read mean the company has no key, or has been offboarded: a
+   permanent error, not a retry.
+5. **The ingest worker** reads only: no change to `BlobStore::get`. Infra adds its task role to
+   `company_key_reader_role_arns` when its service lands, and then runs `sync` for each company. The worker treats the
+   errors in 4 as permanent for that event (quarantine it, like any event it can never process). It never writes S3.
+6. **Offboarding**: the operator runs `offboard`; the API's check in 2 turns the company off within the cache time.
+   Deleting the company's rows and permissions is the API's, as ever.
+
+### Cost
+
+Mumbai list prices, read on 10 November 2026 from the public price list (AWSKMS offer, published 8 November,
+`https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/awskms/current/ap-south-1/index.json`):
+**$1 per customer managed KMS key version a month** (prorated by the hour), requests **$0.03 per 10,000**, and 20,000
+requests a month free for the account. Automatic rotation adds a key version a year, and AWS charges the first and
+second rotation of a key, then no more ("Key rotation and pricing", the KMS developer guide, read the same day).
+
+| Companies with a key | Key storage, first year | After the first rotation | From the second rotation on (rotation on) | Requests at 5,000 a company a month |
+| --- | --- | --- | --- | --- |
+| 10 | $10 | $20 | $30 | $0.09 |
+| 100 | $100 | $200 | $300 | $1.44 |
+| 1,000 | $1,000 | $2,000 | $3,000 | $15 |
+
+The request volume is an assumption, one KMS call per object write or read, because company objects use no S3 Bucket
+Key (so the key policy can bind a key to its prefix); at 100,000 requests a company a month, 1,000 companies would be
+$300. KMS requests also show up in CloudTrail's management events, one per object access, naming the company's key and
+the object: the per-company audit trail the keys are for. Rotation off keeps $1 a key; whether to rotate is a decision
+for the lead (the rule is annual rotation; the benefit for S3 data under per-company keys is small). A key
+pending deletion is not documented as free in the price list, so **assume it is billed until it is deleted**
+(not rechecked). KMS allows 100,000 keys a Region by default (adjustable). Nothing is billed until the first key
+exists.
+
+### Limits
+
+- `ponytail:` provisioning is one operator command per company; automate it with a worker that holds the
+  provisioning role once companies are created often. Until then a company created in the app has no key, and the API
+  stops it from taking real data.
+- `ponytail:` a company is identified by its id alone in the alias (ADR 0003). The API generates company ids at
+  random, so two tenants do not collide; if one ever did, the second `provision` refuses (the tags name the other
+  tenant) instead of sharing a key.
+- An account administrator can still rewrite a company key's policy (`PutKeyPolicy`) or the bucket policy: the
+  controls stop the roles in this design, not an administrator. CloudTrail records it.
+- After `ScheduleKeyDeletion` KMS refuses every use, but S3 "might not immediately" stop serving a data key it
+  has cached (the KMS developer guide says so for data keys). With no Bucket Key the exposure is short; the check
+  after the first real offboarding is a read that must fail.
+- Objects written before a company's key exists stay under the environment key (above).
+- The bucket policy cannot see the object key's company segment. A write under B naming A's alias is refused by KMS,
+  not by the bucket policy; if the key policy's encryption-context condition ever stopped working, the bucket policy alone
+  would not stop it.
 
 ## Deploys
 
@@ -596,7 +810,7 @@ the Checked column names the offer and its publication date). Check against the 
 | RDS PostgreSQL | `db.t4g.micro` single-AZ ($0.021 an hour: $15.33), 20 GB gp3 ($0.131 a GB: $2.62), backups inside the free allowance | 18 | AmazonRDS, 29 Oct |
 | NAT instance | fck-nat on `t4g.nano` ($0.0028 an hour: $2.04), its public IPv4 ($0.005 an hour: $3.65), 8 GB gp3 root volume ($0.0912 a GB: $0.73), and an assumed 10 GB or less a month out to the internet at $0.1093 a GB | 6.50 to 8 | AmazonEC2, 7 Nov; AmazonVPC, 5 Nov; AWSDataTransfer, 3 Nov; the root volume's size and the traffic are assumptions |
 | Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 | AWSSecretsManager, 11 Sep |
-| KMS | environment key + CloudTrail key at $1, requests at $0.03 per 10,000 (S3 Bucket Keys on) | 2 to 2.50 | awskms, 8 Nov |
+| KMS | environment key + CloudTrail key at $1, requests at $0.03 per 10,000 (S3 Bucket Keys on). Company keys are $1 each from the day each is made (Company keys, Cost) and none exists yet | 2 to 2.50 | awskms, 8 Nov |
 | Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance ($0.10) | 0.60 | instance: AWSCloudMap, 6 Nov; the hosted zone's price is global and **was not rechecked** |
 | CloudWatch Logs | 14-day retention, about 2 to 3 GB a month ingested at $0.67 a GB, storage $0.03 a GB-month | 1.50 to 2.50 | AmazonCloudWatch, 4 Nov; the volume is an assumption |
 | CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 | AWSCloudTrail, 2 Nov |
@@ -669,6 +883,36 @@ These could not be checked without an account. Each one is flagged at the place 
   whether binding a Workers VPC service needs a Connectivity Directory permission too) are from the
   docs; the first `deploy-workers` run confirms them.
 
+- **Company keys (#109).** Each of these fails closed (a refused write, never an open one), and the first real
+  check is a test with sample data before `require_company_keys` is turned on:
+  - **S3 compares the key header as written.** The bucket policy lets a write name only `.../alias/oryxa-fde-<env>/companies/*`,
+    which works only if S3 evaluates `s3:x-amz-server-side-encryption-aws-kms-key-id` against the string in the request
+    and accepts an alias ARN in that header (the PutObject reference lists "Key ID, Key ARN, or Key Alias"; the SSE-KMS
+    guide shows the condition with a key ARN and does not say what an alias does). Test: a `PutObject` naming a company
+    alias ARN succeeds under a company prefix; one naming the environment key's ARN, its id or `alias/oryxa-fde-<env>` is
+    `AccessDenied`. If the alias is refused, the API names the key ARN (it resolves it with `DescribeKey`) and
+    the bucket policy keeps only its negative rules (refuse the environment key's ARN, no key header, other
+    encryption): weaker, because a spelling it does not list passes, but the company key policy still binds each key
+    to its own prefix.
+  - **A request-level `x-amz-server-side-encryption-bucket-key-enabled: false` gives the object's ARN as the
+    encryption context** (the S3 Bucket Key guide: the header overrides the bucket's setting; the SSE-KMS guide: the
+    context is the object ARN without a Bucket Key). Test: the write above, then a `GetObject` by the API role,
+    both succeed; a write under company B's prefix naming company A's alias is `AccessDenied` from KMS.
+    If a Bucket Key cannot be turned off per request, the key policy's context pattern must also allow the bucket's
+    ARN (`arn:aws:s3:::<bucket>`), which gives up the per-prefix binding.
+  - **`DescribeKey` on an alias that does not exist** answers `NotFoundException` for the provisioning role, which
+    the script reads as "no key". Its policy grants `DescribeKey` on the alias ARNs for this; if the first run
+    answers `AccessDenied` instead, the script stops and says so rather than creating a key.
+  - **`GetKeyPolicy` returns the policy in a form the script compares after normalising** (one-element lists
+    unwrapped, lists unordered). If the first re-run of `provision` reports a policy difference with nothing changed,
+    the comparison needs another rule.
+  - **Condition keys** used for the first time here (`kms:ScheduleKeyDeletionPendingWindowInDays`, `kms:KeySpec`,
+    `kms:MultiRegion`, `kms:BypassPolicyLockoutSafetyCheck`, `kms:EncryptionContext:aws:s3:arn`, `kms:ViaService`) are
+    in the KMS developer guide's condition key list (read 10 November). The first `provision` shows whether `CreateKey`
+    with its tags and `TagResource` pass the provisioner's conditions (AWS needs `kms:TagResource` as well as
+    `kms:CreateKey` when tags go on at creation).
+  - **A multipart upload** names its key only in `CreateMultipartUpload`, so a `UploadPart` would meet
+    `DenyWriteWithoutCompanyKey`. The API uses single `PutObject` calls; test `UploadPart` before anything else uploads in parts.
 - **Secrets Manager with the environment key.** `CreateSecret` with `KmsKeyId` needs `kms:GenerateDataKey` and
   `kms:Decrypt` for the caller; AWS's reference may also list `kms:DescribeKey`. The Slack statement grants
   the first two, only through Secrets Manager. The first Slack install shows whether a third is needed.
@@ -693,9 +937,9 @@ These could not be checked without an account. Each one is flagged at the place 
   does not verify the CA. Prod adds TLS on each hop and the RDS CA bundle.
 - Tasks may reach any host on 443 through the NAT. The application's outbound allowlist
   (CLAUDE.md) is the control; a network firewall is a prod decision.
-- **No per-company KMS keys in P0** (ADR 0003, amendment of 4 November). The bucket encrypts with
-  the environment key, and the API's role is limited to company documents and canvas snapshots. A provisioning step
-  adds a key per company before the first real customer data (P1).
+- **Per-company KMS keys are built but off** (ADR 0003, amendment of 4 November; Company keys). Until the API names a
+  company's key on write and `require_company_keys` is `true`, new files land under the environment key, which is for
+  sample data only. The API's role is limited to company documents and canvas snapshots.
 - `ponytail:` the API and the tunnel connector share one 0.25 vCPU / 512 MiB task (`api_cpu`, `api_memory`).
   cloudflared is small, but a busy tunnel and a busy API compete; raise the task, not one container.
 - `ponytail:` no health check on cloudflared itself: a connector that is running but not connected is not
@@ -731,6 +975,8 @@ These could not be checked without an account. Each one is flagged at the place 
     inside a transaction that took `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants`. The
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
+  - **Company keys** (#109): write each company's files under its own key, and check that the company has one before
+    storing customer content (ADR 0006). The exact changes are in Company keys, "For the API stream".
   - It serves `GET /healthz` without auth (it does; the container health check and the deploy rely on
     it), listens where `LISTEN_ADDR` says (`127.0.0.1:<api_port>` in dev; the tunnel sidecar is its only
     client), keeps files under
@@ -755,5 +1001,6 @@ tofu -chdir=infra/envs/dev validate
 tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API task against the contract table
 shellcheck infra/scripts/*.sh
 bash infra/scripts/test-smoke-test.sh # the smoke test against a local stub; no environment needed
+bash infra/scripts/test-company-key.sh # company-key.sh against a fake aws; no account needed
 actionlint                            # the deploy workflows
 ```

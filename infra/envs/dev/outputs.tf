@@ -87,3 +87,13 @@ output "agent_model_target" {
   description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
   value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null
 }
+
+output "company_keys" {
+  description = "Input of infra/scripts/company-key.sh: `tofu output -json company_keys > <file>`. Holds ARNs and the key policy, no secret."
+  value       = module.company_keys.config
+}
+
+output "company_key_alias_arn_prefix" {
+  description = "Append a company id for the alias the API names on write and looks up (the API stream's COMPANY_KEY_ALIAS_ARN_PREFIX, once its code reads it)."
+  value       = module.company_keys.alias_arn_prefix
+}
