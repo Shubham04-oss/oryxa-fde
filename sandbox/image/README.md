@@ -37,11 +37,16 @@ starts. Every command the gateway runs gets `SSL_CERT_FILE` and the related vari
 ## Pid 1 and setuid files
 
 Pid 1 is `tini` (`/usr/bin/tini -- sleep infinity`), Debian trixie's `tini` package pinned at `0.19.0-3+b8`. apt
-checks the package against the archive's signed index, and a build fails rather than take another version. Every
+reads the `snapshot.debian.org` archive at `20261027T000000Z`, the timestamp the digest-pinned base image was itself
+built from (the comment in its `/etc/apt/sources.list.d/debian.sources`), not the live archive, which drops a version
+once Debian supersedes it. apt checks the package against the snapshot's signed index (only `Valid-Until`, which a
+snapshot's Release files have passed, is not checked), and a build fails rather than take another version. Every
 process orphaned in the container passes to pid 1, so when the clean start kills an earlier run's processes, `tini`
 reaps them and no zombie is left until the container stops. Reaping needs no capability, and as pid 1 it does not
 register as a subreaper. It reads no file after it starts, and the image sets none of its options or variables.
-To update it, change the version in the Dockerfile to one the archive has for both amd64 and arm64.
+To update it, change the version in the Dockerfile to one the snapshot has for both amd64 and arm64, and the
+`DEBIAN_SNAPSHOT` timestamp whenever the base image's digest changes. This is the only package the Dockerfile installs
+with apt; the harness's npm packages come from its lockfile.
 
 The base image ships `chage`, `chfn`, `chsh`, `expiry`, `gpasswd`, `mount`, `newgrp`, `passwd`, `su`, `umount`,
 `ssh-agent`, `ssh-keysign` and `unix_chkpwd` setuid or setgid. The Dockerfile clears the bits on every file that has
@@ -88,8 +93,9 @@ setuid or setgid. It leaves agent processes running (a detached session, a stopp
 thread exited), runs the harness's clean start as root, and checks again. Two control containers replace `tini` with
 plain `sleep infinity`. In one it runs as `init`, as the image did before #160: the clean start succeeds, but the
 processes it killed stay as zombies, so the zombie check must fail there. In the other it runs as `agent`, as the
-image did before #156: the pid 1 check must fail there, and the clean start must refuse to run. The CI job that runs
-it on the product image is a separate, lead-reviewed step.
+image did before #156: the pid 1 check must fail there, and the clean start must refuse to run. The `sandbox-image`
+job in `.github/workflows/ci.yml` builds the `linux/amd64` image from this Dockerfile and runs it, on every pull
+request that changes `sandbox/` or the workflow and on every push to `main`.
 
 Docker is only a stand-in. Whether the agent can trace another process of its own user depends on the kernel's
 `kernel.yama.ptrace_scope`, its capabilities and seccomp, which the Cloudflare runtime does not document. With
