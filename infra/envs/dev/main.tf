@@ -32,10 +32,12 @@ locals {
 
   # Optional API features, on while their variable is set (variables.tf). Off, the API starts without
   # them and no secret or permission for them exists.
-  agent_on    = var.sandbox_gateway_url != null
-  realtime_on = local.agent_on && var.realtime_url != null
-  github_on   = var.github_app != null
-  slack_on    = var.slack_client_id != null
+  agent_on = var.sandbox_gateway_url != null
+  # Where the agent's Bedrock calls start from; may differ from region (variables.tf, agent_region).
+  agent_region = coalesce(var.agent_region, local.region)
+  realtime_on  = local.agent_on && var.realtime_url != null
+  github_on    = var.github_app != null
+  slack_on     = var.slack_client_id != null
 
   # Slack bot tokens are created by the API at run time, one secret per workspace, under this prefix
   # (SLACK_SECRET_PREFIX, which the code wants as oryxa-fde/<env>/slack/). Not OpenTofu's, so teardown leaves them.
@@ -104,7 +106,7 @@ locals {
     local.agent_on ? {
       SANDBOX_GATEWAY_URL = var.sandbox_gateway_url
       AGENT_MODEL         = var.agent_model
-      AGENT_REGION        = coalesce(var.agent_region, local.region)
+      AGENT_REGION        = local.agent_region
     } : {},
     local.realtime_on ? { REALTIME_URL = var.realtime_url } : {},
     local.github_on ? {

@@ -1,0 +1,39 @@
+{
+  "default": [
+    "models.opencode.ai"
+  ],
+  "models-fetch-off": [],
+  "websearch-on": [
+    "agent.tinyfish.ai",
+    "example.com"
+  ],
+  "share-auto": [],
+  "plugin-npm": [
+    "registry.npmjs.org"
+  ],
+  "mcp-remote": [
+    "mcp.spike.example"
+  ],
+  "mcp-local": [
+    "mcp-local.spike.example"
+  ],
+  "otel": [
+    "otel.spike.example"
+  ],
+  "intended": [],
+  "bedrock-host": [
+    "bedrock-runtime.us-east-1.amazonaws.com"
+  ],
+  "s-readonly": [
+    "github.com"
+  ],
+  "s-readonly-rg": [],
+  "hostile-open": [
+    "mcp.evil-repo.spike.example",
+    "models.opencode.ai",
+    "plugin.evil-repo.spike.example",
+    "registry.npmjs.org"
+  ],
+  "hostile-protected": [],
+  "s-healthz": []
+}

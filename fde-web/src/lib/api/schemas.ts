@@ -27,7 +27,9 @@ export type StakeholderId = z.infer<typeof StakeholderId>
 export const SystemId = id<"SystemId">()
 export type SystemId = z.infer<typeof SystemId>
 export const ScopeItemId = id<"ScopeItemId">()
+export type ScopeItemId = z.infer<typeof ScopeItemId>
 export const CriterionId = id<"CriterionId">()
+export type CriterionId = z.infer<typeof CriterionId>
 export const AccessRequestId = id<"AccessRequestId">()
 export type AccessRequestId = z.infer<typeof AccessRequestId>
 export const TaskId = id<"TaskId">()
@@ -143,6 +145,7 @@ export const ScopeItemOut = z.object({
   description: z.string(),
   updated_at: instant,
 })
+export type ScopeItemOut = z.infer<typeof ScopeItemOut>
 
 export const CriterionOut = z.object({
   id: CriterionId,
@@ -163,6 +166,7 @@ export const SignOffOut = z.object({
   recorded_by: UserId,
   signed_at: instant,
 })
+export type SignOffOut = z.infer<typeof SignOffOut>
 
 export const ScopeOut = z.object({
   version,

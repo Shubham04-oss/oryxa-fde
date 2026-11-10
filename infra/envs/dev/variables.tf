@@ -20,9 +20,9 @@ variable "aws_account_id" {
 }
 
 variable "aws_region" {
-  description = "Dev runs in the platform's region until the first region is decided (plan, open decisions)."
+  description = "Where the environment runs: Mumbai (ap-south-1), chosen by the founder to measure latency from the team and first customers (#144). Customer data at rest stays here (ADR 0003). Bedrock embeddings are in-region here; the Claude models are not (agent_region)."
   type        = string
-  default     = "us-west-2"
+  default     = "ap-south-1"
 }
 
 variable "cloudflare_account_id" {
@@ -210,7 +210,7 @@ variable "agent_model" {
 }
 
 variable "agent_region" {
-  description = "Region of agent_model (AGENT_REGION). Null: aws_region."
+  description = "Region the agent's Bedrock calls start from (AGENT_REGION); null means aws_region. In ap-south-1 Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 are served only through a cross-Region inference profile, and none has a geography profile for India: `global.anthropic.claude-opus-5-5` lets Bedrock process prompts and outputs in any commercial AWS Region (infra/README.md, Where prompts are processed). A profile tied to a geography keeps processing inside it, but is called from a source Region in that geography, which is what this variable is for (for example `eu.anthropic.claude-opus-5-5` from eu-west-2). The profile id's prefix does not say where requests go: check the profile's destination Regions with GetInferenceProfile from this Region."
   type        = string
   default     = null
 }

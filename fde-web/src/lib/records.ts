@@ -34,17 +34,17 @@ const NAME_CONTROL = /[\u0000-\u001f\u007f]/
 const TEXT_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/
 
 const length = (value: string) => [...value].length
-const say = (code: string) => SAFE_TEXT[code] ?? "Check what you typed."
+export const say = (code: string) => SAFE_TEXT[code] ?? "Check what you typed."
 
 /** A name: one line. A blank optional one is fine and is left out or cleared. */
-function checkName(value: string, code: string, required: boolean) {
+export function checkName(value: string, code: string, required: boolean) {
   const v = value.trim()
   if (!v) return required ? say("invalid_name") : null
   return length(v) > MAX_NAME || NAME_CONTROL.test(v) ? say(code) : null
 }
 
 /** Text: several lines, up to the limit. */
-function checkText(value: string, code: string) {
+export function checkText(value: string, code: string) {
   const v = value.trim()
   return length(v) > MAX_TEXT || TEXT_CONTROL.test(v) ? say(code) : null
 }

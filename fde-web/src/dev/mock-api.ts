@@ -1120,6 +1120,97 @@ async function projectWrites(
   return json(p.project)
 }
 
+let scopeCount = 0
+const KINDS = ["in", "out"] as const
+const COMPARATORS = ["at_least", "at_most"] as const
+
+/** Every change to the items or criteria moves the version on, and the last sign-off no longer covers it. */
+function bumped(current: S["ScopeOut"]) {
+  current.version += 1
+  current.signed_off = current.sign_off?.version === current.version
+}
+
+/**
+ * A project's scope writes, with the API's rules: each item and criterion on its own, a `PUT` that
+ * replaces it, a version bumped by every change (even one that changes nothing), one sign-off per
+ * version, and no sign-off of an empty scope. All of them need `work`, which the caller has here.
+ */
+async function scopeRoutes(
+  method: string,
+  rest: Array<string>,
+  found: CompanySeed,
+  current: S["ScopeOut"],
+  request: Request,
+) {
+  const [collection, id] = rest
+  const now = new Date().toISOString()
+  if (collection === "sign-offs" && method === "POST" && id === undefined) {
+    const body = await readBody(request)
+    if (!body || typeof body.stakeholder !== "string") return refuse(400, "invalid")
+    if (current.items.length === 0 && current.criteria.length === 0)
+      return refuse(409, "rejected_empty_scope")
+    if (!found.stakeholders.some((x) => x.id === body.stakeholder))
+      return refuse(400, "invalid_stakeholder")
+    if (current.sign_off?.version === current.version) return refuse(409, "conflict")
+    const signed: S["SignOffOut"] = {
+      version: current.version,
+      stakeholder: body.stakeholder,
+      recorded_by: state.me.user.id,
+      signed_at: now,
+    }
+    current.sign_off = signed
+    current.signed_off = true
+    return json(signed, 201)
+  }
+  if (collection !== "items" && collection !== "criteria") return null
+  const list: Array<{ id: string }> = collection === "items" ? current.items : current.criteria
+  const at = id === undefined ? -1 : list.findIndex((x) => x.id === id)
+  if (method === "DELETE" && id !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    list.splice(at, 1)
+    bumped(current)
+    return noContent()
+  }
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
+  const body = await readBody(request)
+  if (!body) return refuse(400, "invalid")
+  if (!plain(body.description, 4000, true)) return refuse(400, "invalid_description")
+  let saved: S["ScopeItemOut"] | S["CriterionOut"]
+  if (collection === "items") {
+    const kind = KINDS.find((k) => k === body.kind)
+    if (!kind) return refuse(400, "invalid_kind")
+    saved = {
+      id: id ?? `itm_new${++scopeCount}`,
+      kind,
+      description: (body.description as string).trim(),
+      updated_at: now,
+    }
+  } else {
+    const comparator = COMPARATORS.find((c) => c === body.comparator)
+    if (!plain(body.metric, 200, false)) return refuse(400, "invalid_metric")
+    if (!comparator) return refuse(400, "invalid_comparator")
+    if (typeof body.target !== "number" || !Number.isFinite(body.target))
+      return refuse(400, "invalid_target")
+    if (body.unit !== undefined && body.unit !== null && !plain(body.unit, 200, false))
+      return refuse(400, "invalid_unit")
+    saved = {
+      id: id ?? `crt_new${++scopeCount}`,
+      description: (body.description as string).trim(),
+      metric: (body.metric as string).trim(),
+      comparator,
+      target: body.target,
+      unit: typeof body.unit === "string" ? body.unit.trim() : null,
+      updated_at: now,
+    }
+  }
+  if (!adding && at < 0) return refuse(404, "not_found")
+  if (adding) list.push(saved)
+  else list[at] = saved
+  bumped(current)
+  return json(saved, adding ? 201 : 200)
+}
+
 /** `POST`, `PUT` and `DELETE` on a company's stakeholders: the API's `work`, and its checks. */
 async function stakeholderRoutes(
   method: string,
@@ -1322,6 +1413,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "systems") return json(found.systems)
     return null
   }
+  if (record === "scope") return scopeRoutes(method, rest, found, p.records.scope, request)
   if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
   if (record === "access-requests") return accessRoutes(method, rest[0], found, p.records, request)
   if (method === "PUT" && record === "stage") {

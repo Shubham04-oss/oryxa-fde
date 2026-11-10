@@ -1,0 +1,36 @@
+{
+  "model": "stub/stub-1",
+  "small_model": "stub/stub-1",
+  "enabled_providers": ["stub"],
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Stub",
+      "options": { "baseURL": "http://10.123.0.3:8080/v1", "apiKey": "placeholder" },
+      "models": { "stub-1": { "name": "Stub 1", "limit": { "context": 100000, "output": 8000 } } }
+    }
+  },
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "websearch": false,
+  "plugin": [],
+  "mcp": {},
+  "permission": {
+    "*": "ask",
+    "question": "deny",
+    "subagent": "deny",
+    "skill": "deny",
+    "websearch": "deny",
+    "webfetch": "deny",
+    "execute": "deny",
+    "opencode_list_mcp_resources": "deny",
+    "opencode_models": "deny",
+    "opencode_read_mcp_resource": "deny",
+    "opencode_session_move": "deny",
+    "opencode_session_rename": "deny",
+    "opencode_worktree_create": "deny",
+    "opencode_worktree_list": "deny",
+    "opencode_worktree_remove": "deny"
+  }
+}

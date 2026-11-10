@@ -1,0 +1,58 @@
+{
+  "note": "Headers of the request OpenCode 2.2.7 sent to the stub standing in for Bedrock Runtime. Placeholder credentials only.",
+  "access_keys": {
+    "method": "POST",
+    "path": "/model/anthropic.claude-fable-5-2/converse-stream",
+    "headers": {
+      "authorization": "AWS4-HMAC-SHA256 Credential=placeholder-access-key-id/20260101/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date;x-opencode-client;x-opencode-project;x-opencode-session;x-opencode-session-id;x-session-affinity;x-session-id, Signature=<64 hex digits>",
+      "b3": "<b3>",
+      "content-type": "application/json",
+      "traceparent": "<traceparent>",
+      "user-agent": "opencode/latest/2.2.7/acp",
+      "x-amz-date": "20260101T000000Z",
+      "x-opencode-client": "acp",
+      "x-opencode-project": "<project-hash>",
+      "x-opencode-session": "ses_sample001",
+      "x-opencode-session-id": "ses_sample001",
+      "x-session-affinity": "ses_sample001",
+      "x-session-id": "ses_sample001"
+    }
+  },
+  "access_keys_with_session_token": {
+    "method": "POST",
+    "path": "/model/anthropic.claude-fable-5-2/converse-stream",
+    "headers": {
+      "authorization": "AWS4-HMAC-SHA256 Credential=placeholder-access-key-id/20260101/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token;x-opencode-client;x-opencode-project;x-opencode-session;x-opencode-session-id;x-session-affinity;x-session-id, Signature=<64 hex digits>",
+      "b3": "<b3>",
+      "content-type": "application/json",
+      "traceparent": "<traceparent>",
+      "user-agent": "opencode/latest/2.2.7/acp",
+      "x-amz-date": "20260101T000000Z",
+      "x-amz-security-token": "placeholder-session-token",
+      "x-opencode-client": "acp",
+      "x-opencode-project": "<project-hash>",
+      "x-opencode-session": "ses_sample001",
+      "x-opencode-session-id": "ses_sample001",
+      "x-session-affinity": "ses_sample001",
+      "x-session-id": "ses_sample001"
+    }
+  },
+  "bearer_token": {
+    "method": "POST",
+    "path": "/model/anthropic.claude-fable-5-2/converse-stream",
+    "headers": {
+      "authorization": "Bearer placeholder-bearer-not-real",
+      "b3": "<b3>",
+      "content-type": "application/json",
+      "traceparent": "<traceparent>",
+      "user-agent": "opencode/latest/2.2.7/acp",
+      "x-opencode-client": "acp",
+      "x-opencode-project": "<project-hash>",
+      "x-opencode-session": "ses_sample001",
+      "x-opencode-session-id": "ses_sample001",
+      "x-session-affinity": "ses_sample001",
+      "x-session-id": "ses_sample001"
+    }
+  },
+  "no_credentials_sent_a_request": false
+}

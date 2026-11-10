@@ -1,0 +1,13 @@
+{
+  "model": "stub/stub-1",
+  "small_model": "stub/stub-1",
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Stub",
+      "options": { "baseURL": "http://10.123.0.3:8080/v1", "apiKey": "placeholder" },
+      "models": { "stub-1": { "name": "Stub 1", "limit": { "context": 100000, "output": 8000 } } }
+    }
+  },
+  "permission": { "*": "ask" }
+}
