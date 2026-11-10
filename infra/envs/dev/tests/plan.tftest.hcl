@@ -317,6 +317,30 @@ run "the_company_key_prefix_on_each_task_is_what_the_code_parses" {
   }
 }
 
+# Apply order step 5 as written (#195): every file in infra/sql fits run-task.sh's task override once the script drops
+# its comment-only and blank lines. The limit and the dropped lines are read from the script itself.
+run "every_sql_file_fits_the_task_override" {
+  command = plan
+  module {
+    source = "./tests/code"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    task = run.api_task_with_every_feature_off.api_task_timing
+  }
+
+  assert {
+    condition     = contains(keys(output.task_override_lengths), "infra/sql/01-bootstrap.sql") && output.task_override_limit == 7000
+    error_message = "the check reads the SQL files and run-task.sh's limit"
+  }
+  assert {
+    condition     = alltrue([for f, n in output.task_override_lengths : n < output.task_override_limit])
+    error_message = "a file in infra/sql is too large for run-task.sh's override even without comments; split it: ${jsonencode(output.task_override_lengths)}"
+  }
+}
+
 run "the_api_health_check_and_the_stop_sequence_match_the_code" {
   command = plan
   module {
@@ -805,6 +829,74 @@ run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
     condition     = length(aws_iam_openid_connect_provider.github) == 1
     error_message = "the GitHub OIDC provider is created when none is passed in"
   }
+}
+
+# With GitHub's immutable subject on (#196), the token's sub names the owner and repository by id too. The prefix
+# variable carries it; the condition stays an exact match and job_workflow_ref keeps the names. Placeholder ids.
+run "the_deploy_role_trusts_the_immutable_subject_when_given" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:Shubham04-oss@1111111/oryxa-fde@2222222"
+  }
+
+  assert {
+    condition = {
+      for c in one(data.aws_iam_policy_document.github_deploy_assume.statement).condition :
+      c.variable => "${c.test} ${join(" ", c.values)}"
+      } == {
+      "token.actions.githubusercontent.com:aud"              = "StringEquals sts.amazonaws.com"
+      "token.actions.githubusercontent.com:sub"              = "StringEquals repo:Shubham04-oss@1111111/oryxa-fde@2222222:environment:dev"
+      "token.actions.githubusercontent.com:job_workflow_ref" = "StringEquals Shubham04-oss/oryxa-fde/.github/workflows/deploy-api.yml@refs/heads/main"
+    }
+    error_message = "with the immutable prefix, sub is exactly <prefix>:environment:dev and job_workflow_ref is unchanged"
+  }
+}
+
+run "the_name_only_prefix_given_explicitly_is_the_default" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:Shubham04-oss/oryxa-fde"
+  }
+
+  assert {
+    condition = jsonencode(flatten([
+      for c in one(data.aws_iam_policy_document.github_deploy_assume.statement).condition :
+      c.values if c.variable == "token.actions.githubusercontent.com:sub"
+    ])) == jsonencode(["repo:Shubham04-oss/oryxa-fde:environment:dev"])
+    error_message = "the name-only prefix builds the same sub as leaving the variable unset"
+  }
+}
+
+run "rejects_a_wildcard_subject_prefix" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:Shubham04-oss@*/oryxa-fde@*"
+  }
+  expect_failures = [var.github_oidc_subject_prefix]
+}
+
+run "rejects_a_subject_prefix_with_the_environment" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:Shubham04-oss@1111111/oryxa-fde@2222222:environment:dev"
+  }
+  expect_failures = [var.github_oidc_subject_prefix]
+}
+
+run "rejects_a_subject_prefix_with_only_one_id" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:Shubham04-oss@1111111/oryxa-fde"
+  }
+  expect_failures = [var.github_oidc_subject_prefix]
+}
+
+run "rejects_a_subject_prefix_naming_another_repository" {
+  command = plan
+  variables {
+    github_oidc_subject_prefix = "repo:someone-else@1111111/oryxa-fde@2222222"
+  }
+  expect_failures = [var.github_oidc_subject_prefix]
 }
 
 run "deploy_role_reaches_only_the_api_image_migrate_task_and_the_deployed_services" {

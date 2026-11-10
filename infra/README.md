@@ -94,6 +94,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `require_company_keys` | `false` | `false`: a company file written without naming a key lands under the environment key (sample data only). `true`: S3 refuses any write that does not name a company key, and the API's role loses `kms:GenerateDataKey` on the environment key. The API has named company keys on write since #176 and both it and the ingest worker carry `COMPANY_KEY_ALIAS_ARN_PREFIX` (#183). Set it before the first real customer data, once the checks in Company keys, Before `require_company_keys` is switched on, pass |
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
+| `github_oidc_subject_prefix` | `null` | The OIDC `sub` prefix the deploy role trusts, before `:environment:<env>`. Null is `repo:<github_repository>`. With GitHub's immutable subject on (this repository has it), set it to the `sub_claim_prefix` that `gh api repos/<owner>/<name>/actions/oidc/customization/sub` prints, `repo:<owner>@<owner id>/<name>@<repo id>` (Apply order, step 4). Validated: that shape or `repo:<owner>/<name>`, naming `github_repository`, no wildcard |
 | `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
 | `start_services` | `false` | `false`: every service (SpiceDB, the API task, the workers) runs 0 tasks. Set `true` once the image and every secret value exist |
 | `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue. Must include those two: the workers read them |
@@ -539,6 +540,9 @@ workflows (Deploys, below), not from the owner's machine.
    `api_image_tag`, and `event_public_key`: make the event key pair now (`openssl genpkey -algorithm ed25519 -out event-key.pem`,
    `openssl pkey -in event-key.pem -pubout`), put the public PEM in `terraform.tfvars` (a heredoc), and keep the private
    file for step 6. Set `cloudflare_zone_name`, `web_hostname` and `admin_hostname` (and `mcp_hostname` before `enable_mcp`) as in Host names, and check the records first (Verify before apply: the names must be free in the zone). Leave `update_model` and `digest_from` unset (Not deployed: the lifecycle worker waits for a model).
+   Read the repository's OIDC subject setting: `gh api repos/<owner>/<name>/actions/oidc/customization/sub`. If it
+   answers `use_immutable_subject: true`, set `github_oidc_subject_prefix` to its `sub_claim_prefix`
+   (`repo:<owner>@<owner id>/<name>@<repo id>`); otherwise leave it unset (Deploys: the deploy role's trust).
    Then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
    `tofu -chdir=infra/envs/dev apply dev.tfplan`. This creates the network, keys, the database (about
    10 minutes), the empty secrets, ECR, the cluster with every service at 0 tasks (SpiceDB, the API and the
@@ -548,7 +552,9 @@ workflows (Deploys, below), not from the owner's machine.
 5. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
    pgvector, the IAM logins (the API's, the workers' and SpiceDB's), their roles and the `spicedb` database, and is safe to
    re-run: **run it again after #130 on a database it already set up**, for the worker logins. It stops with an error if
-   anything the API or a worker can reach has owner powers (Database logins).
+   anything the API or a worker can reach has owner powers (Database logins). The script sends a SQL file without its
+   comment-only and blank lines, which keeps it under the task override's limit; `tofu test` checks that every file in
+   `infra/sql/` fits, measured that way.
 6. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
@@ -1075,7 +1081,8 @@ apply (Apply order, step 3):
 
 There is no AWS key anywhere. The `deploy` job of `deploy-api` gets a one-hour session for
 `oryxa-fde-dev-github-deploy` through GitHub OIDC. Its trust needs both claims to match exactly:
-`sub` is `repo:<github_repository>:environment:dev`, and `job_workflow_ref` is
+`sub` is `<github_oidc_subject_prefix>:environment:dev` (the prefix is `repo:<github_repository>` unless the variable
+is set; with GitHub's immutable subject on, `repo:<owner>@<owner id>/<name>@<repo id>`), and `job_workflow_ref` is
 `<github_repository>/.github/workflows/deploy-api.yml@refs/heads/main`. So no other workflow, branch
 or environment gets in, even before the environment's branch rule exists. `deploy-workers` needs no
 AWS access and cannot assume it. The role may push to the `oryxa-fde-api` repository, register task
@@ -1133,7 +1140,9 @@ running while the API rolls.
    check; "What the load balancer gave", below), then does the same for each worker in turn, one at a time. Each wait is
    bounded: the AWS CLI's waiter polls every 15 s and gives up after 40 tries, 10 minutes, and a service that does not
    settle on its new revision (the circuit breaker rolled it back, which also reads as stable, so the workflow checks the
-   primary deployment) fails the deploy. A worker has no health check, so it settles when its replacement task runs; a worker
+   primary deployment) fails the deploy. A service at 0 tasks (`start_services = false`) reads as stable at once while its
+   rollout is still `IN_PROGRESS`, so that check polls every 5 s for up to 2 minutes until the primary deployment is
+   `COMPLETED` on the new revision, and stops at once if it is on another revision or `FAILED`. A worker has no health check, so it settles when its replacement task runs; a worker
    that starts and crashes is replaced until the breaker gives up. Services already rolled stay on the new image, and the
    failure (an annotation and the run's summary) names which services are on the new image, which were not rolled, and the
    one it stopped at.
@@ -1409,8 +1418,13 @@ These could not be checked without an account. Each one is flagged at the place 
   scoped to a family); `iam:PassRole` on the roles of the API, the migrate task and each worker (six roles, two more for each of the lifecycle worker and the MCP server) is what limits a new revision. If the account
   already has a GitHub OIDC provider, set `github_oidc_provider_arn` or the first apply fails on it.
   The trust's `job_workflow_ref` condition relies on STS validating that GitHub claim (supported for
-  GitHub since 2025). If the first `deploy-api` run is refused at `AssumeRoleWithWebIdentity`, check
-  that claim first; the failure is closed, never open.
+  GitHub since 2025). If a `deploy-api` run is refused at `AssumeRoleWithWebIdentity`, compare the trust with the
+  token's claims; the failure is closed, never open. Found on the first dev deploy (#196): this repository has
+  GitHub's immutable subject on, so the token's `sub` is `repo:<owner>@<owner id>/<name>@<repo id>:environment:dev`
+  and the name-only `sub` the role then trusted refused it. `github_oidc_subject_prefix` now carries that prefix
+  (Apply order, step 4). The immutable setting changes `sub` only: with the trust's `sub` set to the immutable form by
+  hand and `job_workflow_ref` left as `<github_repository>/.github/workflows/deploy-api.yml@refs/heads/main`, the
+  rerun signed in, so `job_workflow_ref` still names the owner and repository, not their ids.
 - **Cloudflare token for deploys.** The permission names (Containers Edit for the sandbox image, and
   whether binding a Workers VPC service needs a Connectivity Directory permission too) are from the
   docs; the first `deploy-workers` run confirms them.
