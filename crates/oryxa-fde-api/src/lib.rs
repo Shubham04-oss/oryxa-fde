@@ -46,7 +46,7 @@ mod today;
 pub use auth::{Principal, VerifyToken};
 pub use authz::{reconcile_grants, run_reconciler};
 pub use documents::{DocumentOut, SearchHitOut};
-pub use error::{ApiError, ErrorBody};
+pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit};
 

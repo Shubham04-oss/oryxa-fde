@@ -4644,3 +4644,144 @@ async fn a_slack_workspace_links_a_channel_and_an_uninstall_forgets_it() {
         .await;
     assert_eq!(body["error"], "invalid_slack");
 }
+
+/// `body` with `version` set to `v`.
+fn versioned(body: &Value, v: &Value) -> Value {
+    let mut b = body.clone();
+    b["version"] = v.clone();
+    b
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_save_based_on_an_old_version_is_refused_with_the_record_as_it_stands() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let eng = &t.engineer;
+    let base = format!("/v1/companies/{}", t.company);
+    let p = format!("{base}/projects/{}", t.project);
+    // Each whole-record PUT, with a create path and two different bodies it accepts.
+    let kinds = [
+        (
+            format!("{p}/tasks"),
+            t.record("{task}"),
+            json!({"title": "Index tickets", "status": "todo"}),
+            json!({"title": "Index all tickets", "status": "in_progress"}),
+        ),
+        (
+            format!("{p}/access-requests"),
+            t.record("{access_request}"),
+            json!({"description": "VPN", "status": "requested"}),
+            json!({"description": "VPN for two", "status": "in_progress"}),
+        ),
+        (
+            format!("{base}/stakeholders"),
+            t.record("{stakeholder}"),
+            json!({"name": "Sam Lee"}),
+            json!({"name": "Sam Leigh", "role": "sponsor"}),
+        ),
+        (
+            format!("{base}/systems"),
+            t.record("{system}"),
+            json!({"name": "Zendesk"}),
+            json!({"name": "Zendesk", "kind": "Ticketing"}),
+        ),
+        (
+            format!("{p}/scope/items"),
+            t.record("{item}"),
+            json!({"kind": "in", "description": "Tier-1 tickets"}),
+            json!({"kind": "in", "description": "Tier-1 and tier-2 tickets"}),
+        ),
+        (
+            format!("{p}/scope/criteria"),
+            t.record("{criterion}"),
+            json!({"description": "Correct", "metric": "accuracy", "comparator": "at_least", "target": 90}),
+            json!({"description": "Correct", "metric": "accuracy", "comparator": "at_least", "target": 95}),
+        ),
+    ];
+    for (list, id, first, second) in &kinds {
+        let path = format!("{list}/{id}");
+        // No version: written as before, and the answer carries the version to send next.
+        let saved = w.ok(eng, "PUT", &path, Some(first.clone()), StatusCode::OK).await;
+        let v = saved["version"].as_u64().unwrap_or_else(|| panic!("{path}: {saved}"));
+        // The same values with that version: nothing changes, not even the version.
+        let same = w
+            .ok(eng, "PUT", &path, Some(versioned(first, &json!(v))), StatusCode::OK)
+            .await;
+        assert_eq!(same, saved, "{path}");
+        let moved = w
+            .ok(eng, "PUT", &path, Some(versioned(second, &json!(v))), StatusCode::OK)
+            .await;
+        assert_eq!(moved["version"], v + 1, "{path}");
+        // A save from before that change is refused with the record as it stands.
+        let (status, body) = w
+            .call(Some(&eng.token), "PUT", &path, Some(versioned(first, &json!(v))))
+            .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                json!({"error": "stale_version", "current": moved})
+            ),
+            "{path}"
+        );
+        // A create has no version to name.
+        let (status, body) = w
+            .call(Some(&eng.token), "POST", list, Some(versioned(first, &json!(1))))
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_version")),
+            "{list}"
+        );
+    }
+    let tasks = w.ok(eng, "GET", &format!("{p}/tasks"), None, StatusCode::OK).await;
+    let task = tasks.as_array().unwrap().iter().find(|x| x["id"] == t.record("{task}"));
+    assert_eq!(
+        task.unwrap()["title"],
+        "Index all tickets",
+        "the refused save changed nothing"
+    );
+
+    // A sign-off names the scope version the customer read.
+    let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
+    let version = scope["version"].as_u64().unwrap();
+    let sign = format!("{p}/scope/sign-offs");
+    let stakeholder = t.record("{stakeholder}");
+    let (status, body) = w
+        .call(
+            Some(&eng.token),
+            "POST",
+            &sign,
+            Some(json!({"stakeholder": stakeholder, "version": version - 1})),
+        )
+        .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::CONFLICT,
+            json!({"error": "stale_version", "current": scope})
+        )
+    );
+    let signed = w
+        .ok(
+            eng,
+            "POST",
+            &sign,
+            Some(json!({"stakeholder": stakeholder, "version": version})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(signed["version"], version);
+    // Saving an item as it is does not move the scope on, so the sign-off still covers it.
+    let item = &scope["items"].as_array().unwrap()[0];
+    let same = json!({"kind": item["kind"], "description": item["description"], "version": item["version"]});
+    let path = format!("{p}/scope/items/{}", item["id"].as_str().unwrap());
+    w.ok(eng, "PUT", &path, Some(same), StatusCode::OK).await;
+    let scope = w.ok(eng, "GET", &format!("{p}/scope"), None, StatusCode::OK).await;
+    assert_eq!(
+        (scope["version"].as_u64(), scope["signed_off"].as_bool()),
+        (Some(version), Some(true))
+    );
+}

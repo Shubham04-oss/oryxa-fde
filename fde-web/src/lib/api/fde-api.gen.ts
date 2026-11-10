@@ -726,7 +726,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Record the customer's sign-off of the current scope version. */
+        /**
+         * Record the customer's sign-off of the scope version they read.
+         * @description 409 is `stale_version` (with the scope as it stands) when the scope has moved on from that
+         *     version, `rejected_empty_scope`, or `conflict` when this version is already signed.
+         */
         post: operations["sign_off_scope"];
         delete?: never;
         options?: never;
@@ -1576,6 +1580,13 @@ export interface components {
             owner?: string | null;
             status: components["schemas"]["AccessState"];
             system?: string | null;
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
         };
         AccessRequestOut: {
             /**
@@ -1591,6 +1602,11 @@ export interface components {
             status: components["schemas"]["AccessState"];
             status_changed_at: string;
             system?: string | null;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
         };
         /** @enum {string} */
         AccessState: "requested" | "in_progress" | "granted" | "denied" | "revoked";
@@ -1716,6 +1732,13 @@ export interface components {
             target: number;
             /** @description e.g. "%" or "s". */
             unit?: string | null;
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
         };
         CriterionOut: {
             comparator: components["schemas"]["TargetComparator"];
@@ -1726,6 +1749,11 @@ export interface components {
             target: number;
             unit?: string | null;
             updated_at: string;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
         };
         CustomerQuestionBody: {
             /**
@@ -2000,6 +2028,16 @@ export interface components {
         };
         /** @enum {string} */
         RunOutcomeOut: "succeeded" | "failed" | "rejected" | "cancelled";
+        /**
+         * @description A 409 from a save that also enforces rules of the record: `stale_version` with the record as
+         *     it stands, or a refusal with a code only, e.g. `rejected_blocker_required`.
+         */
+        SaveConflict_ScopeOut: components["schemas"]["StaleBody_ScopeOut"] | components["schemas"]["ErrorBody"];
+        /**
+         * @description A 409 from a save that also enforces rules of the record: `stale_version` with the record as
+         *     it stands, or a refusal with a code only, e.g. `rejected_blocker_required`.
+         */
+        SaveConflict_TaskOut: components["schemas"]["StaleBody_TaskOut"] | components["schemas"]["ErrorBody"];
         ScopeChangeOut: {
             action: string;
             actor: string;
@@ -2016,12 +2054,24 @@ export interface components {
         ScopeItemBody: {
             description: string;
             kind: components["schemas"]["ItemKind"];
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
         };
         ScopeItemOut: {
             description: string;
             id: string;
             kind: components["schemas"]["ItemKind"];
             updated_at: string;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
         };
         ScopeOut: {
             criteria: components["schemas"]["CriterionOut"][];
@@ -2031,7 +2081,8 @@ export interface components {
             signed_off: boolean;
             /**
              * Format: int32
-             * @description Bumped by every change to the items or criteria.
+             * @description Bumped by every change to the items or criteria (a save that changes nothing is none); send
+             *     it as `version` with a sign-off.
              */
             version: number;
         };
@@ -2083,6 +2134,13 @@ export interface components {
         SignOffBody: {
             /** @description The person at the customer who signed off. */
             stakeholder: string;
+            /**
+             * Format: int32
+             * @description The scope `version` the customer agreed to. If the scope has moved on since, the answer is
+             *     409 `stale_version` with the scope as it stands, and nothing is signed. Left out, the
+             *     current version is signed.
+             */
+            version?: number | null;
         };
         SignOffOut: {
             recorded_by: string;
@@ -2149,6 +2207,13 @@ export interface components {
             role?: components["schemas"]["StakeholderPart"];
             /** @description Their job at the customer, e.g. "VP Engineering". */
             title?: string | null;
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
         };
         StakeholderOut: {
             /** @description When they unsubscribed from the weekly digest, if they did. */
@@ -2159,12 +2224,180 @@ export interface components {
             role: components["schemas"]["StakeholderPart"];
             title?: string | null;
             updated_at: string;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
         };
         /**
          * @description The part a stakeholder plays in the engagement.
          * @enum {string}
          */
         StakeholderPart: "sponsor" | "champion" | "user" | "it" | "security" | "other";
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_AccessRequestOut: {
+            current: {
+                /**
+                 * Format: int64
+                 * @description Whole days from the request until it was settled, or until now while it is open.
+                 */
+                days_waiting: number;
+                description: string;
+                granted_at?: string | null;
+                id: string;
+                owner?: string | null;
+                requested_at: string;
+                status: components["schemas"]["AccessState"];
+                status_changed_at: string;
+                system?: string | null;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_CriterionOut: {
+            current: {
+                comparator: components["schemas"]["TargetComparator"];
+                description: string;
+                id: string;
+                metric: string;
+                /** Format: double */
+                target: number;
+                unit?: string | null;
+                updated_at: string;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_ScopeItemOut: {
+            current: {
+                description: string;
+                id: string;
+                kind: components["schemas"]["ItemKind"];
+                updated_at: string;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_ScopeOut: {
+            current: {
+                criteria: components["schemas"]["CriterionOut"][];
+                items: components["schemas"]["ScopeItemOut"][];
+                sign_off?: components["schemas"]["SignOffOut"] | null;
+                /** @description Whether the latest sign-off covers the current version. */
+                signed_off: boolean;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the items or criteria (a save that changes nothing is none); send
+                 *     it as `version` with a sign-off.
+                 */
+                version: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_StakeholderOut: {
+            current: {
+                /** @description When they unsubscribed from the weekly digest, if they did. */
+                digest_unsubscribed_at?: string | null;
+                email?: string | null;
+                id: string;
+                name: string;
+                role: components["schemas"]["StakeholderPart"];
+                title?: string | null;
+                updated_at: string;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_SystemOut: {
+            current: {
+                description?: string | null;
+                id: string;
+                kind?: string | null;
+                name: string;
+                updated_at: string;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
+        /**
+         * @description A whole-record save refused because the record has moved on from the `version` it was based
+         *     on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+         */
+        StaleBody_TaskOut: {
+            current: {
+                assignee?: string | null;
+                /** @description The access request it is blocked on. */
+                blocked_by?: string | null;
+                blocker?: string | null;
+                created_at: string;
+                /** @description `YYYY-MM-DD`. */
+                due_on?: string | null;
+                id: string;
+                status: components["schemas"]["TaskState"];
+                title: string;
+                updated_at: string;
+                /**
+                 * Format: int32
+                 * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+                 */
+                version?: number;
+                waiting_on?: string | null;
+                /** @description When it started waiting on the customer; set while the status is `waiting_on_customer`. */
+                waiting_since?: string | null;
+            };
+            /** @description `stale_version`. */
+            error: string;
+        };
         /** @enum {string} */
         SubjectKind: "stakeholder" | "system" | "document" | "task" | "decision" | "access_request" | "scope_item" | "criterion" | "meeting_note" | "shape";
         /** @description A record or a canvas shape, by kind and id. */
@@ -2185,6 +2418,13 @@ export interface components {
             /** @description What sort of system, e.g. "CRM" or "data warehouse". */
             kind?: string | null;
             name: string;
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
         };
         SystemOut: {
             description?: string | null;
@@ -2192,6 +2432,11 @@ export interface components {
             kind?: string | null;
             name: string;
             updated_at: string;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
         };
         /** @enum {string} */
         TargetComparator: "at_least" | "at_most";
@@ -2209,6 +2454,13 @@ export interface components {
             due_on?: string | null;
             status: components["schemas"]["TaskState"];
             title: string;
+            /**
+             * Format: int32
+             * @description On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+             *     since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+             *     Left out, the save is not checked and the last writer wins. Not allowed on a create.
+             */
+            version?: number | null;
             /** @description The stakeholder at the customer it waits on. */
             waiting_on?: string | null;
         };
@@ -2224,6 +2476,11 @@ export interface components {
             status: components["schemas"]["TaskState"];
             title: string;
             updated_at: string;
+            /**
+             * Format: int32
+             * @description Bumped by every change to the record; send it back as `version` on a `PUT`.
+             */
+            version?: number;
             waiting_on?: string | null;
             /** @description When it started waiting on the customer; set while the status is `waiting_on_customer`. */
             waiting_since?: string | null;
@@ -3771,6 +4028,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaleBody_AccessRequestOut"];
+                };
+            };
         };
     };
     list_activity: {
@@ -5008,6 +5274,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaleBody_CriterionOut"];
+                };
+            };
         };
     };
     remove_criterion: {
@@ -5165,6 +5440,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaleBody_ScopeItemOut"];
+                };
+            };
         };
     };
     remove_scope_item: {
@@ -5270,7 +5554,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["SaveConflict_ScopeOut"];
                 };
             };
         };
@@ -6073,7 +6357,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["SaveConflict_TaskOut"];
                 };
             };
         };
@@ -7080,6 +7364,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaleBody_StakeholderOut"];
+                };
+            };
         };
     };
     remove_stakeholder: {
@@ -7270,6 +7563,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaleBody_SystemOut"];
                 };
             };
         };

@@ -120,7 +120,7 @@ async fn set_status(store: &Store, p: &ProjectScope, id: &AccessRequestId, statu
         owner: None,
         status,
     };
-    tx.update_access_request(id, &v, &actor()).await.unwrap().unwrap();
+    tx.update_access_request(id, None, &v, &actor()).await.unwrap().unwrap();
     tx.commit().await.unwrap();
 }
 
@@ -185,6 +185,7 @@ async fn a_granted_access_request_unblocks_only_the_tasks_blocked_on_it() {
     let mut tx = store.project(&p).await.unwrap();
     tx.update_task(
         &on_vpn,
+        None,
         &task_in("Index tickets", TaskStatus::Blocked, Some(&vpn)),
         &actor(),
     )
@@ -712,6 +713,7 @@ async fn the_week_lists_the_tasks_that_moved_to_done_in_it_not_those_only_touche
     let mut tx = store.project(&p).await.unwrap();
     tx.update_task(
         &old,
+        None,
         &task_in("Done long ago, renamed", TaskStatus::Done, None),
         &actor(),
     )
@@ -962,7 +964,12 @@ async fn the_digest_mails_an_approved_update_once_to_each_sponsor_who_wants_it()
         role: StakeholderRole::Sponsor,
         email: Some(EmailAddress::new("sam@new.example").unwrap()),
     };
-    let s = tx.update_stakeholder(&sam, &v, &actor()).await.unwrap().unwrap();
+    let s = tx
+        .update_stakeholder(&sam, None, &v, &actor())
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
     assert_eq!(s.digest_opt_out_at, None);
     tx.commit().await.unwrap();
 
