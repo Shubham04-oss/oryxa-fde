@@ -169,7 +169,7 @@ database auth, as `oryxa_fde_api`, `oryxa_fde_ingest`, `oryxa_fde_lifecycle`, `o
 | `oryxa_fde_api` | the API service | member of `oryxa_fde_runtime` only: `SET LOCAL ROLE` to `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants` per transaction, inheriting none; `connect` and `usage` only; owns nothing, creates nothing |
 | `oryxa_fde_ingest` | the ingest worker | member of `oryxa_fde_app` only, not inherited: `SET LOCAL ROLE` per transaction; `connect` and `usage` only; owns nothing |
 | `oryxa_fde_lifecycle` | the lifecycle worker | member of `oryxa_fde_app` and `oryxa_fde_grants` (its cross-tenant scan, `store/src/engine.rs:443`), neither inherited; otherwise as the ingest login |
-| `oryxa_fde_mcp` | the MCP server (only with `enable_mcp`) | member of `oryxa_fde_app` only, as the ingest login |
+| `oryxa_fde_mcp` | the MCP server (only with `enable_mcp`) | member of `oryxa_fde_app` only, as the ingest login. That role can write, so the server is read-only by its code, not by its login (How the MCP server is reached, item 8) |
 | `spicedb` | SpiceDB | its own `spicedb` database only |
 | RDS master | the db-admin task | the bootstrap SQL |
 
@@ -476,7 +476,12 @@ list, none of it built here (each is the API stream's or the lead's):
    code change to not need the key would let the task drop that secret.
 6. **Hostname and Access** (the lead). Which name: `mcp.<domain>` is the proposal (the pattern of `app.` and `admin.`, so it has the same certificate coverage as they do). Whether to put Cloudflare Access in front: it would need a service-token
    or an identity policy that an MCP client can satisfy next to the WorkOS bearer token, which the sign-in design decides.
-7. **Whether to switch it on at all** before 1 and 2 are done. With it off nothing exists.
+7. **Whether to switch it on at all** before 1, 2 and 8 are done. With it off nothing exists.
+8. **Read-only by its login, not only by its code** (the API stream, then infra). ADR 0006 says the server stays read-only, and its tools
+   only read, but `oryxa_fde_mcp` takes `oryxa_fde_app` per transaction (the store's `SET LOCAL ROLE`), which may insert, update and
+   delete, and the SpiceDB pre-shared key it shares with the API may write relationships. A process taken over through the internet-facing
+   name could therefore write customer rows and grants. Wanted before it is switched on: a select-only transaction role the store takes for
+   this login, granted in `sql/01-bootstrap.sql` in place of `oryxa_fde_app`; SpiceDB stays shared until it has per-client keys.
 
 **Turning it on** (only after the lead decides 6 and 7): (1) the image must already hold `oryxa-fde-mcp`: every `deploy-api` run from
 the change that added it does, so run one first if none has; (2) set `enable_mcp = true`, plan and apply: this creates the tunnel, its ingress
@@ -975,7 +980,9 @@ running while the API rolls.
    bounded: the AWS CLI's waiter polls every 15 s and gives up after 40 tries, 10 minutes, and a service that does not
    settle on its new revision (the circuit breaker rolled it back, which also reads as stable, so the workflow checks the
    primary deployment) fails the deploy. A worker has no health check, so it settles when its replacement task runs; a worker
-   that starts and crashes is replaced until the breaker gives up. Services already rolled stay on the new image.
+   that starts and crashes is replaced until the breaker gives up. Services already rolled stay on the new image, and the
+   failure (an annotation and the run's summary) names which services are on the new image, which were not rolled, and the
+   one it stopped at.
 6. Only when the API and every worker settled, writes the sha to `/oryxa-fde-dev/api-image-tag`. OpenTofu reads that
    parameter on every plan, so a later apply keeps the deployed image instead of rolling anything back. To roll back, revert the
    change on `main` and run `deploy-api` again.

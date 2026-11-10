@@ -168,16 +168,30 @@ jobs:
         run: |
           cluster=$(jq -r .cluster "$CONFIG")
           mapfile -t pending < <(jq -c '.[]' "$ROLLS")
-          for roll in "${pending[@]}"; do
+          rolled=""
+          # A stop partway leaves a mixed state that is safe but must be visible: name what runs which image.
+          stopped() {
+            local later msg
+            later=$(jq -r --argjson i "$i" '.[$i + 1:] | map(.name) | join(", ")' "$ROLLS")
+            msg="deploy stopped at $name ($service): $1. On the new image: ${rolled:-none}. Not rolled, still on the previous image: ${later:-none}. $name itself runs whichever revision ECS settles on. The image tag was not recorded: fix the cause and run deploy-api again (infra/README.md, Deploys)."
+            echo "::error::$msg"
+            { echo "### Deploy to dev stopped partway"; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          for i in "${!pending[@]}"; do
+            roll=${pending[$i]}
             name=$(jq -r .name <<< "$roll") service=$(jq -r .service <<< "$roll") td=$(jq -r .task_definition <<< "$roll")
             echo "rolling $name ($service) onto $td"
-            aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$td" > /dev/null
-            aws ecs wait services-stable --cluster "$cluster" --services "$service"
+            aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$td" > /dev/null \
+              || stopped "the update was refused"
+            aws ecs wait services-stable --cluster "$cluster" --services "$service" \
+              || stopped "it did not settle within the waiter's 10 minutes"
             # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck.
             aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
               | jq -e --arg td "$td" \
                   '.services[0].deployments[] | select(.status == "PRIMARY") | .taskDefinition == $td and .rolloutState == "COMPLETED"' \
-              > /dev/null || { echo "::error::$name ($service) did not settle on $td"; exit 1; }
+              > /dev/null || stopped "it did not settle on $td (the circuit breaker rolled it back?)"
+            rolled="${rolled:+$rolled, }$name"
           done
       # OpenTofu reads this on every plan, so a later apply keeps this image instead of rolling back. Only after the API and
       # every worker settled on it: after a deploy that stopped partway an apply returns everything to the last complete one.

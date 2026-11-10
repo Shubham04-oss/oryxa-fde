@@ -810,6 +810,28 @@ run "the_deploy_role_passes_only_the_roles_of_the_api_the_migrate_task_and_the_w
   }
 }
 
+# Drift: an apply after a deploy must build every service from the sha the workflow recorded, never from api_image_tag
+# (which only seeds the parameter), or it would roll a worker back to an older image than the API's.
+run "every_service_runs_the_recorded_image_tag" {
+  command = plan
+  variables {
+    update_model = "global.anthropic.claude-sonnet-5-5"
+    enable_mcp   = true
+  }
+  override_data {
+    target = data.aws_ssm_parameter.api_image_tag
+    values = { insecure_value = "deployed-sha" }
+  }
+
+  assert {
+    condition = alltrue([
+      for c in [module.api.containers[0], module.migrate.containers[0], module.ingest.containers[0], module.lifecycle[0].containers[0], module.mcp[0].containers[0]] :
+      c.image == "${aws_ecr_repository.api.repository_url}:deployed-sha"
+    ])
+    error_message = "the API, the migrate task, both workers and the MCP server take the tag deploy-api recorded, not api_image_tag"
+  }
+}
+
 # The lifecycle worker joins the deploy with its model, and only then: its service, its roles and its place in the
 # parameter appear together, after the ingest worker.
 run "the_lifecycle_worker_joins_the_deploy_with_its_model" {
