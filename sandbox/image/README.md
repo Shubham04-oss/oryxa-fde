@@ -107,9 +107,18 @@ curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -H "x-oryxa-lease: <generatio
   "$GATEWAY/v1/sandboxes/<tenant>/<company>/exec" -d '{"argv":["oryxa-isolation-check","pid1"],"timeoutMs":60000}'
 ```
 
-| Date             | Environment                                         | Result                                             |
-| ---------------- | --------------------------------------------------- | -------------------------------------------------- |
-| 10 November 2026 | Local Docker, a build not for linux/amd64           | `real-image.sh`: 9 of 9 passed                     |
-| 10 November 2026 | Local Docker, a build not for linux/amd64, `tini`   | `real-image.sh`: 13 of 13 passed (#160)            |
-| Pending          | `real-image.sh` on the linux/amd64 image in CI      | To add as a CI job (lead review) and record        |
-| Pending          | First Cloudflare deploy, `pid1` through the gateway | To run and record, with the ptrace scope it prints |
+| Date             | Environment                                          | Result                                             |
+| ---------------- | ---------------------------------------------------- | -------------------------------------------------- |
+| 10 November 2026 | Local Docker, a build not for linux/amd64            | `real-image.sh`: 9 of 9 passed                     |
+| 10 November 2026 | Local Docker, a build not for linux/amd64, `tini`    | `real-image.sh`: 13 of 13 passed (#160)            |
+| 10 November 2026 | GitHub-hosted `ubuntu-latest`, the linux/amd64 image | `real-image.sh`: 13 of 13 passed (#159)            |
+| Pending          | First Cloudflare deploy, `pid1` through the gateway  | To run and record, with the ptrace scope it prints |
+
+What the first amd64 build and run showed (the `sandbox-image` job, Ubuntu 24.04 runner image `20261101.360.1`): the image builds as written with the real `sandbox-shim` and takes about 50 seconds with no layer cache
+(the whole job, about a minute); it is 1.9 GB unpacked by `docker image inspect`. `oryxa-isolation-check pid1` on it, as
+`agent`, printed `kernel.yama.ptrace_scope: 1` and `own effective capabilities: 0000000000000000`, found pid 1 running as
+uid 1003, and got `EPERM` for `PTRACE_ATTACH` and `PTRACE_SEIZE` on pid 1 and `EACCES` opening `/proc/1/mem` for
+writing. Its controls on its own child show scope 1 still allows attaching to a child and writing its memory, so the
+refusals for pid 1 come from the uid difference, not from Yama. That is the hosted runner's kernel and Docker defaults,
+not Cloudflare's: the first deployed sandbox must still run `oryxa-isolation-check pid1` through the gateway and record
+its ptrace scope and capabilities here.
