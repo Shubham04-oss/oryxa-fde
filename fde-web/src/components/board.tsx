@@ -1,11 +1,12 @@
 import { useId, useRef, useState } from "react"
-import type { DragEvent, FormEvent, KeyboardEvent, ReactNode } from "react"
+import type { DragEvent, KeyboardEvent, ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronDown, ChevronRight, Ellipsis } from "lucide-react"
 import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
-import { FIELD, Footer, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
+import { FormDialog } from "./form-dialog"
+import { Dialog } from "./ui/dialog"
+import { FIELD, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
 import {
   Menu,
   MenuContent,
@@ -593,134 +594,90 @@ function TaskDialog({
           blockedBy: null,
         },
   )
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [deleting, setDeleting] = useState(false)
   const set = (patch: Partial<Fields>) => setFields({ ...fields, ...patch })
-
-  async function run(work: () => Promise<string | null>) {
-    setBusy(true)
-    const failed = await work()
-    setBusy(false)
-    if (failed) setError(failed)
-    else onClose()
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault()
-    const bad = problem(fields)
-    if (bad) return setError(bad)
-    void run(() => onSave(fields))
-  }
 
   // A teammate has no name here yet, only an id, so they are kept as "a teammate".
   const teammate = fields.assignee !== null && fields.assignee !== me
 
   return (
-    <DialogContent placement="center" className="p-5">
-      <form onSubmit={submit} className="grid gap-3.5 text-xs">
-        <DialogTitle className="text-[13px] font-semibold">
-          {task ? "Edit task" : "New task"}
-        </DialogTitle>
-        <DialogDescription className="sr-only">
-          {task ? "Change this task, or delete it." : "Add a task to the board."}
-        </DialogDescription>
-        <Labelled label="Title">
-          <input
-            autoFocus
-            className={FIELD}
-            value={fields.title}
-            onChange={(e) => set({ title: e.target.value })}
-            autoComplete="off"
+    <FormDialog
+      title={task ? "Edit task" : "New task"}
+      description={task ? "Change this task, or delete it." : "Add a task to the board."}
+      save={task ? "Save" : "Add task"}
+      validate={() => problem(fields)}
+      onSubmit={() => onSave(fields)}
+      remove={
+        onDelete && {
+          label: "Delete task",
+          ask: "Delete this task? This cannot be undone.",
+          group: "Confirm the delete",
+          confirm: "Delete",
+          run: onDelete,
+        }
+      }
+      onClose={onClose}
+    >
+      <Labelled label="Title">
+        <input
+          autoFocus
+          className={FIELD}
+          value={fields.title}
+          onChange={(e) => set({ title: e.target.value })}
+          autoComplete="off"
+        />
+      </Labelled>
+      <Labelled label="Status">
+        <select
+          className={FIELD}
+          value={fields.status}
+          onChange={(e) => set({ status: e.target.value as TaskState })}
+        >
+          {COLUMNS.map((c) => (
+            <option key={c.status} value={c.status}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+      </Labelled>
+      {fields.status === "blocked" && (
+        <Labelled label="The blocker">
+          <textarea
+            className={`${FIELD} min-h-20`}
+            value={fields.blocker}
+            onChange={(e) => set({ blocker: e.target.value })}
           />
         </Labelled>
-        <Labelled label="Status">
+      )}
+      {fields.status === "waiting_on_customer" && (
+        <Labelled label="Waiting on">
+          <WaitingOn
+            value={fields.waitingOn}
+            people={people}
+            onChange={(waitingOn) => set({ waitingOn })}
+          />
+        </Labelled>
+      )}
+      <div className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
+        <Labelled label="Due">
+          <input
+            type="date"
+            className={FIELD}
+            value={fields.due}
+            onChange={(e) => set({ due: e.target.value })}
+          />
+        </Labelled>
+        <Labelled label="Assigned to">
           <select
             className={FIELD}
-            value={fields.status}
-            onChange={(e) => set({ status: e.target.value as TaskState })}
+            value={fields.assignee ?? ""}
+            onChange={(e) => set({ assignee: e.target.value || null })}
           >
-            {COLUMNS.map((c) => (
-              <option key={c.status} value={c.status}>
-                {c.label}
-              </option>
-            ))}
+            <option value="">Unassigned</option>
+            {me && <option value={me}>You</option>}
+            {teammate && <option value={fields.assignee!}>A teammate</option>}
           </select>
         </Labelled>
-        {fields.status === "blocked" && (
-          <Labelled label="The blocker">
-            <textarea
-              className={`${FIELD} min-h-20`}
-              value={fields.blocker}
-              onChange={(e) => set({ blocker: e.target.value })}
-            />
-          </Labelled>
-        )}
-        {fields.status === "waiting_on_customer" && (
-          <Labelled label="Waiting on">
-            <WaitingOn
-              value={fields.waitingOn}
-              people={people}
-              onChange={(waitingOn) => set({ waitingOn })}
-            />
-          </Labelled>
-        )}
-        <div className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
-          <Labelled label="Due">
-            <input
-              type="date"
-              className={FIELD}
-              value={fields.due}
-              onChange={(e) => set({ due: e.target.value })}
-            />
-          </Labelled>
-          <Labelled label="Assigned to">
-            <select
-              className={FIELD}
-              value={fields.assignee ?? ""}
-              onChange={(e) => set({ assignee: e.target.value || null })}
-            >
-              <option value="">Unassigned</option>
-              {me && <option value={me}>You</option>}
-              {teammate && <option value={fields.assignee!}>A teammate</option>}
-            </select>
-          </Labelled>
-        </div>
-        {deleting ? (
-          <div
-            role="group"
-            aria-label="Confirm the delete"
-            className="flex flex-wrap items-center gap-2 rounded-xl border bg-raised px-3.5 py-2.5"
-          >
-            <p className="mr-auto">Delete this task? This cannot be undone.</p>
-            <Button type="button" variant="ghost" onClick={() => setDeleting(false)}>
-              Keep it
-            </Button>
-            <Button type="button" disabled={busy} onClick={() => void run(() => onDelete!())}>
-              Delete
-            </Button>
-          </div>
-        ) : null}
-        <Footer
-          busy={busy}
-          error={error}
-          save={task ? "Save" : "Add task"}
-          onClose={onClose}
-          extra={
-            onDelete &&
-            !deleting && (
-              <Button
-                type="button"
-                variant="ghost"
-                className="mr-auto text-destructive hover:text-destructive"
-                onClick={() => setDeleting(true)}
-              >
-                Delete task
-              </Button>
-            )
-          }
-        />
-      </form>
-    </DialogContent>
+      </div>
+    </FormDialog>
   )
 }

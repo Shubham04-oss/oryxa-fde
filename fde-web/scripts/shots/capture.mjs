@@ -33,6 +33,9 @@ async function shoot(screen, size, theme) {
   const page = await context.newPage()
   const problems = []
   page.on("pageerror", (error) => problems.push(`page error: ${error.message}`))
+  // Before the app's own code runs, so the mock seeds a workspace with no company.
+  if (screen.emptyWorkspace)
+    await page.addInitScript(() => (globalThis.__fdeMockNoCompanies = true))
   try {
     const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"), {
       timeout: 60000,

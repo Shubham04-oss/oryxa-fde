@@ -1,24 +1,23 @@
+import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
-import { Avatar } from "./app-shell"
+import { CompanyDialog, ProjectDialog } from "./company-forms"
 import { ROLE_LABEL } from "./companies-home"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
+import { StakeholdersCard, SystemsCard } from "./records-cards"
+import { MembersCard } from "./team"
+import { Button } from "./ui/button"
+import { Dialog } from "./ui/dialog"
 import { queries } from "@/lib/api/client"
-import type { CompanyId, StakeholderPart } from "@/lib/api/schemas"
+import type { CompanyId } from "@/lib/api/schemas"
+import { canManage } from "@/lib/records"
 import { STAGE_LABEL } from "@/lib/stage"
 
-const PART_LABEL: Record<StakeholderPart, string> = {
-  sponsor: "Sponsor",
-  champion: "Champion",
-  user: "User",
-  it: "IT",
-  security: "Security",
-  other: "Other",
-}
-
-/** A company (DESIGN.md §3): its profile, stakeholders, systems and projects. */
+/** A company (DESIGN.md §3): its profile, stakeholders, systems, projects and team. */
 export function CompanyPage({ companyId }: { companyId: CompanyId }) {
   const company = useQuery(queries.company(companyId))
+  const me = useQuery(queries.me())
+  const [dialog, setDialog] = useState<"edit" | "project" | null>(null)
 
   if (company.isPending)
     return (
@@ -39,9 +38,20 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
     )
 
   const c = company.data
+  // Editing the profile and starting projects need `manage`; the API still decides.
+  const manage = canManage(me.data, c.role)
   return (
     <Page wide>
-      <Card title="Profile">
+      <Card
+        title="Profile"
+        aside={
+          manage && (
+            <Button variant="outline" size="sm" onClick={() => setDialog("edit")}>
+              Edit company
+            </Button>
+          )
+        }
+      >
         {c.summary && <p className="mb-3 text-xs leading-relaxed">{c.summary}</p>}
         <dl className="grid grid-cols-3 gap-3 text-xs max-[560px]:grid-cols-1">
           {[
@@ -55,56 +65,35 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
             </div>
           ))}
         </dl>
+        {!manage && (
+          <Quiet className="mt-3">
+            Only a lead or an organisation admin changes the profile or starts a project.
+          </Quiet>
+        )}
       </Card>
 
       <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-        <Card title="Stakeholders">
-          {c.stakeholders.length === 0 ? (
-            <Quiet>No stakeholders yet.</Quiet>
-          ) : (
-            <Rows>
-              {c.stakeholders.map((person) => (
-                <Row key={person.id}>
-                  <div className="flex items-center gap-3">
-                    <Avatar name={person.name} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs">{person.name}</p>
-                      {person.title && <Quiet className="truncate">{person.title}</Quiet>}
-                    </div>
-                    <span className="flex-none text-[11px] text-soft">
-                      {PART_LABEL[person.role]}
-                    </span>
-                  </div>
-                </Row>
-              ))}
-            </Rows>
-          )}
-        </Card>
-
-        <Card title="Systems">
-          {c.systems.length === 0 ? (
-            <Quiet>No systems yet.</Quiet>
-          ) : (
-            <Rows>
-              {c.systems.map((system) => (
-                <Row key={system.id}>
-                  <div className="flex items-baseline justify-between gap-3">
-                    <p className="truncate text-xs">{system.name}</p>
-                    {system.kind && (
-                      <span className="flex-none text-[11px] text-soft">{system.kind}</span>
-                    )}
-                  </div>
-                  {system.description && <Quiet>{system.description}</Quiet>}
-                </Row>
-              ))}
-            </Rows>
-          )}
-        </Card>
+        <StakeholdersCard company={c.id} people={c.stakeholders} />
+        <SystemsCard company={c.id} systems={c.systems} />
       </div>
 
-      <Card title="Projects">
+      <Card
+        title="Projects"
+        aside={
+          manage && (
+            <Button variant="outline" size="sm" onClick={() => setDialog("project")}>
+              New project
+            </Button>
+          )
+        }
+      >
         {c.projects.length === 0 ? (
-          <Quiet>No projects yet.</Quiet>
+          <Quiet>
+            No projects yet.
+            {manage
+              ? " Start one for the first piece of work. It begins at Discover."
+              : " A lead starts one when the work is known."}
+          </Quiet>
         ) : (
           <Rows>
             {c.projects.map((project) => (
@@ -126,6 +115,13 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
           </Rows>
         )}
       </Card>
+
+      <MembersCard company={c.id} me={me.data?.user.id} manage={manage} />
+
+      <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}>
+        {dialog === "edit" && <CompanyDialog company={c} onClose={() => setDialog(null)} />}
+        {dialog === "project" && <ProjectDialog company={c.id} onClose={() => setDialog(null)} />}
+      </Dialog>
     </Page>
   )
 }

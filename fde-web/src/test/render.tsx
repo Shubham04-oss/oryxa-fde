@@ -21,9 +21,21 @@ import { createQueryClient } from "@/lib/session"
  */
 export function renderWithRouter(
   ui: ReactNode,
-  { at = "/", signedIn = true }: { at?: string; signedIn?: boolean } = {},
+  {
+    at = "/",
+    signedIn = true,
+    keep = false,
+    ...mock
+  }: {
+    at?: string
+    signedIn?: boolean
+    /** Keep the sample data as it is: the test already called `resetMockApi` and changed it. */
+    keep?: boolean
+    engineer?: boolean
+    empty?: boolean
+  } = {},
 ) {
-  resetMockApi({ signedIn })
+  if (!keep) resetMockApi({ signedIn, ...mock })
   const current: { router?: AnyRouter } = {}
   const queryClient = createQueryClient(() => current.router, {
     defaultOptions: { queries: { retry: false } },

@@ -1,3 +1,4 @@
+import { useState } from "react"
 import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
@@ -5,6 +6,10 @@ import { ChevronLeft } from "lucide-react"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
 import type { Tone } from "./page"
 import { Board } from "./board"
+import { ProjectDialog } from "./company-forms"
+import { AssigneesCard } from "./team"
+import { Button } from "./ui/button"
+import { Dialog } from "./ui/dialog"
 import { StageBar } from "./stage-bar"
 import { RunsCard } from "./runs"
 import { ApiError, api, queries } from "@/lib/api/client"
@@ -16,6 +21,7 @@ import type {
   ProjectScope,
   Stage,
 } from "@/lib/api/schemas"
+import { canManage } from "@/lib/records"
 import { dayOf, shortDate } from "@/lib/time"
 
 const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
@@ -64,6 +70,10 @@ function signOffStatus(p: Project, person: (id: string) => string) {
 export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const queryClient = useQueryClient()
   const project = useQuery(queries.project(scope))
+  const me = useQuery(queries.me())
+  // The FDE's part at the company comes with their list of companies, already read for the sidebar.
+  const companies = useQuery(queries.companies())
+  const [editing, setEditing] = useState(false)
   const move = useMutation({
     mutationFn: (to: Stage) => api.moveStage(scope, to),
     onSuccess: (moved: ProjectOut) => {
@@ -95,6 +105,16 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     )
 
   const p = project.data
+  const role = companies.data?.companies.find((c) => c.id === p.company.id)?.role
+  // Editing a project and its team need `manage` on the company; the API still decides.
+  const manage = canManage(me.data, role)
+  // A project nobody has written anything in yet: say what to do first.
+  const fresh =
+    p.scope.items.length === 0 &&
+    p.scope.criteria.length === 0 &&
+    p.tasks.length === 0 &&
+    p.access.length === 0 &&
+    p.decisions.length === 0
   const moveError = move.isError
     ? move.error instanceof ApiError && move.error.status === 409
       ? move.error.message
@@ -110,15 +130,31 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     <Page full>
       <Column>
         <div className="grid gap-2">
-          <Link
-            to="/companies/$companyId"
-            params={{ companyId: p.company.id }}
-            className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-          >
-            <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
-            {p.company.name}
-          </Link>
+          <div className="flex items-center justify-between gap-3">
+            <Link
+              to="/companies/$companyId"
+              params={{ companyId: p.company.id }}
+              className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
+              {p.company.name}
+            </Link>
+            {manage && (
+              <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+                Edit project
+              </Button>
+            )}
+          </div>
           {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
+          {fresh && (
+            <div className="rounded-[14px] border border-dashed border-strong px-5 py-3.5 max-[800px]:p-4">
+              <strong className="text-[13px] font-semibold">A new project. Start here.</strong>
+              <Quiet className="mt-1">
+                Name who you work with at {p.company.name} on the company page, then agree the scope
+                with them. Add tasks to the board as the work takes shape.
+              </Quiet>
+            </div>
+          )}
         </div>
 
         <StageBar
@@ -226,7 +262,15 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
             </Rows>
           )}
         </Card>
+
+        <AssigneesCard scope={scope} me={me.data?.user.id} manage={manage} />
       </Column>
+
+      <Dialog open={editing} onOpenChange={setEditing}>
+        {editing && (
+          <ProjectDialog company={p.company.id} project={p} onClose={() => setEditing(false)} />
+        )}
+      </Dialog>
     </Page>
   )
 }
