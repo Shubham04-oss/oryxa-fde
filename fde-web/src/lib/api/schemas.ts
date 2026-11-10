@@ -121,6 +121,14 @@ export type CompanySummary = z.infer<typeof CompanySummaryOut>
 export const StakeholderPart = z.enum(["sponsor", "champion", "user", "it", "security", "other"])
 export type StakeholderPart = z.infer<typeof StakeholderPart>
 
+const version = z.int().nonnegative()
+
+/**
+ * A record's version, bumped by every change to it; a `PUT` sends it back as `version`. The API
+ * always sends it, but the spec marks it optional until the web's fixtures carry it.
+ */
+const recordVersion = version.optional()
+
 export const StakeholderOut = z.object({
   id: StakeholderId,
   name: z.string(),
@@ -131,6 +139,7 @@ export const StakeholderOut = z.object({
   /** When they unsubscribed from the weekly digest, if they did. */
   digest_unsubscribed_at: instant.nullish(),
   updated_at: instant,
+  version: recordVersion,
 })
 export type StakeholderOut = z.infer<typeof StakeholderOut>
 
@@ -152,6 +161,7 @@ export const SystemOut = z.object({
   kind: optionalText,
   description: optionalText,
   updated_at: instant,
+  version: recordVersion,
 })
 export type SystemOut = z.infer<typeof SystemOut>
 
@@ -160,6 +170,7 @@ export const ScopeItemOut = z.object({
   kind: z.enum(["in", "out"]),
   description: z.string(),
   updated_at: instant,
+  version: recordVersion,
 })
 export type ScopeItemOut = z.infer<typeof ScopeItemOut>
 
@@ -171,10 +182,9 @@ export const CriterionOut = z.object({
   target: z.number(),
   unit: optionalText,
   updated_at: instant,
+  version: recordVersion,
 })
 export type CriterionOut = z.infer<typeof CriterionOut>
-
-const version = z.int().nonnegative()
 
 export const SignOffOut = z.object({
   version,
@@ -209,6 +219,7 @@ export const AccessRequestOut = z.object({
   granted_at: instant.nullish(),
   /** Whole days from the request until it was settled, or until now while it is open. */
   days_waiting: z.int(),
+  version: recordVersion,
 })
 export type AccessRequestOut = z.infer<typeof AccessRequestOut>
 
@@ -230,6 +241,7 @@ export const TaskOut = z.object({
   blocked_by: AccessRequestId.nullish(),
   created_at: instant,
   updated_at: instant,
+  version: recordVersion,
 })
 export type TaskOut = z.infer<typeof TaskOut>
 

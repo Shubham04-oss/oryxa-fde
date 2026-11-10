@@ -147,6 +147,46 @@ pub struct Actor {
     pub request_id: String,
 }
 
+/// What a whole-record save did, checked under the record's row lock against the version the
+/// caller read (`None`: no check, the last writer wins).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Saved<T, S = T> {
+    /// Written, or left as it was because it already held these values: the record as it stands.
+    Current(T),
+    /// The record has moved on from the version the caller read; nothing was written. The
+    /// record as it stands.
+    Stale(S),
+}
+
+impl<T, S> Saved<T, S> {
+    /// Converts the record, whichever way the save went, e.g. into an API answer.
+    pub fn map<U, V>(self, current: impl FnOnce(T) -> U, stale: impl FnOnce(S) -> V) -> Saved<U, V> {
+        match self {
+            Saved::Current(t) => Saved::Current(current(t)),
+            Saved::Stale(s) => Saved::Stale(stale(s)),
+        }
+    }
+}
+
+impl<T> Saved<T> {
+    /// The record as it stands, whether or not this save wrote it.
+    pub fn record(self) -> T {
+        match self {
+            Saved::Current(t) | Saved::Stale(t) => t,
+        }
+    }
+}
+
+/// Whether a save that read `expected` is too late for a record now at `current`.
+pub(crate) fn stale(expected: Option<u32>, current: u32) -> bool {
+    expected.is_some_and(|e| e != current)
+}
+
+/// A version column, which starts at 1 and only grows.
+pub(crate) fn row_version(v: i32) -> Result<u32, StoreError> {
+    u32::try_from(v).map_err(|_| StoreError::Corrupt("version"))
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("a name must be 1..={MAX_NAME_CHARS} characters with no control characters")]
 pub struct NameError;
@@ -538,6 +578,18 @@ fn opt<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_is_stale_only_when_it_names_another_version() {
+        assert!(!stale(None, 7), "no version: the last writer wins");
+        assert!(!stale(Some(7), 7));
+        assert!(stale(Some(6), 7));
+        assert!(
+            stale(Some(8), 7),
+            "a version from the future is not the one stored either"
+        );
+        assert!(row_version(-1).is_err());
+    }
 
     #[test]
     fn names_are_trimmed_bounded_and_printable() {
