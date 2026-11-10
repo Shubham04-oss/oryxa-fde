@@ -10,7 +10,7 @@
 // `<tmpdir>/fde-shots`). Exits non-zero when a screen fails to render.
 import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, readdirSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseArgs } from "node:util"
@@ -40,14 +40,15 @@ function removeOwn() {
 /** Containers left by a run that was killed: theirs, named with a pid that is gone. */
 function removeStale() {
   const listed = docker("ps", "--all", "--filter", `name=${PREFIX}`, "--format", "{{.Names}}")
-  for (const name of listed.stdout.split("\n").filter((n) => n.startsWith(PREFIX))) {
+  for (const name of listed.stdout.split("\n").filter((n) => /^fde-shots-\d+$/.test(n))) {
     const pid = Number(name.slice(PREFIX.length))
     let alive = false
     try {
       process.kill(pid, 0)
       alive = true
-    } catch {
-      // No such process.
+    } catch (error) {
+      // EPERM: the process exists but is someone else's, so its container is not stale.
+      alive = error.code === "EPERM"
     }
     if (!alive) docker("rm", "--force", name)
   }
@@ -93,10 +94,11 @@ async function main() {
   if (!(await reachable(values.url))) {
     const { port, hostname } = new URL(values.url)
     console.log(`Starting the dev mock on ${values.url} ...`)
-    // `pnpm dev:mock` with the host and port of --url; its own process group, so it can be stopped whole.
+    // `dev:mock` on --url's host and port, via the app's own vite (pnpm may not be on PATH), in its own
+    // process group so it can be stopped whole.
     server = spawn(
-      "pnpm",
-      ["exec", "vite", "dev", "--host", hostname, "--port", port || "3000", "--strictPort"],
+      path.join(here, "../../node_modules/.bin/vite"),
+      ["dev", "--host", hostname, "--port", port || "3000", "--strictPort"],
       {
         env: { ...process.env, VITE_FDE_MOCK_API: "1" },
         stdio: "ignore",
@@ -104,6 +106,7 @@ async function main() {
       },
     )
     server.on("exit", () => (server = null))
+    server.on("error", () => (server = null))
     const until = Date.now() + 180_000
     while (!(await reachable(values.url))) {
       if (!server) throw new Error("The dev mock stopped before it answered.")
@@ -113,9 +116,13 @@ async function main() {
   }
 
   mkdirSync(out, { recursive: true })
-  // Playwright's driver is installed once into a cache on the host's temp directory, not in the repo.
-  const cache = path.join(tmpdir(), `fde-shots-playwright-${PLAYWRIGHT}`)
-  mkdirSync(cache, { recursive: true })
+  // The user's own cache, not the shared temp dir, where another user could plant a driver that runs.
+  const cache = path.join(
+    process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"),
+    "fde-shots",
+    PLAYWRIGHT,
+  )
+  mkdirSync(cache, { recursive: true, mode: 0o700 })
   const uid = process.getuid?.() ?? 1000
   const gid = process.getgid?.() ?? 1000
   const config = JSON.stringify({
@@ -131,7 +138,8 @@ async function main() {
       "run",
       "--rm",
       "--init",
-      "--ipc=host",
+      // Room for Chromium's shared memory without sharing the host's IPC namespace.
+      "--shm-size=1g",
       "--network",
       "host",
       "--name",

@@ -197,7 +197,7 @@ on `pnpm dev:mock` (it uses one already running at `http://127.0.0.1:3000`, or s
 at 1440, 1024 and 390 wide, light and dark, and writes PNGs to `<tmpdir>/fde-shots` (`--out DIR` to
 choose; `--only NAME[,NAME]` to take some; `--url` for another address). The browser is Playwright's
 official Docker image, pinned in `scripts/shots/run.mjs`, run on the host network and removed after; nothing
-is installed on the host or added to the app, and the script is not in the production build. It needs
+is installed on the host (Playwright's driver is cached in `~/.cache/fde-shots`) or added to the app, and the script is not in the production build. It needs
 Docker, and the image (about 3.6 GB) is pulled the first time. It exits non-zero when a screen fails to
 render, and leaves a `-FAILED.png` of it.
 
