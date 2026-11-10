@@ -19,7 +19,7 @@ oryxa-fde-api.workspace = true
 oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
 oryxa-fde-store.workspace = true
-rmcp = { version = "3.8", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
