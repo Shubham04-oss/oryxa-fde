@@ -1559,19 +1559,31 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
             }
             // Versions start at 1, so 0 is always stale: a version check run before the tenant and
             // company filter would answer 409 with the victim's record as `current`.
-            // A sign-off in the attacker's own project rightly answers stale with their own scope.
-            let own_scope = at.kind == Kind::OwnProject && template.ends_with("/sign-offs");
-            if let Some(mut stale) = body
-                .clone()
-                .filter(|_| VERSIONED.contains(&(*method, *template)) && !own_scope)
-            {
+            if let Some(mut stale) = body.clone().filter(|_| VERSIONED.contains(&(*method, *template))) {
                 stale["version"] = json!(0);
+                // The task save refuses the victim's stakeholder as `waiting_on` (400) before it looks
+                // the task up, so without it the call reaches the lookup and the version check.
+                if let Some(fields) = stale.as_object_mut() {
+                    fields.remove("waiting_on");
+                }
                 let (status, resp) = w.call(Some(&at.who.token), method, &path, Some(stale)).await;
                 calls += 1;
-                // In the attacker's own project the body may be refused (400) before the record is looked up.
-                let refused = matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
-                    || (at.kind == Kind::OwnProject && status == StatusCode::BAD_REQUEST);
-                if !refused || resp.get("current").is_some() {
+                let refused =
+                    matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) && resp.get("current").is_none();
+                // A sign-off in the attacker's own project rightly answers stale, with that project's own scope.
+                let own_scope = at.kind == Kind::OwnProject
+                    && template.ends_with("/sign-offs")
+                    && status == StatusCode::CONFLICT
+                    && resp["current"]
+                        == w.call(
+                            Some(&at.who.token),
+                            "GET",
+                            &at.fill("/v1/companies/{company}/projects/{project}/scope"),
+                            None,
+                        )
+                        .await
+                        .1;
+                if !refused && !own_scope {
                     leaks.push(format!(
                         "{} ({:?}, version 0) {method} {path} -> {status} {resp}",
                         at.who.id, at.kind
