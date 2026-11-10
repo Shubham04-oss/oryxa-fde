@@ -21,13 +21,14 @@ locals {
   deploy_workers = concat(
     [{ name = "ingest", service = module.ingest.service_name, task_definition = module.ingest.task_family }],
     local.lifecycle_on ? [{ name = "lifecycle", service = module.lifecycle[0].service_name, task_definition = module.lifecycle[0].task_family }] : [],
+    local.mcp_on ? [{ name = "mcp", service = module.mcp[0].service_name, task_definition = module.mcp[0].task_family }] : [],
   )
   # Every task role a deploy may hand to a new task definition revision, and its execution role: the API's, the
-  # migrate task's and each worker's. Never the one-off db-admin and zed tasks, SpiceDB or any other role.
+  # migrate task's and each worker's (the MCP server's included). Never the one-off db-admin and zed tasks, SpiceDB or any other role.
   deploy_task_roles = concat(
     [module.api.task_role_arn, module.api.execution_role_arn, module.migrate.task_role_arn, module.migrate.execution_role_arn],
     [module.ingest.task_role_arn, module.ingest.execution_role_arn],
-    flatten([for m in module.lifecycle : [m.task_role_arn, m.execution_role_arn]]),
+    flatten([for m in concat(module.lifecycle, module.mcp) : [m.task_role_arn, m.execution_role_arn]]),
   )
   deploy_service_arns = [
     for s in concat([module.api.service_name], [for w in local.deploy_workers : w.service]) :

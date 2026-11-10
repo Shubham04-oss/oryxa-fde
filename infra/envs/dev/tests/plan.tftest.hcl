@@ -341,7 +341,7 @@ run "the_api_health_check_and_the_stop_sequence_match_the_code" {
       length([for i in output.image : i if startswith(i, "FROM ")]) == 1
       && anytrue([for i in output.image : startswith(i, "FROM gcr.io/distroless/cc-debian13:nonroot@sha256:")])
       && contains(output.image, "USER nonroot")
-      && contains(output.image, "COPY --chmod=0555 oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle /usr/local/bin/")
+      && contains(output.image, "COPY --chmod=0555 oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle oryxa-fde-mcp /usr/local/bin/")
       && length([for i in output.image : i if startswith(i, "COPY ") || startswith(i, "ADD ") || startswith(i, "RUN ")]) == 1
     )
     error_message = "the image is one distroless nonroot stage that adds the four binaries and nothing else"
@@ -1696,4 +1696,299 @@ run "the_workers_need_their_queues" {
     consumers = ["lifecycle"]
   }
   expect_failures = [var.consumers]
+}
+
+# ---------------------------------------------------------------- the MCP server (#165)
+
+# oryxa-fde-mcp: a read-only server an FDE's own agent reads project context from (ADR 0006). Behind enable_mcp, off by
+# default: nothing of it exists until the lead decides how an agent signs in (infra/README.md). Reached through a tunnel of
+# its own at Cloudflare's edge, so it has no listener, no security group ingress, no load balancer and no Cloud Map name.
+run "the_mcp_server_does_not_exist_by_default" {
+  command = apply
+
+  assert {
+    condition = (
+      length(module.mcp) == 0 && length(data.aws_iam_policy_document.mcp) == 0
+      && output.mcp_env_names == null && output.mcp_hostname == null && output.mcp_tunnel_id == null
+    )
+    error_message = "without enable_mcp there is no MCP task, role, hostname or tunnel"
+  }
+  assert {
+    condition     = !contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && contains(keys(output.secrets), "cloudflared/tunnel-token")
+    error_message = "the MCP tunnel's token secret exists only with the server; the API's stays"
+  }
+  assert {
+    condition = (
+      !contains(keys(local.db_clients), "mcp") && !contains(keys(local.nat_https_clients), "mcp")
+      && keys(local.nat_tunnel_clients) == ["api"] && keys(local.spicedb_clients) == ["api", "zed"]
+    )
+    error_message = "no network rule names an MCP task that does not exist"
+  }
+  assert {
+    condition     = [for w in local.deploy_workers : w.name] == ["ingest"] && toset(keys(jsondecode(aws_ssm_parameter.deploy.insecure_value))) == toset(["cluster", "service", "workers", "api_task_definition", "migrate_task_definition", "migrate_security_group", "subnets", "ecr_repository_url", "image_tag_parameter"])
+    error_message = "the deploy rolls no MCP service while it is off"
+  }
+}
+
+# With the server on: who it signs in as, what it may call (the database, SpiceDB, one embedding model), how it is reached,
+# and that it joins the deploy. The task roles get distinct ARNs, since the mock gives every role the same one.
+run "the_mcp_server_with_enable_mcp" {
+  command = apply
+  variables {
+    enable_mcp = true
+  }
+  override_resource {
+    target = module.api.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-task" }
+  }
+  override_resource {
+    target = module.mcp.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-mcp-task" }
+  }
+  override_resource {
+    target = module.mcp.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-mcp-exec" }
+  }
+
+  # ---- its login and what it may call: nothing else
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_mcp"] && local.mcp_environment.DB_USER == "oryxa_fde_mcp"
+    error_message = "the MCP server connects as oryxa_fde_mcp only: it never takes the API's login"
+  }
+  assert {
+    condition = (
+      toset(flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.actions])) == toset(["rds-db:connect", "bedrock:InvokeModel"])
+      && flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"]) == ["arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0"]
+      && alltrue([for s in data.aws_iam_policy_document.mcp[0].statement : !contains(s.resources, "*") && length(s.condition) == 0])
+    )
+    error_message = "the MCP role may connect as its login and embed a query on the one model: no S3, no KMS (no tool reads a file), no secret, no SQS, no other model, no bare wildcard"
+  }
+  assert {
+    condition     = !strcontains(jsonencode(module.company_keys.config.key_policy), "dev-mcp-task")
+    error_message = "the MCP role is not a reader of any company key: it reads no file"
+  }
+
+  # ---- network: nothing goes in, and the tunnel goes out
+  assert {
+    condition = (
+      length(module.mcp[0].ingress_sources) == 0
+      && module.mcp[0].egress_names == toset(["https", "postgres", "spicedb", "tunnel-tcp", "tunnel-udp"])
+      && alltrue([for c in module.mcp[0].containers : length(try(c.portMappings, [])) == 0])
+    )
+    error_message = "no security group admits anything to the MCP task, it publishes no port, and it dials out to HTTPS, the database, SpiceDB and the tunnel's port only"
+  }
+  assert {
+    condition = (
+      contains(keys(local.db_clients), "mcp") && contains(keys(local.nat_https_clients), "mcp")
+      && keys(local.nat_tunnel_clients) == ["api", "mcp"] && keys(local.spicedb_clients) == ["api", "mcp", "zed"]
+    )
+    error_message = "the database, the NAT (HTTPS and the tunnel port) and SpiceDB admit the MCP task's group, and the API's connector keeps its own"
+  }
+  assert {
+    condition     = module.spicedb.ingress_sources == toset(["api", "zed", "mcp"])
+    error_message = "SpiceDB admits the MCP server, which asks it who may read what"
+  }
+
+  # ---- the task: the server on its loopback, its own connector with its own token
+  assert {
+    condition = (
+      [for c in module.mcp[0].containers : c.name] == ["mcp", "cloudflared"]
+      && module.mcp[0].containers[0].entryPoint == ["/usr/local/bin/oryxa-fde-mcp"]
+      && startswith(module.mcp[0].containers[0].image, "${aws_ecr_repository.api.repository_url}:")
+      && module.mcp[0].containers[0].readonlyRootFilesystem && module.mcp[0].containers[1].readonlyRootFilesystem
+      && startswith(module.mcp[0].containers[1].image, "cloudflare/cloudflared@sha256:")
+    )
+    error_message = "the MCP task is the backend image under its own entrypoint, and the pinned cloudflared, both read-only"
+  }
+  assert {
+    condition = (
+      local.mcp_environment.LISTEN_ADDR == "127.0.0.1:8081"
+      && local.mcp_environment.MCP_ALLOWED_HOSTS == "mcp.fde-dev.example.com" && module.cloudflare.mcp_hostname == "mcp.fde-dev.example.com"
+      && local.mcp_environment.MCP_ALLOWED_HOSTS != local.api_environment.WEB_ORIGIN
+    )
+    error_message = "the server listens on loopback and accepts requests addressed to its own name only (DNS rebinding guard), not the web app's"
+  }
+  assert {
+    condition = (
+      module.mcp[0].secret_env_names == toset(["WORKOS_API_KEY", "SPICEDB_PRESHARED_KEY"])
+      && local.mcp_secrets == { WORKOS_API_KEY = "api/workos-api-key", SPICEDB_PRESHARED_KEY = "shared/spicedb-preshared-key" }
+      && !contains(module.mcp[0].env_names, "DATABASE_URL") && !contains(module.mcp[0].env_names, "TUNNEL_TOKEN")
+    )
+    error_message = "the MCP container gets the two secrets its binary reads and nothing of the API's (no session key, no signing key), never DATABASE_URL, and not the tunnel token"
+  }
+  assert {
+    condition = (
+      [for x in module.mcp[0].containers[1].secrets : x.name] == ["TUNNEL_TOKEN"]
+      && [for x in module.api.containers[1].secrets : x.name] == ["TUNNEL_TOKEN"]
+      && length(module.mcp[0].containers[1].environment) == 0
+      && output.secrets["cloudflared/mcp-tunnel-token"] != output.secrets["cloudflared/tunnel-token"]
+    )
+    error_message = "each connector holds one secret, its tunnel's token, and the MCP tunnel's is a secret of its own (the mock gives every secret one ARN, so which secret each connector reads is checked by name in the plan below)"
+  }
+  assert {
+    condition = (
+      module.mcp[0].containers[1].dependsOn[0].containerName == "mcp" && module.mcp[0].containers[1].dependsOn[0].condition == "START"
+      && try(module.mcp[0].containers[0].healthCheck, null) == null
+      && module.mcp[0].deployment.minimum_healthy_percent == 100 && local.desired == 0
+    )
+    error_message = "the binary has no health route, so the connector starts with the process (not 'healthy'); a rollout keeps the old task until the new runs; 0 tasks until start_services"
+  }
+
+  # ---- the deploy rolls it, last, and may pass its roles
+  assert {
+    condition = (
+      [for w in jsondecode(aws_ssm_parameter.deploy.insecure_value).workers : w.name] == ["ingest", "mcp"]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1] == { name = "mcp", service = "oryxa-fde-mcp", task_definition = "oryxa-fde-dev-mcp" }
+    )
+    error_message = "the deploy parameter lists the MCP server after the ingest worker"
+  }
+  assert {
+    condition = (
+      contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")]), "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-mcp")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-mcp-task")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-mcp-exec")
+    )
+    error_message = "the deploy role may update the MCP service and pass its two roles"
+  }
+  assert {
+    condition     = contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && output.mcp_hostname == "mcp.fde-dev.example.com"
+    error_message = "the MCP tunnel's token secret exists, and the hostname is mcp.<domain>"
+  }
+}
+
+run "contract_mcp" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    binary           = "oryxa-fde-mcp"
+    min_rows         = 10
+    plain_env_names  = run.the_mcp_server_with_enable_mcp.mcp_env_names.plain
+    secret_env_names = run.the_mcp_server_with_enable_mcp.mcp_env_names.secret
+    features         = []
+  }
+
+  assert {
+    condition     = output.table_read
+    error_message = "the MCP table in infra/README.md was not read (its heading or row format changed?)"
+  }
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "the MCP task definition and its README table disagree: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0 && length(output.injected_non_secrets) == 0
+    error_message = "the MCP server's secrets are injected from Secrets Manager, never set as plain config"
+  }
+}
+
+# The WorkOS issuer is the API's rule for the MCP server too: it verifies the same tokens.
+run "the_mcp_server_pins_the_workos_issuer_when_one_is_set" {
+  command = plan
+  variables {
+    enable_mcp    = true
+    workos_issuer = "https://auth.example.com/"
+  }
+
+  assert {
+    condition     = local.mcp_environment.WORKOS_ISSUER == "https://auth.example.com/"
+    error_message = "a custom auth domain applies to the MCP server's tokens as to the API's"
+  }
+}
+
+# The tunnel, its one hostname and its ingress rule (modules/cloudflare, run on its own).
+run "the_mcp_hostname_is_a_tunnel_at_the_edge_and_nothing_in_aws" {
+  command = apply
+  module {
+    source = "../../modules/cloudflare"
+  }
+  providers = {
+    cloudflare = cloudflare
+  }
+  # The mock gives every tunnel one id; these make the two tunnels, and so what refers to which, distinguishable.
+  override_resource {
+    target = cloudflare_zero_trust_tunnel_cloudflared.api
+    values = { id = "api-tunnel-id" }
+  }
+  override_resource {
+    target = cloudflare_zero_trust_tunnel_cloudflared.mcp
+    values = { id = "mcp-tunnel-id" }
+  }
+  variables {
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    mcp_enabled  = true
+    mcp_port     = 8081
+    admin_emails = ["owner@example.com"]
+  }
+
+  assert {
+    condition = (
+      cloudflare_zero_trust_tunnel_cloudflared.mcp[0].name == "oryxa-fde-test-mcp"
+      && cloudflare_zero_trust_tunnel_cloudflared.mcp[0].config_src == "cloudflare"
+      && cloudflare_zero_trust_tunnel_cloudflared.mcp[0].name != cloudflare_zero_trust_tunnel_cloudflared.api.name
+      && output.mcp_tunnel_id == "mcp-tunnel-id" && output.tunnel_id == "api-tunnel-id"
+    )
+    error_message = "the MCP server has a tunnel of its own, remotely managed, so its token is not the API's"
+  }
+  assert {
+    condition = (
+      [for i in cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].config.ingress : "${coalesce(i.hostname, "*")} ${i.service}"]
+      == ["mcp.fde-dev.example.com http://127.0.0.1:8081", "* http_status:404"]
+      && cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].tunnel_id == "mcp-tunnel-id"
+    )
+    error_message = "the tunnel serves one name, to the connector's own loopback, and answers 404 to any other"
+  }
+  assert {
+    condition = (
+      cloudflare_dns_record.mcp[0].name == "mcp.fde-dev.example.com" && cloudflare_dns_record.mcp[0].type == "CNAME"
+      && cloudflare_dns_record.mcp[0].proxied == true
+      && cloudflare_dns_record.mcp[0].content == "mcp-tunnel-id.cfargotunnel.com"
+    )
+    error_message = "mcp.<domain> is a proxied record to the MCP tunnel, so it resolves to Cloudflare and never to an address in AWS"
+  }
+  assert {
+    condition = (
+      toset(keys(cloudflare_dns_record.worker)) == toset(["app.fde-dev.example.com", "admin.fde-dev.example.com"])
+      && cloudflare_connectivity_directory_service.api.host.network.tunnel_id == "api-tunnel-id"
+      && output.mcp_hostname == "mcp.fde-dev.example.com"
+    )
+    error_message = "the Worker hostnames and the API's VPC service on its own tunnel are untouched"
+  }
+}
+
+run "no_mcp_hostname_or_tunnel_while_it_is_off" {
+  command = plan
+  module {
+    source = "../../modules/cloudflare"
+  }
+  providers = {
+    cloudflare = cloudflare
+  }
+  variables {
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    admin_emails = ["owner@example.com"]
+  }
+
+  assert {
+    condition = (
+      length(cloudflare_zero_trust_tunnel_cloudflared.mcp) == 0 && length(cloudflare_zero_trust_tunnel_cloudflared_config.mcp) == 0
+      && length(cloudflare_dns_record.mcp) == 0 && output.mcp_hostname == null && output.mcp_tunnel_id == null
+    )
+    error_message = "no tunnel, ingress rule, record or name for the MCP server unless it is enabled"
+  }
 }
