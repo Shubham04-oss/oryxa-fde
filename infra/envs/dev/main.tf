@@ -107,20 +107,22 @@ locals {
   # Plain configuration the API reads (the contract). Anything optional is set only when its feature is on.
   api_environment = merge(
     {
-      AWS_REGION         = local.region
-      LISTEN_ADDR        = "127.0.0.1:${var.api_port}" # the tunnel sidecar is the only client
-      DB_HOST            = module.db.address
-      DB_PORT            = tostring(module.db.port)
-      DB_NAME            = local.db_name
-      DB_USER            = local.db_user["api"]
-      SPICEDB_ENDPOINT   = local.spicedb_endpoint
-      EVENT_BUS_ARN      = var.event_bus_arn
-      EVENT_SIGNING_KID  = var.event_signing_kid
-      DOCUMENTS_BUCKET   = module.data_bucket.name
-      EMBEDDING_PROVIDER = "bedrock"
-      EMBEDDING_MODEL    = var.embedding_model
-      WORKOS_CLIENT_ID   = var.workos_client_id
-      WEB_ORIGIN         = "https://${module.cloudflare.web_hostname}"
+      AWS_REGION  = local.region
+      LISTEN_ADDR = "127.0.0.1:${var.api_port}" # the tunnel sidecar is the only client, and the health check calls it
+      # How long the API drains after SIGTERM (shutdown.rs); its container's stop timeout is derived from it.
+      SHUTDOWN_GRACE_SECONDS = tostring(var.api_shutdown_grace_seconds)
+      DB_HOST                = module.db.address
+      DB_PORT                = tostring(module.db.port)
+      DB_NAME                = local.db_name
+      DB_USER                = local.db_user["api"]
+      SPICEDB_ENDPOINT       = local.spicedb_endpoint
+      EVENT_BUS_ARN          = var.event_bus_arn
+      EVENT_SIGNING_KID      = var.event_signing_kid
+      DOCUMENTS_BUCKET       = module.data_bucket.name
+      EMBEDDING_PROVIDER     = "bedrock"
+      EMBEDDING_MODEL        = var.embedding_model
+      WORKOS_CLIENT_ID       = var.workos_client_id
+      WEB_ORIGIN             = "https://${module.cloudflare.web_hostname}"
     },
     local.agent_on ? {
       SANDBOX_GATEWAY_URL = var.sandbox_gateway_url
@@ -253,12 +255,15 @@ module "data_bucket" {
 # this config: this holds the identities that make and retire them, the policy each key gets, and the
 # bucket rules. The bucket is named, not referenced, so the bucket's policy can take this module's output.
 module "company_keys" {
-  source               = "../../modules/company_keys"
-  env                  = var.env
-  bucket_name          = var.data_bucket_name
-  operator_arns        = var.company_key_operator_arns
-  writer_role_arns     = [module.api.task_role_arn]
-  reader_role_arns     = var.company_key_reader_role_arns
+  source           = "../../modules/company_keys"
+  env              = var.env
+  bucket_name      = var.data_bucket_name
+  operator_arns    = var.company_key_operator_arns
+  writer_role_arns = [module.api.task_role_arn]
+  # The ingest worker reads every company's documents, so its role is named in each company key's policy. It is not
+  # optional: module.ingest always exists (it runs 0 tasks until start_services). After a role is added here,
+  # `company-key.sh sync` must run for each company that already has a key (infra/README.md, Company keys).
+  reader_role_arns     = concat([module.ingest.task_role_arn], var.company_key_reader_role_arns)
   require_company_keys = var.require_company_keys
   key_rotation         = var.company_key_rotation
 }
@@ -429,10 +434,19 @@ module "api" {
   environment   = local.api_environment
   secrets       = { for env, k in local.api_secrets : env => { arn = local.secret_arn[k] } }
   task_policies = { api = data.aws_iam_policy_document.api.json }
-  # busybox is in the image for this alone (infra/docker/oryxa-fde-api.Dockerfile); the image has no shell.
+  # The API's own check (`oryxa-fde-ops healthcheck`, health.rs): one GET to /healthz on LISTEN_ADDR over loopback,
+  # exit 0 only on a 200, gives up after 2 s. The path and address are fixed by the code, so nothing here names them.
+  # ECS's timeout is longer than the 2 s so the check's own exit code arrives first; 3 misses at 10 s apart replace the task.
   health_check = {
-    command = ["/usr/local/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${var.api_port}${var.api_health_check_path}"]
+    command      = ["/usr/local/bin/oryxa-fde-ops", "healthcheck"]
+    interval     = 10
+    timeout      = 5
+    retries      = 3
+    start_period = 30
   }
+  # ECS stops cloudflared first (it drains for up to 30 s, killed at 45 s), then sends the API SIGTERM; the API
+  # drains for the grace and ECS kills it 10 s after that. The module checks the two add up to 120 s or less.
+  stop_timeout = var.api_shutdown_grace_seconds + 10
   sidecars = {
     cloudflared = {
       image   = var.cloudflared_image

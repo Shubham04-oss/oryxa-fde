@@ -83,6 +83,16 @@ output "api_env_names" {
   }
 }
 
+output "api_task_timing" {
+  description = "The API task's health check, plain environment (names and values; secrets are not in it) and stop timeouts, for tests/code, which compares them with the code's constants. No secret."
+  value = {
+    health_check = module.api.containers[0].healthCheck
+    environment  = { for e in module.api.containers[0].environment : e.name => e.value }
+    # ECS waits 30 s when a container sets none.
+    stop_timeouts = { for c in module.api.containers : c.name => coalesce(try(c.stopTimeout, null), 30) }
+  }
+}
+
 output "agent_model_target" {
   description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
   value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null

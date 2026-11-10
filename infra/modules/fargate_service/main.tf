@@ -341,6 +341,16 @@ resource "aws_ecs_task_definition" "this" {
     cpu_architecture        = "ARM64"
   }
 
+  # ECS stops the sidecars first and then the main container, each waiting up to its stop timeout (30 s when unset),
+  # so the longest sidecar plus the main container is how long a stop can take. Fargate allows no stop timeout over
+  # 120 s and documents no longer total, so a task whose sequence could pass it is refused.
+  lifecycle {
+    precondition {
+      condition     = coalesce(var.stop_timeout, 30) + max(concat([0], [for s in values(var.sidecars) : coalesce(s.stop_timeout, 30)])...) <= 120
+      error_message = "The stop sequence must fit 120 s: the longest sidecar stop timeout plus the main container's (stop_timeout, 30 s when unset) is over it."
+    }
+  }
+
   container_definitions = jsonencode(concat([{
     name                   = var.container_name
     image                  = var.image
