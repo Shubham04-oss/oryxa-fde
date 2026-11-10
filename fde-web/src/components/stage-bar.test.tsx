@@ -172,6 +172,19 @@ describe("StageBar", () => {
       expect(onMove).not.toHaveBeenCalled()
     })
 
+    it("ties its note and its error to the field, and says the count once typing pauses", async () => {
+      renderBar("scope", [OUT])
+      await userEvent.click(screen.getByRole("button", { name: "Move to Access" }))
+      expect(reasonField()).toHaveAccessibleDescription(/recorded in the audit log/)
+      await userEvent.click(screen.getByRole("button", { name: "Move with items open" }))
+      expect(reasonField()).toHaveAccessibleDescription(/Say why you are moving on with items open/)
+
+      await userEvent.type(reasonField(), "Because")
+      const heard = await screen.findByText("7 of 500 characters")
+      expect(heard).toHaveAttribute("aria-live", "polite")
+      expect(reasonField()).not.toHaveAccessibleDescription(/Say why/)
+    })
+
     it("keeps the reason and shows why when the move fails", async () => {
       const onMove = renderBar("scope", [OUT], {
         error: "The reason is plain text, 1 to 500 characters.",

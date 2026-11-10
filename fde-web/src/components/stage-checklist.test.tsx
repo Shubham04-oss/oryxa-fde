@@ -340,7 +340,7 @@ describe("the API mock's checklist", () => {
       open: [{ key: "access_granted", label: "Every access request granted", met: false }],
     })
     // A reason that is not one is a 400, whether or not it was needed.
-    for (const reason of ["", "   ", "bell\u0007", "x".repeat(501)])
+    for (const reason of ["", "   ", "bell\u0007", "c1\u0085x", "x".repeat(501)])
       expect((await put({ stage: "build", reason })).status, reason).toBe(400)
     expect((await put({ stage: "scope", reason: "" })).status).toBe(400)
     // Moving back needs none, and a valid reason moves forward.

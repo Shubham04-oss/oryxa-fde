@@ -308,7 +308,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     open." The button reads **Move with items open**. With no reason it says "Say why you are moving
     on with items open." and sends nothing; the same words for spaces only, and a refusal of more than
     500 characters or a control character, before the API is asked (`reasonProblem`, the API's own
-    rule: trimmed, 1 to 500 characters, only newline and tab). The reason is sent trimmed.
+    rule: trimmed, 1 to 500 characters, only newline and tab). The reason is sent trimmed. The note
+    and any error describe the field; a screen reader hears the count ("7 of 500 characters") once
+    typing pauses, not on every key.
   - **The confirmation stays open until the API answers** ("Moving…"), so a refusal keeps what was
     typed: `invalid_reason` reads "The reason is plain text, 1 to 500 characters."
   - **A stale view.** If the page thought nothing was open and the API answers 409

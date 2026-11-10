@@ -49,7 +49,9 @@ describe("reasonProblem", () => {
 
   it("allows newlines and tabs, and no other control character", () => {
     expect(reasonProblem("one\ntwo\tthree")).toBeNull()
-    for (const bad of ["bell\u0007", "nul\u0000", "esc\u001b", "del\u007f"])
+    for (const bad of ["bell\u0007", "nul\u0000", "esc\u001b", "del\u007f", "c1\u0085x"])
       expect(reasonProblem(bad), bad).toMatch(/plain text/)
+    // The API trims before it looks, so trailing whitespace control characters are not refused.
+    expect(reasonProblem("windows line\r\n")).toBeNull()
   })
 })

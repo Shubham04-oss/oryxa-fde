@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Button } from "./ui/button"
 import { FIELD, Labelled } from "./task-move"
 import { STAGES } from "@/lib/api/schemas"
@@ -36,6 +36,11 @@ export function StageBar({
   const [tried, setTried] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // What a screen reader hears of the count: once typing pauses, not on every key.
+  const [heard, setHeard] = useState("")
+  const pause = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(pause.current), [])
+  const ids = useId()
   const at = STAGES.indexOf(stage)
   const back = target !== null && STAGES.indexOf(target) < at
   // Moving back never asks for a reason.
@@ -47,10 +52,23 @@ export function StageBar({
   function choose(to: Stage | null) {
     setTarget(to)
     setReason("")
+    clearTimeout(pause.current)
+    setHeard("")
     setFound(null)
     setTried(false)
     setError(null)
   }
+
+  function write(value: string) {
+    setReason(value)
+    clearTimeout(pause.current)
+    pause.current = setTimeout(
+      () => setHeard(`${reasonLength(value)} of ${MAX_REASON} characters`),
+      600,
+    )
+  }
+
+  const shown = (tried && problem) || error
 
   async function confirm() {
     if (target === null) return
@@ -166,13 +184,13 @@ export function StageBar({
                     required
                     className={`${FIELD} min-h-20`}
                     value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    aria-describedby="move-reason-note"
+                    onChange={(e) => write(e.target.value)}
+                    aria-describedby={shown ? `${ids}-note ${ids}-error` : `${ids}-note`}
                     aria-invalid={tried && problem ? true : undefined}
                   />
                 </Labelled>
                 <p
-                  id="move-reason-note"
+                  id={`${ids}-note`}
                   className="flex flex-wrap justify-between gap-x-3 text-[11px] text-muted-foreground"
                 >
                   <span>Your reason is recorded in the audit log, with the items left open.</span>
@@ -185,12 +203,15 @@ export function StageBar({
                     {reasonLength(reason)} / {MAX_REASON}
                   </span>
                 </p>
+                <span aria-live="polite" className="sr-only">
+                  {heard}
+                </span>
               </div>
             </>
           )}
-          {((tried && problem) || error) && (
-            <p role="alert" className="text-destructive">
-              {(tried && problem) || error}
+          {shown && (
+            <p id={`${ids}-error`} role="alert" className="text-destructive">
+              {shown}
             </p>
           )}
           <div className="flex flex-wrap items-center justify-end gap-2">

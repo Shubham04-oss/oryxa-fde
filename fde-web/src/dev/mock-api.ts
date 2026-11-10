@@ -1400,7 +1400,6 @@ function assigneeRoutes(
   return noContent()
 }
 
-/** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 /**
  * What leaves each stage, as `oryxa_fde_core::Check` lists it, with its words. `met` judges the
  * project's records the way `oryxa-fde-store` does (checklist.rs), so the mock refuses what the
@@ -1475,9 +1474,9 @@ function checklist(
     .map(([key, check]) => ({ key, label: check.label, met: check.met(found, records) }))
 }
 
-/** A reason is 1 to 500 characters once trimmed, with no control character but newline and tab. */
+/** A reason is 1 to 500 characters once trimmed, with no control character (C0 or C1) but newline and tab. */
 // eslint-disable-next-line no-control-regex
-const REASON_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/
+const REASON_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
 function validReason(value: unknown) {
   if (typeof value !== "string") return false
   const v = value.trim()
@@ -1516,6 +1515,7 @@ async function stageMove(
   return json(p.project)
 }
 
+/** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
   if (companyId === undefined) {

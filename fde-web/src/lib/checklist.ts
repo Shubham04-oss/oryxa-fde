@@ -1,7 +1,4 @@
-import type { QueryClient } from "@tanstack/react-query"
-import { queries } from "./api/client"
-import type { ChecklistItem, Project, ProjectScope } from "./api/schemas"
-import { STAGE_LABEL } from "./stage"
+import type { ChecklistItem, Project } from "./api/schemas"
 
 // What the stage checklist says on the project page (DESIGN.md §3): for each item the API names,
 // what is missing in plain words and where on this page (or the company's) it is put right. The
@@ -107,23 +104,10 @@ export function hintFor(key: string, p: Project): Hint | undefined {
   }
 }
 
-/** "Scope has 1 item open." for a heading; empty when none is. */
+/** How many items are still open. */
 export const openCount = (items: ReadonlyArray<ChecklistItem>) =>
   items.filter((item) => !item.met).length
 
 /** The count a heading shows: "1 of 3 met". */
 export const metSummary = (items: ReadonlyArray<ChecklistItem>) =>
   `${items.length - openCount(items)} of ${items.length} met`
-
-export const checklistTitle = (stage: keyof typeof STAGE_LABEL) => `To leave ${STAGE_LABEL[stage]}`
-
-const checklistKey = (scope: ProjectScope) => queries.stageChecklist(scope).queryKey
-
-/**
- * The checklist reads again after a record it depends on changed on this page. A read sent before
- * the write would land after it with the old answer, so those are dropped first.
- */
-export async function refreshChecklist(client: QueryClient, scope: ProjectScope) {
-  await client.cancelQueries({ queryKey: checklistKey(scope) })
-  void client.invalidateQueries({ queryKey: checklistKey(scope) })
-}
