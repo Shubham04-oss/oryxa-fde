@@ -10,7 +10,7 @@ The S3, SQS FIFO and EventBridge modules and the VPC are adapted from there, and
 ## What it builds
 
 ```
-Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
+Browser -> Cloudflare (DNS, Access on <admin_hostname>) -> fde-web Worker (<web_hostname>)
   -> vpc_services binding (Workers VPC) -> Cloudflare Tunnel
   -> one Fargate task in a private subnet: cloudflared (sidecar) -> 127.0.0.1:8080 -> oryxa-fde-api
        -> RDS PostgreSQL 17 + pgvector    (IAM database auth, TLS, private)
@@ -22,7 +22,7 @@ Two more Fargate tasks, queue workers with no inbound network at all (they read 
   oryxa-fde-lifecycle <- lifecycle queue; Bedrock (drafts), SES (digest), Slack tokens (read); RDS as
                          oryxa_fde_lifecycle. Not deployed until a drafting model is chosen (update_model).
 And, only with enable_mcp (off by default), the MCP server for an FDE's own agent, with a tunnel of its own:
-  Agent -> mcp.<domain> (Cloudflare's edge) -> its own tunnel -> one Fargate task: cloudflared (sidecar) -> 127.0.0.1:8081
+  Agent -> <mcp_hostname> (Cloudflare's edge) -> its own tunnel -> one Fargate task: cloudflared (sidecar) -> 127.0.0.1:8081
   -> oryxa-fde-mcp (RDS as oryxa_fde_mcp, SpiceDB, Bedrock to embed a query); no S3, no listener, no inbound network
 Everything outbound (AWS APIs, image pulls, WorkOS, the tunnels) leaves through one fck-nat instance.
 CloudTrail logs management events and object access on the data bucket.
@@ -48,7 +48,7 @@ says what replaced it).
 | `modules/sqs_fifo` | FIFO queue, FIFO DLQ, optional undelivered queue (names and attributes match the platform's consumer kit) |
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
-| `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the API on the loopback of the tunnel's connector, Access on `admin.`; with `enable_mcp`, the MCP server's own tunnel, its ingress rule and its proxied `mcp.` record |
+| `modules/cloudflare` | DNS for the web and admin host names (named by variables, not derived), the tunnel, the Workers VPC service to the API on the loopback of the tunnel's connector, Access on the admin host; with `enable_mcp`, the MCP server's own tunnel, its ingress rule and its proxied record for the MCP host name |
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the environment contract tables below, one per binary, and `tests/code`, which reads the API's health-check and shutdown constants and the Dockerfile); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
 | `docker/oryxa-fde-api.Dockerfile` | The backend image, one for every task: the prebuilt ARM64 `oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle` and `oryxa-fde-mcp` on distroless Debian 13, nonroot, with no shell and no other program (Deploys, The image) |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
@@ -76,9 +76,12 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `aws_account_id` | required | The only account the AWS provider will touch (`allowed_account_ids`) |
 | `aws_region` | `ap-south-1` | Mumbai, chosen by the founder to see real latency from the team and first customers (#144). Everything in AWS runs and rests here; what Mumbai does and does not offer is in Mumbai (ap-south-1) below |
 | `cloudflare_account_id` | required | Account for the tunnel, the Workers VPC service and Access |
-| `cloudflare_zone_id` | required | Zone holding `domain` |
-| `domain` | required | Base hostname for dev; `app.<domain>` (fde-web) and `admin.<domain>` hang off it |
-| `admin_emails` | required | Who may open `admin.<domain>` through Cloudflare Access |
+| `cloudflare_zone_id` | required | The Cloudflare zone's id |
+| `cloudflare_zone_name` | required | That zone's own name (`example.com` in the examples; this README never names a real zone). It is not a host name: it is what the three host names below are checked against |
+| `web_hostname` | required | The web app's full host name (fde-web). **The API's `WEB_ORIGIN` is `https://<web_hostname>`, exactly**, because the session cookie and the CSRF check depend on it; the `WEB_HOSTNAME` GitHub variable (Deploys) and the smoke test's `SMOKE_BASE_URL` are the same name. Validated: a lowercase host name that is the zone itself or **exactly one label under it** (Cloudflare's Universal SSL certificate covers the zone and one level of subdomain only, so `app.fde-dev.<zone>` would have no certificate). For dev, for example `fde-dev.<zone>` |
+| `admin_hostname` | required | The admin tools' full host name, behind Cloudflare Access (a proxied `AAAA` placeholder record for a Worker route, and the Access application). Same rules, and not the web app's. For dev, for example `fde-dev-admin.<zone>` |
+| `mcp_hostname` | `null` | The MCP server's full host name (its tunnel's one public name, its ingress rule and `MCP_ALLOWED_HOSTS`). **Required with `enable_mcp`**, ignored without it. Same rules, and neither of the other two. For dev, for example `fde-dev-mcp.<zone>` |
+| `admin_emails` | required | Who may open `admin_hostname` through Cloudflare Access |
 | `workos_client_id` | required | WorkOS client id (public); the API key is a secret |
 | `event_bus_arn` | required | Printed by `scripts/create-event-bus.sh`; must be the `oryxa-fde-<env>` v2 bus in `aws_account_id` and `aws_region` (plan fails otherwise) |
 | `event_signing_kid` | `k1` | Key id of the API's event signing key (`EVENT_SIGNING_KID`); change it when the key rotates |
@@ -109,7 +112,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `workos_issuer` | `null` | `WORKOS_ISSUER` on the API: set it only when the WorkOS environment has a custom auth domain, because the API pins every token's `iss` to it. Null: the API's default, `https://api.workos.com/` |
 | `ingest_cpu`, `ingest_memory` | `512`, `2048` | The ingest worker's task. It holds each document in memory and extracts its text in a child limited to 1 GiB of address space (`child.rs`), so memory is the figure to watch |
 | `lifecycle_cpu`, `lifecycle_memory` | `256`, `512` | The lifecycle worker's task |
-| `enable_mcp` | `false` | Deploy the MCP server for FDE agents: its task (the server and its own cloudflared), role and service, the `cloudflared/mcp-tunnel-token` secret, and on Cloudflare its tunnel, ingress rule and the proxied record `mcp.<domain>`. **Off, because how an FDE's agent signs in is not decided** (What is missing before an agent can sign in): on, the name answers on the internet and refuses every request without a valid WorkOS token. Off, nothing of it exists, although the binary is in the image |
+| `enable_mcp` | `false` | Deploy the MCP server for FDE agents: its task (the server and its own cloudflared), role and service, the `cloudflared/mcp-tunnel-token` secret, and on Cloudflare its tunnel, ingress rule and the proxied record for `mcp_hostname` (which it requires). **Off, because how an FDE's agent signs in is not decided** (What is missing before an agent can sign in): on, the name answers on the internet and refuses every request without a valid WorkOS token. Off, nothing of it exists, although the binary is in the image |
 | `mcp_cpu`, `mcp_memory` | `256`, `512` | The MCP server's task, shared by the server and its connector |
 | `update_model` | `null` | The Bedrock inference profile that drafts the weekly updates (`UPDATE_MODEL`). **No default, and no model is chosen**: while it is null the lifecycle worker is not deployed (no task definition, role, service or Bedrock permission). Only a `global.` profile is accepted; read Where prompts are processed before setting it |
 | `digest_from` | `null` | The address the weekly digest is sent from (`DIGEST_FROM`); null: no digest. Needs `update_model`, and the address or its domain must be a verified SES identity in `aws_region` (Verify before apply) |
@@ -122,6 +125,26 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 
 The state backend takes `bucket` and `region` at `tofu init` (step 1); the state key is
 `oryxa-fde/dev/terraform.tfstate`.
+
+### Host names
+
+The three host names are inputs, not derived from one base name. The zone is the founder's real one and also holds the
+production names (the zone itself, `app.`, `admin.`, `mcp.`), and Cloudflare's Universal SSL certificate covers the zone
+and one level of subdomain only, so dev needs single-level names of its own, chosen explicitly. There is no default
+for any of them, so nobody takes the production names by accident, and `terraform.tfvars.example` shows dev's with the
+placeholder zone `example.com` (no real zone or host name belongs in this repository):
+
+| Variable | Dev example | Where it goes |
+| --- | --- | --- |
+| `web_hostname` | `fde-dev.example.com` | the proxied `AAAA` placeholder record for fde-web's route; the API's `WEB_ORIGIN` (`https://fde-dev.example.com`) and the lifecycle worker's, with the digest; output `web_hostname`, which is the `WEB_HOSTNAME` GitHub variable (the route `<WEB_HOSTNAME>/*` that `deploy-workers` adds); the smoke test's `SMOKE_BASE_URL`; the WorkOS redirect URI `https://<web_hostname>/auth/callback` |
+| `admin_hostname` | `fde-dev-admin.example.com` | its proxied `AAAA` placeholder record; the Cloudflare Access application's domain; output `admin_hostname` |
+| `mcp_hostname` | `fde-dev-mcp.example.com` | only with `enable_mcp`: its proxied CNAME to the MCP tunnel, the tunnel's one ingress rule, `MCP_ALLOWED_HOSTS` on the MCP server; output `mcp_hostname` |
+
+`plan` refuses a name that is not lowercase, is neither the zone nor exactly one label under it (with the reason), is
+the same as another of the three, or (`mcp_hostname`) is missing while `enable_mcp` is on. The web name must be exactly
+the web app's origin: the API compares the browser's `Origin` with `WEB_ORIGIN` (`403 csrf`) and the session cookie is
+`__Host-` bound to the host, so a different name in either place signs nobody in. The GitHub environment variable
+`WEB_HOSTNAME` is `tofu output -raw web_hostname`, never typed by hand, so it cannot differ from `web_hostname`.
 
 ## Secrets
 
@@ -244,7 +267,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `SPICEDB_PRESHARED_KEY` | always | secret | none | `main.rs:53` | `shared/spicedb-preshared-key` |
 | `WORKOS_API_KEY` | always | secret | none | `main.rs:57` | `api/workos-api-key` |
 | `WORKOS_CLIENT_ID` | always | config | none | `main.rs:58` | `workos_client_id` |
-| `WEB_ORIGIN` | always | config | none | `main.rs:71`, `main.rs:89` | `https://app.<domain>` |
+| `WEB_ORIGIN` | always | config | none | `main.rs:71`, `main.rs:89` | `https://<web_hostname>`: the web app's origin exactly |
 | `SESSION_PASSWORD` | always | secret | none | `main.rs:72` | `api/session-password` |
 | `EVENT_SIGNING_KID` | always | config | none | `main.rs:79` | `event_signing_kid` |
 | `EVENT_SIGNING_KEY` | always | secret | none | `main.rs:79` | `api/event-signing-key` |
@@ -371,7 +394,7 @@ approved update to the customer's sponsors (the weekly digest). **It is deployed
 | `UPDATE_MODEL` | always | config | none | `lifecycle.rs:58` | `update_model`: a `global.` profile (Where prompts are processed) |
 | `LIFECYCLE_QUEUE_URL` | always | config | none | `lifecycle.rs:110` | the `lifecycle` queue's url |
 | `DIGEST_FROM` | digest | config | none: no digest | `lifecycle.rs:60` | `digest_from` |
-| `WEB_ORIGIN` | digest | config | none; required with `DIGEST_FROM` | `lifecycle.rs:63` | `https://app.<domain>` |
+| `WEB_ORIGIN` | digest | config | none; required with `DIGEST_FROM` | `lifecycle.rs:63` | `https://<web_hostname>` |
 | `SLACK_SECRET_PREFIX` | slack | reference | none: no update posted to Slack | `lifecycle.rs:96` | `oryxa-fde/<env>/slack/`, set with `slack_client_id` |
 | `RUST_LOG` | optional | config | `info` | `lifecycle.rs:48` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
@@ -407,7 +430,7 @@ WorkOS bearer token as the API does (`Principal::from_bearer`). A variable that 
 | `SPICEDB_PRESHARED_KEY` | always | secret | none | `mcp.rs:31` | `shared/spicedb-preshared-key`, the API's |
 | `WORKOS_API_KEY` | always | secret | none | `mcp.rs:35` | `api/workos-api-key`, the API's |
 | `WORKOS_CLIENT_ID` | always | config | none | `mcp.rs:36` | `workos_client_id` |
-| `MCP_ALLOWED_HOSTS` | always | config | none; comma-separated `Host` values, none means the server accepts none that is not loopback | `mcp.rs:41` | `mcp.<domain>` only |
+| `MCP_ALLOWED_HOSTS` | always | config | none; comma-separated `Host` values, none means the server accepts none that is not loopback | `mcp.rs:41` | `mcp_hostname` only |
 | `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:113` (`Context::from_env`, `mcp.rs:40`) | the data bucket: the binary needs the name to start, and no tool reads a file |
 | `LISTEN_ADDR` | optional | config | `0.0.0.0:8081` | `mcp.rs:47` | `127.0.0.1:8081`: the tunnel sidecar is the only client |
 | `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
@@ -447,14 +470,14 @@ in an FDE's own tooling cannot use one. Two options were compared (the first is 
 | --- | --- | --- |
 | What it builds | A Cloud Map service and its instance, a security group rule from the API task to port 8081 and a second VPC service on the API's tunnel (`resolver_network`), **and then a Worker** that the agent calls and that proxies to the binding, with its route, its secrets and its deploy | One tunnel, its ingress rule and one proxied DNS record in Cloudflare, one secret for its token, and the sidecar in a task that already needs a task and a role of its own |
 | Moving parts in AWS | Cloud Map instance, an ingress rule on the MCP task and an egress rule on the API's (the API's connector would reach into another service) | The same sidecar pattern as the API's (egress to the tunnel's port, the pinned image); nothing registered, no rule that admits traffic |
-| Who an agent reaches | The gateway Worker's public name, which is then the thing to harden and to sign in to | `mcp.<domain>` at Cloudflare's edge, the same server |
+| Who an agent reaches | The gateway Worker's public name, which is then the thing to harden and to sign in to | `<mcp_hostname>` at Cloudflare's edge, the same server |
 | Coupling | The MCP server is reachable only while the API task's connector runs, and the API's connector can reach the MCP server | None: each task has its own connector, and a deploy of one does not cut the other |
 | Open question | Whether Workers VPC accepts a hostname resolved through the tunnel (the same as the API's loopback, Verify before apply) | None new: a tunnel's public hostname with an ingress rule is Cloudflare's long-standing feature, and the sidecar is the API's pattern |
 
 **What is built:** a tunnel `oryxa-fde-dev-mcp` (remotely managed, token-run; the token is copied into
-`cloudflared/mcp-tunnel-token` by hand, so it never passes through OpenTofu), one ingress rule, `mcp.<domain>` to
-`http://127.0.0.1:8081`, with `http_status:404` for any other name, and one proxied CNAME `mcp.<domain>` to `<tunnel id>.cfargotunnel.com`.
-The server listens on `127.0.0.1:8081` and its `MCP_ALLOWED_HOSTS` is `mcp.<domain>` alone, so a request for another name (a rebinding
+`cloudflared/mcp-tunnel-token` by hand, so it never passes through OpenTofu), one ingress rule, `<mcp_hostname>` to
+`http://127.0.0.1:8081`, with `http_status:404` for any other name, and one proxied CNAME `<mcp_hostname>` to `<tunnel id>.cfargotunnel.com`.
+The server listens on `127.0.0.1:8081` and its `MCP_ALLOWED_HOSTS` is `mcp_hostname` alone, so a request for another name (a rebinding
 attack, the API's name) is refused by the server even if it got that far. Private here means: **no listener, load balancer, public
 IP or inbound rule in AWS; reachable only through Cloudflare**, which terminates TLS. It does not mean unreachable from the internet
 at Cloudflare's edge: the name resolves for anyone, and every request without a valid WorkOS access token (verified against WorkOS's
@@ -479,7 +502,7 @@ list, none of it built here (each is the API stream's or the lead's):
    already inside the server is cut).
 5. **WorkOS's API key.** The binary builds a WorkOS client with the API's key but, as far as its code shows, only verifies tokens. A
    code change to not need the key would let the task drop that secret.
-6. **Hostname and Access** (the lead). Which name: `mcp.<domain>` is the proposal (the pattern of `app.` and `admin.`, so it has the same certificate coverage as they do). Whether to put Cloudflare Access in front: it would need a service-token
+6. **Hostname and Access** (the lead). Which name: `mcp_hostname` is chosen explicitly per environment, one label under the zone like the other two, so it has the same certificate coverage (a name such as `fde-dev-mcp.<zone>` for dev). Whether to put Cloudflare Access in front: it would need a service-token
    or an identity policy that an MCP client can satisfy next to the WorkOS bearer token, which the sign-in design decides.
 7. **Whether to switch it on at all** before 1, 2 and 8 are done. With it off nothing exists.
 8. **Read-only by its login, not only by its code** (the API stream, then infra). ADR 0006 says the server stays read-only, and its tools
@@ -494,7 +517,7 @@ rule, the DNS record, the secret `cloudflared/mcp-tunnel-token` and the task wit
 task after: a task cannot start until its secrets have values, so ECS retries until the next step); (3) copy the new tunnel's token (output
 `mcp_tunnel_id`: Zero Trust, Networks, Tunnels, `oryxa-fde-dev-mcp`) into that secret, as in Apply order step 6; if the service gave up
 meanwhile, run `deploy-api`, which rolls the MCP service with the rest; (4) check that the task runs, that the tunnel shows healthy in the
-Cloudflare dashboard and that `curl -i -X POST https://mcp.<domain>/mcp` answers `401` (no token). There is no other path to the task: there
+Cloudflare dashboard and that `curl -i -X POST https://<mcp_hostname>/mcp` answers `401` (no token). There is no other path to the task: there
 is no listener in AWS.
 
 ## Apply order
@@ -515,7 +538,7 @@ workflows (Deploys, below), not from the owner's machine.
 4. **First apply, nothing running.** Fill `terraform.tfvars` with `start_services = false` and any
    `api_image_tag`, and `event_public_key`: make the event key pair now (`openssl genpkey -algorithm ed25519 -out event-key.pem`,
    `openssl pkey -in event-key.pem -pubout`), put the public PEM in `terraform.tfvars` (a heredoc), and keep the private
-   file for step 6. Leave `update_model` and `digest_from` unset (Not deployed: the lifecycle worker waits for a model).
+   file for step 6. Set `cloudflare_zone_name`, `web_hostname` and `admin_hostname` (and `mcp_hostname` before `enable_mcp`) as in Host names, and check the records first (Verify before apply: the names must be free in the zone). Leave `update_model` and `digest_from` unset (Not deployed: the lifecycle worker waits for a model).
    Then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
    `tofu -chdir=infra/envs/dev apply dev.tfplan`. This creates the network, keys, the database (about
    10 minutes), the empty secrets, ECR, the cluster with every service at 0 tasks (SpiceDB, the API and the
@@ -530,7 +553,7 @@ workflows (Deploys, below), not from the owner's machine.
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
    WorkOS key comes from the WorkOS dashboard, and the event signing key is the private PEM of the pair
-   made in step 4 (its public half is `event_public_key`, which the workers verify events with). Copy the tunnel token from the Cloudflare dashboard
+   made in step 4 (its public half is `event_public_key`, which the workers verify events with). In the WorkOS dashboard, register `https://<web_hostname>/auth/callback` as a redirect URI (the API sends the browser back to `<WEB_ORIGIN>/auth/callback`, `session.rs:362`); a mismatch fails the first sign-in. Copy the tunnel token from the Cloudflare dashboard
    (Zero Trust, Networks, Tunnels, `oryxa-fde-dev-api`; output `tunnel_id`).
 7. **SpiceDB datastore.** Run `infra/scripts/run-task.sh spicedb-migrate` (`datastore migrate head`,
    IAM auth).
@@ -555,8 +578,8 @@ workflows (Deploys, below), not from the owner's machine.
     README); until then the gateway refuses every call. Secrets survive later deploys.
 14. **Smoke test.** The `oryxa-fde-api` service has one running task whose `api` container reports
     `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), `oryxa-fde-ingest` has one running task, the tunnel `oryxa-fde-dev-api`
-    shows healthy in the Cloudflare dashboard, `https://app.<domain>` reaches the API through the
-    binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
+    shows healthy in the Cloudflare dashboard, `https://<web_hostname>` reaches the API through the
+    binding, `<admin_hostname>` asks for an Access login, and CloudTrail delivers to its bucket.
     Then run stage A of the scripted smoke test (next section), and stage B, document search, with
     `SMOKE_WORKERS=1` (it skips otherwise, because the script cannot tell a missing worker from a slow one):
     `SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b`. If stage B times out, look in this order: the subscriber exists
@@ -613,7 +636,7 @@ deploy ends in a pass or a fail. It goes to the web app's public address the way
 first failure with a plain message and a non-zero exit. Needs `bash`, `curl` and `jq`.
 
 ```bash
-export SMOKE_BASE_URL=https://app.<domain>               # exactly the web app's origin (the API's WEB_ORIGIN)
+export SMOKE_BASE_URL=https://<web_hostname>             # exactly the web app's origin (the API's WEB_ORIGIN), for dev e.g. https://fde-dev.<zone>
 export SMOKE_SESSION_FILE=~/.oryxa-smoke-session         # the session cookie, see below
 infra/scripts/smoke-test.sh a                            # stage A, the core (the default)
 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker runs and its subscriber exists (Apply order, steps 10 and 12)
@@ -641,9 +664,9 @@ exits 0 for that stage; the last line, `result: a=passed b=skipped ...`, tells p
 a test organisation**: it creates a company in that organisation, and the user becomes its lead. Never use a
 real customer's organisation or your own login.
 
-1. In a private browser window, open `https://app.<domain>` and sign in as the test user. Do not sign out
+1. In a private browser window, open `https://<web_hostname>` and sign in as the test user. Do not sign out
    until the run is over (sign-out ends the WorkOS session, and with it the cookie the script uses).
-2. In the browser's developer tools, Application (Chrome) or Storage (Firefox), Cookies, `https://app.<domain>`:
+2. In the browser's developer tools, Application (Chrome) or Storage (Firefox), Cookies, `https://<web_hostname>`:
    copy the **Value** of `__Host-fde_session` (it is `HttpOnly`, so only the tools show it). Just the value.
 3. Put it in a file only you can read, and paste it into that file in an editor, not on a command line:
    `install -m 600 /dev/null ~/.oryxa-smoke-session`. The script refuses a file that group or others can read.
@@ -1193,7 +1216,7 @@ Without the workflow, the same steps by hand: push an image, put its sha in
 **deploy-workers.** Each Worker deploys with the `wrangler` its own lockfile pins. `fde-web`'s
 `wrangler.jsonc` stays local-only: after `pnpm build`, the workflow adds dev's settings to the built
 config: the zone route `<WEB_HOSTNAME>/*` (OpenTofu owns that DNS record), the `API` binding to the
-Workers VPC service, and `workers_dev` and preview URLs off, so `app.<domain>` is its only address.
+Workers VPC service, and `workers_dev` and preview URLs off, so `<web_hostname>` is its only address.
 Worker secrets are set by hand with `wrangler secret put` and are never in the workflow.
 
 **Teardown.**
@@ -1335,6 +1358,20 @@ streams outlast Lambda). Cuts that are left, each with a cost:
 
 These could not be checked without an account. Each one is flagged at the place it is used.
 
+- **The host names are free in the zone.** The zone already serves production, and apply must not touch it. `tofu apply`
+  does not overwrite a record. Cloudflare documents ("Records with the same name", "Round-robin DNS", "Proxy status")
+  that an `A`/`AAAA` record may sit beside other `A`/`AAAA` records at the same name, so the new `AAAA` is **added beside
+  an existing address record**, the name answers with both, and if any of them is proxied all are treated as proxied;
+  it refuses an `A`/`AAAA` at a name that has a CNAME, and a CNAME (the MCP record) at a name that has an `A`, `AAAA`
+  or CNAME. So,
+  before the first apply, for each of `web_hostname`, `admin_hostname` and (before `enable_mcp`) `mcp_hostname`, check that
+  the zone has **no record of any type** at that exact name, and that the Zero Trust dashboard has no Access application and no
+  Worker route or custom domain on it. With `CLOUDFLARE_API_TOKEN` in the environment and the zone's id (the token is passed
+  as a header file, not an argument, so `ps` never shows it):
+  `curl -s -H @<(printf 'Authorization: Bearer %s' "$CLOUDFLARE_API_TOKEN") "https://api.cloudflare.com/client/v4/zones/<cloudflare_zone_id>/dns_records?name=<host name>" | jq '.result | length'`
+  must print `0` for each name. The check is by exact name: records at other names, the production ones included, are not
+  affected, and a web name equal to the zone itself would sit on the apex, where records usually exist.
+
 - **EventBridge v2.** There is no OpenTofu resource, so the bus is created by script. The publish
   action `events:PutEvents` on the v2 bus ARN is inferred from the SDK's signing name, as in the
   platform. The CLI field names in `create-event-bus.sh` match `aws-sdk-eventbridgev2` 1.2.0.
@@ -1348,10 +1385,10 @@ These could not be checked without an account. Each one is flagged at the place 
   binding reaches `/healthz`.
 - **The MCP server's tunnel (#165), with `enable_mcp`.** `cloudflare_zero_trust_tunnel_cloudflared_config` (provider 5.27) puts the
   ingress rule on the remotely managed tunnel, and the connector run with only `TUNNEL_TOKEN` takes it from Cloudflare: the first apply and
-  the dashboard show it (the tunnel healthy, the rule `mcp.<domain>` to `http://127.0.0.1:8081`). Cloudflare forwards the request's own `Host`
-  (`mcp.<domain>`) to the origin by default, which is what `MCP_ALLOWED_HOSTS` is compared with: if the first request is refused with a
-  host error, that is the place to look. Two connectors of this tunnel run during a deploy (as the API's do). The `mcp.` record is
-  proxied (an orange-cloud CNAME to `<tunnel id>.cfargotunnel.com`), and the certificate for it is the zone's, as `app.`'s.
+  the dashboard show it (the tunnel healthy, the rule `<mcp_hostname>` to `http://127.0.0.1:8081`). Cloudflare forwards the request's own `Host`
+  (`<mcp_hostname>`) to the origin by default, which is what `MCP_ALLOWED_HOSTS` is compared with: if the first request is refused with a
+  host error, that is the place to look. Two connectors of this tunnel run during a deploy (as the API's do). The `mcp_hostname` record is
+  proxied (an orange-cloud CNAME to `<tunnel id>.cfargotunnel.com`), and the certificate for it is the zone's Universal SSL one, which is why the name is the zone or one label under it, as the web app's.
 - **Health check and start order.** The API container's health check runs `/usr/local/bin/oryxa-fde-ops healthcheck`
   (the image has no shell). The binary's own test (`crates/oryxa-fde-api/tests/shutdown.rs`) shows exit 0 on a 200 and 1 on
   anything else, but it has not run as an ECS health check: confirm in the first run that the `api` container reaches
@@ -1551,7 +1588,7 @@ These could not be checked without an account. Each one is flagged at the place 
   check with a matching `healthcheck`, a graceful shutdown, and no need for WorkOS's API key (How the MCP server is reached). When a tool
   needs a file's bytes, it adds its S3 and KMS permission with its company-key reader entry in the same change, and tells infra first.
 - **Web (`fde-web/`, `realtime/`).** `deploy-workers` adds the `API` binding (`env.API`, the Workers
-  VPC service) and the zone route on `app.<domain>` to the built config at deploy time, so
+  VPC service) and the zone route on `<web_hostname>` to the built config at deploy time, so
   `wrangler.jsonc` keeps no dev values. `realtime/` deploys like the gateway: `npm ci` with a
   `package-lock.json`, `wrangler` in its devDependencies and `wrangler deploy` from its directory,
   before `fde-web`.

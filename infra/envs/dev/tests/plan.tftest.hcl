@@ -75,7 +75,10 @@ variables {
   aws_account_id         = "000000000000"
   cloudflare_account_id  = "mock"
   cloudflare_zone_id     = "mock"
-  domain                 = "fde-dev.example.com"
+  cloudflare_zone_name   = "example.com"
+  web_hostname           = "fde-dev.example.com"
+  admin_hostname         = "fde-dev-admin.example.com"
+  mcp_hostname           = "fde-dev-mcp.example.com" # used only with enable_mcp
   admin_emails           = ["owner@example.com"]
   workos_client_id       = "client_mock"
   event_bus_arn          = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
@@ -99,9 +102,22 @@ run "dev_plans_without_credentials" {
 
   assert {
     condition = (
-      output.web_hostname == "app.fde-dev.example.com" && output.admin_hostname == "admin.fde-dev.example.com"
+      output.web_hostname == "fde-dev.example.com" && output.admin_hostname == "fde-dev-admin.example.com"
     )
-    error_message = "hostnames hang off var.domain"
+    error_message = "the host names are the ones the variables name, not derived from a base name"
+  }
+
+  assert {
+    condition = (
+      local.api_environment.WEB_ORIGIN == "https://${var.web_hostname}" && local.api_environment.WEB_ORIGIN == "https://fde-dev.example.com"
+      && module.cloudflare.web_hostname == var.web_hostname && module.cloudflare.admin_hostname == var.admin_hostname
+    )
+    error_message = "the API's WEB_ORIGIN is https:// plus the web host name exactly: the session cookie and the CSRF check compare it with the browser's Origin"
+  }
+
+  assert {
+    condition     = output.web_hostname != output.admin_hostname
+    error_message = "the web and admin names are distinct"
   }
 
   assert {
@@ -1392,12 +1408,14 @@ run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
     cloudflare = cloudflare
   }
   variables {
-    account_id   = "mock"
-    zone_id      = "mock"
-    name         = "oryxa-fde-test"
-    domain       = "fde-dev.example.com"
-    api_port     = 8080
-    admin_emails = ["owner@example.com"]
+    account_id     = "mock"
+    zone_id        = "mock"
+    name           = "oryxa-fde-test"
+    web_hostname   = "fde-dev.example.com"
+    admin_hostname = "fde-dev-admin.example.com"
+    mcp_hostname   = "fde-dev-mcp.example.com"
+    api_port       = 8080
+    admin_emails   = ["owner@example.com"]
   }
 
   assert {
@@ -1410,12 +1428,21 @@ run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
   }
   assert {
     condition = toset(keys(cloudflare_dns_record.worker)) == toset([
-      "app.fde-dev.example.com", "admin.fde-dev.example.com",
+      "fde-dev.example.com", "fde-dev-admin.example.com",
     ])
     error_message = "DNS only for Worker hostnames; the API has none"
   }
   assert {
-    condition     = cloudflare_zero_trust_access_application.admin.domain == "admin.fde-dev.example.com"
+    condition = (
+      cloudflare_dns_record.worker["fde-dev.example.com"].name == var.web_hostname
+      && cloudflare_dns_record.worker["fde-dev-admin.example.com"].name == var.admin_hostname
+      && alltrue([for r in values(cloudflare_dns_record.worker) : r.type == "AAAA" && r.proxied == true && r.zone_id == var.zone_id])
+      && output.web_hostname == var.web_hostname && output.admin_hostname == var.admin_hostname
+    )
+    error_message = "each Worker record is named exactly by its variable (no app. or admin. is added), proxied, in the zone"
+  }
+  assert {
+    condition     = cloudflare_zero_trust_access_application.admin.domain == "fde-dev-admin.example.com"
     error_message = "Access sits in front of the admin hostname"
   }
 }
@@ -1638,7 +1665,7 @@ run "lifecycle_worker_with_a_model_a_digest_and_slack" {
     error_message = "the lifecycle worker is shaped like the ingest worker: no inbound, its own log group, replaced in place"
   }
   assert {
-    condition     = local.lifecycle_environment.UPDATE_MODEL == "global.anthropic.claude-opus-5-5" && local.lifecycle_environment.SLACK_SECRET_PREFIX == "oryxa-fde/dev/slack/" && local.lifecycle_environment.WEB_ORIGIN == "https://app.fde-dev.example.com"
+    condition     = local.lifecycle_environment.UPDATE_MODEL == "global.anthropic.claude-opus-5-5" && local.lifecycle_environment.SLACK_SECRET_PREFIX == "oryxa-fde/dev/slack/" && local.lifecycle_environment.WEB_ORIGIN == "https://fde-dev.example.com"
     error_message = "the model, the Slack prefix the API writes under, and the web origin of the unsubscribe page"
   }
 }
@@ -1909,7 +1936,7 @@ run "the_mcp_server_with_enable_mcp" {
   assert {
     condition = (
       local.mcp_environment.LISTEN_ADDR == "127.0.0.1:8081"
-      && local.mcp_environment.MCP_ALLOWED_HOSTS == "mcp.fde-dev.example.com" && module.cloudflare.mcp_hostname == "mcp.fde-dev.example.com"
+      && local.mcp_environment.MCP_ALLOWED_HOSTS == "fde-dev-mcp.example.com" && module.cloudflare.mcp_hostname == "fde-dev-mcp.example.com"
       && local.mcp_environment.MCP_ALLOWED_HOSTS != local.api_environment.WEB_ORIGIN
     )
     error_message = "the server listens on loopback and accepts requests addressed to its own name only (DNS rebinding guard), not the web app's"
@@ -1957,8 +1984,8 @@ run "the_mcp_server_with_enable_mcp" {
     error_message = "the deploy role may update the MCP service and pass its two roles"
   }
   assert {
-    condition     = contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && output.mcp_hostname == "mcp.fde-dev.example.com"
-    error_message = "the MCP tunnel's token secret exists, and the hostname is mcp.<domain>"
+    condition     = contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && output.mcp_hostname == "fde-dev-mcp.example.com"
+    error_message = "the MCP tunnel's token secret exists, and the hostname is the one mcp_hostname names"
   }
 }
 
@@ -2025,14 +2052,16 @@ run "the_mcp_hostname_is_a_tunnel_at_the_edge_and_nothing_in_aws" {
     values = { id = "mcp-tunnel-id" }
   }
   variables {
-    account_id   = "mock"
-    zone_id      = "mock"
-    name         = "oryxa-fde-test"
-    domain       = "fde-dev.example.com"
-    api_port     = 8080
-    mcp_enabled  = true
-    mcp_port     = 8081
-    admin_emails = ["owner@example.com"]
+    account_id     = "mock"
+    zone_id        = "mock"
+    name           = "oryxa-fde-test"
+    web_hostname   = "fde-dev.example.com"
+    admin_hostname = "fde-dev-admin.example.com"
+    mcp_hostname   = "fde-dev-mcp.example.com"
+    api_port       = 8080
+    mcp_enabled    = true
+    mcp_port       = 8081
+    admin_emails   = ["owner@example.com"]
   }
 
   assert {
@@ -2047,24 +2076,24 @@ run "the_mcp_hostname_is_a_tunnel_at_the_edge_and_nothing_in_aws" {
   assert {
     condition = (
       [for i in cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].config.ingress : "${coalesce(i.hostname, "*")} ${i.service}"]
-      == ["mcp.fde-dev.example.com http://127.0.0.1:8081", "* http_status:404"]
+      == ["fde-dev-mcp.example.com http://127.0.0.1:8081", "* http_status:404"]
       && cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].tunnel_id == "mcp-tunnel-id"
     )
     error_message = "the tunnel serves one name, to the connector's own loopback, and answers 404 to any other"
   }
   assert {
     condition = (
-      cloudflare_dns_record.mcp[0].name == "mcp.fde-dev.example.com" && cloudflare_dns_record.mcp[0].type == "CNAME"
+      cloudflare_dns_record.mcp[0].name == "fde-dev-mcp.example.com" && cloudflare_dns_record.mcp[0].type == "CNAME"
       && cloudflare_dns_record.mcp[0].proxied == true
       && cloudflare_dns_record.mcp[0].content == "mcp-tunnel-id.cfargotunnel.com"
     )
-    error_message = "mcp.<domain> is a proxied record to the MCP tunnel, so it resolves to Cloudflare and never to an address in AWS"
+    error_message = "the MCP host name is a proxied record to the MCP tunnel, so it resolves to Cloudflare and never to an address in AWS"
   }
   assert {
     condition = (
-      toset(keys(cloudflare_dns_record.worker)) == toset(["app.fde-dev.example.com", "admin.fde-dev.example.com"])
+      toset(keys(cloudflare_dns_record.worker)) == toset(["fde-dev.example.com", "fde-dev-admin.example.com"])
       && cloudflare_connectivity_directory_service.api.host.network.tunnel_id == "api-tunnel-id"
-      && output.mcp_hostname == "mcp.fde-dev.example.com"
+      && output.mcp_hostname == "fde-dev-mcp.example.com"
     )
     error_message = "the Worker hostnames and the API's VPC service on its own tunnel are untouched"
   }
@@ -2079,12 +2108,14 @@ run "no_mcp_hostname_or_tunnel_while_it_is_off" {
     cloudflare = cloudflare
   }
   variables {
-    account_id   = "mock"
-    zone_id      = "mock"
-    name         = "oryxa-fde-test"
-    domain       = "fde-dev.example.com"
-    api_port     = 8080
-    admin_emails = ["owner@example.com"]
+    account_id     = "mock"
+    zone_id        = "mock"
+    name           = "oryxa-fde-test"
+    web_hostname   = "fde-dev.example.com"
+    admin_hostname = "fde-dev-admin.example.com"
+    mcp_hostname   = "fde-dev-mcp.example.com"
+    api_port       = 8080
+    admin_emails   = ["owner@example.com"]
   }
 
   assert {
@@ -2093,5 +2124,100 @@ run "no_mcp_hostname_or_tunnel_while_it_is_off" {
       && length(cloudflare_dns_record.mcp) == 0 && output.mcp_hostname == null && output.mcp_tunnel_id == null
     )
     error_message = "no tunnel, ingress rule, record or name for the MCP server unless it is enabled"
+  }
+}
+
+# ---------------------------------------------------------------- host names: explicit, one level under the zone
+
+# Universal SSL covers the zone and one label below it, and the zone also holds the production names, so the names are
+# required inputs, validated against the zone, and never derived.
+run "host_names_may_be_the_zone_or_one_label_under_it" {
+  command = plan
+  variables {
+    web_hostname   = "example.com"
+    admin_hostname = "fde-dev-admin.example.com"
+  }
+  assert {
+    condition     = output.web_hostname == "example.com" && local.api_environment.WEB_ORIGIN == "https://example.com"
+    error_message = "the zone itself is a valid name (the production web app's), and WEB_ORIGIN follows it"
+  }
+}
+
+run "a_two_level_web_name_is_refused" {
+  command = plan
+  variables {
+    web_hostname = "app.fde-dev.example.com"
+  }
+  expect_failures = [var.web_hostname]
+}
+
+run "a_two_level_admin_name_is_refused" {
+  command = plan
+  variables {
+    admin_hostname = "admin.fde-dev.example.com"
+  }
+  expect_failures = [var.admin_hostname]
+}
+
+run "a_two_level_mcp_name_is_refused" {
+  command = plan
+  variables {
+    enable_mcp   = true
+    mcp_hostname = "mcp.fde-dev.example.com"
+  }
+  expect_failures = [var.mcp_hostname]
+}
+
+run "a_name_outside_the_zone_is_refused" {
+  command = plan
+  variables {
+    # shares the zone's text as a suffix but is not under it
+    web_hostname = "fde-dev-example.com"
+  }
+  expect_failures = [var.web_hostname]
+}
+
+run "an_uppercase_name_is_refused" {
+  command = plan
+  variables {
+    web_hostname = "FDE-dev.example.com"
+  }
+  expect_failures = [var.web_hostname]
+}
+
+run "the_web_and_admin_names_must_differ" {
+  command = plan
+  variables {
+    admin_hostname = "fde-dev.example.com"
+  }
+  expect_failures = [var.admin_hostname]
+}
+
+run "the_mcp_name_must_differ_from_the_others" {
+  command = plan
+  variables {
+    enable_mcp   = true
+    mcp_hostname = "fde-dev-admin.example.com"
+  }
+  expect_failures = [var.mcp_hostname]
+}
+
+run "enable_mcp_needs_a_name" {
+  command = plan
+  variables {
+    enable_mcp   = true
+    mcp_hostname = null
+  }
+  expect_failures = [var.mcp_hostname]
+}
+
+run "no_mcp_name_is_needed_while_it_is_off" {
+  command = plan
+  variables {
+    mcp_hostname = null
+  }
+  assert {
+    condition     = output.mcp_hostname == null && module.cloudflare.mcp_hostname == null
+    error_message = "without enable_mcp no name is needed and none is exposed"
   }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A scripted pass against a deployed environment's public address, going through the web app the way a
 # browser does (`/api/*` on the web origin, the session cookie, the CSRF header and origin on writes).
-#   SMOKE_BASE_URL=https://app.<domain> SMOKE_SESSION_FILE=~/.oryxa-smoke-session infra/scripts/smoke-test.sh [a] [b] [c | k | all]
+#   SMOKE_BASE_URL=https://<web_hostname> SMOKE_SESSION_FILE=~/.oryxa-smoke-session infra/scripts/smoke-test.sh [a] [b] [c | k | all]
 # Stages (default `a`; they run in the order given, and the run stops at the first failure):
 #   a  core: health, /v1/me, company, project, task, Today, stage checklist, stage move with a reason
 #   b  workers: upload a sample document, wait for ingest, find a passage by search   (needs SMOKE_WORKERS=1)
@@ -51,7 +51,7 @@ done
 
 BASE="${SMOKE_BASE_URL:-}"
 BASE="${BASE%/}"
-[[ -n $BASE ]] || { say "set SMOKE_BASE_URL to the web app's origin, e.g. https://app.<domain>. $usage" >&2; exit 2; }
+[[ -n $BASE ]] || { say "set SMOKE_BASE_URL to the web app's origin, e.g. https://<web_hostname> (the API's WEB_ORIGIN). $usage" >&2; exit 2; }
 # An origin only: the API compares the Origin header to WEB_ORIGIN byte for byte, and a cookie must not
 # cross plain http except to this machine.
 origin_re='^https?://[][A-Za-z0-9.:-]+$'

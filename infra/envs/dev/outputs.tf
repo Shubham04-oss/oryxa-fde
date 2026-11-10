@@ -19,7 +19,8 @@ output "tunnel_id" {
 }
 
 output "web_hostname" {
-  value = module.cloudflare.web_hostname
+  description = "The web app's host name: set as WEB_HOSTNAME on the GitHub environment (deploy-workers routes it), and the API's WEB_ORIGIN is https://<this>."
+  value       = module.cloudflare.web_hostname
 }
 
 output "admin_hostname" {

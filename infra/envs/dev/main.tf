@@ -753,7 +753,7 @@ data "aws_iam_policy_document" "mcp" {
 
 # One task, two containers, as the API's: the server on its loopback and its own cloudflared, with its own tunnel and
 # token. No security group admits anything to the task, there is no load balancer, no Cloud Map name and no listener
-# outside the task: an FDE's agent reaches it at mcp.<domain> through Cloudflare's edge and the tunnel. The binary has
+# outside the task: an FDE's agent reaches it at <mcp_hostname> through Cloudflare's edge and the tunnel. The binary has
 # no health route (`oryxa-fde-ops healthcheck` calls /healthz, which it does not serve), so the connector starts once the
 # server's process has, and a process that exits (a missing variable, no database) replaces the task.
 module "mcp" {
@@ -942,13 +942,15 @@ module "cloudtrail" {
 # ---------------------------------------------------------------- cloudflare
 
 module "cloudflare" {
-  source       = "../../modules/cloudflare"
-  account_id   = var.cloudflare_account_id
-  zone_id      = var.cloudflare_zone_id
-  name         = local.prefix
-  domain       = var.domain
-  api_port     = var.api_port
-  mcp_enabled  = local.mcp_on
-  mcp_port     = local.mcp_port
-  admin_emails = var.admin_emails
+  source         = "../../modules/cloudflare"
+  account_id     = var.cloudflare_account_id
+  zone_id        = var.cloudflare_zone_id
+  name           = local.prefix
+  web_hostname   = var.web_hostname
+  admin_hostname = var.admin_hostname
+  mcp_hostname   = var.mcp_hostname
+  api_port       = var.api_port
+  mcp_enabled    = local.mcp_on
+  mcp_port       = local.mcp_port
+  admin_emails   = var.admin_emails
 }

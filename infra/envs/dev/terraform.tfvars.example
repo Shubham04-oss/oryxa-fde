@@ -6,9 +6,18 @@ aws_account_id         = "000000000000"
 aws_region             = "ap-south-1" # Mumbai; the default (infra/README.md, Mumbai)
 cloudflare_account_id  = "<cloudflare account id>"
 cloudflare_zone_id     = "<zone id>"
-domain                 = "<dev base hostname, e.g. fde-dev.example.com>"
+cloudflare_zone_name   = "example.com" # the zone's own name: use your zone's, never commit it
 admin_emails           = ["owner@example.com"]
 workos_client_id       = "<WorkOS client id (public)>"
+
+# The environment's host names, chosen here and required: no default, so nobody takes the production names (the zone
+# itself, app., admin., mcp.) by accident. Each is the zone or exactly one label under it: Cloudflare's Universal SSL
+# certificate covers the zone and one level only, so app.fde-dev.example.com would have no certificate. Distinct names.
+# The web name is the API's WEB_ORIGIN (https://<it>) and WEB_HOSTNAME on the GitHub environment, and
+# https://<it>/auth/callback is the redirect URI to register in WorkOS (infra/README.md, Apply order).
+web_hostname   = "fde-dev.example.com"
+admin_hostname = "fde-dev-admin.example.com"
+# mcp_hostname = "fde-dev-mcp.example.com" # required with enable_mcp
 data_bucket_name       = "oryxa-fde-dev-data-<unique suffix>"
 cloudtrail_bucket_name = "oryxa-fde-dev-cloudtrail-<unique suffix>"
 
@@ -48,6 +57,6 @@ start_services = false
 # update_model = "global.anthropic.claude-opus-5-5"
 # digest_from  = "updates@example.com" # a verified SES identity in aws_region, out of the SES sandbox
 
-# The MCP server for FDE agents (its own tunnel, at mcp.<domain>). Off until the lead decides how an agent signs in:
+# The MCP server for FDE agents (its own tunnel, at mcp_hostname above). Off until the lead decides how an agent signs in:
 # read "How the MCP server is reached" in infra/README.md first.
 # enable_mcp = true
