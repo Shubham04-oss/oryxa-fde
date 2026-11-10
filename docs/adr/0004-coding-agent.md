@@ -19,6 +19,11 @@ amended again the same day with what the spike found (`sandbox/harness/OPENCODE.
 - **An approval is enforced for real only where the outbound handler can hold the request.** Every
   action on a company's approval list must be one the handler can hold. The adapter's approval is
   the prompt in front of that hold, not the hold itself.
+- **The OpenCode adapter stays thin.** It speaks to `opencode acp` through the Agent Client
+  Protocol's own open-source client library, maps session updates onto our events (the two formats
+  already match), and answers permission requests from the approval queue. Policy lives in one
+  static config file, not in adapter code. Where a maintained open-source piece with a permissive
+  licence does a job, we use it instead of building our own, and we do not patch OpenCode.
 - Each run gets a context pack: the company's scope, success criteria, decisions, config and
   conventions, written into the sandbox before the agent starts.
 - Secrets and model credentials never enter the sandbox. The outbound handler adds them to allowed
@@ -42,9 +47,10 @@ amended again the same day with what the spike found (`sandbox/harness/OPENCODE.
   eval comparison against the current default. The lead enables a version, and changes the
   default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
   Agent SDK.
-- A run's budget uses the price of the model it runs. A harness may report usage only at the end
-  of a turn, and a turn can be a whole run, so the outbound handler meters the model's responses
-  and stops a run that passes its budget. Usage a harness reports is for display.
+- A run's budget uses the price of the model it runs. OpenCode reports usage once per turn, so the
+  adapter checks the budget between turns, and every run also has a turn limit and a time limit.
+  Metering at the outbound handler, where an agent cannot under-report, is the stronger design and
+  waits until it is needed.
 - Each run starts with a fresh home, config, data, cache and temp directory, and the harness's
   configuration lives in a directory root owns.
 - Changes the agent makes to files that run code or steer an agent on someone else's machine are
