@@ -16,6 +16,14 @@ user, so these rules are the contract. Read `docs/plan.md` and `docs/adr/` befor
 
 If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the issue instead of guessing.
 
+## Agent fleet
+
+Read `docs/agents.md` before delegating anything. In short: only Claude accounts and OpenCode work
+here. The Claude accounts build and own every PR. OpenCode (DeepSeek V4.1 Flash, GLM 5.3) does fast
+research and checkable sub-tasks for them, and GLM 5.3 gives a second-opinion security pass. It never
+opens PRs and never sees secrets or customer data. Bedrock and Vertex are used only with the lead's OK.
+Respect each machine's heavy-job budget, and clean up the worktrees, containers and processes you start.
+
 ## Workflow (non-negotiable)
 
 1. Work only from a GitHub issue labelled for your account. One issue = one branch = one PR.
