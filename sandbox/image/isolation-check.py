@@ -4,7 +4,8 @@
 #   oryxa-isolation-check pid1      as agent: pid 1 runs as another user, and attaching to it with ptrace and
 #                                   opening /proc/1/mem for writing are both refused.
 #   oryxa-isolation-check no-agent  as root, right after a clean start: no live process has the agent's uid among
-#                                   its real, effective, saved or file system user ids.
+#                                   its real, effective, saved or file system user ids, and pid 1 has reaped
+#                                   every one that was killed, so no zombie is left either.
 # On a deployed sandbox, `pid1` runs through the gateway, which runs every exec as agent:
 #   POST /v1/sandboxes/<tenant>/<company>/exec  {"argv": ["oryxa-isolation-check", "pid1"], "timeoutMs": 60000}
 # Each line is one check; the exit code is 0 only when every check passed. Uses only Python's standard library.
@@ -117,8 +118,8 @@ def no_agent():
             zombies.append(int(name))
         else:
             live.append({"pid": int(name), "name": fields.get("Name"), "uids": uids(fields)})
-    note("agent zombies waiting to be reaped", len(zombies))
     record("no live process has an agent user id, pid 1 included", json.dumps(live), live == [])
+    record("no agent zombie waits to be reaped", json.dumps(zombies), zombies == [])
 
 
 modes = {"pid1": pid1, "no-agent": no_agent}
