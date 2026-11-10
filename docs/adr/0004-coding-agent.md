@@ -19,12 +19,15 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   not a key (the same for every run, never shaped like a real one), sent where the outbound
   handler replaces it, or drops it before signing. Model hosts are ones the policy signs for or
   adds secrets to.
-- **A harness reads nothing from the repository it works on:** no settings, instructions, plugins,
-  skills or MCP servers. The run's configuration comes only from the adapter: passed in at start,
-  or written by root where the agent cannot write.
+- **A harness reads nothing from the repository it works on, or from anywhere else the agent can
+  write:** no settings, instructions, plugins, skills or MCP servers. That includes the agent's
+  home directory, which must not carry anything from one run into the next. The run's
+  configuration comes only from the adapter: passed in at start, or written by root where the
+  agent cannot write.
 - **A harness's own permission system is a convenience, not a boundary.** OpenCode says so of its
   own. The adapter decides every approval against the company's list, an approval covers one call
-  and is never remembered, and the outbound handler's held hosts back it.
+  and is never remembered, and the outbound handler's held hosts back it. For OpenCode the adapter
+  sets every permission to ask, so every call reaches it.
 - Actions on the company's approval list (deploys, new network hosts, anything sent to the
   customer) pause the run until an FDE approves.
 - **A harness version is pinned exactly and checked by hash.** It is enabled only after it passes
@@ -33,13 +36,31 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
   Agent SDK.
 - A run's budget uses the price of the model it runs.
-- Changes the agent makes to agent configuration files (`.opencode/`, `opencode.json*`, `AGENTS.md`,
-  `.claude/`) are held for review and never delivered silently: merged, they would run on the next
-  person's machine.
+- Changes the agent makes to files that run code or steer an agent on someone else's machine are
+  held for review and never delivered silently. That covers agent configuration (`.opencode/`,
+  `opencode.json*`, `AGENTS.md` and `CLAUDE.md` at any depth, `.claude/`, `.cursor/`, `.mcp.json`),
+  CI workflows (`.github/workflows/`), git hooks (`.husky/`, `.githooks/`,
+  `.pre-commit-config.yaml`, `lefthook.yml`) and editor or container setup (`.vscode/`,
+  `.devcontainer/`). The list is kept in one place in the code and grows as tools appear.
 - An FDE may also run their own agent on their own machine. It reads project context through the
   read-only MCP server, and we record no transcript. Its output returns as a pull request or an
   upload (ADR 0006).
 - Hosted sandboxes take sample data only; real data waits for the runner (ADR 0003).
+
+## The gate's tests
+- **Recorded session:** the adapter, fed a session recorded from the pinned version, produces
+  exactly the expected internal events, including an approval that is asked, answered once and
+  not remembered.
+- **Hostile repository:** a repository and a home directory seeded with harness configuration,
+  plugins, a local MCP server, skills and instruction files that try to redirect the agent change
+  nothing about the run: same tools, same permissions, same hosts.
+- **Egress:** with the outbound handler recording, a run contacts only the model host and the hosts
+  the company's policy allows. A catalogue fetch, update check, share, plugin install or telemetry
+  call fails the test. It runs in CI against a recorded or stubbed model, not by hand.
+- **Eval comparison:** the candidate and the current default each run the sample tasks three times
+  on the same model. The candidate passes if its mean pass rate is at least the default's lowest
+  of its three runs. The lead PR that changes the default records the pass rates of every run and
+  each harness's cost per passed task.
 
 ## Why OpenCode first
 Model choice: a run can use a cheap, fast model for routine work and a stronger one where it
