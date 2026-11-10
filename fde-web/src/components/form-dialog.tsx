@@ -119,6 +119,7 @@ export function TextField({
   hint,
   autoFocus,
   type = "text",
+  inputMode,
 }: {
   label: string
   value: string
@@ -126,6 +127,8 @@ export function TextField({
   hint?: string
   autoFocus?: boolean
   type?: "text" | "email"
+  /** The keyboard a phone shows, for a number typed as text so the API's own check reads it. */
+  inputMode?: "decimal"
 }) {
   return (
     <div className="grid gap-1">
@@ -133,6 +136,7 @@ export function TextField({
         <input
           autoFocus={autoFocus}
           type={type}
+          inputMode={inputMode}
           className={FIELD}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -152,17 +156,23 @@ export function TextArea({
   value,
   onChange,
   hint,
+  autoFocus,
+  tall,
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   hint?: string
+  autoFocus?: boolean
+  /** More room, for text that runs to several lines. */
+  tall?: boolean
 }) {
   return (
     <div className="grid gap-1">
       <Labelled label={label}>
         <textarea
-          className={`${FIELD} min-h-20`}
+          autoFocus={autoFocus}
+          className={`${FIELD} ${tall ? "min-h-36" : "min-h-20"}`}
           value={value}
           onChange={(e) => onChange(e.target.value)}
         />

@@ -7,20 +7,14 @@ import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotF
 import type { Tone } from "./page"
 import { Board } from "./board"
 import { ProjectDialog } from "./company-forms"
+import { ScopeCard, CriteriaCard } from "./scope-cards"
 import { AssigneesCard } from "./team"
 import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
 import { StageBar } from "./stage-bar"
 import { RunsCard } from "./runs"
 import { ApiError, api, queries } from "@/lib/api/client"
-import type {
-  AccessState,
-  CriterionOut,
-  Project,
-  ProjectOut,
-  ProjectScope,
-  Stage,
-} from "@/lib/api/schemas"
+import type { AccessState, ProjectOut, ProjectScope, Stage } from "@/lib/api/schemas"
 import { canManage } from "@/lib/records"
 import { dayOf, shortDate } from "@/lib/time"
 
@@ -32,34 +26,10 @@ const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   revoked: { label: "Revoked", tone: "attention" },
 }
 
-const COMPARATOR: Record<CriterionOut["comparator"], string> = {
-  at_least: "at least",
-  at_most: "at most",
-}
-
-/** "plans accepted unchanged, at least 70%". */
-function target({ metric, comparator, target: value, unit }: CriterionOut) {
-  const units = unit ? (unit === "%" ? "%" : ` ${unit}`) : ""
-  return `${metric}, ${COMPARATOR[comparator]} ${value}${units}`
-}
-
 /** The page column (1040px) the cards sit in; the board alone breaks out to the canvas. */
 function Column({ children }: { children: ReactNode }) {
   return (
     <div className="mx-auto grid w-[min(1040px,100%)] gap-4 max-[800px]:gap-3.5">{children}</div>
-  )
-}
-
-/** How scope sign-off stands: signed for this version, signed before a change, or never. */
-function signOffStatus(p: Project, person: (id: string) => string) {
-  const signed = p.scope.sign_off
-  if (!signed) return <Status tone="neutral">Not signed off</Status>
-  const by = person(signed.stakeholder)
-  if (!p.scope.signed_off) return <Status tone="neutral">Changed since {by} signed off</Status>
-  return (
-    <Status tone="success">
-      Signed off by {by}, {shortDate(dayOf(signed.signed_at))}
-    </Status>
   )
 }
 
@@ -124,8 +94,6 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const people = new Map(p.stakeholders.map((s) => [s.id as string, s.name]))
   const systems = new Map(p.systems.map((s) => [s.id as string, s.name]))
   const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
-  const inScope = p.scope.items.filter((item) => item.kind === "in")
-  const outOfScope = p.scope.items.filter((item) => item.kind === "out")
 
   return (
     <Page full>
@@ -168,48 +136,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
 
       <Column>
         <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-          <Card title="Scope" aside={signOffStatus(p, person)}>
-            {p.scope.items.length === 0 ? (
-              <Quiet>No scope written yet.</Quiet>
-            ) : (
-              <div className="grid gap-3 text-xs">
-                {(
-                  [
-                    ["In scope", inScope],
-                    ["Out of scope", outOfScope],
-                  ] as const
-                ).map(([heading, items]) => (
-                  <div key={heading}>
-                    <h3 className="text-[11px] text-muted-foreground">{heading}</h3>
-                    {items.length === 0 ? (
-                      <Quiet>None listed.</Quiet>
-                    ) : (
-                      <ul className="mt-1 grid list-disc gap-1 pl-4 marker:text-muted-foreground">
-                        {items.map((item) => (
-                          <li key={item.id}>{item.description}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          <Card title="Success criteria">
-            {p.scope.criteria.length === 0 ? (
-              <Quiet>No success criteria yet.</Quiet>
-            ) : (
-              <Rows>
-                {p.scope.criteria.map((criterion) => (
-                  <Row key={criterion.id}>
-                    <p className="min-w-0 text-xs">{criterion.description}</p>
-                    <Quiet>Target: {target(criterion)}</Quiet>
-                  </Row>
-                ))}
-              </Rows>
-            )}
-          </Card>
+          <ScopeCard scope={scope} project={p} me={me.data?.user.id} />
+          <CriteriaCard scope={scope} criteria={p.scope.criteria} signedOff={p.scope.signed_off} />
         </div>
 
         <Card title="Access">

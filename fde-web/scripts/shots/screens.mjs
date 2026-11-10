@@ -58,6 +58,22 @@ const newCompany = async (page) => {
   await dialog(page, "New company").waitFor()
 }
 
+// The scope and success criteria. Each state is the viewport with the two cards scrolled to the top,
+// so they are seen as a person sees them; `full` keeps whole pages for the one that shows the layout.
+const BW_REFERRALS = "/companies/cmp_brightwater/projects/prj_bw_referrals"
+const ATLAS_FNOL = "/companies/cmp_atlas/projects/prj_atlas_fnol"
+const KESTREL_CLAIMS = `${KESTREL}/projects/prj_kestrel_claims`
+const scopeCard = (page) => page.getByRole("region", { name: "Scope" })
+const criteriaCard = (page) => page.getByRole("region", { name: "Success criteria" })
+const scopeReady = (page) => scopeCard(page)
+const toScope = (page) =>
+  scopeCard(page).evaluate((el) => {
+    el.scrollIntoView({ block: "start" })
+    // A little air above the cards, as a person who scrolled to them would leave it.
+    document.querySelector(".app-canvas")?.scrollBy(0, -16)
+  })
+const SCOPE = { ready: scopeReady, full: false }
+
 const FINE = ["1440", "1024"]
 const ONE = { sizes: ["1440", "390"], themes: ["light"] }
 
@@ -413,6 +429,154 @@ export const screens = [
         .getByRole("button", { name: "Remove", exact: true })
         .click()
       await dialog(page, "Edit stakeholder").getByRole("alert").waitFor()
+    },
+  },
+
+  // Scope, success criteria and sign-off: the three sign-off states, the empty states, the forms, a refusal.
+  { name: "scope-signed", path: DISPATCH, ready: scopeReady },
+  { name: "scope-changed", path: BW_REFERRALS, ...SCOPE, act: toScope },
+  { name: "scope-unsigned", path: ATLAS_FNOL, ...SCOPE, act: toScope },
+  { name: "scope-empty", path: KESTREL_CLAIMS, ...SCOPE, act: toScope },
+  {
+    name: "scope-item-add",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add in scope").click()
+      await dialog(page, "Add to scope").waitFor()
+      await dialog(page, "Add to scope")
+        .getByLabel("Description")
+        .fill("Sort each incoming damage claim by likely cause\nand name the team it goes to")
+    },
+  },
+  {
+    name: "scope-item-edit-signed",
+    path: DISPATCH,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Changing the planning database").click()
+      await dialog(page, "Edit scope item").waitFor()
+    },
+  },
+  {
+    name: "scope-item-remove-ask",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Live re-routing during the day").click()
+      await button(page, "Remove item").click()
+      await page.getByRole("group", { name: "Confirm the removal" }).waitFor()
+    },
+  },
+  {
+    name: "scope-item-invalid",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add out of scope").click()
+      await dialog(page, "Add to scope").getByRole("button", { name: "Add", exact: true }).click()
+      await dialog(page, "Add to scope").getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "criterion-add",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add criterion").click()
+      const box = dialog(page, "Add success criterion")
+      await box.waitFor()
+      await box
+        .getByLabel("What must be true")
+        .fill("Claims reach the right team the first time, with no one re-routing them")
+      await box.getByLabel("What is measured").fill("claims routed correctly")
+      await box.getByLabel("Target").fill("85")
+      await box.getByLabel("Unit").fill("%")
+    },
+  },
+  {
+    name: "criterion-invalid",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add criterion").click()
+      const box = dialog(page, "Add success criterion")
+      await box.getByLabel("What must be true").fill("Fast enough")
+      await box.getByLabel("What is measured").fill("seconds per claim")
+      await box.getByLabel("Target").fill("ten")
+      await box.getByRole("button", { name: "Add criterion", exact: true }).click()
+      await box.getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "criterion-edit-signed",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Time to a draft plan").click()
+      await dialog(page, "Edit success criterion").waitFor()
+    },
+  },
+  {
+    name: "signoff-unsigned",
+    path: ATLAS_FNOL,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Record sign-off").click()
+      await dialog(page, "Record sign-off").waitFor()
+    },
+  },
+  {
+    name: "signoff-again",
+    path: BW_REFERRALS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Sign off again").click()
+      await dialog(page, "Sign off again").waitFor()
+    },
+  },
+  {
+    name: "signoff-recorded",
+    path: ATLAS_FNOL,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Record sign-off").click()
+      const box = dialog(page, "Record sign-off")
+      await box.getByLabel("Signed off by").selectOption({ label: "Daniel Osei, Champion" })
+      await box.getByRole("button", { name: "Record sign-off", exact: true }).click()
+      await page.getByText(/Daniel Osei agreed/).waitFor()
+      await toScope(page)
+    },
+  },
+  {
+    name: "scope-save-refused",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    failWrites: true,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Changing the planning database").click()
+      const box = dialog(page, "Edit scope item")
+      await box.getByLabel("Description").fill("Changing the planning database schema")
+      await box.getByRole("button", { name: "Save", exact: true }).click()
+      await box.getByRole("alert").waitFor()
     },
   },
 

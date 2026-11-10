@@ -14,7 +14,10 @@ import {
   Me,
   MemberOut,
   ProjectOut,
+  ScopeItemOut,
+  CriterionOut,
   ScopeOut,
+  SignOffOut,
   StakeholderOut,
   SystemOut,
   TaskOut,
@@ -29,15 +32,18 @@ import type {
   StakeholderBody,
   SystemBody,
 } from "../records"
+import type { CriterionBody, ScopeItemBody } from "../scope"
 import type { AccessBody } from "../today"
 import type {
   AccessRequestId,
   Company,
   CompanyId,
+  CriterionId,
   MemberRole,
   Project,
   ProjectId,
   ProjectScope,
+  ScopeItemId,
   Stage,
   StakeholderId,
   SystemId,
@@ -74,6 +80,13 @@ export const SAFE_TEXT: Record<string, string> = {
   invalid_summary: "The summary is plain text, up to 4000 characters.",
   invalid_description: "The description is plain text, up to 4000 characters.",
   invalid_email: "Use an address like name@example.com.",
+  invalid_metric: "What is measured is one line, up to 200 characters.",
+  invalid_unit: "The unit is one line, up to 200 characters, such as % or s.",
+  invalid_target: "The target must be a number.",
+  rejected_target: "The target must be a number.",
+  invalid_stakeholder: "That person is not a stakeholder at this company.",
+  rejected_empty_scope:
+    "Write at least one scope item or success criterion before it is signed off.",
   rejected_stage_transition: "A project moves one stage forward, or back to an earlier one.",
   // The API could not reach a service it needs (WorkOS, SpiceDB). Nothing is wrong on this end.
   unavailable: "The workspace is briefly unavailable. Try again in a minute.",
@@ -265,6 +278,9 @@ function connect(transport: Transport) {
       }
     },
 
+    /** The scope as it is now: the sign-off asks, to catch an edit made while its dialog was open. */
+    scope: (scope: ProjectScope) => get.scope(scope),
+
     today: () => read(TodayOut, client.GET("/v1/today")),
 
     /** Creates a company; the caller becomes its lead. */
@@ -428,6 +444,80 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
+    addScopeItem: (scope: ProjectScope, body: ScopeItemBody) =>
+      read(
+        ScopeItemOut,
+        client.POST("/v1/companies/{company}/projects/{project}/scope/items", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    /** Replaces an item: its side and its words. */
+    updateScopeItem: (scope: ProjectScope, item: ScopeItemId, body: ScopeItemBody) =>
+      read(
+        ScopeItemOut,
+        client.PUT("/v1/companies/{company}/projects/{project}/scope/items/{item}", {
+          params: { path: { ...scope, item } },
+          body,
+        }),
+      ),
+
+    async removeScopeItem(scope: ProjectScope, item: ScopeItemId) {
+      const { error, response } = await client.DELETE(
+        "/v1/companies/{company}/projects/{project}/scope/items/{item}",
+        { params: { path: { ...scope, item } } },
+      )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    addCriterion: (scope: ProjectScope, body: CriterionBody) =>
+      read(
+        CriterionOut,
+        client.POST("/v1/companies/{company}/projects/{project}/scope/criteria", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    /** Replaces a criterion: every field. */
+    updateCriterion: (scope: ProjectScope, criterion: CriterionId, body: CriterionBody) =>
+      read(
+        CriterionOut,
+        client.PUT("/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}", {
+          params: { path: { ...scope, criterion } },
+          body,
+        }),
+      ),
+
+    async removeCriterion(scope: ProjectScope, criterion: CriterionId) {
+      const { error, response } = await client.DELETE(
+        "/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}",
+        { params: { path: { ...scope, criterion } } },
+      )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    /** Records that `stakeholder` signed off the scope as it is now. */
+    async signOffScope(scope: ProjectScope, stakeholder: StakeholderId) {
+      const { data, error, response } = await client.POST(
+        "/v1/companies/{company}/projects/{project}/scope/sign-offs",
+        { ...project(scope), body: { stakeholder } },
+      )
+      // One sign-off per version: the unique key refuses a second.
+      if (
+        response.status === 409 &&
+        (error as { error?: string } | undefined)?.error === "conflict"
+      )
+        throw new ApiError(
+          409,
+          "conflict",
+          "This version of the scope has already been signed off. Reload to see by whom.",
+        )
+      if (!response.ok) throw refusal(response.status, error)
+      return SignOffOut.parse(data)
+    },
+
     runs: runsOf,
 
     /** A run with its events so far and its approval requests. */
@@ -525,6 +615,7 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     companies: async () => (await use()).companies(),
     company: async (id) => (await use()).company(id),
     project: async (scope) => (await use()).project(scope),
+    scope: async (scope) => (await use()).scope(scope),
     today: async () => (await use()).today(),
     createCompany: async (body) => (await use()).createCompany(body),
     updateCompany: async (id, patch) => (await use()).updateCompany(id, patch),
@@ -549,6 +640,14 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
     projectStakeholders: async (scope) => (await use()).projectStakeholders(scope),
     removeTask: async (scope, task) => (await use()).removeTask(scope, task),
+    addScopeItem: async (scope, body) => (await use()).addScopeItem(scope, body),
+    updateScopeItem: async (scope, item, body) => (await use()).updateScopeItem(scope, item, body),
+    removeScopeItem: async (scope, item) => (await use()).removeScopeItem(scope, item),
+    addCriterion: async (scope, body) => (await use()).addCriterion(scope, body),
+    updateCriterion: async (scope, criterion, body) =>
+      (await use()).updateCriterion(scope, criterion, body),
+    removeCriterion: async (scope, criterion) => (await use()).removeCriterion(scope, criterion),
+    signOffScope: async (scope, stakeholder) => (await use()).signOffScope(scope, stakeholder),
     runs: async (scope) => (await use()).runs(scope),
     run: async (scope, id) => (await use()).run(scope, id),
     startRun: async (scope, body) => (await use()).startRun(scope, body),

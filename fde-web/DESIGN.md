@@ -22,24 +22,24 @@ Every colour is written once, as a token in `src/styles.css`. Screens read token
 utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--token)` in
 `src/shell.css`. Do not write a hex, `rgb()` or `hsl()` anywhere else.
 
-| Token             | Light     | Dark      | Use                                              |
-| ----------------- | --------- | --------- | ------------------------------------------------ |
-| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band      |
-| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays            |
-| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                              |
-| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation       |
-| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                   |
-| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards  |
-| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                  |
-| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone       |
-| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                              |
-| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                 |
-| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis            |
-| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                               |
-| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                       |
-| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.      |
-| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied. Nothing else. |
-| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.    |
+| Token             | Light     | Dark      | Use                                                                                   |
+| ----------------- | --------- | --------- | ------------------------------------------------------------------------------------- |
+| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                           |
+| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                 |
+| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                   |
+| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                            |
+| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                        |
+| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                       |
+| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                       |
+| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                            |
+| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                   |
+| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                      |
+| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                 |
+| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                    |
+| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                            |
+| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                           |
+| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, a signed-off scope that has changed. Nothing else. |
+| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                         |
 
 - Every grey is neutral (R=G=B). No decorative accent.
 - A status is a dot and words, never colour alone.
@@ -64,7 +64,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   or the project's name.
 - **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
   prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder
-  and system forms) is centred on the screen: 560px
+  system and scope forms) is centred on the screen: 560px
   wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
   Both sit on a scrim and close with Escape.
 - **Jump to** is a Base UI dialog: type to filter companies and projects (every word must match the
@@ -136,8 +136,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - **Project.** The company link, with **Edit project** at its right, the summary, the stage bar, the **Board** (the one card that
   takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
   with the others), Scope beside Success
-  criteria (each with its target), then Access, Agent runs and Decisions, then **Assigned**. Scope
-  says whether it is signed off, changed since sign-off, or not signed off. Access and waiting tasks
+  criteria, then Access, Agent runs and Decisions, then **Assigned**. Both are written in place
+  (see **Scope and success criteria** below). Access and waiting tasks
   name people and systems from the company's records. A project with nothing written in it yet
   starts with a dashed note, **A new project. Start here.**, that says to name the people at the
   customer, agree the scope, and add tasks as the work takes shape.
@@ -172,6 +172,45 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     change of role (the API would allow it): their row says "A company always has a lead. Make
     someone else lead first." A lead who makes themselves an engineer is asked first, in the row. There is no way to add someone to a company yet: the
     API only takes the id of a user, and has no list of the organisation's people to choose from.
+- **Scope and success criteria.** Where an FDE and the customer agree what "done" means, and what the
+  customer will later read. Everything here needs only `work` on the project, which anyone who can
+  open the page has: the API guards every scope route, read and write, with it alone, so an engineer
+  sees every control. A refusal is still shown, in the dialog.
+  - **Scope** lists _In scope_ and _Out of scope_ as two lists, each with its own **Add**; a row
+    opens its form. Each item is saved on its own (the API takes one at a time), so each opens in a
+    dialog: a long item gets a tall field to write in, and the card shows it in full, lines kept.
+    The form has the side (**Listed as**, so an item can move across) and the words. An item is
+    changed with a whole-record `PUT` and removed after asking, in the dialog.
+  - **Success criteria** reads as an agreement: the sentence the customer would agree to, then
+    "Met when plans accepted unchanged is at least 70%." The form is that sentence in parts (what
+    must be true, what is measured, at least or at most, the target, the unit) and shows how it will
+    read once there is enough to read. A target is typed as text and read as a number; zero is a
+    target. There is no baseline field in the API yet, so the page has none.
+  - **Empty states** say what a good scope has, in a line each: the outcome, what is out, and how
+    done is measured. A scope with nothing in it offers no sign-off.
+  - **Sign-off has three states**, said in the card's heading and again in a panel below the lists:
+    **Not signed off** (grey dot; the panel offers **Record sign-off**), **Signed off by Mara
+    Lindqvist, 3 Nov 2026** (green dot; the panel says who recorded it and that a change will need a
+    new sign-off) and **Changed since sign-off** (amber dot; the panel says who signed the earlier
+    version, how many changes have been saved since, and offers **Sign off again**). The count is
+    the scope's version minus the version signed.
+  - **What the API does with an edit.** Every add, change or removal of an item or criterion
+    bumps the scope's version, and the last sign-off stays on record but no longer covers it
+    (`signed_off` turns false). Nothing is cleared and nothing is refused. So the form of a signed-off
+    scope says so before it saves, "This scope is signed off. Saving a change means it needs signing
+    off again.", and the removal question adds it. A save that changes nothing is not sent, because
+    the API would still count it as a change. A removal is never refused, even for a criterion that
+    has results.
+  - **Recording a sign-off** asks who at the customer signed (any stakeholder of the company; sponsors
+    are listed first, and a sponsor, or the person who signed before, is chosen when there is one to
+    choose). It says what is being signed, in numbers, and what is missing without refusing it:
+    nothing listed as out of scope, no success criteria. The API signs whatever the scope is when the
+    request arrives, so the dialog reads the scope again first and, if it moved while the dialog was
+    open, refuses and keeps nothing signed. One version is signed once: a second sign-off of it is a
+    409 and the dialog says so. The API refuses an empty scope (409), and a person who is not a
+    stakeholder at the company (400).
+  - **Focus.** When a dialog closes, focus goes back to the row that opened it, or to the section's
+    **Add** when that row is gone, or, after a sign-off, to the sentence that now says it is signed.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -257,7 +296,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
 - Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
-  `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems, and
+  `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
+  `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
   `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`. The API's refusals carry a
   code only; `SAFE_TEXT` in `client.ts` turns the ones a person can act on into a sentence.
 - Home, Jump to and Today read whole views from the API (`GET /v1/companies`, `/v1/today`). The
@@ -273,7 +313,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   invented sample data only. Setting `globalThis.__fdeMockFailWrites = true` there (in the console,
   or a test) makes every write answer 503, so the failed-save states can be seen; the switch lives
   in the mock and ships nowhere. The mock answers every write route of this page with the API's
-  validation and permissions (a lead or admin manages, any member works, anything else is a 403):
+  validation and permissions (the scope's too: the version bump on every save, one sign-off per
+  version, no sign-off of an empty scope) (a lead or admin manages, any member works, anything else is a 403):
   `resetMockApi({ engineer: true })` signs in as an engineer, `{ empty: true }` leaves no company,
   and `globalThis.__fdeMockNoCompanies = true` before the app loads does the same in the browser. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
