@@ -1,7 +1,8 @@
 # FDE workspace: build plan
 
-The source for every issue in this repo. Decisions live in `docs/adr/`; this file says what to
-build and in what order. Last updated 3 November 2026.
+The source for every issue in this repo. `docs/direction.md` says what the product is for and how
+it should work; decisions live in `docs/adr/`; this file says what to build and in what order.
+Last updated 10 November 2026.
 
 ## 1. The product
 
@@ -105,12 +106,24 @@ Every item is one issue, one branch, one PR. The lead reviews and merges.
 | Agent | `agent:agent` | Agent runs end to end (orchestration, approvals, budgets); evals; Bedrock IAM signing in the outbound handler |
 | Infra | `agent:infra` | Build and deploy pipelines for the API, Workers and web app |
 
+**Wave 3 (from 10 November): make it run, then the FDE's day.** Waves 1 and 2 built most of the
+P0 backend; nothing is deployed and the web app shows a small part of it. `docs/direction.md`
+section 7 sets three milestones, and each stream now works toward them in order. New API surface
+waits until a screen uses it. The canvas, versioned config and billing move behind M2.
+
+| Stream | M1. It runs | M2. The FDE's day | M3. The customer side, and paying |
+| --- | --- | --- | --- |
+| API | The session reaches agent and eval routes | Next step and stage checklists; scope as an agreement with baselines; task order and links; the signal model, Slack inbound, generic webhook and results upload; Today over signals | Customer roles (ADR 0005), invites, billing, Jira and GitLab |
+| Web | Fixes found by the first deploy | Today as an inbox; the engagement page by stage; the board; notes to tasks; proof; the weekly update; create from Jump to | IT admin and sponsor screens; the admin console |
+| Agent | Production secret resolver; outbound policy written through the API; the GitHub token limited to checkout and delivery | The agent the founder chose (ADR 0004, amendment pending); runs on the FDE's own machine recorded through MCP | Approvals that route to the customer's IT admin |
+| Infra | The API's environment contract; deploys for the workers; reachable gateway and realtime | Inbound webhook and email routes | Per-company keys; a production environment |
+
 ## 7. Open decisions
 
 | Decision | Default until the lead decides | ADR |
 | --- | --- | --- |
 | Shared or own SpiceDB and bus | Own, named `oryxa-fde-<env>` | 0002, 0003 |
-| Customer guests | Users in the vendor's tenant with a per-project guest relation | 0002 |
+| Customer people | Decided: sponsor and IT admin roles, users in the vendor's tenant for now | 0005 |
 | First AWS region | Decided with design partners; dev in the region the platform uses | 0003 |
 | Canvas library | Excalidraw, since tldraw needs a paid production licence | wave 2 |
 | Product name and domain | `fde-web` placeholder | none |

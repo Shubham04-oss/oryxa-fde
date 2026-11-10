@@ -2,7 +2,7 @@
 
 The FDE workspace, built on the Oryxa platform base (authn, authz, events) vendored unchanged in
 `vendor/oryxa-platform`. Several Claude accounts work here in parallel and push as the same GitHub
-user, so these rules are the contract. Read `docs/plan.md` and `docs/adr/` before your first change.
+user, so these rules are the contract. Read `docs/direction.md`, `docs/plan.md` and `docs/adr/` before your first change.
 
 ## Roles
 
