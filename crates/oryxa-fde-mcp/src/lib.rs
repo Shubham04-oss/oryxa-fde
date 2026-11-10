@@ -205,7 +205,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "The project's tasks with their status and blockers, oldest first. Paged: pass the \
+        description = "The project's tasks with their status and blockers, in the board's order. Paged: pass the \
         answer's `next` as `after` for the following page; `next` is null on the last."
     )]
     async fn list_tasks(

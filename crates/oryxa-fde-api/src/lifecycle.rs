@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use oryxa_core::UserId;
@@ -16,12 +16,13 @@ use oryxa_fde_core::{
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
     AccessRequest, AccessRequestIn, ChecklistItem, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx,
-    Reason, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn, TaskStatus,
+    Reason, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn, TaskPlace,
+    TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::authz::project;
 use crate::error::{SaveConflict, StaleBody, saved};
@@ -412,6 +413,28 @@ pub struct TaskBody {
     /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
     /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
     pub version: Option<u32>,
+    /// The project's success criterion it works towards. Removing the criterion unlinks it.
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub criterion: Option<CriterionId>,
+    /// Put it just before this task, which must have the status this task will have. At most one
+    /// of `before` and `after`; with neither, a new task or one whose status changes goes to the end
+    /// of its column, and any other task keeps its place.
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub before: Option<TaskId>,
+    /// Put it just after this task, which must have the status this task will have.
+    #[schema(value_type = Option<String>)]
+    #[serde(default)]
+    pub after: Option<TaskId>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TaskFilter {
+    /// Only the tasks linked to this success criterion.
+    #[param(value_type = Option<String>)]
+    pub criterion: Option<CriterionId>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -428,6 +451,8 @@ pub struct TaskOut {
     pub waiting_since: Option<String>,
     /// The access request it is blocked on.
     pub blocked_by: Option<String>,
+    /// The success criterion it works towards.
+    pub criterion: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Bumped by every change to the record; send it back as `version` on a `PUT`.
@@ -451,6 +476,7 @@ impl From<Task> for TaskOut {
             waiting_on: t.waiting_on.map(|w| w.to_string()),
             waiting_since: t.waiting_since.map(ts),
             blocked_by: t.blocked_by.map(|a| a.to_string()),
+            criterion: t.criterion.map(|c| c.to_string()),
             created_at: ts(t.created_at),
             updated_at: ts(t.updated_at),
             version: t.version,
@@ -533,6 +559,12 @@ impl AccessRequestBody {
 
 impl TaskBody {
     fn parse(self) -> Result<TaskIn, ApiError> {
+        let place = match (self.before, self.after) {
+            (Some(_), Some(_)) => return Err(ApiError::Invalid("place")),
+            (Some(b), None) => Some(TaskPlace::Before(b)),
+            (None, Some(a)) => Some(TaskPlace::After(a)),
+            (None, None) => None,
+        };
         Ok(TaskIn {
             title: name(self.title, "title")?,
             status: self.status.into(),
@@ -544,6 +576,8 @@ impl TaskBody {
             assignee: self.assignee,
             waiting_on: self.waiting_on,
             blocked_by: self.blocked_by,
+            criterion: self.criterion,
+            place,
         })
     }
 }
@@ -869,16 +903,20 @@ pub(crate) async fn update_access_request(
     ))
 }
 
+/// The project's tasks in its order: the board's columns read top to bottom.
 #[utoipa::path(get, operation_id = "list_tasks", path = "/v1/companies/{company}/projects/{project}/tasks", tag = "lifecycle",
-    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
-    responses((status = 200, body = [TaskOut]), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
+        TaskFilter),
+    responses((status = 200, body = [TaskOut]), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody)))]
 pub(crate) async fn tasks(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
+    Query(filter): Query<TaskFilter>,
 ) -> Result<Json<Vec<TaskOut>>, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let list = tx.tasks().await?;
+    let list = tx.tasks(filter.criterion.as_ref()).await?;
     tx.commit().await?;
     Ok(Json(list.into_iter().map(Into::into).collect()))
 }
@@ -982,4 +1020,35 @@ pub(crate) async fn record_decision(
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(recorded.into())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_goes_before_or_after_one_task_at_most() {
+        let parse = |place: serde_json::Value| {
+            let mut body = serde_json::json!({"title": "Export", "status": "todo"});
+            body.as_object_mut().unwrap().extend(place.as_object().unwrap().clone());
+            serde_json::from_value::<TaskBody>(body)
+                .unwrap()
+                .parse()
+                .map(|v| v.place)
+        };
+        let id = || TaskId::new("tsk_1").unwrap();
+        assert_eq!(parse(serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            parse(serde_json::json!({"before": "tsk_1"})).unwrap(),
+            Some(TaskPlace::Before(id()))
+        );
+        assert_eq!(
+            parse(serde_json::json!({"after": "tsk_1"})).unwrap(),
+            Some(TaskPlace::After(id()))
+        );
+        assert!(matches!(
+            parse(serde_json::json!({"before": "tsk_1", "after": "tsk_2"})),
+            Err(ApiError::Invalid("place"))
+        ));
+    }
 }

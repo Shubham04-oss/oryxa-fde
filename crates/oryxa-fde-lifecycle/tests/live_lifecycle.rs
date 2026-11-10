@@ -133,6 +133,8 @@ fn task_in(title: &str, status: TaskStatus, blocked_by: Option<&AccessRequestId>
         assignee: None,
         waiting_on: None,
         blocked_by: blocked_by.cloned(),
+        criterion: None,
+        place: None,
     }
 }
 
@@ -146,7 +148,7 @@ async fn add_task(store: &Store, p: &ProjectScope, v: &TaskIn) -> TaskId {
 
 async fn task_state(store: &Store, p: &ProjectScope, id: &TaskId) -> (TaskStatus, bool, Option<AccessRequestId>) {
     let mut tx = store.project(p).await.unwrap();
-    let t = tx.tasks().await.unwrap().into_iter().find(|t| &t.id == id).unwrap();
+    let t = tx.tasks(None).await.unwrap().into_iter().find(|t| &t.id == id).unwrap();
     (t.status, t.blocker.is_some(), t.blocked_by)
 }
 

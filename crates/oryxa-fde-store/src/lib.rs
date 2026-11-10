@@ -79,7 +79,7 @@ pub use threads::{Comment, PromoteIn, Subject, Thread};
 
 pub use share::{Redeemed, ShareLink};
 pub use views::{CompanySummary, Named, TodayItem};
-pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskStatus};
+pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskPlace, TaskStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

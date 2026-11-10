@@ -108,7 +108,7 @@ pub(crate) async fn export(
         let mut ptx = tx.into_project(p.id.clone());
         let scope = ptx.scope_of_work().await?.ok_or(ApiError::NotFound)?;
         let access_requests = ptx.access_requests().await?;
-        let tasks = ptx.tasks().await?;
+        let tasks = ptx.tasks(None).await?;
         let decisions = ptx.decisions().await?;
         let updates = ptx.update_drafts().await?;
         let github_repositories = ptx.github_repositories().await?;

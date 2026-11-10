@@ -5173,3 +5173,125 @@ async fn a_save_based_on_an_old_version_is_refused_with_the_record_as_it_stands(
         (Some(version), Some(true))
     );
 }
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn the_board_orders_tasks_and_links_them_to_criteria() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let them = company(&w, &org, "globex").await;
+    let p = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let tasks = format!("{p}/tasks");
+    let ids = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = ids(&w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await);
+    let criterion = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{p}/scope/criteria"),
+            Some(json!({"description": "Fast", "metric": "p95", "comparator": "at_most", "target": 2})),
+            StatusCode::CREATED,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let body = |title: &str, extra: Value| {
+        let mut b = json!({"title": title, "status": "todo"});
+        b.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        Some(b)
+    };
+    let a = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks,
+            body("a", json!({"criterion": criterion})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(a["criterion"].as_str(), Some(criterion.as_str()));
+    let a = a["id"].as_str().unwrap().to_owned();
+    let b = w
+        .ok(&t.lead, "POST", &tasks, body("b", json!({})), StatusCode::CREATED)
+        .await;
+    let b = b["id"].as_str().unwrap().to_owned();
+    let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
+    assert_eq!(ids(&all), [before.clone(), vec![a.clone(), b.clone()]].concat());
+
+    // A move sets the place, and the list follows it.
+    let b_path = format!("{tasks}/{b}");
+    w.ok(
+        &t.engineer,
+        "PUT",
+        &b_path,
+        body("b", json!({"before": a})),
+        StatusCode::OK,
+    )
+    .await;
+    let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
+    assert_eq!(ids(&all), [before, vec![b.clone(), a.clone()]].concat());
+
+    // Refused: two places, an anchor or a criterion of another company, a criterion that is not an id.
+    let theirs = them.record("{task}");
+    let their_criterion = them.record("{criterion}");
+    for (path, method, extra, code) in [
+        (&b_path, "PUT", json!({"before": a, "after": a}), "invalid_place"),
+        (&b_path, "PUT", json!({"after": theirs}), "invalid_after"),
+        (
+            &tasks,
+            "POST",
+            json!({"criterion": their_criterion}),
+            "invalid_criterion",
+        ),
+        (
+            &b_path,
+            "PUT",
+            json!({"criterion": their_criterion}),
+            "invalid_criterion",
+        ),
+    ] {
+        let (status, resp) = w
+            .call(Some(&t.lead.token), method, path, body("b", extra.clone()))
+            .await;
+        assert_eq!(
+            (status, resp["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some(code)),
+            "{extra}"
+        );
+    }
+
+    // The list filtered by criterion; removing the criterion unlinks its tasks.
+    let filtered = w
+        .ok(
+            &t.lead,
+            "GET",
+            &format!("{tasks}?criterion={criterion}"),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(ids(&filtered), std::slice::from_ref(&a));
+    let (status, _) = w
+        .call(Some(&t.lead.token), "GET", &format!("{tasks}?criterion=no%20id"), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("{p}/scope/criteria/{criterion}"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
+    let linked = all.as_array().unwrap().iter().find(|x| x["id"] == a.as_str()).unwrap();
+    assert!(linked["criterion"].is_null());
+}
