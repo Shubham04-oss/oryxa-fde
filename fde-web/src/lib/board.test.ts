@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest"
 import { TaskId } from "./api/schemas"
 import type { TaskOut } from "./api/schemas"
-import { asksFirst, fieldsOf, inColumn, problem, toBody } from "./board"
+import {
+  asksFirst,
+  fieldsOf,
+  inColumn,
+  isOverdue,
+  problem,
+  recentDone,
+  summarise,
+  toBody,
+} from "./board"
 import type { Fields } from "./board"
 
 const task = (over: Partial<TaskOut> = {}): TaskOut => ({
@@ -89,5 +98,33 @@ describe("columns", () => {
     const earlier = task({ id: TaskId.parse("tsk_3"), created_at: "2026-11-02T09:00:00Z" })
     const other = task({ id: TaskId.parse("tsk_4"), status: "done" })
     expect(inColumn([later, other, earlier], "todo").map((t) => t.id)).toEqual(["tsk_3", "tsk_2"])
+  })
+})
+
+describe("recentDone", () => {
+  it("lists the most recently finished first and only done tasks", () => {
+    const done = (id: string, updated_at: string) =>
+      task({ id: TaskId.parse(id), status: "done", updated_at })
+    const tasks = [
+      done("tsk_a", "2026-11-01T09:00:00Z"),
+      task({ id: TaskId.parse("tsk_open") }),
+      done("tsk_c", "2026-11-05T09:00:00Z"),
+      done("tsk_b", "2026-11-03T09:00:00Z"),
+    ]
+    expect(recentDone(tasks).map((t) => t.id)).toEqual(["tsk_c", "tsk_b", "tsk_a"])
+  })
+})
+
+describe("summarise", () => {
+  it("counts blocked, waiting and overdue open tasks, and never a done one as overdue", () => {
+    const tasks = [
+      task({ status: "blocked", due_on: "2026-11-01" }),
+      task({ status: "waiting_on_customer" }),
+      task({ status: "todo", due_on: "2026-11-09" }),
+      task({ status: "todo", due_on: "2026-11-10" }),
+      task({ status: "done", due_on: "2026-10-01" }),
+    ]
+    expect(summarise(tasks, "2026-11-10")).toEqual({ blocked: 1, waiting: 1, overdue: 2 })
+    expect(isOverdue(tasks[4]!, "2026-11-10")).toBe(false)
   })
 })

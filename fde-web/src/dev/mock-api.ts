@@ -406,6 +406,17 @@ function seed() {
             due: -12,
             assignee: JONAH,
           }),
+          task("tsk_k7", "Sign the data processing terms with the customer", "done", 20, {
+            assignee: RIYA,
+          }),
+          task("tsk_k8", "Pick the two pilot depots", "done", 16, { assignee: JONAH }),
+          task("tsk_k9", "Write the first depot rules summary", "done", 9, { assignee: RIYA }),
+          task("tsk_k10", "Run the first planner replay on sample orders", "done", 6, {
+            assignee: JONAH,
+          }),
+          task("tsk_k11", "Share the pilot plan with the dispatchers", "done", 3, {
+            assignee: RIYA,
+          }),
         ],
         decisions: [
           decision(
@@ -957,6 +968,10 @@ async function answer(request: Request): Promise<Response> {
   }
   if (!pathname.startsWith("/api/v1/")) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
+  // Dev and test only, like everything here: `globalThis.__fdeMockFailWrites = true` makes every write
+  // answer 503, so the failed-save states can be seen and tested. A production build has no mock.
+  if (method !== "GET" && (globalThis as Record<string, unknown>).__fdeMockFailWrites === true)
+    return refuse(503, "unavailable")
   const [root, ...parts] = pathname.slice("/api/v1/".length).split("/")
   if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())

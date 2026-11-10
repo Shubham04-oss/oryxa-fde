@@ -1,7 +1,7 @@
-import { useId, useState } from "react"
+import { useId, useRef, useState } from "react"
 import type { DragEvent, FormEvent, KeyboardEvent, ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ellipsis } from "lucide-react"
+import { ChevronDown, ChevronRight, Ellipsis } from "lucide-react"
 import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
@@ -16,7 +16,19 @@ import {
 } from "./ui/menu"
 import { ApiError, api, queries } from "@/lib/api/client"
 import type { Project, ProjectScope, StakeholderOut, TaskOut, TaskState } from "@/lib/api/schemas"
-import { COLUMNS, STATUS_LABEL, asksFirst, fieldsOf, inColumn, problem, toBody } from "@/lib/board"
+import {
+  COLUMNS,
+  DONE_SHOWN,
+  STATUS_LABEL,
+  asksFirst,
+  fieldsOf,
+  inColumn,
+  isOverdue,
+  problem,
+  recentDone,
+  summarise,
+  toBody,
+} from "@/lib/board"
 import type { Fields } from "@/lib/board"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -62,6 +74,10 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const [over, setOver] = useState<TaskState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState("")
+  // Done is the longest and least urgent column, so it starts collapsed (DESIGN.md §3).
+  const [doneOpen, setDoneOpen] = useState(false)
+  const [doneAll, setDoneAll] = useState(false)
+  const columns = useRef(new Map<TaskState, HTMLElement>())
 
   const key = queries.project(scope).queryKey
   const change = (edit: (tasks: Array<TaskOut>) => Array<TaskOut>) =>
@@ -148,10 +164,37 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
     if (task) requestMove(task, to)
   }
 
+  /** Scrolls a column into view, and moves focus to it or to a card in it. */
+  function reveal(status: TaskState, focus: (column: HTMLElement) => HTMLElement | null) {
+    const column = columns.current.get(status)
+    if (!column) return
+    const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    column.scrollIntoView({
+      behavior: calm ? "auto" : "smooth",
+      block: "nearest",
+      inline: "start",
+    })
+    // The scroll above brings it into view; focus must not jump the canvas a second time.
+    focus(column)?.focus({ preventScroll: true })
+  }
+
+  function showStuck(part: "blocked" | "waiting" | "overdue") {
+    if (part === "blocked") return reveal("blocked", (column) => column)
+    if (part === "waiting") return reveal("waiting_on_customer", (column) => column)
+    // Overdue spans columns: go to the first card that is late, in column order.
+    const first = COLUMNS.find(({ status }) =>
+      columns.current.get(status)?.querySelector("[data-overdue]"),
+    )
+    if (first) reveal(first.status, (column) => column.querySelector<HTMLElement>("[data-overdue]"))
+  }
+
   const tasks = project.tasks
+  const summary = summarise(tasks, today)
+  const finished = recentDone(tasks)
   return (
     <Card
       title="Board"
+      className="mx-auto w-full max-w-[1600px]"
       aside={
         <Button variant="outline" onClick={() => setDialog({ kind: "new", status: "todo" })}>
           New task
@@ -179,55 +222,107 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
       {tasks.length === 0 ? (
         <Quiet>No tasks yet. Add the first one.</Quiet>
       ) : (
-        <div className="-mx-1 overflow-x-auto px-1 pb-1 max-[800px]:mx-0 max-[800px]:overflow-visible max-[800px]:px-0">
-          <div className="grid auto-cols-[minmax(176px,1fr)] grid-flow-col gap-3 max-[800px]:auto-cols-auto max-[800px]:grid-flow-row">
-            {COLUMNS.map(({ status, label }) => {
-              const column = inColumn(tasks, status)
-              return (
-                <Column
-                  key={status}
-                  status={status}
-                  label={label}
-                  count={column.length}
-                  active={over === status}
-                  onDragOver={(event) => {
-                    const task = tasks.find((t) => t.id === dragging)
-                    if (!task || task.status === status) return
-                    event.preventDefault()
-                    setOver(status)
-                  }}
-                  onDragLeave={(event) => {
-                    if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-                      setOver((now) => (now === status ? null : now))
-                  }}
-                  onDrop={(event) => onDrop(event, status)}
-                >
-                  {column.map((task) => (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      to={saving[task.id]}
-                      me={me.data?.user.id}
-                      today={today}
-                      person={(id) => people.get(id) ?? "a stakeholder no longer listed"}
-                      onOpen={() => setDialog({ kind: "edit", task })}
-                      onMove={(to) => requestMove(task, to)}
-                      onDragStart={(event) => {
-                        event.dataTransfer.setData("text/plain", task.id)
-                        event.dataTransfer.effectAllowed = "move"
-                        setDragging(task.id)
-                      }}
-                      onDragEnd={() => {
-                        setDragging(null)
-                        setOver(null)
-                      }}
-                    />
-                  ))}
-                </Column>
-              )
-            })}
+        <>
+          <Summary counts={summary} onShow={showStuck} />
+          <div className="board-scroll @container snap-x snap-mandatory overflow-x-auto pb-2 max-[800px]:overflow-visible max-[800px]:pb-0">
+            <div
+              data-done={doneOpen ? "open" : "collapsed"}
+              // The columns are 220px at least. When they do not all fit, each is sized so that a
+              // part of the next one always shows: n whole columns and about a third of the next.
+              className={cn(
+                "grid grid-flow-col grid-cols-[repeat(4,minmax(var(--col),1fr))_var(--last)] gap-3",
+                "[--col:max(220px,calc((100cqw-12px)/1.35))]",
+                "@min-[541px]:[--col:max(220px,calc((100cqw-24px)/2.35))]",
+                "@min-[773px]:[--col:max(220px,calc((100cqw-36px)/3.35))]",
+                "data-[done=open]:@min-[1005px]:[--col:max(220px,calc((100cqw-48px)/4.35))]",
+                "data-[done=collapsed]:@min-[984px]:[--col:220px]",
+                "data-[done=open]:@min-[1148px]:[--col:220px]",
+                "data-[done=collapsed]:[--last:3.5rem] data-[done=open]:[--last:minmax(var(--col),1fr)]",
+                "max-[800px]:grid-flow-row max-[800px]:grid-cols-1",
+              )}
+            >
+              {COLUMNS.map(({ status, label }) => {
+                const isDone = status === "done"
+                const column = isDone
+                  ? doneAll
+                    ? finished
+                    : finished.slice(0, DONE_SHOWN)
+                  : inColumn(tasks, status)
+                const count = isDone ? finished.length : column.length
+                return (
+                  <Column
+                    key={status}
+                    status={status}
+                    label={label}
+                    count={count}
+                    collapsed={isDone && !doneOpen}
+                    onToggle={
+                      isDone
+                        ? () => {
+                            setDoneOpen(!doneOpen)
+                            // Opened, it is bigger than a strip: bring it into view once it has laid out.
+                            if (!doneOpen) requestAnimationFrame(() => reveal("done", () => null))
+                          }
+                        : undefined
+                    }
+                    sectionRef={(element) => {
+                      if (element) columns.current.set(status, element)
+                      else columns.current.delete(status)
+                    }}
+                    active={over === status}
+                    onDragOver={(event) => {
+                      const task = tasks.find((t) => t.id === dragging)
+                      if (!task || task.status === status) return
+                      event.preventDefault()
+                      setOver(status)
+                    }}
+                    onDragLeave={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+                        setOver((now) => (now === status ? null : now))
+                    }}
+                    onDrop={(event) => onDrop(event, status)}
+                    more={
+                      isDone && doneOpen && finished.length > DONE_SHOWN ? (
+                        <button
+                          type="button"
+                          aria-expanded={doneAll}
+                          className="px-0.5 pt-2 text-left text-[11px] text-muted-foreground underline"
+                          onClick={() => setDoneAll(!doneAll)}
+                        >
+                          {doneAll
+                            ? `Show the latest ${DONE_SHOWN}`
+                            : `Show all ${finished.length}`}
+                        </button>
+                      ) : null
+                    }
+                  >
+                    {column.map((task) => (
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        to={saving[task.id]}
+                        me={me.data?.user.id}
+                        today={today}
+                        person={(id) => people.get(id) ?? "a stakeholder no longer listed"}
+                        onOpen={() => setDialog({ kind: "edit", task })}
+                        onMove={(to) => requestMove(task, to)}
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData("text/plain", task.id)
+                          event.dataTransfer.effectAllowed = "move"
+                          setDragging(task.id)
+                        }}
+                        onDragEnd={() => {
+                          setDragging(null)
+                          setOver(null)
+                        }}
+                      />
+                    ))}
+                  </Column>
+                )
+              })}
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}>
@@ -258,11 +353,57 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   )
 }
 
+/** What needs the FDE, always visible above the columns; each part goes to where that work is. */
+function Summary({
+  counts,
+  onShow,
+}: {
+  counts: ReturnType<typeof summarise>
+  onShow: (part: "blocked" | "waiting" | "overdue") => void
+}) {
+  const parts = [
+    { part: "blocked", n: counts.blocked, text: `${counts.blocked} blocked`, dot: "bg-attention" },
+    {
+      part: "waiting",
+      n: counts.waiting,
+      text: `${counts.waiting} waiting on the customer`,
+      dot: "bg-strong",
+    },
+    { part: "overdue", n: counts.overdue, text: `${counts.overdue} overdue`, dot: "bg-attention" },
+  ] as const
+  const shown = parts.filter((p) => p.n > 0)
+  if (shown.length === 0)
+    return <Quiet className="mb-3">Nothing is blocked, waiting or overdue.</Quiet>
+  return (
+    <div
+      role="group"
+      aria-label="What needs attention"
+      className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-soft"
+    >
+      {shown.map((p) => (
+        <button
+          key={p.part}
+          type="button"
+          onClick={() => onShow(p.part)}
+          className="inline-flex items-center gap-1.5 rounded-md outline-none hover:text-foreground hover:underline focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", p.dot)} />
+          {p.text}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function Column({
   status,
   label,
   count,
   active,
+  collapsed,
+  onToggle,
+  sectionRef,
+  more,
   children,
   ...drop
 }: {
@@ -270,32 +411,89 @@ function Column({
   label: string
   count: number
   active: boolean
+  /** Only Done collapses: a narrow strip with its count that still takes a drop. */
+  collapsed: boolean
+  onToggle: (() => void) | undefined
+  sectionRef: (element: HTMLElement | null) => void
+  more: ReactNode
   children: ReactNode
   onDragOver: (event: DragEvent) => void
   onDragLeave: (event: DragEvent) => void
   onDrop: (event: DragEvent) => void
 }) {
   const heading = useId()
+  const dot = (
+    <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", DOT[status])} />
+  )
   return (
     <section
+      ref={sectionRef}
       aria-labelledby={heading}
+      tabIndex={-1}
       {...drop}
       className={cn(
-        "min-w-0 rounded-xl border border-transparent p-1.5 transition-colors",
+        "min-w-0 snap-start rounded-xl border border-transparent p-1.5 transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        collapsed && "border-border",
         active && "border-dashed border-strong bg-selected",
       )}
     >
-      <h3 className="mb-2 flex items-center gap-1.5 px-0.5 text-[11px] text-soft">
-        <span aria-hidden="true" className={cn("size-1.5 rounded-full", DOT[status])} />
-        <span id={heading}>{label}</span>
-        <span className="text-muted-foreground tabular-nums">{count}</span>
-      </h3>
-      {count === 0 ? (
+      {onToggle ? (
+        <h3 className="mb-2 text-[11px] text-soft max-[800px]:mb-0">
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            onClick={onToggle}
+            className={cn(
+              "flex w-full items-center gap-1.5 rounded-md px-0.5 outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring",
+              collapsed &&
+                "flex-col py-1 max-[800px]:flex-row max-[800px]:py-1.5 min-[801px]:gap-2",
+            )}
+          >
+            {dot}
+            <span
+              id={heading}
+              className={
+                collapsed
+                  ? "[writing-mode:vertical-rl] max-[800px]:[writing-mode:horizontal-tb]"
+                  : ""
+              }
+            >
+              {label}
+            </span>
+            <span className="text-muted-foreground tabular-nums">{count}</span>
+            {collapsed ? (
+              <ChevronRight
+                size={13}
+                strokeWidth={1.7}
+                aria-hidden="true"
+                className="text-muted-foreground max-[800px]:order-last max-[800px]:ml-auto"
+              />
+            ) : (
+              <ChevronDown
+                size={13}
+                strokeWidth={1.7}
+                aria-hidden="true"
+                className="ml-auto text-muted-foreground"
+              />
+            )}
+          </button>
+        </h3>
+      ) : (
+        <h3 className="mb-2 flex items-center gap-1.5 px-0.5 text-[11px] text-soft">
+          {dot}
+          <span id={heading}>{label}</span>
+          <span className="text-muted-foreground tabular-nums">{count}</span>
+        </h3>
+      )}
+      {collapsed ? null : count === 0 ? (
         <Quiet className="px-0.5 py-1">{active ? "Drop it here." : "Nothing here."}</Quiet>
       ) : (
-        <ul aria-label={label} className="grid gap-2">
-          {children}
-        </ul>
+        <>
+          <ul aria-label={label} className="grid gap-2">
+            {children}
+          </ul>
+          {more}
+        </>
       )}
     </section>
   )
@@ -348,6 +546,7 @@ function TaskCard({
   onDragEnd: () => void
 }) {
   const pending = to !== undefined
+  const late = isOverdue(task, today)
   const detail = lines(task, today, person)
   const who = assigneeLabel(task.assignee, me)
 
@@ -374,11 +573,15 @@ function TaskCard({
         role="button"
         tabIndex={0}
         aria-label={`Edit ${task.title}`}
+        data-overdue={late || undefined}
         onClick={onOpen}
         onKeyDown={key}
-        className="grid min-w-0 gap-0.5 rounded-md pr-7 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="grid min-w-0 gap-0.5 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        <span className="text-xs leading-snug [overflow-wrap:anywhere]">{task.title}</span>
+        {/* On touch the menu button is always there, so the title leaves room for it; with a mouse it uses the full width. */}
+        <span className="text-xs leading-snug [overflow-wrap:anywhere] pointer-coarse:pr-8">
+          {task.title}
+        </span>
         {who && <span className="text-[11px] text-muted-foreground">{who}</span>}
         {detail.map((line) => (
           <span
@@ -402,7 +605,11 @@ function TaskCard({
         <MenuTrigger
           aria-label={`Actions for ${task.title}`}
           disabled={pending}
-          className="absolute top-1.5 right-1.5 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-selected hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring data-popup-open:bg-selected max-[800px]:size-9"
+          className={cn(
+            "absolute top-1 right-1 inline-flex size-6 items-center justify-center rounded-md bg-raised text-muted-foreground outline-none hover:bg-selected hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring data-popup-open:bg-selected max-[800px]:size-9 pointer-coarse:size-9",
+            // With a mouse it shows on hover and keyboard focus; touch has no hover, so it stays.
+            "pointer-fine:opacity-0 pointer-fine:group-focus-within:opacity-100 pointer-fine:group-hover:opacity-100 pointer-fine:data-popup-open:opacity-100",
+          )}
         >
           <Ellipsis size={15} strokeWidth={1.7} aria-hidden="true" />
         </MenuTrigger>
@@ -525,7 +732,7 @@ function AskDialog({
   }
 
   return (
-    <DialogContent className="p-5">
+    <DialogContent placement="center" className="p-5">
       <form onSubmit={(e) => void submit(e)} className="grid gap-3.5 text-xs">
         <div className="grid gap-1">
           <DialogTitle className="text-[13px] font-semibold">
@@ -614,7 +821,7 @@ function TaskDialog({
   const teammate = fields.assignee !== null && fields.assignee !== me
 
   return (
-    <DialogContent className="max-h-[calc(100dvh-24vh)] overflow-y-auto p-5">
+    <DialogContent placement="center" className="p-5">
       <form onSubmit={submit} className="grid gap-3.5 text-xs">
         <DialogTitle className="text-[13px] font-semibold">
           {task ? "Edit task" : "New task"}

@@ -7,12 +7,25 @@ import { cn } from "@/lib/utils"
 // What every screen in the canvas is made of (DESIGN.md §3): a centered column of quiet cards,
 // and the loading, empty and error states each one shows.
 
-export function Page({ children, wide }: { children: ReactNode; wide?: boolean }) {
+/** `wide` is the page column's larger size; `full` takes the whole canvas, for a screen that holds a page-wide card (the board). */
+export function Page({
+  children,
+  wide,
+  full,
+}: {
+  children: ReactNode
+  wide?: boolean
+  full?: boolean
+}) {
   return (
     <div
       className={cn(
         "mx-auto grid gap-4 py-7 text-[13px] max-[800px]:w-[calc(100%-32px)] max-[800px]:gap-3.5 max-[800px]:py-5",
-        wide ? "w-[min(1040px,calc(100%-48px))]" : "w-[min(880px,calc(100%-48px))]",
+        full
+          ? "w-[calc(100%-48px)]"
+          : wide
+            ? "w-[min(1040px,calc(100%-48px))]"
+            : "w-[min(880px,calc(100%-48px))]",
       )}
     >
       {children}

@@ -94,3 +94,26 @@ export function inColumn(tasks: ReadonlyArray<TaskOut>, status: TaskState): Arra
     .filter((t) => t.status === status)
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
 }
+
+/** Done tasks to list before "Show all": the board shows the latest, the rest sit behind a button. */
+export const DONE_SHOWN = 5
+
+/** A done column's tasks, the most recently finished first (a task's last save is when it moved). */
+export function recentDone(tasks: ReadonlyArray<TaskOut>): Array<TaskOut> {
+  return tasks
+    .filter((t) => t.status === "done")
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+}
+
+/** Whether an open task is past its due day. */
+export const isOverdue = (task: TaskOut, today: string) =>
+  task.status !== "done" && !!task.due_on && task.due_on < today
+
+/** What the summary line counts: stuck work an FDE opens the board to find. */
+export function summarise(tasks: ReadonlyArray<TaskOut>, today: string) {
+  return {
+    blocked: tasks.filter((t) => t.status === "blocked").length,
+    waiting: tasks.filter((t) => t.status === "waiting_on_customer").length,
+    overdue: tasks.filter((t) => isOverdue(t, today)).length,
+  }
+}

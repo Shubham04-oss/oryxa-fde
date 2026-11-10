@@ -9,9 +9,13 @@ export const DialogTitle = DialogPrimitive.Title
 export const DialogDescription = DialogPrimitive.Description
 export const DialogClose = DialogPrimitive.Close
 
-type ContentProps = Omit<DialogPrimitive.Popup.Props, "className"> & { className?: string }
+type ContentProps = Omit<DialogPrimitive.Popup.Props, "className"> & {
+  className?: string
+  /** A launcher (Jump to) sits high, like a command palette; a form or prompt is centred. */
+  placement?: "top" | "center"
+}
 
-export function DialogContent({ className, children, ...props }: ContentProps) {
+export function DialogContent({ className, placement = "top", children, ...props }: ContentProps) {
   return (
     <DialogPrimitive.Portal>
       <DialogPrimitive.Backdrop
@@ -21,7 +25,10 @@ export function DialogContent({ className, children, ...props }: ContentProps) {
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[12vh] left-1/2 z-50 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 rounded-2xl border border-border bg-popover text-popover-foreground shadow-overlay outline-none",
+          "fixed left-1/2 z-50 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 rounded-2xl border border-border bg-popover text-popover-foreground shadow-overlay outline-none",
+          placement === "top"
+            ? "top-[12vh]"
+            : "top-1/2 max-h-[calc(100dvh-32px)] -translate-y-1/2 overflow-y-auto",
           className,
         )}
         {...props}

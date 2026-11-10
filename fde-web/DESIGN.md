@@ -62,6 +62,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   Escape, a tap outside or any navigation.
 - The header names what the canvas shows, centered: **Today**, **Companies**, the company's name,
   or the project's name.
+- **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
+  prompt (New task, Edit task, the Blocked and Waiting questions) is centred on the screen: 560px
+  wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
+  Both sit on a scrim and close with Escape.
 - **Jump to** is a Base UI dialog: type to filter companies and projects (every word must match the
   company or project name), arrows to move (wrapping), Enter to open, Escape to close.
 
@@ -80,7 +84,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   blocked wins over waiting, waiting over due. Each row says why it is there.
 - **Company.** Profile (summary, industry, region and the FDE's part), then Stakeholders (with
   their part) and Systems (with their kind) side by side (stacked below 960px), then Projects.
-- **Project.** The company link, the summary, the stage bar, the **Board**, Scope beside Success
+- **Project.** The company link, the summary, the stage bar, the **Board** (the one card that
+  takes the canvas's full width, up to 1600px; the others stay in the 1040px page column), Scope beside Success
   criteria (each with its target), then Access and Decisions. Scope says whether it is signed off,
   changed since sign-off, or not signed off. Access and waiting tasks name people and systems from
   the company's records.
@@ -88,9 +93,25 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
   click on every visit. A card has the title, who has it, why it is stuck (the blocker, or who it
-  waits on and for how long) and when it is due; overdue and blocked get the amber dot. Under 800px
-  the columns stack, and between that and a full row they scroll sideways.
-  - **Moving.** Drag a card to another column, or open its menu (the round button on the card,
+  waits on and for how long) and when it is due; overdue and blocked get the amber dot.
+  - **Summary line.** One line above the columns, always visible, says what is stuck, for example
+    "1 blocked 1 waiting on the customer 2 overdue" (a part with none is left out; with none at all
+    it says nothing is blocked, waiting or overdue). Blocked and overdue carry the amber dot, waiting
+    a neutral one. Each part is a button: Blocked and Waiting scroll to that column and focus it;
+    Overdue goes to the first late card, in column order. Stuck work is never found only by
+    scrolling.
+  - **Width.** A column is 220px wide at least. When they all fit they share the width; when not,
+    the row scrolls sideways with scroll snap and a visible scrollbar (a classic bar on the tokens,
+    not one that hides itself), and each column is sized so that about a third of the next one
+    always shows. No gradients or fades. Under 800px the columns stack.
+  - **Done is collapsed** to a 56px strip with its dot, name and count (a row on a phone), because
+    it is the least urgent column and grows without limit. It is still a drop target and a **Move to**
+    destination. Opening it (its heading is the toggle) scrolls it into view and lists the five most
+    recently finished tasks, with **Show all** for the rest.
+  - **The card's menu button** sits in the card's top right corner and takes no room from the
+    title. With a mouse it appears on hover and on keyboard focus; on touch it is always shown, and
+    the title leaves it room.
+  - **Moving.** Drag a card to another column, or open its menu (the button in the card's corner,
     reachable by Tab and operated with the arrow keys and Enter) and pick **Move to**. The menu is
     the only way on a phone. Dropping on the same column does nothing.
   - **Two moves ask first.** Into **Blocked** asks what is blocking it, and the answer is required.
@@ -101,7 +122,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     dimmed and marked "Moving to ...", and jumps only when the API answers. A refused move leaves
     the card where it was and says why above the board, with Dismiss. A dialog that fails stays
     open with its reason and what was typed.
-  - **Order** in a column is creation order. The API has no position field, so the board does not
+  - **Order** in a column is creation order, except Done, which is the most recently finished first. The API has no position field, so the board does not
     invent one.
   - **Create, edit, delete.** **New task** opens a form: title, status, the blocker or who it waits
     on when the status needs one, due date, and who has it (you, or unassigned). Clicking a card
@@ -159,7 +180,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Pages carry a content security policy with a fresh script nonce per response; static assets get
   their headers from `public/_headers`, kept in step by `security-headers.test.ts`.
 - `pnpm dev:mock` answers from `src/dev/mock-api.ts`: the spec's routes in the browser, on
-  invented sample data only. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
+  invented sample data only. Setting `globalThis.__fdeMockFailWrites = true` there (in the console,
+  or a test) makes every write answer 503, so the failed-save states can be seen; the switch lives
+  in the mock and ships nowhere. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
   same mock.
 

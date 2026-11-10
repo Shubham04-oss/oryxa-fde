@@ -43,6 +43,11 @@ const titles = (name: string) =>
     .queryAllByRole("button", { name: /^Edit /, hidden: true })
     .map((b) => b.getAttribute("aria-label")!.slice("Edit ".length))
 
+/** Opens the Done column, which starts collapsed. */
+async function openDone() {
+  await userEvent.click(within(column("Done")).getByRole("button", { name: /^Done/ }))
+}
+
 /** Opens a card's menu and picks one entry. */
 async function pick(card: string, entry: string) {
   await userEvent.click(screen.getByRole("button", { name: `Actions for ${card}` }))
@@ -62,7 +67,7 @@ describe("Board", () => {
         "In progress1",
         "Waiting on the customer1",
         "Blocked1",
-        "Done1",
+        "Done6",
       ]),
     )
     // Creation order.
@@ -102,6 +107,7 @@ describe("Board", () => {
 
     await pick(TELEMATICS, "Done")
 
+    await openDone()
     await waitFor(() => expect(titles("Done")).toContain(TELEMATICS))
     const saved = (await api.project(scope)).tasks.find((t) => t.title === TELEMATICS)
     expect(saved).toMatchObject({ status: "done", blocker: null, blocked_by: null })
@@ -128,7 +134,12 @@ describe("Board", () => {
     fireEvent.dragOver(target, { dataTransfer })
     fireEvent.drop(target, { dataTransfer })
 
-    await waitFor(() => expect(titles("Done")).toContain(REPLAY))
+    // Dropped on the collapsed column: it counts there, and shows once the column is opened.
+    await waitFor(() =>
+      expect(within(column("Done")).getByRole("heading", { level: 3 })).toHaveTextContent("Done7"),
+    )
+    await openDone()
+    expect(titles("Done")).toContain(REPLAY)
   })
 
   it("does nothing when a card is dropped on its own column", async () => {
@@ -210,6 +221,20 @@ describe("Board", () => {
     await waitFor(() => expect(titles("To do")).not.toContain(REPLAY))
   })
 
+  it("shows a failed save when the dev mock is told to fail writes", async () => {
+    await board()
+    ;(globalThis as Record<string, unknown>).__fdeMockFailWrites = true
+    try {
+      await pick(REPLAY, "In progress")
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        `Couldn't move “${REPLAY}” to In progress. The workspace is briefly unavailable.`,
+      )
+      expect(titles("To do")).toContain(REPLAY)
+    } finally {
+      delete (globalThis as Record<string, unknown>).__fdeMockFailWrites
+    }
+  })
+
   it("leaves a card where it was and says why when the API is unavailable", async () => {
     await board()
     wire.refuse = Response.json({ error: "unavailable" }, { status: 503 })
@@ -223,6 +248,67 @@ describe("Board", () => {
     expect(titles("In progress")).not.toContain(REPLAY)
     await userEvent.click(screen.getByRole("button", { name: "Dismiss" }))
     expect(screen.queryByRole("alert")).toBeNull()
+  })
+
+  it("sums up what is stuck above the columns, and each part goes to where it is", async () => {
+    await board()
+    const summary = screen.getByRole("group", { name: "What needs attention" })
+    expect(summary).toHaveTextContent("1 blocked1 waiting on the customer2 overdue")
+
+    await userEvent.click(within(summary).getByRole("button", { name: "1 blocked" }))
+    expect(column("Blocked")).toHaveFocus()
+    await userEvent.click(
+      within(summary).getByRole("button", { name: "1 waiting on the customer" }),
+    )
+    expect(column("Waiting on the customer")).toHaveFocus()
+    // Overdue spans columns: the first late card, in column order.
+    await userEvent.click(within(summary).getByRole("button", { name: "2 overdue" }))
+    expect(
+      screen.getByRole("button", { name: "Edit Add driver-hours checks to the eval suite" }),
+    ).toHaveFocus()
+  })
+
+  it("updates the summary as work moves, and says so when nothing is stuck", async () => {
+    await board()
+    await pick(TELEMATICS, "Done")
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "What needs attention" })).toHaveTextContent(
+        "1 waiting on the customer1 overdue",
+      ),
+    )
+  })
+
+  it("keeps Done collapsed, and opens it with the latest first and the rest behind Show all", async () => {
+    await board()
+    // Collapsed: the count shows, the cards do not.
+    expect(titles("Done")).toEqual([])
+    expect(within(column("Done")).getByRole("button", { name: /^Done/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    )
+
+    await openDone()
+    expect(titles("Done")).toEqual([
+      "Share the pilot plan with the dispatchers",
+      "Run the first planner replay on sample orders",
+      "Write the first depot rules summary",
+      "Set up the sandbox with sample orders",
+      "Pick the two pilot depots",
+    ])
+    await userEvent.click(screen.getByRole("button", { name: "Show all 6" }))
+    expect(titles("Done")).toHaveLength(6)
+    expect(titles("Done").at(-1)).toBe("Sign the data processing terms with the customer")
+    await userEvent.click(screen.getByRole("button", { name: "Show the latest 5" }))
+    expect(titles("Done")).toHaveLength(5)
+  })
+
+  it("moves a card into the collapsed Done column by its menu", async () => {
+    await board()
+    await pick(REPLAY, "Done")
+    await waitFor(() =>
+      expect(within(column("Done")).getByRole("heading", { level: 3 })).toHaveTextContent("Done7"),
+    )
+    expect(titles("Done")).toEqual([])
   })
 
   it("adds a task to To do once the API confirms it", async () => {
