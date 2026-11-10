@@ -507,6 +507,15 @@ describe("search", () => {
     expect(await within(await card()).findByText(/for “d”/)).toBeVisible()
   })
 
+  it("keeps a one-character search sent with Enter once the typing pause has passed", async () => {
+    renderWithRouter(<DocumentsCard company={KESTREL} />)
+    await userEvent.type(await field(), "d{Enter}")
+    expect(await within(await card()).findByText(/for “d”/)).toBeVisible()
+    // The pause that began with the typing must not set the search back to nothing.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(within(await card()).getByText(/for “d”/)).toBeVisible()
+  })
+
   it("says plainly when nothing matches, and what a search cannot see yet", async () => {
     renderWithRouter(<DocumentsCard company={KESTREL} />)
     await userEvent.type(await field(), "zebra")

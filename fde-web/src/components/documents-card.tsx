@@ -63,7 +63,11 @@ export function DocumentsCard({ company }: { company: CompanyId }) {
   useEffect(() => {
     const typed = text.trim()
     if (typed === "") return setQ("")
-    const pause = setTimeout(() => setQ(typed.length >= MIN_AUTO ? typed : ""), PAUSE_MS)
+    // A short search Enter already sent for these words stays: the pause must not undo it.
+    const pause = setTimeout(
+      () => setQ((now) => (typed.length >= MIN_AUTO || now === typed ? typed : "")),
+      PAUSE_MS,
+    )
     return () => clearTimeout(pause)
   }, [text])
 

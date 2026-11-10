@@ -160,7 +160,7 @@ export const uploadedOn = (doc: Pick<DocumentOut, "created_at">) => shortDate(da
 export function queryProblem(raw: string): string | null {
   const q = raw.trim()
   // eslint-disable-next-line no-control-regex
-  if ([...q].length > MAX_QUERY || /[\u0000-\u001f\u007f]/.test(q))
+  if ([...q].length > MAX_QUERY || /[\u0000-\u001f\u007f-\u009f]/.test(q))
     return `Search for up to ${MAX_QUERY} characters on one line.`
   return null
 }

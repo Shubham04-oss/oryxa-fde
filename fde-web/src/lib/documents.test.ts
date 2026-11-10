@@ -157,6 +157,9 @@ describe("search", () => {
     expect(queryProblem("x".repeat(500))).toBeNull()
     expect(queryProblem("x".repeat(501))).not.toBeNull()
     expect(queryProblem("a\u0007b")).not.toBeNull()
+    // Rust's `char::is_control` also covers the C1 range, so the API refuses these too.
+    expect(queryProblem("a\u0085b")).not.toBeNull()
+    expect(queryProblem("a\u009fb")).not.toBeNull()
   })
 
   it("finds the words and phrases typed, without exclusions and the operator or", () => {

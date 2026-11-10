@@ -170,6 +170,54 @@ describe("the Worker", () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it("refuses a declared length over 20 MiB without reading the body, and counts a body that lies low", async () => {
+    const { env, fetch } = apiAnswering()
+    const url = `${APP}/api/v1/companies/cmp_1/documents?name=a.pdf`
+    const stream = (chunks: number) => {
+      const counted = { pulled: 0 }
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (counted.pulled++ === chunks) return controller.close()
+            controller.enqueue(new Uint8Array(1024 * 1024))
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      return { body, counted }
+    }
+
+    // A declared length over the limit is refused before a byte is read.
+    const big = stream(1)
+    const declared = await call(
+      new Request(url, {
+        method: "POST",
+        headers: { Origin: APP, "Content-Length": String(20 * 1024 * 1024 + 1) },
+        body: big.body,
+        duplex: "half",
+      } as RequestInit),
+      env,
+    )
+    expect(declared.status).toBe(413)
+    expect(big.counted.pulled).toBe(0)
+
+    // A small declared length does not let a longer body through: what arrives is counted.
+    const lying = stream(25)
+    const low = await call(
+      new Request(url, {
+        method: "POST",
+        headers: { Origin: APP, "Content-Length": "10" },
+        body: lying.body,
+        duplex: "half",
+      } as RequestInit),
+      env,
+    )
+    expect(low.status).toBe(413)
+    expect(lying.counted.pulled).toBeLessThan(25)
+
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it("answers 503 when it has no way to the API, never anything else", async () => {
     const response = await call(new Request(`${APP}/api/v1/companies`), {})
 
