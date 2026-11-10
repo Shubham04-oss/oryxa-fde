@@ -59,9 +59,10 @@ definition fde_project {
   company and invites the first IT admin at an address on that domain. A tenant admin may do this
   only while the company has no IT admin, so again if the last one leaves. Otherwise only an
   existing IT admin of the company adds or removes IT admins and sponsors. A change to the
-  recorded domain is audited and shown to the customer. `guest` stays as the read-only role. Every grant, removal
-  and customer decision is in the audit log with its actor, and the customer's screens show who
-  decided what, so a decision made in the customer's name is visible to the customer.
+  recorded domain is audited and shown to the customer. `guest` stays as the read-only role.
+  Every grant, removal and customer decision is in the audit log with its actor, and the
+  customer's screens show who decided what, so a decision made in the customer's name is visible
+  to the customer.
 - **What the customer sees is an allowlist.** The customer screens read their own endpoints, which
   return named fields only, as the customer room does. Internal tasks, threads, notes, agent
   transcripts and Today are never reachable with `govern`, `decide` or `view`. The isolation suite
@@ -74,8 +75,8 @@ definition fde_project {
 
 ## Consequences
 - `schema/fde.zed` gains two relations and three permissions; the lead reviews that change, and the
-  schema's validation file asserts that a tenant member with a customer relation has neither
-  `govern` nor `decide`.
+  schema's validation file asserts that neither a tenant member nor a lead, engineer or assignee
+  with no workspace relation has `govern` or `decide` through a customer relation.
 - A dishonest tenant admin can still invite an address they control on a domain they typed in.
   The audit trail and the customer-visible record are the guard; proving ownership of the domain
   comes with sign-in through the customer's identity provider.
