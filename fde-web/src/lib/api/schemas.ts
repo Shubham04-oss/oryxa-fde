@@ -35,6 +35,8 @@ export type AccessRequestId = z.infer<typeof AccessRequestId>
 export const TaskId = id<"TaskId">()
 export type TaskId = z.infer<typeof TaskId>
 export const DecisionId = id<"DecisionId">()
+export const MeetingNoteId = id<"MeetingNoteId">()
+export type MeetingNoteId = z.infer<typeof MeetingNoteId>
 
 /** Every project-scoped call takes both ids, as `ProjectScope` does in `oryxa-fde-core`. */
 export type ProjectScope = { company: CompanyId; project: ProjectId }
@@ -119,6 +121,14 @@ export type CompanySummary = z.infer<typeof CompanySummaryOut>
 export const StakeholderPart = z.enum(["sponsor", "champion", "user", "it", "security", "other"])
 export type StakeholderPart = z.infer<typeof StakeholderPart>
 
+const version = z.int().nonnegative()
+
+/**
+ * A record's version, bumped by every change to it; a `PUT` sends it back as `version`. The API
+ * always sends it, but the spec marks it optional until the web's fixtures carry it.
+ */
+const recordVersion = version.optional()
+
 export const StakeholderOut = z.object({
   id: StakeholderId,
   name: z.string(),
@@ -129,6 +139,7 @@ export const StakeholderOut = z.object({
   /** When they unsubscribed from the weekly digest, if they did. */
   digest_unsubscribed_at: instant.nullish(),
   updated_at: instant,
+  version: recordVersion,
 })
 export type StakeholderOut = z.infer<typeof StakeholderOut>
 
@@ -150,6 +161,7 @@ export const SystemOut = z.object({
   kind: optionalText,
   description: optionalText,
   updated_at: instant,
+  version: recordVersion,
 })
 export type SystemOut = z.infer<typeof SystemOut>
 
@@ -158,6 +170,7 @@ export const ScopeItemOut = z.object({
   kind: z.enum(["in", "out"]),
   description: z.string(),
   updated_at: instant,
+  version: recordVersion,
 })
 export type ScopeItemOut = z.infer<typeof ScopeItemOut>
 
@@ -169,10 +182,9 @@ export const CriterionOut = z.object({
   target: z.number(),
   unit: optionalText,
   updated_at: instant,
+  version: recordVersion,
 })
 export type CriterionOut = z.infer<typeof CriterionOut>
-
-const version = z.int().nonnegative()
 
 export const SignOffOut = z.object({
   version,
@@ -207,6 +219,7 @@ export const AccessRequestOut = z.object({
   granted_at: instant.nullish(),
   /** Whole days from the request until it was settled, or until now while it is open. */
   days_waiting: z.int(),
+  version: recordVersion,
 })
 export type AccessRequestOut = z.infer<typeof AccessRequestOut>
 
@@ -228,6 +241,7 @@ export const TaskOut = z.object({
   blocked_by: AccessRequestId.nullish(),
   created_at: instant,
   updated_at: instant,
+  version: recordVersion,
 })
 export type TaskOut = z.infer<typeof TaskOut>
 
@@ -242,6 +256,26 @@ export const DecisionOut = z.object({
   created_at: instant,
 })
 export type DecisionOut = z.infer<typeof DecisionOut>
+
+/** A meeting note at a company or a project. Its body is customer text: shown as plain text, never as markup. */
+export const MeetingNoteOut = z.object({
+  id: MeetingNoteId,
+  title: z.string(),
+  /** The day the meeting was held, `YYYY-MM-DD`. */
+  held_on: day,
+  body: z.string(),
+  /** The company's stakeholders who took part. */
+  stakeholders: z.array(StakeholderId),
+  /** The workspace's users who took part, by id: the API has no names for them yet. */
+  attendees: z.array(UserId),
+  created_by: UserId,
+  created_at: instant,
+  updated_at: instant,
+})
+export type MeetingNoteOut = z.infer<typeof MeetingNoteOut>
+
+/** Where notes are kept: a company, or one of its projects. */
+export type NotePlace = { company: CompanyId; project?: ProjectId }
 
 /** What a thread is about (`SubjectKind`): a record of the project or company, or a canvas shape. */
 export const SubjectKind = z.enum([

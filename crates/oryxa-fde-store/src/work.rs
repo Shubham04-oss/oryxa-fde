@@ -6,7 +6,9 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::{Date, OffsetDateTime};
 
-use crate::{Actor, Name, ProjectTx, StoreError, Text, audit, id, name, opt, text, unique_violation};
+use crate::{
+    Actor, Name, ProjectTx, Saved, StoreError, Text, audit, id, name, opt, row_version, stale, text, unique_violation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -62,6 +64,21 @@ pub struct Task {
     pub blocked_by: Option<AccessRequestId>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    /// Bumped by every change to the task; a save names the version it read.
+    pub version: u32,
+}
+
+impl Task {
+    /// Whether the task already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &TaskIn) -> bool {
+        self.title == v.title
+            && self.status == v.status
+            && self.blocker == v.blocker
+            && self.due_on == v.due_on
+            && self.assignee == v.assignee
+            && self.waiting_on == v.waiting_on
+            && self.blocked_by == v.blocked_by
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +142,8 @@ impl<T> Page<T> {
 }
 
 pub(crate) const TASK: &str =
-    "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, blocked_by, created_at, updated_at";
+    "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, blocked_by,
+    created_at, updated_at, version";
 const DECISION: &str = "decision_id, title, rationale, decided_by, decided_at, recorded_by, created_at";
 
 impl ProjectTx {
@@ -234,13 +252,39 @@ impl ProjectTx {
         task(row).map(Some)
     }
 
-    /// Replaces the task's fields. Waiting on the customer keeps its start time while the status
-    /// stays `WaitingOnCustomer` and clears when it leaves.
-    pub async fn update_task(&mut self, id: &TaskId, v: &TaskIn, by: &Actor) -> Result<Option<Task>, StoreError> {
+    /// Replaces the task's fields, unless it has moved on from version `expected` or already holds
+    /// them. Waiting on the customer keeps its start time while the status stays
+    /// `WaitingOnCustomer` and clears when it leaves. `None` if there is no such task.
+    pub async fn update_task(
+        &mut self,
+        id: &TaskId,
+        expected: Option<u32>,
+        v: &TaskIn,
+        by: &Actor,
+    ) -> Result<Option<Saved<Task>>, StoreError> {
         v.check()?;
         self.check_waiting_on(v).await?;
         self.check_blocked_by(v).await?;
         let (t, c, p) = self.keys();
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {TASK} from tasks
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4 for update"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let current = task(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
         let row = sqlx::query(&format!(
             "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
                  waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
@@ -259,9 +303,8 @@ impl ProjectTx {
         .bind(v.assignee.as_ref().map(UserId::as_str))
         .bind(v.waiting_on.as_ref().map(StakeholderId::as_str))
         .bind(v.blocked_by.as_ref().map(AccessRequestId::as_str))
-        .fetch_optional(&mut *self.tx)
+        .fetch_one(&mut *self.tx)
         .await?;
-        let Some(row) = row else { return Ok(None) };
         let s = self.scope.clone();
         audit(
             &mut self.tx,
@@ -272,7 +315,7 @@ impl ProjectTx {
             Some(id.as_str()),
         )
         .await?;
-        task(row).map(Some)
+        Ok(Some(Saved::Current(task(row)?)))
     }
 
     pub async fn remove_task(&mut self, id: &TaskId, by: &Actor) -> Result<bool, StoreError> {
@@ -474,6 +517,7 @@ pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
             .transpose()?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
+        version: row_version(r.try_get("version")?)?,
     })
 }
 
@@ -516,6 +560,52 @@ mod tests {
                 more: false
             }
         );
+    }
+
+    #[test]
+    fn a_task_holds_a_save_only_when_every_field_matches() {
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let v = TaskIn {
+            title: Name::new("Get VPN access").unwrap(),
+            status: TaskStatus::Blocked,
+            blocker: Some(Text::new("IT ticket").unwrap()),
+            due_on: Some(Date::from_calendar_date(2026, time::Month::November, 20).unwrap()),
+            assignee: Some(UserId::new("user_1").unwrap()),
+            waiting_on: Some(StakeholderId::new("stk_1").unwrap()),
+            blocked_by: Some(AccessRequestId::new("acc_1").unwrap()),
+        };
+        let stored = Task {
+            id: TaskId::new("tsk_1").unwrap(),
+            title: v.title.clone(),
+            status: v.status,
+            blocker: v.blocker.clone(),
+            due_on: v.due_on,
+            assignee: v.assignee.clone(),
+            waiting_on: v.waiting_on.clone(),
+            waiting_since: Some(at),
+            blocked_by: v.blocked_by.clone(),
+            created_at: at,
+            updated_at: at,
+            version: 3,
+        };
+        assert!(
+            stored.holds(&v),
+            "the stamps and the version are not the caller's to set"
+        );
+        let changes: [fn(&mut TaskIn); 7] = [
+            |v| v.title = Name::new("Get VPN access now").unwrap(),
+            |v| v.status = TaskStatus::Todo,
+            |v| v.blocker = None,
+            |v| v.due_on = None,
+            |v| v.assignee = None,
+            |v| v.waiting_on = None,
+            |v| v.blocked_by = None,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = v.clone();
+            change(&mut other);
+            assert!(!stored.holds(&other), "field {i}");
+        }
     }
 
     #[test]

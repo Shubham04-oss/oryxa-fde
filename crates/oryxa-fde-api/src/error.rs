@@ -3,7 +3,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use oryxa_fde_store::StoreError;
+use oryxa_fde_store::{Saved, StoreError};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -54,6 +54,42 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
+
+/// A whole-record save refused because the record has moved on from the `version` it was based
+/// on; nothing was changed. Read `current`, apply the change to it and save with its `version`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StaleBody<T> {
+    /// `stale_version`.
+    pub error: String,
+    /// The record as it stands.
+    pub current: T,
+}
+
+/// A 409 from a save that also enforces rules of the record: `stale_version` with the record as
+/// it stands, or a refusal with a code only, e.g. `rejected_blocker_required`.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum SaveConflict<T> {
+    Stale(StaleBody<T>),
+    Refused(ErrorBody),
+}
+
+/// The answer to a save the store checked against the version its caller read: `ok` with the
+/// record as the save left it, or 409 `stale_version` with the record as it stands.
+pub(crate) fn saved<O: Serialize, C: Serialize>(ok: StatusCode, s: Saved<O, C>) -> Response {
+    match s {
+        Saved::Current(record) => (ok, Json(record)).into_response(),
+        Saved::Stale(current) => {
+            let body = StaleBody {
+                error: STALE.to_owned(),
+                current,
+            };
+            (StatusCode::CONFLICT, Json(body)).into_response()
+        }
+    }
+}
+
+const STALE: &str = "stale_version";
 
 impl ApiError {
     fn status(&self) -> (StatusCode, &'static str) {

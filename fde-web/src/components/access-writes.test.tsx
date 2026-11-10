@@ -115,7 +115,7 @@ describe("asking for access", () => {
     const row = rowFor(access, "Driver hours, read only")
     expect(row).toHaveTextContent("Owner: Ines Moreau")
     expect(row).toHaveTextContent("Planning database")
-    expect(row).toHaveTextContent("Requested, waiting since today")
+    expect(row).toHaveTextContent("Requested, waiting less than a day")
     expect(within(access).getByLabelText("Access at a glance")).toHaveTextContent(
       "Not granted3 of 4",
     )
@@ -325,7 +325,9 @@ describe("moving an access request's status", () => {
     renderWithRouter(<ProjectPage scope={DISPATCH} />)
     const row = rowFor(await card(), "Read replica of the planning database")
     await pick(row, "Mark revoked")
-    await waitFor(() => expect(row).toHaveTextContent(/Revoked .* after 3 days/))
+    await waitFor(() =>
+      expect(row).toHaveTextContent(/Revoked .*\. It had been granted .*, after 3 days\./),
+    )
     expect(wire.sent[0]).toMatchObject({ body: { status: "revoked" } })
   })
 })

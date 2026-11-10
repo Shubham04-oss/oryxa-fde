@@ -1,6 +1,7 @@
 //! A project's scope: in-scope and out-of-scope items, success criteria with measurable targets,
-//! a change log and the customer's sign-off. Every change bumps the scope version; a sign-off pins
-//! the version the customer agreed to and queues `scope.signed-off`.
+//! a change log and the customer's sign-off. Every change bumps the scope version (a save that
+//! changes nothing is not a change); a sign-off pins the version the customer agreed to and queues
+//! `scope.signed-off`.
 
 use oryxa_core::UserId;
 use oryxa_fde_core::{CriterionId, ScopeItemId, StakeholderId};
@@ -10,7 +11,10 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::OffsetDateTime;
 
-use crate::{Actor, Name, ProjectTx, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
+use crate::{
+    Actor, Name, ProjectTx, Saved, StoreError, Text, audit, enqueue, id, name, opt, row_version, stale, text,
+    unique_violation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeKind {
@@ -39,6 +43,15 @@ pub struct ScopeItem {
     pub kind: ScopeKind,
     pub description: Text,
     pub updated_at: OffsetDateTime,
+    /// The item's own version, bumped by every change to it; a save names the version it read.
+    pub version: u32,
+}
+
+impl ScopeItem {
+    /// Whether the item already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &ScopeItemIn) -> bool {
+        self.kind == v.kind && self.description == v.description
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +93,19 @@ pub struct Criterion {
     pub target: f64,
     pub unit: Option<Name>,
     pub updated_at: OffsetDateTime,
+    /// The criterion's own version, bumped by every change to it; a save names the version it read.
+    pub version: u32,
+}
+
+impl Criterion {
+    /// Whether the criterion already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &CriterionIn) -> bool {
+        self.description == v.description
+            && self.metric == v.metric
+            && self.comparator == v.comparator
+            && self.target == v.target
+            && self.unit == v.unit
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -124,8 +150,8 @@ pub struct ScopeChange {
     pub at: OffsetDateTime,
 }
 
-const ITEM: &str = "item_id, kind, description, updated_at";
-const CRITERION: &str = "criterion_id, description, metric, comparator, target, unit, updated_at";
+const ITEM: &str = "item_id, kind, description, updated_at, version";
+const CRITERION: &str = "criterion_id, description, metric, comparator, target, unit, updated_at, version";
 
 impl ProjectTx {
     /// `None` if the project is not in this company.
@@ -203,13 +229,35 @@ impl ProjectTx {
         Ok(Some(added))
     }
 
+    /// Replaces the item, unless it has moved on from version `expected` or already holds these
+    /// values: then neither the item nor the scope version changes. `None` if there is no such item.
     pub async fn update_scope_item(
         &mut self,
         id: &ScopeItemId,
+        expected: Option<u32>,
         v: &ScopeItemIn,
         by: &Actor,
-    ) -> Result<Option<ScopeItem>, StoreError> {
+    ) -> Result<Option<Saved<ScopeItem>>, StoreError> {
         let (t, c, p) = self.keys();
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {ITEM} from scope_items
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and item_id = $4 for update"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let current = item(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
         let row = sqlx::query(&format!(
             "update scope_items set kind = $5, description = $6, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and item_id = $4 returning {ITEM}"
@@ -220,14 +268,13 @@ impl ProjectTx {
         .bind(id.as_str())
         .bind(v.kind.as_str())
         .bind(v.description.as_str())
-        .fetch_optional(&mut *self.tx)
+        .fetch_one(&mut *self.tx)
         .await?;
-        let Some(row) = row else { return Ok(None) };
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
         let updated = item(row)?;
         self.log_change(version, "item_updated", id.as_str(), item_json(&updated), by)
             .await?;
-        Ok(Some(updated))
+        Ok(Some(Saved::Current(updated)))
     }
 
     pub async fn remove_scope_item(&mut self, id: &ScopeItemId, by: &Actor) -> Result<bool, StoreError> {
@@ -291,14 +338,37 @@ impl ProjectTx {
         Ok(Some(added))
     }
 
+    /// Replaces the criterion, unless it has moved on from version `expected` or already holds
+    /// these values: then neither the criterion nor the scope version changes. `None` if there is
+    /// no such criterion.
     pub async fn update_criterion(
         &mut self,
         id: &CriterionId,
+        expected: Option<u32>,
         v: &CriterionIn,
         by: &Actor,
-    ) -> Result<Option<Criterion>, StoreError> {
+    ) -> Result<Option<Saved<Criterion>>, StoreError> {
         finite(v.target)?;
         let (t, c, p) = self.keys();
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {CRITERION} from criteria
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and criterion_id = $4 for update"
+        ))
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(id.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let current = criterion(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
         let row = sqlx::query(&format!(
             "update criteria set description = $5, metric = $6, comparator = $7, target = $8, unit = $9,
                  updated_at = now()
@@ -313,14 +383,13 @@ impl ProjectTx {
         .bind(v.comparator.as_str())
         .bind(v.target)
         .bind(v.unit.as_ref().map(Name::as_str))
-        .fetch_optional(&mut *self.tx)
+        .fetch_one(&mut *self.tx)
         .await?;
-        let Some(row) = row else { return Ok(None) };
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
         let updated = criterion(row)?;
         self.log_change(version, "criterion_updated", id.as_str(), criterion_json(&updated), by)
             .await?;
-        Ok(Some(updated))
+        Ok(Some(Saved::Current(updated)))
     }
 
     pub async fn remove_criterion(&mut self, id: &CriterionId, by: &Actor) -> Result<bool, StoreError> {
@@ -344,8 +413,15 @@ impl ProjectTx {
     }
 
     /// Records that `stakeholder` (a person at the customer) signed off the current scope version,
-    /// and queues `scope.signed-off`. `None` if the project is not in this company.
-    pub async fn sign_off(&mut self, stakeholder: &StakeholderId, by: &Actor) -> Result<Option<SignOff>, StoreError> {
+    /// and queues `scope.signed-off`. Stale, with the scope as it stands, if the scope has moved on
+    /// from version `expected` (the one the person read). `None` if the project is not in this
+    /// company.
+    pub async fn sign_off(
+        &mut self,
+        stakeholder: &StakeholderId,
+        expected: Option<u32>,
+        by: &Actor,
+    ) -> Result<Option<Saved<SignOff, ScopeOfWork>>, StoreError> {
         let (t, c, p) = self.keys();
         let version: Option<i32> = sqlx::query_scalar(
             "select scope_version from projects where tenant_id = $1 and company_id = $2 and project_id = $3
@@ -357,6 +433,11 @@ impl ProjectTx {
         .fetch_optional(&mut *self.tx)
         .await?;
         let Some(version) = version else { return Ok(None) };
+        // The project row stays locked, so no change can land between this check and the sign-off.
+        if stale(expected, version_of(version)?) {
+            let current = self.scope_of_work().await?.ok_or(StoreError::Corrupt("project"))?;
+            return Ok(Some(Saved::Stale(current)));
+        }
         let empty: bool = sqlx::query_scalar(
             "select not exists (select 1 from scope_items where tenant_id = $1 and company_id = $2 and project_id = $3)
                 and not exists (select 1 from criteria where tenant_id = $1 and company_id = $2 and project_id = $3)",
@@ -410,12 +491,12 @@ impl ProjectTx {
         let version = version_of(version)?;
         let s = self.scope.clone();
         enqueue(&mut self.tx, &s.company, by, &ScopeSignedOff::new(&s, version)).await?;
-        Ok(Some(SignOff {
+        Ok(Some(Saved::Current(SignOff {
             version,
             stakeholder: stakeholder.clone(),
             recorded_by: by.user.clone(),
             signed_at: row.try_get("signed_at")?,
-        }))
+        })))
     }
 
     /// The scope's change log, oldest first.
@@ -569,6 +650,7 @@ fn item(r: PgRow) -> Result<ScopeItem, StoreError> {
         kind: ScopeKind::parse(r.try_get("kind")?)?,
         description: text(r.try_get("description")?, "description")?,
         updated_at: r.try_get("updated_at")?,
+        version: row_version(r.try_get("version")?)?,
     })
 }
 
@@ -581,5 +663,69 @@ fn criterion(r: PgRow) -> Result<Criterion, StoreError> {
         target: r.try_get("target")?,
         unit: opt(r.try_get("unit")?, "unit", name)?,
         updated_at: r.try_get("updated_at")?,
+        version: row_version(r.try_get("version")?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_item_holds_a_save_only_when_kind_and_description_match() {
+        let v = ScopeItemIn {
+            kind: ScopeKind::In,
+            description: Text::new("Answer support tickets").unwrap(),
+        };
+        let stored = ScopeItem {
+            id: ScopeItemId::new("itm_1").unwrap(),
+            kind: v.kind,
+            description: v.description.clone(),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            version: 2,
+        };
+        assert!(stored.holds(&v));
+        assert!(!stored.holds(&ScopeItemIn {
+            kind: ScopeKind::Out,
+            ..v.clone()
+        }));
+        assert!(!stored.holds(&ScopeItemIn {
+            description: Text::new("Answer every ticket").unwrap(),
+            ..v
+        }));
+    }
+
+    #[test]
+    fn a_criterion_holds_a_save_only_when_every_field_matches() {
+        let v = CriterionIn {
+            description: Text::new("Answers are right").unwrap(),
+            metric: Name::new("answer accuracy").unwrap(),
+            comparator: Comparator::AtLeast,
+            target: 90.0,
+            unit: Some(Name::new("%").unwrap()),
+        };
+        let stored = Criterion {
+            id: CriterionId::new("crt_1").unwrap(),
+            description: v.description.clone(),
+            metric: v.metric.clone(),
+            comparator: v.comparator,
+            target: v.target,
+            unit: v.unit.clone(),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            version: 1,
+        };
+        assert!(stored.holds(&v));
+        let changes: [fn(&mut CriterionIn); 5] = [
+            |v| v.description = Text::new("Answers are mostly right").unwrap(),
+            |v| v.metric = Name::new("precision").unwrap(),
+            |v| v.comparator = Comparator::AtMost,
+            |v| v.target = 90.5,
+            |v| v.unit = None,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = v.clone();
+            change(&mut other);
+            assert!(!stored.holds(&other), "field {i}");
+        }
+    }
 }

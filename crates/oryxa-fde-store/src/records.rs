@@ -6,8 +6,8 @@ use sqlx::{PgConnection, Row};
 use time::OffsetDateTime;
 
 use crate::{
-    Actor, CompanyTx, EmailAddress, Name, ProjectTx, StoreError, Text, audit, id, in_use, name, opt, text,
-    unique_violation,
+    Actor, CompanyTx, EmailAddress, Name, ProjectTx, Saved, StoreError, Text, audit, id, in_use, name, opt,
+    row_version, stale, text, unique_violation,
 };
 
 /// The part a stakeholder plays in the engagement.
@@ -62,6 +62,15 @@ pub struct Stakeholder {
     /// Unsubscribed from the digest, and when.
     pub digest_opt_out_at: Option<OffsetDateTime>,
     pub updated_at: OffsetDateTime,
+    /// Bumped by every change to the stakeholder; a save names the version it read.
+    pub version: u32,
+}
+
+impl Stakeholder {
+    /// Whether the stakeholder already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &StakeholderIn) -> bool {
+        self.name == v.name && self.title == v.title && self.role == v.role && self.email == v.email
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +89,15 @@ pub struct System {
     pub kind: Option<Name>,
     pub description: Option<Text>,
     pub updated_at: OffsetDateTime,
+    /// Bumped by every change to the system; a save names the version it read.
+    pub version: u32,
+}
+
+impl System {
+    /// Whether the system already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &SystemIn) -> bool {
+        self.name == v.name && self.kind == v.kind && self.description == v.description
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,8 +107,8 @@ pub struct SystemIn {
     pub description: Option<Text>,
 }
 
-const STAKEHOLDER: &str = "stakeholder_id, name, title, role, email, digest_opt_out_at, updated_at";
-const SYSTEM: &str = "system_id, name, kind, description, updated_at";
+const STAKEHOLDER: &str = "stakeholder_id, name, title, role, email, digest_opt_out_at, updated_at, version";
+const SYSTEM: &str = "system_id, name, kind, description, updated_at, version";
 
 impl CompanyTx {
     pub async fn stakeholders(&mut self) -> Result<Vec<Stakeholder>, StoreError> {
@@ -132,13 +150,34 @@ impl CompanyTx {
         stakeholder(row).map(Some)
     }
 
+    /// Replaces the stakeholder's fields, unless they have moved on from version `expected` or
+    /// already hold them. `None` if there is no such stakeholder.
     pub async fn update_stakeholder(
         &mut self,
         id: &StakeholderId,
+        expected: Option<u32>,
         v: &StakeholderIn,
         by: &Actor,
-    ) -> Result<Option<Stakeholder>, StoreError> {
+    ) -> Result<Option<Saved<Stakeholder>>, StoreError> {
         let s = &self.scope;
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {STAKEHOLDER} from stakeholders
+             where tenant_id = $1 and company_id = $2 and stakeholder_id = $3 for update"
+        ))
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let current = stakeholder(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
         let row = sqlx::query(&format!(
             "update stakeholders set name = $4, title = $5, role = $6, email = $7,
                  digest_opt_out_at = case when email is distinct from $7 then null else digest_opt_out_at end,
@@ -152,11 +191,10 @@ impl CompanyTx {
         .bind(v.title.as_ref().map(Name::as_str))
         .bind(v.role.as_str())
         .bind(v.email.as_ref().map(EmailAddress::as_str))
-        .fetch_optional(&mut *self.tx)
+        .fetch_one(&mut *self.tx)
         .await?;
-        let Some(row) = row else { return Ok(None) };
         audit(&mut self.tx, s, None, by, "stakeholder.updated", Some(id.as_str())).await?;
-        stakeholder(row).map(Some)
+        Ok(Some(Saved::Current(stakeholder(row)?)))
     }
 
     /// `false` if there is no such stakeholder; `Conflict` if one has signed off a scope.
@@ -211,13 +249,33 @@ impl CompanyTx {
         system(row).map(Some)
     }
 
+    /// Replaces the system's fields, unless it has moved on from version `expected` or already
+    /// holds them. `None` if there is no such system.
     pub async fn update_system(
         &mut self,
         id: &SystemId,
+        expected: Option<u32>,
         v: &SystemIn,
         by: &Actor,
-    ) -> Result<Option<System>, StoreError> {
+    ) -> Result<Option<Saved<System>>, StoreError> {
         let s = &self.scope;
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {SYSTEM} from systems where tenant_id = $1 and company_id = $2 and system_id = $3 for update"
+        ))
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let current = system(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
         let row = sqlx::query(&format!(
             "update systems set name = $4, kind = $5, description = $6, updated_at = now()
              where tenant_id = $1 and company_id = $2 and system_id = $3 returning {SYSTEM}"
@@ -228,11 +286,10 @@ impl CompanyTx {
         .bind(v.name.as_str())
         .bind(v.kind.as_ref().map(Name::as_str))
         .bind(v.description.as_ref().map(Text::as_str))
-        .fetch_optional(&mut *self.tx)
+        .fetch_one(&mut *self.tx)
         .await?;
-        let Some(row) = row else { return Ok(None) };
         audit(&mut self.tx, s, None, by, "system.updated", Some(id.as_str())).await?;
-        system(row).map(Some)
+        Ok(Some(Saved::Current(system(row)?)))
     }
 
     /// `false` if there is no such system. Access requests naming it keep their record, unlinked.
@@ -415,6 +472,7 @@ fn stakeholder(r: PgRow) -> Result<Stakeholder, StoreError> {
             .transpose()?,
         digest_opt_out_at: r.try_get("digest_opt_out_at")?,
         updated_at: r.try_get("updated_at")?,
+        version: row_version(r.try_get("version")?)?,
     })
 }
 
@@ -425,5 +483,71 @@ fn system(r: PgRow) -> Result<System, StoreError> {
         kind: opt(r.try_get("kind")?, "kind", name)?,
         description: opt(r.try_get("description")?, "description", text)?,
         updated_at: r.try_get("updated_at")?,
+        version: row_version(r.try_get("version")?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stakeholder_holds_a_save_only_when_every_field_matches() {
+        let v = StakeholderIn {
+            name: Name::new("Sam Lee").unwrap(),
+            title: Some(Name::new("VP Engineering").unwrap()),
+            role: StakeholderRole::Sponsor,
+            email: Some(EmailAddress::new("sam@example.com").unwrap()),
+        };
+        let stored = Stakeholder {
+            id: StakeholderId::new("stk_1").unwrap(),
+            name: v.name.clone(),
+            title: v.title.clone(),
+            role: v.role,
+            email: v.email.clone(),
+            digest_opt_out_at: Some(OffsetDateTime::UNIX_EPOCH),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            version: 5,
+        };
+        assert!(stored.holds(&v));
+        let changes: [fn(&mut StakeholderIn); 4] = [
+            |v| v.name = Name::new("Sam Leigh").unwrap(),
+            |v| v.title = None,
+            |v| v.role = StakeholderRole::Champion,
+            |v| v.email = None,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = v.clone();
+            change(&mut other);
+            assert!(!stored.holds(&other), "field {i}");
+        }
+    }
+
+    #[test]
+    fn a_system_holds_a_save_only_when_every_field_matches() {
+        let v = SystemIn {
+            name: Name::new("Snowflake").unwrap(),
+            kind: Some(Name::new("data warehouse").unwrap()),
+            description: Some(Text::new("Sales data").unwrap()),
+        };
+        let stored = System {
+            id: SystemId::new("sys_1").unwrap(),
+            name: v.name.clone(),
+            kind: v.kind.clone(),
+            description: v.description.clone(),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            version: 1,
+        };
+        assert!(stored.holds(&v));
+        let changes: [fn(&mut SystemIn); 3] = [
+            |v| v.name = Name::new("BigQuery").unwrap(),
+            |v| v.kind = None,
+            |v| v.description = None,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = v.clone();
+            change(&mut other);
+            assert!(!stored.holds(&other), "field {i}");
+        }
+    }
 }

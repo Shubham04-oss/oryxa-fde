@@ -20,7 +20,7 @@ describe("time", () => {
   it("says how long a wait has lasted, and on whom when known", () => {
     expect(waitingLabel(6, "Priya Raman")).toBe("Waiting 6 days on Priya Raman")
     expect(waitingLabel(1, "Priya Raman")).toBe("Waiting 1 day on Priya Raman")
-    expect(waitingLabel(0, "Priya Raman")).toBe("Waiting since today on Priya Raman")
+    expect(waitingLabel(0, "Priya Raman")).toBe("Waiting less than a day on Priya Raman")
     expect(waitingLabel(3, null)).toBe("Waiting 3 days")
   })
 

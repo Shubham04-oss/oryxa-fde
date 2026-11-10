@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router"
 import { CompanyDialog, ProjectDialog } from "./company-forms"
 import { ROLE_LABEL } from "./companies-home"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
+import { NotesCard } from "./notes-card"
 import { StakeholdersCard, SystemsCard } from "./records-cards"
 import { MembersCard } from "./team"
 import { Button } from "./ui/button"
@@ -122,6 +123,8 @@ export function CompanyPage({
           </Rows>
         )}
       </Card>
+
+      <NotesCard place={{ company: c.id }} people={c.stakeholders} />
 
       <MembersCard company={c.id} me={me.data?.user.id} manage={manage} />
 

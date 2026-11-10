@@ -2029,6 +2029,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleBody_AccessRequestOut"
+                }
+              }
+            }
           }
         }
       }
@@ -3844,6 +3854,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleBody_CriterionOut"
+                }
+              }
+            }
           }
         }
       },
@@ -4073,6 +4093,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleBody_ScopeItemOut"
+                }
+              }
+            }
           }
         }
       },
@@ -4142,7 +4172,8 @@
         "tags": [
           "lifecycle"
         ],
-        "summary": "Record the customer's sign-off of the current scope version.",
+        "summary": "Record the customer's sign-off of the scope version they read.",
+        "description": "409 is `stale_version` (with the scope as it stands) when the scope has moved on from that\nversion, `rejected_empty_scope`, or `conflict` when this version is already signed.",
         "operationId": "sign_off_scope",
         "parameters": [
           {
@@ -4220,7 +4251,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/SaveConflict_ScopeOut"
                 }
               }
             }
@@ -5393,7 +5424,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/SaveConflict_TaskOut"
                 }
               }
             }
@@ -6850,6 +6881,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleBody_StakeholderOut"
+                }
+              }
+            }
           }
         }
       },
@@ -7103,6 +7144,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleBody_SystemOut"
                 }
               }
             }
@@ -8398,6 +8449,15 @@
               "string",
               "null"
             ]
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -8450,6 +8510,12 @@
               "string",
               "null"
             ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           }
         }
       },
@@ -8887,6 +8953,15 @@
               "null"
             ],
             "description": "e.g. \"%\" or \"s\"."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -8926,6 +9001,12 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           }
         }
       },
@@ -9888,6 +9969,28 @@
           "cancelled"
         ]
       },
+      "SaveConflict_ScopeOut": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/StaleBody_ScopeOut"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        ],
+        "description": "A 409 from a save that also enforces rules of the record: `stale_version` with the record as\nit stands, or a refusal with a code only, e.g. `rejected_blocker_required`."
+      },
+      "SaveConflict_TaskOut": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/StaleBody_TaskOut"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        ],
+        "description": "A 409 from a save that also enforces rules of the record: `stale_version` with the record as\nit stands, or a refusal with a code only, e.g. `rejected_blocker_required`."
+      },
       "ScopeChangeOut": {
         "type": "object",
         "required": [
@@ -9936,6 +10039,15 @@
           },
           "kind": {
             "$ref": "#/components/schemas/ItemKind"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -9960,6 +10072,12 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           }
         }
       },
@@ -10002,7 +10120,7 @@
           "version": {
             "type": "integer",
             "format": "int32",
-            "description": "Bumped by every change to the items or criteria.",
+            "description": "Bumped by every change to the items or criteria (a save that changes nothing is none); send\nit as `version` with a sign-off.",
             "minimum": 0
           }
         }
@@ -10138,6 +10256,15 @@
           "stakeholder": {
             "type": "string",
             "description": "The person at the customer who signed off."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The scope `version` the customer agreed to. If the scope has moved on since, the answer is\n409 `stale_version` with the scope as it stands, and nothing is signed. Left out, the\ncurrent version is signed.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -10335,6 +10462,15 @@
               "null"
             ],
             "description": "Their job at the customer, e.g. \"VP Engineering\"."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -10378,6 +10514,12 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           }
         }
       },
@@ -10392,6 +10534,435 @@
           "security",
           "other"
         ]
+      },
+      "StaleBody_AccessRequestOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "description",
+              "status",
+              "requested_at",
+              "status_changed_at",
+              "days_waiting"
+            ],
+            "properties": {
+              "days_waiting": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Whole days from the request until it was settled, or until now while it is open."
+              },
+              "description": {
+                "type": "string"
+              },
+              "granted_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "owner": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "requested_at": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/components/schemas/AccessState"
+              },
+              "status_changed_at": {
+                "type": "string"
+              },
+              "system": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_CriterionOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "description",
+              "metric",
+              "comparator",
+              "target",
+              "updated_at"
+            ],
+            "properties": {
+              "comparator": {
+                "$ref": "#/components/schemas/TargetComparator"
+              },
+              "description": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "metric": {
+                "type": "string"
+              },
+              "target": {
+                "type": "number",
+                "format": "double"
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_ScopeItemOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "description",
+              "updated_at"
+            ],
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/ItemKind"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_ScopeOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "version",
+              "signed_off",
+              "items",
+              "criteria"
+            ],
+            "properties": {
+              "criteria": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CriterionOut"
+                }
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ScopeItemOut"
+                }
+              },
+              "sign_off": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SignOffOut",
+                    "description": "The latest sign-off, if any."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "signed_off": {
+                "type": "boolean",
+                "description": "Whether the latest sign-off covers the current version."
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the items or criteria (a save that changes nothing is none); send\nit as `version` with a sign-off.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_StakeholderOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "role",
+              "updated_at"
+            ],
+            "properties": {
+              "digest_unsubscribed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When they unsubscribed from the weekly digest, if they did."
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "$ref": "#/components/schemas/StakeholderPart"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_SystemOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "updated_at"
+            ],
+            "properties": {
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
+      },
+      "StaleBody_TaskOut": {
+        "type": "object",
+        "description": "A whole-record save refused because the record has moved on from the `version` it was based\non; nothing was changed. Read `current`, apply the change to it and save with its `version`.",
+        "required": [
+          "error",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "object",
+            "required": [
+              "id",
+              "title",
+              "status",
+              "created_at",
+              "updated_at"
+            ],
+            "properties": {
+              "assignee": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "blocked_by": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The access request it is blocked on."
+              },
+              "blocker": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "due_on": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`YYYY-MM-DD`."
+              },
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/components/schemas/TaskState"
+              },
+              "title": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+                "minimum": 0
+              },
+              "waiting_on": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "waiting_since": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When it started waiting on the customer; set while the status is `waiting_on_customer`."
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "`stale_version`."
+          }
+        }
       },
       "SubjectKind": {
         "type": "string",
@@ -10471,6 +11042,15 @@
           },
           "name": {
             "type": "string"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -10503,6 +11083,12 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           }
         }
       },
@@ -10553,6 +11139,15 @@
           },
           "title": {
             "type": "string"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "On a `PUT`, the `version` of the record this save was based on. If the record has moved on\nsince, the answer is 409 `stale_version` with the record as it stands, and nothing changes.\nLeft out, the save is not checked and the last writer wins. Not allowed on a create.",
+            "minimum": 0
           },
           "waiting_on": {
             "type": [
@@ -10614,6 +11209,12 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every change to the record; send it back as `version` on a `PUT`.",
+            "minimum": 0
           },
           "waiting_on": {
             "type": [

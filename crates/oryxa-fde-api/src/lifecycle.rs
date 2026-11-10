@@ -24,6 +24,7 @@ use time::format_description::well_known::Rfc3339;
 use utoipa::ToSchema;
 
 use crate::authz::project;
+use crate::error::{SaveConflict, StaleBody, saved};
 use crate::projects::{ProjectOut, ProjectStage};
 use crate::records::{name, new, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
@@ -34,6 +35,14 @@ async fn check_assignee(app: &App, who: &Principal, s: &ProjectScope, v: &TaskIn
     match &v.assignee {
         Some(a) if !app.works_on(who, a, s).await? => Err(ApiError::Invalid("assignee")),
         _ => Ok(()),
+    }
+}
+
+/// A create has no version to check against.
+pub(crate) fn unversioned(version: Option<u32>) -> Result<(), ApiError> {
+    match version {
+        Some(_) => Err(ApiError::Invalid("version")),
+        None => Ok(()),
     }
 }
 
@@ -169,6 +178,10 @@ pub struct StageConflictBody {
 pub struct ScopeItemBody {
     pub kind: ItemKind,
     pub description: String,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -177,6 +190,10 @@ pub struct ScopeItemOut {
     pub kind: ItemKind,
     pub description: String,
     pub updated_at: String,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 impl From<ScopeItem> for ScopeItemOut {
@@ -186,6 +203,7 @@ impl From<ScopeItem> for ScopeItemOut {
             kind: i.kind.into(),
             description: i.description.as_str().to_owned(),
             updated_at: ts(i.updated_at),
+            version: i.version,
         }
     }
 }
@@ -200,6 +218,10 @@ pub struct CriterionBody {
     pub target: f64,
     /// e.g. "%" or "s".
     pub unit: Option<String>,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -211,6 +233,10 @@ pub struct CriterionOut {
     pub target: f64,
     pub unit: Option<String>,
     pub updated_at: String,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 impl From<Criterion> for CriterionOut {
@@ -223,6 +249,7 @@ impl From<Criterion> for CriterionOut {
             target: c.target,
             unit: c.unit.map(|u| u.as_str().to_owned()),
             updated_at: ts(c.updated_at),
+            version: c.version,
         }
     }
 }
@@ -233,6 +260,10 @@ pub struct SignOffBody {
     /// The person at the customer who signed off.
     #[schema(value_type = String)]
     pub stakeholder: StakeholderId,
+    /// The scope `version` the customer agreed to. If the scope has moved on since, the answer is
+    /// 409 `stale_version` with the scope as it stands, and nothing is signed. Left out, the
+    /// current version is signed.
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -256,7 +287,8 @@ impl From<SignOff> for SignOffOut {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ScopeOut {
-    /// Bumped by every change to the items or criteria.
+    /// Bumped by every change to the items or criteria (a save that changes nothing is none); send
+    /// it as `version` with a sign-off.
     pub version: u32,
     /// The latest sign-off, if any.
     pub sign_off: Option<SignOffOut>,
@@ -315,6 +347,10 @@ pub struct AccessRequestBody {
     #[schema(value_type = Option<String>)]
     pub owner: Option<StakeholderId>,
     pub status: AccessState,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -329,6 +365,10 @@ pub struct AccessRequestOut {
     pub granted_at: Option<String>,
     /// Whole days from the request until it was settled, or until now while it is open.
     pub days_waiting: i64,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 impl From<AccessRequest> for AccessRequestOut {
@@ -343,6 +383,7 @@ impl From<AccessRequest> for AccessRequestOut {
             status_changed_at: ts(a.status_changed_at),
             granted_at: a.granted_at.map(ts),
             days_waiting: a.days_waiting,
+            version: a.version,
         }
     }
 }
@@ -367,6 +408,10 @@ pub struct TaskBody {
     #[schema(value_type = Option<String>)]
     #[serde(default)]
     pub blocked_by: Option<AccessRequestId>,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -385,6 +430,10 @@ pub struct TaskOut {
     pub blocked_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 pub(crate) const DATE: &[time::format_description::FormatItem<'static>] =
@@ -404,6 +453,7 @@ impl From<Task> for TaskOut {
             blocked_by: t.blocked_by.map(|a| a.to_string()),
             created_at: ts(t.created_at),
             updated_at: ts(t.updated_at),
+            version: t.version,
         }
     }
 }
@@ -591,7 +641,7 @@ pub(crate) async fn add_scope_item(
     Json(body): Json<ScopeItemBody>,
 ) -> Result<(StatusCode, Json<ScopeItemOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("itm", ScopeItemId::new)?;
     let added = tx
         .add_scope_item(&id, &v, &who.actor())
@@ -606,21 +656,25 @@ pub(crate) async fn add_scope_item(
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
         ("item" = String, Path, description = "Scope item id")),
     responses((status = 200, body = ScopeItemOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = StaleBody<ScopeItemOut>)))]
 pub(crate) async fn update_scope_item(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p, id)): Path<(CompanyId, ProjectId, ScopeItemId)>,
     Json(body): Json<ScopeItemBody>,
-) -> Result<Json<ScopeItemOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
+    let expected = body.version;
     let v = body.parse()?;
     let updated = tx
-        .update_scope_item(&id, &v, &who.actor())
+        .update_scope_item(&id, expected, &v, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(
+        StatusCode::OK,
+        updated.map(ScopeItemOut::from, ScopeItemOut::from),
+    ))
 }
 
 #[utoipa::path(delete, operation_id = "remove_scope_item", path = "/v1/companies/{company}/projects/{project}/scope/items/{item}",
@@ -653,7 +707,7 @@ pub(crate) async fn add_criterion(
     Json(body): Json<CriterionBody>,
 ) -> Result<(StatusCode, Json<CriterionOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("crt", CriterionId::new)?;
     let added = tx
         .add_criterion(&id, &v, &who.actor())
@@ -669,21 +723,25 @@ pub(crate) async fn add_criterion(
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
         ("criterion" = String, Path, description = "Success criterion id")),
     responses((status = 200, body = CriterionOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = StaleBody<CriterionOut>)))]
 pub(crate) async fn update_criterion(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p, id)): Path<(CompanyId, ProjectId, CriterionId)>,
     Json(body): Json<CriterionBody>,
-) -> Result<Json<CriterionOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
+    let expected = body.version;
     let v = body.parse()?;
     let updated = tx
-        .update_criterion(&id, &v, &who.actor())
+        .update_criterion(&id, expected, &v, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(
+        StatusCode::OK,
+        updated.map(CriterionOut::from, CriterionOut::from),
+    ))
 }
 
 #[utoipa::path(delete, operation_id = "remove_criterion",
@@ -704,25 +762,28 @@ pub(crate) async fn remove_criterion(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Record the customer's sign-off of the current scope version.
+/// Record the customer's sign-off of the scope version they read.
+///
+/// 409 is `stale_version` (with the scope as it stands) when the scope has moved on from that
+/// version, `rejected_empty_scope`, or `conflict` when this version is already signed.
 #[utoipa::path(post, operation_id = "sign_off_scope", path = "/v1/companies/{company}/projects/{project}/scope/sign-offs",
     tag = "lifecycle", request_body = SignOffBody,
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
     responses((status = 201, body = SignOffOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = SaveConflict<ScopeOut>)))]
 pub(crate) async fn sign_off(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
     Json(body): Json<SignOffBody>,
-) -> Result<(StatusCode, Json<SignOffOut>), ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
     let signed = tx
-        .sign_off(&body.stakeholder, &who.actor())
+        .sign_off(&body.stakeholder, body.version, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(signed.into())))
+    Ok(saved(StatusCode::CREATED, signed.map(SignOffOut::from, ScopeOut::from)))
 }
 
 /// The scope's change log, oldest first.
@@ -770,7 +831,7 @@ pub(crate) async fn add_access_request(
     Json(body): Json<AccessRequestBody>,
 ) -> Result<(StatusCode, Json<AccessRequestOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("acc", AccessRequestId::new)?;
     let added = tx
         .add_access_request(&id, &v, &who.actor())
@@ -787,21 +848,25 @@ pub(crate) async fn add_access_request(
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
         ("access_request" = String, Path, description = "Access request id")),
     responses((status = 200, body = AccessRequestOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = StaleBody<AccessRequestOut>)))]
 pub(crate) async fn update_access_request(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p, id)): Path<(CompanyId, ProjectId, AccessRequestId)>,
     Json(body): Json<AccessRequestBody>,
-) -> Result<Json<AccessRequestOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
+    let expected = body.version;
     let v = body.parse()?;
     let updated = tx
-        .update_access_request(&id, &v, &who.actor())
+        .update_access_request(&id, expected, &v, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(
+        StatusCode::OK,
+        updated.map(AccessRequestOut::from, AccessRequestOut::from),
+    ))
 }
 
 #[utoipa::path(get, operation_id = "list_tasks", path = "/v1/companies/{company}/projects/{project}/tasks", tag = "lifecycle",
@@ -830,7 +895,7 @@ pub(crate) async fn add_task(
     Json(body): Json<TaskBody>,
 ) -> Result<(StatusCode, Json<TaskOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     check_assignee(&app, &who, tx.scope(), &v).await?;
     let id = new("tsk", TaskId::new)?;
     let added = tx.add_task(&id, &v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
@@ -843,19 +908,23 @@ pub(crate) async fn add_task(
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id"),
         ("task" = String, Path, description = "Task id")),
     responses((status = 200, body = TaskOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = SaveConflict<TaskOut>)))]
 pub(crate) async fn update_task(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p, id)): Path<(CompanyId, ProjectId, TaskId)>,
     Json(body): Json<TaskBody>,
-) -> Result<Json<TaskOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
+    let expected = body.version;
     let v = body.parse()?;
     check_assignee(&app, &who, tx.scope(), &v).await?;
-    let updated = tx.update_task(&id, &v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
+    let updated = tx
+        .update_task(&id, expected, &v, &who.actor())
+        .await?
+        .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(StatusCode::OK, updated.map(TaskOut::from, TaskOut::from)))
 }
 
 #[utoipa::path(delete, operation_id = "remove_task", path = "/v1/companies/{company}/projects/{project}/tasks/{task}",

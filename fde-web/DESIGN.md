@@ -64,8 +64,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   or the project's name.
 - **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
   prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder,
-  system, scope, access request and decision forms) is centred on the screen: 560px
-  wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
+  system, scope, access request, decision and note forms) is centred on the screen: 560px
+  wide at most (the note form, made for writing, is 720px), 16px from every edge, scrolling inside
+  itself when it is taller than the screen.
   Both sit on a scrim and close with Escape.
 - **Jump to** is a Base UI dialog: type to filter companies and projects (every word must match the
   company or project name), arrows to move (wrapping), Enter to open, Escape to close.
@@ -130,7 +131,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     come from `actionsOf` (`src/lib/today.ts`), and `TodayRow` draws any of them.
 - **Company.** Profile (summary, industry, region and the FDE's part, with **Edit company**), then
   Stakeholders (with their part) and Systems (with their kind) side by side (stacked below 960px),
-  then Projects (with **New project**), then the Team. Each list has its add button in the card's
+  then Projects (with **New project**), then **Notes** (the company's own, see **Meeting notes**), then the Team. Each list has its add button in the card's
   heading, and a row opens its form. An empty card says what to add and why, so a new company reads
   as a list of next steps: "Add the people you work with at the customer: the sponsor who signs off,
   a champion, someone in IT."
@@ -138,9 +139,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   checklist** (see **The stage checklist** below), the **Board** (the one card that
   takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
   with the others), Scope beside Success
-  criteria, then Access, Agent runs and Decisions, then **Assigned**. Scope and criteria are written
+  criteria, then Access, Agent runs, **Notes** and Decisions, then **Assigned**. Scope and criteria are written
   in place (see **Scope and success criteria** below), Access and Decisions too (see **Access and
-  decisions** below). Access and waiting tasks name people and systems from the company's records. A project with nothing written in it yet
+  decisions** below), and so are Notes (see **Meeting notes** below). Access and waiting tasks name people and systems from the company's records. A project with nothing written in it yet
   starts with a dashed note, **A new project. Start here.**, that says to name the people at the
   customer, agree the scope, and add tasks as the work takes shape.
 - **Writes: companies, projects and what they hold.** One form, `FormDialog` (`form-dialog.tsx`), is
@@ -231,8 +232,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     no request as met ("a project may need no access"), so that button only shows to a view that has
     not caught up. An eval suite on every criterion, and every
     criterion met: **Go to criteria** (the Success criteria card, focused), or **Add criterion** when
-    there are none. A meeting note on the project: nothing to press, and the line says notes are not
-    written in this app yet. A key the page does not know shows the API's label and nothing to press.
+    there are none. A meeting note on the project: **Write a note**, which opens the Notes card's
+    blank note. The line says that a note written on the company does not count: the API meets this item
+    only with a note on the project. A key the page does not know shows the API's label and nothing to press.
   - **When all are met** the card collapses to one quiet line with a green check, "Ready to leave
     Build. Everything it needs is in place." A stage with no items (Deploy, Handoff, Operate today)
     shows nothing. While it is being read, a quiet "Reading what this stage needs…"; if the read
@@ -253,10 +255,15 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   - **Rows** are in the order the FDE chases: denied or revoked first, then open (requested, in
     progress), then granted, the oldest request first in each. A row has what is asked, **Owner:** the
     stakeholder (or "No one at the customer is named to grant it"), the system and the day it was
-    requested, one line for its state (**In progress, waiting 11 days**; **Denied 5 Nov 2026, after 4
-    days**; **Granted 3 Nov 2026, after 3 days**) and, when tasks name it as their blocker, **Blocks 2
+    requested, one line for its state (**In progress, waiting 11 days**, or **waiting less than a day** for a request asked today;
+    **Denied 5 Nov 2026, after 4 days**; **Granted 3 Nov 2026, after 3 days**; **Revoked 9 Nov 2026. It
+    had been granted 3 Nov 2026, after 3 days.** for a grant that was taken back) and, when tasks name it as their blocker, **Blocks 2
     tasks:** with their titles. The days come from the API's `days_waiting` (from the request until it
-    was settled, or until now while it is open), so a settled request's number stops.
+    was settled, or until now while it is open), so a settled request's number stops. For a revoked
+    request the API counts to the grant, not to the revocation, so the line says that the days were the
+    grant's and when it was granted, rather than "revoked after 3 days" for something revoked weeks on.
+    A day count of zero is "less than a day" everywhere (Today, the board and the card), because the
+    API counts whole days and "since today" read oddly beside yesterday's date.
   - **Moves.** The first button is the move most likely wanted, as on Today (**Mark granted** for an
     open request, **Ask again** for a denied or revoked one); the round dots menu holds the rest and
     **Edit request**. A granted request has no button, only the menu (**Mark revoked**, **Ask again**),
@@ -297,6 +304,75 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     the dialog's alert.
   - **Focus.** When a dialog closes, focus goes back to the row that opened it, or to **Request
     access** or **Log a decision**. After a move is confirmed it stays on the row, wherever that now sorts.
+- **Meeting notes.** Where a call becomes a record, and from it commitments. The **Notes** card is on the
+  project page (after Agent runs) and on the company page (after Projects): the same card, with the same
+  form. Anyone who can open the page may read, write, change and remove a note: the API guards all
+  five routes with `work` alone.
+  - **The list** is newest meeting first, as the API sends it: the title, the day it was held ("3 Nov
+    2026"), who was there ("Attended: You and 2 teammates", "With Mara Lindqvist, Ines Moreau") and, under
+    it, the first two lines of the note. The title is a button that opens the whole note in place
+    (`aria-expanded`); **Edit** is at the right. A note is **plain text**: the body is customer content, so it is
+    rendered as text with its lines kept (`whitespace-pre-wrap`), never as HTML or Markdown, and a note
+    that holds `<b>` or `**` shows those characters. Reads fail on their own: the card says "We couldn't read
+    the notes." with **Try again**, and the rest of the page is untouched.
+  - **A dialog, not a page.** The note form is a dialog (720px, the one wide form) because the FDE writes it from the
+    project they are looking at and must come back to the same place: no route to leave and return
+    to, no draft to keep somewhere else. It is the shared `FormDialog`, so it has the saving rules
+    of every other form. The words get the room: a field about 42% of the screen high that can be
+    pulled taller, a counter ("1,204 of 20,000 characters", red over the limit), and the title and the day
+    side by side above it, small. The cursor starts in the words. Who was there sits below: **who from
+    your team** (you, ticked for a new note, and any teammate the note already names) and **who from the
+    customer** (the company's stakeholders, each a pill with a checkbox).
+  - **What the API holds.** `title` (a name: one line, 1 to 200), `held_on` (a day), `body` (1 to
+    20,000 characters once trimmed, newline and tab allowed, no other control character), `stakeholders` (the
+    company's, up to 50) and `attendees` (users of the workspace who work on the company or project, up to
+    50). A `PUT` replaces the whole note, so an edit sends every field: what the form changed, compared with
+    the copy taken when it opened, is the form's, and every other field is the note as the page has it
+    now, so a teammate's change to another field is not undone. A save that changes nothing sends nothing.
+    A refusal names a field (`invalid_title`, `invalid_held_on`, `invalid_body`, `invalid_stakeholders`,
+    `invalid_attendees`): that field is marked, takes focus and says so.
+  - **People.** Attendees are user ids and the API has no names yet (#110), so a teammate is "A teammate"
+    with the end of their id, as on the board and the Team card, and you are "You". A teammate who is on a
+    note can be unticked and ticked again, and is kept on a save; teammates cannot be added until there are
+    names to choose from.
+  - **Words are never lost.** Nothing shows as saved until the API confirms. A refusal or a network failure keeps
+    the dialog open with every word in it and says what happened. Cancel, Escape and a click outside ask
+    first when there is something to lose ("Leave without saving this note? What you wrote is lost."): the
+    safe answer, **Keep writing**, has focus, so pressing Escape twice does not throw a long note away. A
+    note nobody has written in closes at once. Leaving the page with words in the note (the back button, a
+    link, Jump to, or the redirect to sign-in when the session has ended) asks the same question first, and
+    closing or reloading the tab gets the browser's own. Removing asks first, in the dialog. The counter is
+    said to a screen reader once typing pauses, not on every key.
+  - **From a line to a task or a decision.** While writing, **Make a task** and **Log a decision** sit under the
+    words; while reading an open note they sit under it. Each opens the board's task form or the
+    Decisions card's decision form (the same forms, saving and refusals), with the title started from
+    a line. **Which line:** what is selected in the note, or else (while writing) the line the cursor is on,
+    or else nothing, for the FDE to type. Why not a button on every line, or a parser for "- [ ]": a
+    selection and a caret work with a mouse, a finger and a keyboard (shift and arrows in the field),
+    need no widget on a long note, and the fallback is simply typing a title in a form that is open
+    anyway. The title is one line: lines are joined, a list marker or checkbox is dropped, and it is cut at the
+    API's 200 characters. A selection in a note being read is remembered when it is made, because a tap
+    on a button can empty it first; it is used once. The task or decision form opens
+    **over** the note, inside its dialog (so Escape closes the form only), and the note stays as it was,
+    with everything typed in it. When it saves, the dialog says "Added the task “...” to the board." or
+    "Logged the decision “...”." where the FDE is, and focus goes back to the button they pressed. The
+    task is on the board behind it at once.
+  - **No link from a note to what came of it.** The API has no field that ties a task to a note, and the page does not
+    fake one. A decision could be tied through a discussion about the note (`subject_kind` allows
+    `meeting_note`, and a project's thread is promoted once to a decision), but that is two calls with
+    no transaction between them, an opening comment the FDE did not write, and a thread left behind if the
+    second fails; so it is an API gap (a decision logged with its source note), noted on the issue.
+    A company note has neither button: a task and a decision belong to a project, and a company has several.
+  - **What counts for the checklist.** The Discover item "A meeting note on the project" is met by a note
+    **on the project**. A note on the company does not count (`discovery_notes` in the store checks the
+    project's rows only). The company's Notes card says so under its heading; the checklist's line says so
+    when the item is open; the project's Notes card lists only the project's. The checklist is read
+    again after a note is added to a project or removed from it (not after a change to one, which cannot
+    change the count). Removing a project's only note, while it is at Discover, says in the question that
+    the checklist will ask for a note again.
+  - **Focus.** When a dialog closes, focus goes back to what opened it: the row's **Edit**, the card's **Write a
+    note**, or the checklist's button; if that has gone (a removed note, a checklist item now met), to **Write a
+    note**.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -399,6 +475,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
+- Notes are `api.notes`, `addNote`, `updateNote` and `removeNote`, each taking a place (`{ company }` or
+  `{ company, project }`) and choosing the company's or the project's routes (`queries.notes`, under the
+  project's own key). A note's body is never rendered as markup anywhere.
 - Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
   `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
   `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
@@ -420,7 +499,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   invented sample data only. Setting `globalThis.__fdeMockFailWrites = true` there (in the console,
   or a test) makes every write answer 503, so the failed-save states can be seen; the switch lives
   in the mock and ships nowhere. The mock answers every write route of this page with the API's
-  validation and permissions (an access request starts requested or in progress, `blocked_by` is one of
+  validation and permissions (meeting notes at a company and a project: the fields in the API's order, a `PUT`
+  that replaces the note, attendees who work there and stakeholders who are at the company, 404 for a note that is not
+  there; an access request starts requested or in progress, `blocked_by` is one of
   the project's, the decisions log takes no edit, and a decision's day is parsed as RFC 3339) (the scope's too: the version bump on every save, one sign-off per
   version, no sign-off of an empty scope) (a lead or admin manages, any member works, anything else is a 403):
   The mock answers the stage checklist and the stage move with the API's rules

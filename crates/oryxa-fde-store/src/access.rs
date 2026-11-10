@@ -8,7 +8,9 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::OffsetDateTime;
 
-use crate::{Actor, ProjectTx, StoreError, Text, audit, enqueue, id, text, unique_violation};
+use crate::{
+    Actor, ProjectTx, Saved, StoreError, Text, audit, enqueue, id, row_version, stale, text, unique_violation,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessRequest {
@@ -24,6 +26,15 @@ pub struct AccessRequest {
     /// Whole days from the request until it was granted, refused or revoked, or until now while
     /// it is still open.
     pub days_waiting: i64,
+    /// Bumped by every change to the request; a save names the version it read.
+    pub version: u32,
+}
+
+impl AccessRequest {
+    /// Whether the request already holds these values, so saving them would change nothing.
+    fn holds(&self, v: &AccessRequestIn) -> bool {
+        self.description == v.description && self.system == v.system && self.owner == v.owner && self.status == v.status
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +73,7 @@ pub(crate) const COLUMNS: &str =
     "access_request_id, description, system_id, owner_id, status, requested_at, status_changed_at,
     granted_at, floor(extract(epoch from (
         case when status in ('requested', 'in_progress') then now() else coalesce(granted_at, status_changed_at) end
-        - requested_at)) / 86400)::bigint as days_waiting";
+        - requested_at)) / 86400)::bigint as days_waiting, version";
 
 impl ProjectTx {
     pub async fn access_requests(&mut self) -> Result<Vec<AccessRequest>, StoreError> {
@@ -135,28 +146,38 @@ impl ProjectTx {
         access_request(row).map(Some)
     }
 
-    /// Replaces the request's fields. A status change stamps the time, sets or clears
-    /// `granted_at` and queues `access-request.status-changed`. `None` if there is no such request.
+    /// Replaces the request's fields, unless it has moved on from version `expected` or already
+    /// holds them. A status change stamps the time, sets or clears `granted_at` and queues
+    /// `access-request.status-changed`. `None` if there is no such request.
     pub async fn update_access_request(
         &mut self,
         id: &AccessRequestId,
+        expected: Option<u32>,
         v: &AccessRequestIn,
         by: &Actor,
-    ) -> Result<Option<AccessRequest>, StoreError> {
+    ) -> Result<Option<Saved<AccessRequest>>, StoreError> {
         let (t, c, p) = self.keys();
-        let from: Option<String> = sqlx::query_scalar(
-            "select status from access_requests
-             where tenant_id = $1 and company_id = $2 and project_id = $3 and access_request_id = $4 for update",
-        )
+        // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
+        let row = sqlx::query(&format!(
+            "select {COLUMNS} from access_requests
+             where tenant_id = $1 and company_id = $2 and project_id = $3 and access_request_id = $4 for update"
+        ))
         .bind(&t)
         .bind(&c)
         .bind(&p)
         .bind(id.as_str())
         .fetch_optional(&mut *self.tx)
         .await?;
-        let Some(from) = from else { return Ok(None) };
-        let from = parse(&from)?;
+        let Some(row) = row else { return Ok(None) };
+        let current = access_request(row)?;
+        if stale(expected, current.version) {
+            return Ok(Some(Saved::Stale(current)));
+        }
         self.check_refs(v).await?;
+        if current.holds(v) {
+            return Ok(Some(Saved::Current(current)));
+        }
+        let from = current.status;
         let changed = from != v.status;
         let row = sqlx::query(&format!(
             "update access_requests set description = $5, system_id = $6, owner_id = $7, status = $8,
@@ -195,7 +216,7 @@ impl ProjectTx {
             let event = AccessRequestStatusChanged::new(&s, id.clone(), from, v.status);
             enqueue(&mut self.tx, &s.company, by, &event).await?;
         }
-        access_request(row).map(Some)
+        Ok(Some(Saved::Current(access_request(row)?)))
     }
 
     /// The system and owner must belong to this company.
@@ -250,5 +271,46 @@ pub(crate) fn access_request(r: PgRow) -> Result<AccessRequest, StoreError> {
         status_changed_at: r.try_get("status_changed_at")?,
         granted_at: r.try_get("granted_at")?,
         days_waiting: r.try_get("days_waiting")?,
+        version: row_version(r.try_get("version")?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_holds_a_save_only_when_every_field_matches() {
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let v = AccessRequestIn {
+            description: Text::new("Read access to the warehouse").unwrap(),
+            system: Some(SystemId::new("sys_1").unwrap()),
+            owner: Some(StakeholderId::new("stk_1").unwrap()),
+            status: AccessStatus::InProgress,
+        };
+        let stored = AccessRequest {
+            id: AccessRequestId::new("acc_1").unwrap(),
+            description: v.description.clone(),
+            system: v.system.clone(),
+            owner: v.owner.clone(),
+            status: v.status,
+            requested_at: at,
+            status_changed_at: at,
+            granted_at: None,
+            days_waiting: 4,
+            version: 2,
+        };
+        assert!(stored.holds(&v));
+        let changes: [fn(&mut AccessRequestIn); 4] = [
+            |v| v.description = Text::new("Write access").unwrap(),
+            |v| v.system = None,
+            |v| v.owner = None,
+            |v| v.status = AccessStatus::Granted,
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut other = v.clone();
+            change(&mut other);
+            assert!(!stored.holds(&other), "field {i}");
+        }
+    }
 }

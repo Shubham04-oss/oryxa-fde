@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use oryxa_fde_core::{CompanyId, ProjectId, SecurityAnswerId, StakeholderId, SystemId};
 use oryxa_fde_store::{
     CompanyTx, EmailAddress, Name, OrgTx, SecurityAnswer, SecurityAnswerIn, Stakeholder, StakeholderIn,
@@ -16,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::authz::{company, workspace};
-use crate::lifecycle::project_tx;
+use crate::error::{StaleBody, saved};
+use crate::lifecycle::{project_tx, unversioned};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
 pub(crate) fn name(raw: String, what: &'static str) -> Result<Name, ApiError> {
@@ -93,6 +95,10 @@ pub struct StakeholderBody {
     /// Where a sponsor's weekly digest goes. Replacing it with another address subscribes that
     /// address again.
     pub email: Option<String>,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 impl StakeholderBody {
@@ -119,6 +125,10 @@ pub struct StakeholderOut {
     /// When they unsubscribed from the weekly digest, if they did.
     pub digest_unsubscribed_at: Option<String>,
     pub updated_at: String,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 impl From<Stakeholder> for StakeholderOut {
@@ -131,6 +141,7 @@ impl From<Stakeholder> for StakeholderOut {
             email: s.email.map(|e| e.as_str().to_owned()),
             digest_unsubscribed_at: s.digest_opt_out_at.map(ts),
             updated_at: ts(s.updated_at),
+            version: s.version,
         }
     }
 }
@@ -142,6 +153,10 @@ pub struct SystemBody {
     /// What sort of system, e.g. "CRM" or "data warehouse".
     pub kind: Option<String>,
     pub description: Option<String>,
+    /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
+    /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
+    /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
+    pub version: Option<u32>,
 }
 
 impl SystemBody {
@@ -161,6 +176,10 @@ pub struct SystemOut {
     pub kind: Option<String>,
     pub description: Option<String>,
     pub updated_at: String,
+    /// Bumped by every change to the record; send it back as `version` on a `PUT`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub version: u32,
 }
 
 impl From<System> for SystemOut {
@@ -171,6 +190,7 @@ impl From<System> for SystemOut {
             kind: s.kind.map(|k| k.as_str().to_owned()),
             description: s.description.map(|d| d.as_str().to_owned()),
             updated_at: ts(s.updated_at),
+            version: s.version,
         }
     }
 }
@@ -236,7 +256,7 @@ pub(crate) async fn add_stakeholder(
     Json(body): Json<StakeholderBody>,
 ) -> Result<(StatusCode, Json<StakeholderOut>), ApiError> {
     let mut tx = company_tx(&app, &who, c).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("stk", StakeholderId::new)?;
     let added = tx
         .add_stakeholder(&id, &v, &who.actor())
@@ -250,21 +270,25 @@ pub(crate) async fn add_stakeholder(
     tag = "records", request_body = StakeholderBody,
     params(("company" = String, Path, description = "Company id"), ("stakeholder" = String, Path, description = "Stakeholder id")),
     responses((status = 200, body = StakeholderOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = StaleBody<StakeholderOut>)))]
 pub(crate) async fn update_stakeholder(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, id)): Path<(CompanyId, StakeholderId)>,
     Json(body): Json<StakeholderBody>,
-) -> Result<Json<StakeholderOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = company_tx(&app, &who, c).await?;
+    let expected = body.version;
     let v = body.parse()?;
     let updated = tx
-        .update_stakeholder(&id, &v, &who.actor())
+        .update_stakeholder(&id, expected, &v, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(
+        StatusCode::OK,
+        updated.map(StakeholderOut::from, StakeholderOut::from),
+    ))
 }
 
 /// Remove a stakeholder. Refused (409) once they have signed off a scope.
@@ -312,7 +336,7 @@ pub(crate) async fn add_system(
     Json(body): Json<SystemBody>,
 ) -> Result<(StatusCode, Json<SystemOut>), ApiError> {
     let mut tx = company_tx(&app, &who, c).await?;
-    let v = body.parse()?;
+    let v = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("sys", SystemId::new)?;
     let added = tx.add_system(&id, &v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
@@ -323,21 +347,22 @@ pub(crate) async fn add_system(
     request_body = SystemBody,
     params(("company" = String, Path, description = "Company id"), ("system" = String, Path, description = "System id")),
     responses((status = 200, body = SystemOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = StaleBody<SystemOut>)))]
 pub(crate) async fn update_system(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, id)): Path<(CompanyId, SystemId)>,
     Json(body): Json<SystemBody>,
-) -> Result<Json<SystemOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = company_tx(&app, &who, c).await?;
+    let expected = body.version;
     let v = body.parse()?;
     let updated = tx
-        .update_system(&id, &v, &who.actor())
+        .update_system(&id, expected, &v, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
-    Ok(Json(updated.into()))
+    Ok(saved(StatusCode::OK, updated.map(SystemOut::from, SystemOut::from)))
 }
 
 #[utoipa::path(delete, operation_id = "remove_system", path = "/v1/companies/{company}/systems/{system}", tag = "records",

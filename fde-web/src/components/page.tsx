@@ -93,9 +93,20 @@ export function Row({ children }: { children: ReactNode }) {
 }
 
 /** Text a person reads second: metadata and hints. */
-export function Quiet({ children, className }: { children: ReactNode; className?: string }) {
+export function Quiet({
+  children,
+  className,
+  id,
+}: {
+  children: ReactNode
+  className?: string
+  /** For a control that it describes. */
+  id?: string
+}) {
   return (
-    <p className={cn("text-[11px] leading-normal text-muted-foreground", className)}>{children}</p>
+    <p id={id} className={cn("text-[11px] leading-normal text-muted-foreground", className)}>
+      {children}
+    </p>
   )
 }
 

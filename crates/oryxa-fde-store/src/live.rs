@@ -633,7 +633,7 @@ async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transact
 
     let mut tx = store.project(&p).await.unwrap();
     assert!(matches!(
-        tx.sign_off(&sam, &by).await,
+        tx.sign_off(&sam, None, &by).await,
         Err(StoreError::Rejected("empty_scope"))
     ));
     drop(tx);
@@ -656,19 +656,21 @@ async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transact
     tx.add_criterion(&crit, &c, &by).await.unwrap().unwrap();
     let unknown = oryxa_fde_core::StakeholderId::new("stk_nobody").unwrap();
     assert!(matches!(
-        tx.sign_off(&unknown, &by).await,
+        tx.sign_off(&unknown, None, &by).await,
         Err(StoreError::Missing("stakeholder"))
     ));
     tx.commit().await.unwrap();
 
     // Rolled back: no sign-off and no event.
     let mut tx = store.project(&p).await.unwrap();
-    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    tx.sign_off(&sam, None, &by).await.unwrap().unwrap();
     drop(tx);
     assert!(payloads(&store, &t, signed).await.is_empty());
 
     let mut tx = store.project(&p).await.unwrap();
-    let s = tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    let Saved::Current(s) = tx.sign_off(&sam, None, &by).await.unwrap().unwrap() else {
+        panic!("not checked against a version, so never stale")
+    };
     assert_eq!((s.version, &s.stakeholder), (2, &sam));
     tx.commit().await.unwrap();
     let events = payloads(&store, &t, signed).await;
@@ -677,7 +679,7 @@ async fn sign_off_pins_a_scope_version_and_writes_its_event_in_the_same_transact
 
     // The same version cannot be signed twice; a change makes the sign-off stale.
     let mut tx = store.project(&p).await.unwrap();
-    assert!(matches!(tx.sign_off(&sam, &by).await, Err(StoreError::Conflict)));
+    assert!(matches!(tx.sign_off(&sam, None, &by).await, Err(StoreError::Conflict)));
     drop(tx);
     let mut tx = store.project(&p).await.unwrap();
     tx.remove_criterion(&crit, &by).await.unwrap();
@@ -788,16 +790,21 @@ async fn access_status_changes_write_their_event_in_the_same_transaction() {
     .unwrap();
     v.status = AccessStatus::Granted;
     let mut tx = store.project(&p).await.unwrap();
-    tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    tx.update_access_request(&id, None, &v, &by).await.unwrap().unwrap();
     drop(tx);
     assert!(payloads(&store, &t, changed).await.is_empty());
 
     let mut tx = store.project(&p).await.unwrap();
-    let r = tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    let r = tx
+        .update_access_request(&id, None, &v, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
     assert_eq!((r.status, r.days_waiting), (AccessStatus::Granted, 3));
     assert!(r.granted_at.is_some());
     // Same status again: no new event.
-    tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    tx.update_access_request(&id, None, &v, &by).await.unwrap().unwrap();
     tx.commit().await.unwrap();
     let events = payloads(&store, &t, changed).await;
     assert_eq!(events.len(), 1);
@@ -813,7 +820,12 @@ async fn access_status_changes_write_their_event_in_the_same_transaction() {
     // Asked for again: waiting restarts counting from the original request.
     v.status = AccessStatus::InProgress;
     let mut tx = store.project(&p).await.unwrap();
-    let r = tx.update_access_request(&id, &v, &by).await.unwrap().unwrap();
+    let r = tx
+        .update_access_request(&id, None, &v, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
     assert_eq!((r.granted_at, r.days_waiting), (None, 3));
     tx.commit().await.unwrap();
     assert_eq!(payloads(&store, &t, changed).await.len(), 2);
@@ -845,7 +857,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
             role: StakeholderRole::Sponsor,
             email: Some(EmailAddress::new("sam@acme.example").unwrap()),
         };
-        tx.update_stakeholder(&stakeholder, &with_email, &by)
+        tx.update_stakeholder(&stakeholder, None, &with_email, &by)
             .await
             .unwrap()
             .unwrap();
@@ -875,7 +887,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
         };
         let criterion = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
         tx.add_criterion(&criterion, &crit, &by).await.unwrap().unwrap();
-        tx.sign_off(&stakeholder, &by).await.unwrap().unwrap();
+        tx.sign_off(&stakeholder, None, &by).await.unwrap().unwrap();
         // A share link a guest redeemed, the project's sponsor, and the week's digest claimed for them.
         let link = oryxa_fde_core::ShareLinkId::new(new_id("shr")).unwrap();
         tx.create_share_link(&link, &"ab".repeat(32), 7, &by)
@@ -1398,16 +1410,16 @@ async fn a_task_records_since_when_it_waits_on_the_customer() {
 
     v.status = TaskStatus::WaitingOnCustomer;
     v.waiting_on = Some(sam.clone());
-    let waiting = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    let waiting = tx.update_task(&id, None, &v, &by).await.unwrap().unwrap().record();
     let since = waiting.waiting_since.expect("stamped when it starts waiting");
     assert_eq!(waiting.waiting_on.as_ref(), Some(&sam));
     // Still waiting: the start stays put.
     v.title = Name::new("Get the sample data").unwrap();
-    let still = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    let still = tx.update_task(&id, None, &v, &by).await.unwrap().unwrap().record();
     assert_eq!(still.waiting_since, Some(since));
     // No longer waiting: cleared.
     v.status = TaskStatus::InProgress;
-    let moving = tx.update_task(&id, &v, &by).await.unwrap().unwrap();
+    let moving = tx.update_task(&id, None, &v, &by).await.unwrap().unwrap().record();
     assert_eq!(moving.waiting_since, None);
     tx.commit().await.unwrap();
 
@@ -1418,7 +1430,7 @@ async fn a_task_records_since_when_it_waits_on_the_customer() {
     v.waiting_on = Some(theirs);
     let mut tx = store.project(&p).await.unwrap();
     assert!(matches!(
-        tx.update_task(&id, &v, &by).await,
+        tx.update_task(&id, None, &v, &by).await,
         Err(StoreError::Missing("waiting_on"))
     ));
 }
@@ -3469,7 +3481,7 @@ async fn each_stage_checklist_item_is_worked_out_from_the_records_and_an_open_on
         .await
         .unwrap()
         .unwrap();
-    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    tx.sign_off(&sam, None, &by).await.unwrap().unwrap();
     tx.commit().await.unwrap();
     assert!(open_checks(&store, &p).await.1.is_empty());
     // A change after the sign-off opens it again until the new version is signed.
@@ -3485,7 +3497,7 @@ async fn each_stage_checklist_item_is_worked_out_from_the_records_and_an_open_on
     tx.commit().await.unwrap();
     assert_eq!(open_checks(&store, &p).await.1, ["scope_signed_off"]);
     let mut tx = store.project(&p).await.unwrap();
-    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    tx.sign_off(&sam, None, &by).await.unwrap().unwrap();
     tx.commit().await.unwrap();
     assert_eq!(step(Stage::Access, None).await.unwrap(), Stage::Access);
 
@@ -3504,7 +3516,10 @@ async fn each_stage_checklist_item_is_worked_out_from_the_records_and_an_open_on
     assert_eq!(open_checks(&store, &p).await.1, ["access_granted"]);
     req.status = AccessStatus::Granted;
     let mut tx = store.project(&p).await.unwrap();
-    tx.update_access_request(&token, &req, &by).await.unwrap().unwrap();
+    tx.update_access_request(&token, None, &req, &by)
+        .await
+        .unwrap()
+        .unwrap();
     req.status = AccessStatus::InProgress;
     tx.add_access_request(&AccessRequestId::new(new_id("acc")).unwrap(), &req, &by)
         .await
@@ -3626,4 +3641,371 @@ async fn a_stage_checklist_reads_only_its_own_company_and_project() {
     let mut tx = store.project(&mismatched).await.unwrap();
     assert!(tx.stage_checklist().await.unwrap().is_none());
     assert!(tx.change_stage(Stage::Scope, None, &by).await.unwrap().is_none());
+}
+
+/// How many audit rows of `action` name `target`.
+async fn audited(action: &str, target: &str) -> i64 {
+    sqlx::query_scalar("select count(*) from audit_log where action = $1 and target = $2")
+        .bind(action)
+        .bind(target)
+        .fetch_one(&admin().await)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_save_based_on_an_old_version_changes_nothing_and_an_identical_one_is_no_change() {
+    use oryxa_fde_core::{AccessRequestId, SystemId, TaskId};
+    use oryxa_fde_events::AccessStatus;
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let by = actor("alice");
+
+    // A task.
+    let id = TaskId::new(new_id("tsk")).unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    let added = tx
+        .add_task(&id, &task_in("Index tickets", TaskStatus::Todo), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(added.version, 1);
+    let mine = task_in("Index all tickets", TaskStatus::InProgress);
+    let saved = tx.update_task(&id, Some(1), &mine, &by).await.unwrap().unwrap();
+    let Saved::Current(saved) = saved else {
+        panic!("based on the current version")
+    };
+    assert_eq!((saved.version, saved.title.as_str()), (2, "Index all tickets"));
+    // A save based on version 1 is refused with the task as it stands.
+    let theirs = task_in("Index some tickets", TaskStatus::Done);
+    assert_eq!(
+        tx.update_task(&id, Some(1), &theirs, &by).await.unwrap(),
+        Some(Saved::Stale(saved.clone()))
+    );
+    // The same values again change nothing: not the version, not the stamps, no audit row.
+    for expected in [Some(2), None] {
+        assert_eq!(
+            tx.update_task(&id, expected, &mine, &by).await.unwrap(),
+            Some(Saved::Current(saved.clone()))
+        );
+    }
+    // No version: the last writer wins, as before.
+    let last = tx.update_task(&id, None, &theirs, &by).await.unwrap().unwrap().record();
+    assert_eq!((last.version, last.status), (3, TaskStatus::Done));
+    let ghost = TaskId::new(new_id("tsk")).unwrap();
+    assert_eq!(tx.update_task(&ghost, Some(1), &mine, &by).await.unwrap(), None);
+    tx.commit().await.unwrap();
+    assert_eq!(audited("task.updated", id.as_str()).await, 2);
+    let mut tx = store.project(&p).await.unwrap();
+    assert_eq!(
+        tx.tasks().await.unwrap(),
+        std::slice::from_ref(&last),
+        "the refused saves left no trace"
+    );
+
+    // An access request: an identical save queues no event and keeps the version.
+    let acc = AccessRequestId::new(new_id("acc")).unwrap();
+    let mut req = AccessRequestIn {
+        description: Text::new("Read-only API token").unwrap(),
+        system: None,
+        owner: None,
+        status: AccessStatus::Requested,
+    };
+    assert_eq!(
+        tx.add_access_request(&acc, &req, &by).await.unwrap().unwrap().version,
+        1
+    );
+    req.status = AccessStatus::Granted;
+    let granted = tx
+        .update_access_request(&acc, Some(1), &req, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    let Saved::Current(granted) = granted else {
+        panic!("based on the current version")
+    };
+    assert_eq!(granted.version, 2);
+    assert_eq!(
+        tx.update_access_request(&acc, Some(2), &req, &by).await.unwrap(),
+        Some(Saved::Current(granted.clone()))
+    );
+    req.status = AccessStatus::Revoked;
+    assert_eq!(
+        tx.update_access_request(&acc, Some(1), &req, &by).await.unwrap(),
+        Some(Saved::Stale(granted.clone()))
+    );
+
+    // Writes outside a save bump the version too: the engine unblocking a task.
+    let mut blocked = task_in("Load the tickets", TaskStatus::Blocked);
+    blocked.blocked_by = Some(acc.clone());
+    let waits = TaskId::new(new_id("tsk")).unwrap();
+    tx.add_task(&waits, &blocked, &by).await.unwrap().unwrap();
+    assert_eq!(
+        tx.unblock_tasks_blocked_by(&acc, &by).await.unwrap(),
+        std::slice::from_ref(&waits)
+    );
+    let unblocked = tx.tasks().await.unwrap().into_iter().find(|t| t.id == waits).unwrap();
+    assert_eq!((unblocked.status, unblocked.version), (TaskStatus::Todo, 2));
+    assert!(matches!(
+        tx.update_task(&waits, Some(1), &blocked, &by).await.unwrap(),
+        Some(Saved::Stale(_))
+    ));
+    tx.commit().await.unwrap();
+
+    // A stakeholder and a system, on the company.
+    let sam = add_stakeholder(&store, &p.company).await;
+    let mut tx = store.company(&p.company).await.unwrap();
+    let mut person = StakeholderIn {
+        name: Name::new("Sam Sponsor").unwrap(),
+        title: Some(Name::new("VP Engineering").unwrap()),
+        role: StakeholderRole::Sponsor,
+        email: None,
+    };
+    let same = tx
+        .update_stakeholder(&sam, Some(1), &person, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&same, Saved::Current(s) if s.version == 1),
+        "identical: {same:?}"
+    );
+    person.title = None;
+    let moved = tx
+        .update_stakeholder(&sam, Some(1), &person, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(moved.version, 2);
+    assert_eq!(
+        tx.update_stakeholder(&sam, Some(1), &person, &by).await.unwrap(),
+        Some(Saved::Stale(moved))
+    );
+    let sys = SystemId::new(new_id("sys")).unwrap();
+    let mut system = SystemIn {
+        name: Name::new("Zendesk").unwrap(),
+        kind: None,
+        description: None,
+    };
+    tx.add_system(&sys, &system, &by).await.unwrap().unwrap();
+    system.kind = Some(Name::new("Ticketing").unwrap());
+    let renamed = tx
+        .update_system(&sys, Some(1), &system, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(renamed.version, 2);
+    assert_eq!(
+        tx.update_system(&sys, Some(1), &system, &by).await.unwrap(),
+        Some(Saved::Stale(renamed.clone()))
+    );
+    assert_eq!(
+        tx.update_system(&sys, Some(2), &system, &by).await.unwrap(),
+        Some(Saved::Current(renamed))
+    );
+    tx.commit().await.unwrap();
+
+    // Removing a system unlinks the requests naming it, which is a change to each of them.
+    let mut tx = store.project(&p).await.unwrap();
+    req.system = Some(sys.clone());
+    let linked = tx
+        .update_access_request(&acc, Some(2), &req, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(linked.version, 3);
+    tx.commit().await.unwrap();
+    let mut tx = store.company(&p.company).await.unwrap();
+    assert!(tx.remove_system(&sys, &by).await.unwrap());
+    tx.commit().await.unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    let unlinked = tx.access_requests().await.unwrap().remove(0);
+    assert_eq!((unlinked.system, unlinked.version), (None, 4));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn an_identical_scope_save_keeps_the_sign_off_and_a_stale_sign_off_signs_nothing() {
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let sam = add_stakeholder(&store, &p.company).await;
+    let by = actor("alice");
+    let mut tx = store.project(&p).await.unwrap();
+    let item = ScopeItemId::new(new_id("itm")).unwrap();
+    let mut v = ScopeItemIn {
+        kind: ScopeKind::In,
+        description: Text::new("Answer tier-1 support tickets").unwrap(),
+    };
+    tx.add_scope_item(&item, &v, &by).await.unwrap().unwrap();
+    let crit = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
+    let c = CriterionIn {
+        description: Text::new("Answers are correct").unwrap(),
+        metric: Name::new("accuracy").unwrap(),
+        comparator: Comparator::AtLeast,
+        target: 90.0,
+        unit: Some(Name::new("%").unwrap()),
+    };
+    tx.add_criterion(&crit, &c, &by).await.unwrap().unwrap();
+    // The scope is at version 2 now; a sign-off of version 1 is refused with the scope as it stands.
+    let scope = tx.scope_of_work().await.unwrap().unwrap();
+    assert_eq!(scope.version, 2);
+    assert_eq!(
+        tx.sign_off(&sam, Some(1), &by).await.unwrap(),
+        Some(Saved::Stale(scope.clone()))
+    );
+    assert!(matches!(
+        tx.sign_off(&sam, Some(2), &by).await.unwrap(),
+        Some(Saved::Current(SignOff { version: 2, .. }))
+    ));
+    // Saving the item and the criterion as they are changes nothing, so the sign-off stands.
+    let same = tx.update_scope_item(&item, Some(1), &v, &by).await.unwrap();
+    assert_eq!(same, Some(Saved::Current(scope.items[0].clone())));
+    let same = tx.update_criterion(&crit, Some(1), &c, &by).await.unwrap();
+    assert_eq!(same, Some(Saved::Current(scope.criteria[0].clone())));
+    let now = tx.scope_of_work().await.unwrap().unwrap();
+    assert_eq!((now.version, now.sign_off.map(|s| s.version)), (2, Some(2)));
+    assert_eq!(tx.scope_changes().await.unwrap().len(), 3, "no change was logged");
+    // A real change moves the item and the scope on; a save from before it is refused.
+    v.description = Text::new("Answer every support ticket").unwrap();
+    let changed = tx
+        .update_scope_item(&item, Some(1), &v, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(changed.version, 2);
+    assert_eq!(
+        tx.update_scope_item(&item, Some(1), &v, &by).await.unwrap(),
+        Some(Saved::Stale(changed))
+    );
+    let mut stale_c = c.clone();
+    stale_c.target = 95.0;
+    let moved = tx
+        .update_criterion(&crit, Some(1), &stale_c, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(moved.version, 2);
+    assert!(matches!(
+        tx.update_criterion(&crit, Some(1), &c, &by).await.unwrap(),
+        Some(Saved::Stale(_))
+    ));
+    assert_eq!(tx.scope_of_work().await.unwrap().unwrap().version, 4);
+    tx.commit().await.unwrap();
+    assert_eq!(payloads(&store, &t, "fde.scope.signed-off.v1").await.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn concurrent_saves_of_one_version_let_exactly_one_through() {
+    use oryxa_fde_core::TaskId;
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let id = TaskId::new(new_id("tsk")).unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    tx.add_task(&id, &task_in("Index tickets", TaskStatus::Todo), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    // Every save read version 1 and saves something different; each commits on its own.
+    let saves: Vec<_> = (0..6)
+        .map(|i| {
+            let (store, p, id) = (store.clone(), p.clone(), id.clone());
+            tokio::spawn(async move {
+                let mut tx = store.project(&p).await.unwrap();
+                let v = task_in(&format!("Index tickets, take {i}"), TaskStatus::InProgress);
+                let saved = tx
+                    .update_task(&id, Some(1), &v, &actor("alice"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                tx.commit().await.unwrap();
+                saved
+            })
+        })
+        .collect();
+    let mut won = Vec::new();
+    let mut refused = Vec::new();
+    for s in saves {
+        match s.await.unwrap() {
+            Saved::Current(t) => won.push(t),
+            Saved::Stale(t) => refused.push(t),
+        }
+    }
+    assert_eq!((won.len(), refused.len()), (1, 5), "one save of version 1 wins");
+    assert_eq!(won[0].version, 2);
+    assert!(refused.iter().all(|t| *t == won[0]), "the rest see the winner's task");
+    let mut tx = store.project(&p).await.unwrap();
+    assert_eq!(tx.tasks().await.unwrap(), won);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_sign_off_racing_a_scope_change_never_signs_what_the_customer_did_not_read() {
+    let store = store().await;
+    let (_, p) = project_world(&store).await;
+    let sam = add_stakeholder(&store, &p.company).await;
+    let by = actor("alice");
+    let item = ScopeItemId::new(new_id("itm")).unwrap();
+    let read = ScopeItemIn {
+        kind: ScopeKind::In,
+        description: Text::new("Answer tier-1 support tickets").unwrap(),
+    };
+    let mut tx = store.project(&p).await.unwrap();
+    tx.add_scope_item(&item, &read, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    let edit = {
+        let (store, p, item, by) = (store.clone(), p.clone(), item.clone(), by.clone());
+        tokio::spawn(async move {
+            let mut tx = store.project(&p).await.unwrap();
+            let v = ScopeItemIn {
+                kind: ScopeKind::In,
+                description: Text::new("Answer every support ticket").unwrap(),
+            };
+            let saved = tx.update_scope_item(&item, Some(1), &v, &by).await.unwrap().unwrap();
+            tx.commit().await.unwrap();
+            saved
+        })
+    };
+    let sign = {
+        let (store, p, by) = (store.clone(), p.clone(), by.clone());
+        tokio::spawn(async move {
+            let mut tx = store.project(&p).await.unwrap();
+            let signed = tx.sign_off(&sam, Some(1), &by).await.unwrap().unwrap();
+            tx.commit().await.unwrap();
+            signed
+        })
+    };
+    assert!(
+        matches!(edit.await.unwrap(), Saved::Current(_)),
+        "the edit read the item's own version"
+    );
+    let signed = sign.await.unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    let scope = tx.scope_of_work().await.unwrap().unwrap();
+    assert_eq!(scope.version, 2);
+    match signed {
+        // Signed first: the sign-off covers version 1, which the edit then moved past.
+        Saved::Current(s) => {
+            assert_eq!(s.version, 1);
+            let log = tx.scope_changes().await.unwrap();
+            let at_sign_off = log.iter().find(|c| c.action == "signed_off").unwrap();
+            assert_eq!(
+                at_sign_off.content.as_ref().unwrap()["items"][0]["description"],
+                "Answer tier-1 support tickets"
+            );
+            assert_ne!(scope.sign_off.map(|o| o.version), Some(scope.version));
+        }
+        // Edited first: nothing was signed.
+        Saved::Stale(current) => {
+            assert_eq!(current, scope);
+            assert!(scope.sign_off.is_none());
+        }
+    }
 }

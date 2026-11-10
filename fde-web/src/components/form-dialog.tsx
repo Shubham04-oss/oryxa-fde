@@ -1,5 +1,5 @@
 import { createContext, useContext, useId, useRef, useState } from "react"
-import type { FormEvent, ReactNode } from "react"
+import type { FormEvent, ReactNode, Ref } from "react"
 import { Button } from "./ui/button"
 import { DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
 import { FIELD, Footer, Labelled } from "./task-move"
@@ -36,6 +36,11 @@ function problemOf(
   return about ? { "aria-invalid": true, "aria-describedby": current.id } : {}
 }
 
+/** What a field of your own says about itself to a screen reader when the form's problem is about it. */
+export function useFieldProblem(name: string) {
+  return problemOf(name, useContext(FormProblem))
+}
+
 export function FormDialog({
   title,
   description,
@@ -44,6 +49,9 @@ export function FormDialog({
   onSubmit,
   remove,
   onClose,
+  onCancel,
+  wide,
+  after,
   children,
 }: {
   title: string
@@ -56,7 +64,18 @@ export function FormDialog({
   /** Null when the API confirmed the save, or why it did not. A problem that names a field marks it. */
   onSubmit: () => Promise<Problem | null>
   remove?: Removal
+  /** Closes the dialog: after a save the API confirmed, and by default for Cancel. */
   onClose: () => void
+  /** What Cancel does, when it should ask first (a note with words in it). */
+  onCancel?: () => void
+  /** A page-wide form, for writing: 720px instead of 560px. */
+  wide?: boolean
+  /**
+   * Dialogs this one opens, kept inside it so the browser treats them as nested: the first stays
+   * where it is, with everything typed in it, and Escape closes the top one only. Outside the
+   * `<form>`, because a submit in a nested form would otherwise reach this one.
+   */
+  after?: ReactNode
   children: ReactNode
 }) {
   const [error, setError] = useState<{ message: string; field?: string } | null>(null)
@@ -93,7 +112,10 @@ export function FormDialog({
   }
 
   return (
-    <DialogContent placement="center" className="p-5">
+    <DialogContent
+      placement="center"
+      className={wide ? "w-[min(720px,calc(100vw-32px))] p-5" : "p-5"}
+    >
       <form ref={form} noValidate onSubmit={submit} className="grid gap-3.5 text-xs">
         <DialogTitle className="text-[13px] font-semibold">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
@@ -119,7 +141,7 @@ export function FormDialog({
           error={error?.message ?? null}
           errorId={errorId}
           save={save}
-          onClose={onClose}
+          onClose={onCancel ?? onClose}
           extra={
             remove &&
             !deleting && (
@@ -135,6 +157,7 @@ export function FormDialog({
           }
         />
       </form>
+      {after}
     </DialogContent>
   )
 }
@@ -205,7 +228,9 @@ export function TextArea({
   hint,
   autoFocus,
   tall,
+  large,
   name,
+  inputRef,
 }: {
   label: string
   value: string
@@ -214,7 +239,11 @@ export function TextArea({
   autoFocus?: boolean
   /** More room, for text that runs to several lines. */
   tall?: boolean
+  /** The most room, for writing: about half the screen, and the person can pull it taller. */
+  large?: boolean
   name?: string
+  /** For a form that reads the selection or the caret. */
+  inputRef?: Ref<HTMLTextAreaElement>
 }) {
   const problem = problemOf(name, useContext(FormProblem))
   const hintId = useId()
@@ -222,9 +251,10 @@ export function TextArea({
     <div className="grid gap-1">
       <Labelled label={label}>
         <textarea
+          ref={inputRef}
           autoFocus={autoFocus}
           data-field={name}
-          className={`${FIELD} ${tall ? "min-h-36" : "min-h-20"}`}
+          className={`${FIELD} ${large ? "min-h-[clamp(14rem,42dvh,26rem)] leading-relaxed" : tall ? "min-h-36" : "min-h-20"}`}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           {...problem}

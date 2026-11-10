@@ -12,6 +12,7 @@ import {
   CompanySummaryOut,
   DecisionOut,
   Me,
+  MeetingNoteOut,
   MemberOut,
   ProjectOut,
   ScopeItemOut,
@@ -28,6 +29,7 @@ import {
 } from "./schemas"
 import type { AccessBody, DecisionBody } from "../access"
 import type { TaskBody } from "../board"
+import type { NoteBody } from "../notes"
 import type {
   CompanyBody,
   CompanyPatch,
@@ -43,7 +45,9 @@ import type {
   Company,
   CompanyId,
   CriterionId,
+  MeetingNoteId,
   MemberRole,
+  NotePlace,
   Project,
   ProjectId,
   ProjectScope,
@@ -123,6 +127,10 @@ export const SAFE_TEXT: Record<string, string> = {
   invalid_rationale: "Why is plain text, up to 4000 characters.",
   invalid_decided_by: "Who decided is a name on one line, up to 200 characters.",
   invalid_decided_at: "Use a date like 2026-11-30.",
+  invalid_held_on: "Pick the day the meeting was held.",
+  invalid_body: "The note is plain text, 1 to 20,000 characters.",
+  invalid_stakeholders: "One of those people is no longer a stakeholder at this company.",
+  invalid_attendees: "Each person who attended must work on this project or company.",
   rejected_blocker_required: "Say what is blocking it.",
   rejected_blocked_by_needs_blocked: "Only a blocked task can name an access request.",
   rejected_over_budget: "This project's agent budget is used up.",
@@ -207,6 +215,10 @@ function connect(transport: Transport) {
       z.array(RunOut),
       runs.GET("/v1/companies/{company}/projects/{project}/agent-runs", project(scope)),
     )
+
+  /** The project a note is in, or null for a note on the company. */
+  const noteScope = (place: NotePlace): ProjectScope | null =>
+    place.project === undefined ? null : { company: place.company, project: place.project }
 
   const get = {
     companies: () => read(z.array(CompanySummaryOut), client.GET("/v1/companies")),
@@ -508,6 +520,62 @@ function connect(transport: Transport) {
         }),
       ),
 
+    /** A company's or a project's meeting notes, latest meeting first. */
+    notes(place: NotePlace) {
+      const scope = noteScope(place)
+      return read(
+        z.array(MeetingNoteOut),
+        scope
+          ? client.GET("/v1/companies/{company}/projects/{project}/meeting-notes", project(scope))
+          : client.GET("/v1/companies/{company}/meeting-notes", company(place.company)),
+      )
+    },
+
+    addNote(place: NotePlace, body: NoteBody) {
+      const scope = noteScope(place)
+      return read(
+        MeetingNoteOut,
+        scope
+          ? client.POST("/v1/companies/{company}/projects/{project}/meeting-notes", {
+              ...project(scope),
+              body,
+            })
+          : client.POST("/v1/companies/{company}/meeting-notes", {
+              ...company(place.company),
+              body,
+            }),
+      )
+    },
+
+    /** Replaces the note: every field is sent. */
+    updateNote(place: NotePlace, note: MeetingNoteId, body: NoteBody) {
+      const scope = noteScope(place)
+      return read(
+        MeetingNoteOut,
+        scope
+          ? client.PUT("/v1/companies/{company}/projects/{project}/meeting-notes/{note}", {
+              params: { path: { ...scope, note } },
+              body,
+            })
+          : client.PUT("/v1/companies/{company}/meeting-notes/{note}", {
+              params: { path: { company: place.company, note } },
+              body,
+            }),
+      )
+    },
+
+    async removeNote(place: NotePlace, note: MeetingNoteId) {
+      const scope = noteScope(place)
+      const { error, response } = scope
+        ? await client.DELETE("/v1/companies/{company}/projects/{project}/meeting-notes/{note}", {
+            params: { path: { ...scope, note } },
+          })
+        : await client.DELETE("/v1/companies/{company}/meeting-notes/{note}", {
+            params: { path: { company: place.company, note } },
+          })
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
     async removeTask(scope: ProjectScope, task: TaskId) {
       const { error, response } = await client.DELETE(
         "/v1/companies/{company}/projects/{project}/tasks/{task}",
@@ -716,6 +784,10 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     threads: async (scope) => (await use()).threads(scope),
     addAccess: async (scope, body) => (await use()).addAccess(scope, body),
     addDecision: async (scope, body) => (await use()).addDecision(scope, body),
+    notes: async (place) => (await use()).notes(place),
+    addNote: async (place, body) => (await use()).addNote(place, body),
+    updateNote: async (place, note, body) => (await use()).updateNote(place, note, body),
+    removeNote: async (place, note) => (await use()).removeNote(place, note),
     removeTask: async (scope, task) => (await use()).removeTask(scope, task),
     addScopeItem: async (scope, body) => (await use()).addScopeItem(scope, body),
     updateScopeItem: async (scope, item, body) => (await use()).updateScopeItem(scope, item, body),
@@ -811,6 +883,16 @@ export const queries = {
       queryFn: () => api.threads(scope),
       ...read,
       staleTime: 60_000,
+    }),
+  /** A company's or a project's meeting notes. A project's sit under the project's own key. */
+  notes: (place: NotePlace) =>
+    queryOptions({
+      queryKey:
+        place.project === undefined
+          ? ["companies", place.company, "notes"]
+          : ["companies", place.company, "projects", place.project, "notes"],
+      queryFn: () => api.notes(place),
+      ...read,
     }),
   runs: (scope: ProjectScope) =>
     queryOptions({

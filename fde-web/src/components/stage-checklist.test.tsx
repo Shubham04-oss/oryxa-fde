@@ -155,15 +155,15 @@ describe("what an open item says and where it goes", () => {
     expect(screen.getByRole("region", { name: "Success criteria" })).toHaveFocus()
   })
 
-  it("says plainly when this page cannot fix an item yet, and offers nothing to press", async () => {
+  it("opens the blank note from a missing meeting note, and says a company note does not count", async () => {
     renderWithRouter(<ProjectPage scope={CLAIMS} />)
     const box = await checklist("Discover")
     expect(box).toHaveTextContent("1 of 2 met")
     expect(box).toHaveTextContent(
-      "No meeting note is on the project yet. Notes are not written here yet.",
+      "No meeting note is on the project yet. A note on the company does not count.",
     )
-    expect(within(box).queryByRole("button")).toBeNull()
-    expect(within(box).queryByRole("link")).toBeNull()
+    await userEvent.click(within(box).getByRole("button", { name: "Write a note" }))
+    expect(await dialog("Write a note")).toBeInTheDocument()
   })
 
   it("sends the FDE to the company's Add stakeholder when no one is named", async () => {

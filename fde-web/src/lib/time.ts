@@ -26,9 +26,10 @@ export function dueLabel(due: string, today: string): string {
   return `Due in ${plural(days, "day")}`
 }
 
-/** "Waiting 6 days on Priya Raman", "Waiting since today", from the API's day count. */
+/** "Waiting 6 days on Priya Raman", "Waiting less than a day", from the API's day count. */
 export function waitingLabel(days: number, who: string | null): string {
-  const wait = days <= 0 ? "Waiting since today" : `Waiting ${plural(days, "day")}`
+  // Whole days, so 0 is anything under 24 hours: "since today" would read oddly beside yesterday's date.
+  const wait = days <= 0 ? "Waiting less than a day" : `Waiting ${plural(days, "day")}`
   return who ? `${wait} on ${who}` : wait
 }
 
