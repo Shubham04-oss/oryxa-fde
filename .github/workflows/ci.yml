@@ -7,7 +7,8 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only a PR's older run is cancelled. A push to main runs to the end, so its checks finish and main writes the caches.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
   # Incremental artifacts are useless in a restored cache and bloat it; debug info off keeps both small.
@@ -233,6 +234,10 @@ jobs:
       - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
+      # The skip list against the Rust sources: a path Rust reads from outside crates/ and vendor/ must run the Rust
+      # jobs. The test proves the check catches a skip list that gets one wrong.
+      - run: bash .github/scripts/test-rust-reads-check.sh
+      - run: bash .github/scripts/rust-reads-check.sh
       # Every workflow, with shellcheck over their run scripts.
       - name: actionlint
         run: |

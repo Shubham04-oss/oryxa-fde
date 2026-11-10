@@ -46,6 +46,14 @@ expect true "docs as a file, not a directory" docs
 expect true "harness test dir" sandbox/harness/test/session.test.ts
 expect true "empty list (fail closed)"
 
+# A stderr that cannot be written (full or closed) must not change the answer.
+got=$(printf 'docs/a.md\ncrates/a/x.rs\n' | bash "$script" - 2>/dev/full)
+if [ "$got" = rust=true ]; then echo "ok   stderr /dev/full, Rust path -> $got"; else echo "FAIL stderr /dev/full, Rust path -> $got"; fail=1; fi
+got=$(printf 'docs/a.md\ncrates/a/x.rs\n' | bash "$script" - 2>&-)
+if [ "$got" = rust=true ]; then echo "ok   stderr closed, Rust path -> $got"; else echo "FAIL stderr closed, Rust path -> $got"; fail=1; fi
+got=$(printf 'docs/a.md\n' | bash "$script" - 2>/dev/full)
+if [ "$got" = rust=false ]; then echo "ok   stderr /dev/full, docs only -> $got"; else echo "FAIL stderr /dev/full, docs only -> $got"; fail=1; fi
+
 # The real diff: a rename out of crates/ must list the old path too.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
