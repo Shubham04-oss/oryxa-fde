@@ -18,6 +18,8 @@ export type Fix =
   | "access"
   /** The Access card's blank request form. */
   | "request-access"
+  /** The Notes card's blank note. */
+  | "write-note"
 
 export type Hint = {
   /** What is missing, in a sentence. */
@@ -41,8 +43,11 @@ export function hintFor(key: string, p: Project): Hint | undefined {
         fix: { do: "add-stakeholder", label: "Add stakeholder" },
       }
     case "discovery_notes":
-      // ponytail: meeting notes have no screen yet, so there is nowhere on this page to write one.
-      return { missing: "No meeting note is on the project yet. Notes are not written here yet." }
+      // The API counts a note on the project only: one written on the company does not meet it.
+      return {
+        missing: "No meeting note is on the project yet. A note on the company does not count.",
+        fix: { do: "write-note", label: "Write a note" },
+      }
     case "scope_signed_off": {
       if (people === 0)
         return {

@@ -186,6 +186,13 @@ export function waitOf(r: AccessRequestOut): { text: string; tone: Tone } {
       text: `${label}, ${waitingLabel(r.days_waiting, null).toLowerCase()}`,
       tone: r.days_waiting >= LONG_WAIT_DAYS ? "attention" : "neutral",
     }
+  // For a request that was granted and then revoked, the API counts the days to the grant, not to
+  // the revocation: say that, rather than "revoked after 3 days" for something revoked a month on.
+  if (r.status === "revoked" && r.granted_at)
+    return {
+      text: `${label} ${settled}. It had been granted ${shortDate(dayOf(r.granted_at))}, ${after}.`,
+      tone: ACCESS_TONE[r.status],
+    }
   return { text: `${label} ${settled}, ${after}`, tone: ACCESS_TONE[r.status] }
 }
 

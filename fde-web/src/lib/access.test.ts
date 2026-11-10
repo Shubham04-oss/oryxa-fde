@@ -143,7 +143,7 @@ describe("what the card answers", () => {
 
   it("reads how long it waited, amber from a week, or when it was settled and how long that took", () => {
     expect(waitOf(request("a", "requested", 0))).toEqual({
-      text: "Requested, waiting since today",
+      text: "Requested, waiting less than a day",
       tone: "neutral",
     })
     expect(waitOf(request("a", "in_progress", 6)).tone).toBe("neutral")
@@ -156,6 +156,13 @@ describe("what the card answers", () => {
       tone: "attention",
     })
     expect(waitOf(request("a", "revoked", 1)).tone).toBe("attention")
+    // Revoked after a grant: the days are the ones the grant took, so the line says so and gives the day.
+    expect(waitOf(request("a", "revoked", 3, { granted_at: "2026-11-02T10:00:00Z" })).text).toMatch(
+      /^Revoked \d+ \w+ \d{4}\. It had been granted 2 Nov 2026, after 3 days\.$/,
+    )
+    expect(waitOf(request("a", "revoked", 0, { granted_at: "2026-11-02T10:00:00Z" })).text).toMatch(
+      /granted 2 Nov 2026, the same day\.$/,
+    )
     expect(waitOf(request("a", "granted", 0))).toEqual({
       text: expect.stringMatching(/^Granted .*, the same day$/),
       tone: "success",
