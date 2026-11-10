@@ -575,10 +575,14 @@ function TaskCard({
   )
 }
 
-/** Creates a task, or edits one; an edit can also delete it, after asking. */
-function TaskDialog({
+/**
+ * Creates a task, or edits one; an edit can also delete it, after asking. `title` starts a new task's
+ * title (a line of a meeting note).
+ */
+export function TaskDialog({
   task,
   status,
+  title,
   people,
   requests,
   me,
@@ -588,6 +592,7 @@ function TaskDialog({
 }: {
   task: TaskOut | null
   status: TaskState
+  title?: string
   people: Array<StakeholderOut>
   requests: ReadonlyArray<AccessRequestOut>
   me: string | undefined
@@ -599,7 +604,7 @@ function TaskDialog({
     task
       ? fieldsOf(task)
       : {
-          title: "",
+          title: title ?? "",
           status,
           blocker: "",
           waitingOn: null,

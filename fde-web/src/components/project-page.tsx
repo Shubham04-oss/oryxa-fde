@@ -9,6 +9,8 @@ import { ProjectDialog } from "./company-forms"
 import { AccessCard } from "./access-card"
 import type { AccessCardHandle } from "./access-card"
 import { DecisionsCard } from "./decisions-card"
+import { NotesCard } from "./notes-card"
+import type { NotesHandle } from "./notes-card"
 import { ScopeCard, CriteriaCard } from "./scope-cards"
 import type { CriteriaCardHandle, ScopeCardHandle } from "./scope-cards"
 import { AssigneesCard } from "./team"
@@ -47,6 +49,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const criteriaCard = useRef<CriteriaCardHandle>(null)
   const accessCard = useRef<HTMLElement>(null)
   const accessHandle = useRef<AccessCardHandle>(null)
+  const notesHandle = useRef<NotesHandle>(null)
   const move = useMutation({
     mutationFn: ({ to, reason }: { to: Stage; reason?: string }) =>
       api.moveStage(scope, to, reason),
@@ -85,6 +88,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     else if (to === "add-criterion") criteriaCard.current?.add()
     else if (to === "criteria") criteriaCard.current?.show()
     else if (to === "request-access") accessHandle.current?.request()
+    else if (to === "write-note") notesHandle.current?.write()
     else accessHandle.current?.show()
   }
 
@@ -186,6 +190,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
         <AccessCard card={accessCard} handle={accessHandle} scope={scope} project={p} />
 
         <RunsCard scope={scope} />
+
+        <NotesCard handle={notesHandle} place={scope} people={p.stakeholders} project={p} />
 
         <DecisionsCard scope={scope} project={p} me={me.data?.user.name} />
 

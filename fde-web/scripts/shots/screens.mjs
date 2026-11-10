@@ -352,6 +352,199 @@ function accessScreens() {
   ]
 }
 
+// Meeting notes (#162). Kestrel's dispatch project has two notes, the first a long one with actions and an
+// agreement in it; its damage claims project is at Discover with none, so its checklist asks for one.
+const notesCard = (page) => page.getByRole("region", { name: "Notes", exact: true })
+const NOTES = { ready: (page) => notesCard(page), full: false }
+const WORKSHOP = "Dispatcher workshop, Leeds depot"
+const NOTE_TEXT = [
+  "Call with the claims team, 40 minutes.",
+  "",
+  "Most claims arrive by email with photos attached. About a third are missing the depot code.",
+  "- Send Ines the triage format for review",
+  "- Ask Tomas which mailbox the claims arrive in",
+  "",
+  "Agreed: we start with damage claims only, and leave lost-goods claims for later.",
+].join("\n")
+async function openWriter(page) {
+  await toCard(notesCard)(page)
+  await notesCard(page).getByRole("button", { name: "Write a note", exact: true }).click()
+  await dialog(page, "Write a note").waitFor()
+  // The cursor starts in the words, where the writing is.
+  const at = await page.evaluate(() => document.activeElement?.getAttribute("data-field"))
+  if (at !== "body") throw new Error(`focus is on ${at ?? "nothing"}, not the note`)
+}
+async function writeNote(page) {
+  await openWriter(page)
+  const box = dialog(page, "Write a note")
+  await box.getByLabel("Title", { exact: true }).fill("Claims team call")
+  await box.getByLabel("Note", { exact: true }).fill(NOTE_TEXT)
+  await box.getByRole("checkbox", { name: /Ines Moreau/ }).check()
+  return box
+}
+/** Opens the long note to read it, and selects its agreement the way a person would. */
+async function readWorkshop(page) {
+  await toCard(notesCard)(page)
+  await notesCard(page).getByRole("button", { name: WORKSHOP, exact: true }).click()
+  await page.evaluate(() => {
+    const root = document.querySelector('[data-note-body="mtg_kd1"]')
+    const text = root.firstChild
+    const part =
+      "We pilot at Leeds and Ghent only, plans stay drafts and nothing goes to drivers directly."
+    const from = text.data.indexOf(part)
+    const range = document.createRange()
+    range.setStart(text, from)
+    range.setEnd(text, from + part.length)
+    const picked = window.getSelection()
+    picked.removeAllRanges()
+    picked.addRange(range)
+  })
+  await toCard(notesCard)(page)
+}
+
+function notesScreens() {
+  return [
+    // The list, newest first: when, who from the team and who from the customer, and the first lines.
+    { name: "notes-card", path: DISPATCH, ...NOTES, act: toCard(notesCard) },
+    { name: "notes-empty", path: KESTREL_CLAIMS, ...NOTES, act: toCard(notesCard) },
+    // A note opened to read, a line of it selected, and the way on from it.
+    {
+      name: "notes-reading",
+      path: DISPATCH,
+      ...NOTES,
+      act: async (page) => {
+        await readWorkshop(page)
+        await notesCard(page)
+          .getByRole("button", { name: /^Make a task from/ })
+          .waitFor()
+      },
+    },
+    {
+      name: "notes-company",
+      path: KESTREL,
+      ...NOTES,
+      ready: (page) => notesCard(page),
+      act: toCard(notesCard),
+    },
+    // The checklist's item now has its button.
+    {
+      name: "checklist-write-note",
+      path: KESTREL_CLAIMS,
+      ready: (page) => checklistRegion(page, "Discover"),
+      act: async (page) => {
+        await checklistRegion(page, "Discover").scrollIntoViewIfNeeded()
+      },
+    },
+    { name: "note-write-blank", path: KESTREL_CLAIMS, ...NOTES, act: openWriter },
+    { name: "note-write", path: KESTREL_CLAIMS, ...NOTES, act: writeNote },
+    {
+      name: "note-write-problem",
+      path: KESTREL_CLAIMS,
+      ...NOTES,
+      act: async (page) => {
+        const box = await writeNote(page)
+        await box.getByLabel("Title", { exact: true }).fill("")
+        await box.getByRole("button", { name: "Save note", exact: true }).click()
+        await box.getByRole("alert").waitFor()
+      },
+    },
+    // The API cannot save: every word is still in the form, and it says what happened.
+    {
+      name: "note-write-refused",
+      path: KESTREL_CLAIMS,
+      ...NOTES,
+      failWrites: true,
+      act: async (page) => {
+        const box = await writeNote(page)
+        await box.getByRole("button", { name: "Save note", exact: true }).click()
+        await box.getByRole("alert").waitFor()
+      },
+    },
+    // Closing with words in it asks first.
+    {
+      name: "note-write-discard",
+      path: KESTREL_CLAIMS,
+      ...NOTES,
+      act: async (page) => {
+        const box = await writeNote(page)
+        await box.getByRole("button", { name: "Cancel", exact: true }).click()
+        await box.getByRole("alertdialog", { name: "Confirm leaving the note" }).waitFor()
+      },
+    },
+    {
+      name: "note-edit",
+      path: DISPATCH,
+      ...NOTES,
+      act: async (page) => {
+        await toCard(notesCard)(page)
+        await page.getByRole("button", { name: `Edit ${WORKSHOP}` }).click()
+        await dialog(page, "Edit note").waitFor()
+      },
+    },
+    {
+      name: "note-delete-ask",
+      path: DISPATCH,
+      ...NOTES,
+      act: async (page) => {
+        await toCard(notesCard)(page)
+        await page.getByRole("button", { name: `Edit ${WORKSHOP}` }).click()
+        await dialog(page, "Edit note").getByRole("button", { name: "Delete note" }).click()
+        await dialog(page, "Edit note").getByRole("group", { name: "Confirm the delete" }).waitFor()
+      },
+    },
+    // While writing: the task form opens on the line the cursor is on, over the note that stays as it was.
+    {
+      name: "note-make-task",
+      path: KESTREL_CLAIMS,
+      ...NOTES,
+      act: async (page) => {
+        const box = await writeNote(page)
+        // The cursor on the first action, as if the FDE had clicked into that line.
+        await page.evaluate(() => {
+          const el = document.querySelector('textarea[data-field="body"]')
+          const at = el.value.indexOf("Send Ines")
+          el.focus()
+          el.setSelectionRange(at + 4, at + 4)
+        })
+        await box.getByRole("button", { name: "Make a task", exact: true }).click()
+        await dialog(page, "New task").waitFor()
+      },
+    },
+    // While reading: the decision form opens on the selected agreement.
+    {
+      name: "note-make-decision",
+      path: DISPATCH,
+      ...NOTES,
+      act: async (page) => {
+        await readWorkshop(page)
+        await page.getByRole("button", { name: `Log a decision from ${WORKSHOP}` }).click()
+        await dialog(page, "Log a decision").waitFor()
+      },
+    },
+    // Back in the note once the task is on the board.
+    {
+      name: "note-made-task",
+      path: KESTREL_CLAIMS,
+      ...NOTES,
+      act: async (page) => {
+        const box = await writeNote(page)
+        await box.getByRole("button", { name: "Make a task", exact: true }).click()
+        const task = dialog(page, "New task")
+        await task.getByLabel("Title").fill("Send Ines the triage format")
+        await task.getByRole("button", { name: "Add task", exact: true }).click()
+        await box.getByRole("status", { name: "Made from this note" }).waitFor()
+      },
+    },
+    // A revoked request that had been granted: the line says when it was granted and how long that took.
+    {
+      name: "access-revoked-wording",
+      path: "/companies/cmp_cobalt/projects/prj_cobalt_field",
+      ...ACCESS,
+      act: toCard(accessCard),
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -857,6 +1050,7 @@ export const screens = [
 
   // Access requests and decisions on the project page.
   ...accessScreens(),
+  ...notesScreens(),
 
   // The stage checklist and the move that asks for a reason. The checklist sits under the stage
   // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.

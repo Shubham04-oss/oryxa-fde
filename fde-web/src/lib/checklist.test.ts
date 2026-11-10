@@ -25,10 +25,10 @@ describe("hintFor", () => {
     for (const key of keys) expect(hintFor(key, project())?.fix, key).toBeDefined()
   })
 
-  it("says plainly that meeting notes cannot be written here yet, with nothing to press", () => {
+  it("sends a missing meeting note to Write a note, and says a note on the company does not count", () => {
     const hint = hintFor("discovery_notes", project())
-    expect(hint?.missing).toMatch(/Notes are not written here yet/)
-    expect(hint?.fix).toBeUndefined()
+    expect(hint?.missing).toMatch(/A note on the company does not count/)
+    expect(hint?.fix).toEqual({ do: "write-note", label: "Write a note" })
   })
 
   it("names the customer, and turns sign-off into the step that is actually next", () => {

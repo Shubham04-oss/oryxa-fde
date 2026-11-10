@@ -248,7 +248,7 @@ describe("Board", () => {
 
     await waitFor(() => expect(titles("Waiting on the customer")).toContain(REPLAY))
     expect(
-      within(column("Waiting on the customer")).getByText("Waiting since today on Ines Moreau"),
+      within(column("Waiting on the customer")).getByText("Waiting less than a day on Ines Moreau"),
     ).toBeInTheDocument()
   })
 

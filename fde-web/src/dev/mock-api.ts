@@ -108,8 +108,9 @@ function access(
     status,
     requested_at: ago(asked),
     status_changed_at: ago(open ? asked : settled),
-    granted_at: status === "granted" ? ago(settled) : null,
-    days_waiting: open ? asked : asked - settled,
+    // A revoked request had been granted: the API counts its days to that grant, a few days after it was asked.
+    granted_at: status === "granted" ? ago(settled) : status === "revoked" ? ago(asked - 3) : null,
+    days_waiting: open ? asked : status === "revoked" ? 3 : asked - settled,
   }
 }
 
@@ -196,6 +197,41 @@ function decision(
   }
 }
 
+/** A meeting note held `daysAgo`; the longer ones are written out in full, as an FDE would. */
+function note(
+  id: string,
+  title: string,
+  daysAgo: number,
+  body: string,
+  who: { stakeholders?: Array<string>; attendees?: Array<string> } = {},
+): S["MeetingNoteOut"] {
+  return {
+    id,
+    title,
+    held_on: day(-daysAgo),
+    body,
+    stakeholders: who.stakeholders ?? [],
+    attendees: who.attendees ?? [RIYA],
+    created_by: RIYA,
+    created_at: ago(daysAgo),
+    updated_at: ago(daysAgo),
+  }
+}
+
+/** `n` short check-in notes, for a project whose notes the screens do not dwell on. */
+const checkIns = (prefix: string, n: number, stakeholder: string) =>
+  Array.from({ length: n }, (_, i) =>
+    note(
+      `${prefix}${i + 1}`,
+      i === n - 1 ? "Kickoff call" : `Check-in ${n - 1 - i}`,
+      (n - i) * 9,
+      i === n - 1
+        ? "Agreed the goal, who signs off and how often we talk.\nNext: list the systems and name an owner for each."
+        : "Short call. Nothing blocked; the next steps are on the board.",
+      { stakeholders: [stakeholder] },
+    ),
+  )
+
 type Records = {
   scope: S["ScopeOut"]
   access: Array<S["AccessRequestOut"]>
@@ -203,8 +239,8 @@ type Records = {
   decisions: Array<S["DecisionOut"]>
   /** Discussions that were promoted to a decision, by the decision they ended in. */
   threads?: Array<S["ThreadOut"]>
-  /** Meeting notes on the project. The web has no screen for them, so the mock only counts them. */
-  notes: number
+  /** Meeting notes on the project. */
+  notes: Array<S["MeetingNoteOut"]>
   /** The criteria an eval suite measures. */
   evaluated: Array<string>
   /** The latest measured value of each criterion that has one. */
@@ -213,6 +249,8 @@ type Records = {
 
 type CompanySeed = {
   company: S["CompanyOut"]
+  /** Meeting notes on the company itself: the stage checklist does not count them. */
+  notes: Array<S["MeetingNoteOut"]>
   members: Array<S["MemberOut"]>
   stakeholders: Array<S["StakeholderOut"]>
   systems: Array<S["SystemOut"]>
@@ -254,7 +292,7 @@ const emptyRecords = (): Records => ({
   access: [],
   tasks: [],
   decisions: [],
-  notes: 0,
+  notes: [],
   evaluated: [],
   results: {},
 })
@@ -270,6 +308,15 @@ function seed() {
         "A regional freight carrier with 14 depots. Wants dispatchers to plan in minutes.",
         80,
       ),
+      notes: [
+        note(
+          "mtg_kc1",
+          "Quarterly review with Kestrel leadership",
+          12,
+          "Mara wants one number for the board: minutes saved per depot per week.\nTomas will not open the telematics feed before the security review in January.\nGeneral point for every project: the customer reads results on Fridays.",
+          { stakeholders: ["stk_k1", "stk_k3"], attendees: [RIYA, JONAH] },
+        ),
+      ],
       members: [member(RIYA, "lead"), member(JONAH, "engineer")],
       stakeholders: [
         person("stk_k1", "Mara Lindqvist", "Head of operations", "sponsor"),
@@ -292,6 +339,7 @@ function seed() {
         "A network of outpatient clinics. Referral intake is slow and done by hand.",
         50,
       ),
+      notes: [],
       members: [member(JONAH, "lead"), member(RIYA, "engineer")],
       stakeholders: [
         person("stk_b1", "Dr Helen Achebe", "Medical director", "sponsor"),
@@ -312,6 +360,7 @@ function seed() {
         "A grocery chain of 220 stores. Fresh produce waste is the target.",
         70,
       ),
+      notes: [],
       members: [member(RIYA, "lead")],
       stakeholders: [
         person("stk_l1", "Carlos Mendes", "VP supply chain", "sponsor"),
@@ -332,6 +381,7 @@ function seed() {
         "A mutual insurer. Call handlers miss fields on the first notice of a claim.",
         20,
       ),
+      notes: [],
       members: [member(JONAH, "lead"), member(RIYA, "engineer")],
       stakeholders: [
         person("stk_a1", "Grace Holm", "Claims director", "other"),
@@ -349,6 +399,7 @@ function seed() {
         150,
       ),
       // The organisation admin reaches it without being a member.
+      notes: [],
       members: [member(JONAH, "lead")],
       stakeholders: [
         person("stk_c1", "Arjun Nair", "Chief operating officer", "sponsor"),
@@ -373,7 +424,37 @@ function seed() {
         "Drafts load plans for dispatchers from open orders, driver hours and depot rules.",
       ),
       records: {
-        notes: 2,
+        notes: [
+          note(
+            "mtg_kd1",
+            "Dispatcher workshop, Leeds depot",
+            4,
+            [
+              "Went through a real morning: orders arrive by 05:30 and the plan has to be out by 06:15.",
+              "",
+              "What Ines said:",
+              "- Drivers hate being re-planned after they have clocked on.",
+              "- The depot rules sheet is the real source of truth; the planning database is often a day behind.",
+              "- A plan she cannot explain to a driver in one sentence goes in the bin.",
+              "",
+              "Agreed in the room:",
+              "We pilot at Leeds and Ghent only, plans stay drafts and nothing goes to drivers directly.",
+              "",
+              "Actions:",
+              "- [ ] Send Ines the explanation format for review",
+              "- [ ] Ask Tomas for a read replica of the planning database",
+              "- Mara to confirm who signs off the pilot plan",
+            ].join("\n"),
+            { stakeholders: ["stk_k1", "stk_k2"], attendees: [RIYA, JONAH] },
+          ),
+          note(
+            "mtg_kd2",
+            "Data access call with IT",
+            19,
+            "Tomas can give a read replica, refreshed nightly. Telematics is a separate approval and he thinks it will be refused.\nWe agreed to start without it and revisit after the pilot.",
+            { stakeholders: ["stk_k3"] },
+          ),
+        ],
         evaluated: ["crt_k1", "crt_k2", "crt_k3"],
         results: { crt_k1: 74, crt_k2: 0, crt_k3: 1.5 },
         scope: scope(
@@ -520,7 +601,7 @@ function seed() {
         "Reads referral letters and fills the intake form for the clinic's coordinators.",
       ),
       records: {
-        notes: 1,
+        notes: checkIns("mtg_bw", 1, "stk_b1"),
         evaluated: [],
         results: {},
         scope: scope(
@@ -590,7 +671,7 @@ function seed() {
         "Daily demand forecasts for fresh produce in forty stores, with reasons a buyer reads.",
       ),
       records: {
-        notes: 3,
+        notes: checkIns("mtg_lm", 3, "stk_l1"),
         evaluated: ["crt_l1", "crt_l2"],
         // One criterion measured and passing, the other not measured yet.
         results: { crt_l1: 16.2 },
@@ -661,7 +742,7 @@ function seed() {
         "Helps call handlers capture a claim's first notice in one pass.",
       ),
       records: {
-        notes: 1,
+        notes: checkIns("mtg_at", 1, "stk_a2"),
         evaluated: [],
         results: {},
         scope: scope(
@@ -716,7 +797,7 @@ function seed() {
         "Summarises overnight outage reports for the morning operations call.",
       ),
       records: {
-        notes: 2,
+        notes: checkIns("mtg_co", 2, "stk_c1"),
         evaluated: ["crt_c1", "crt_c2"],
         results: { crt_c1: 100, crt_c2: 100 },
         scope: scope(
@@ -776,7 +857,7 @@ function seed() {
         "Lets field crews search safety procedures from a phone, offline-first.",
       ),
       records: {
-        notes: 2,
+        notes: checkIns("mtg_cf", 2, "stk_c2"),
         evaluated: ["crt_f1"],
         results: { crt_f1: 94 },
         scope: scope(
@@ -1129,6 +1210,88 @@ async function decisionRoutes(
   return json(saved, 201)
 }
 
+let noteCount = 0
+// A note's words: 1 to 20,000 characters once trimmed, no control character (C0 or C1) but newline and tab.
+// eslint-disable-next-line no-control-regex
+const NOTE_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
+const MAX_PEOPLE = 50
+
+/** The latest meeting first, a note written later first among one day's. */
+const latestFirst = (list: Array<S["MeetingNoteOut"]>) =>
+  [...list].sort(
+    (a, b) =>
+      b.held_on.localeCompare(a.held_on) ||
+      Date.parse(b.created_at) - Date.parse(a.created_at) ||
+      a.id.localeCompare(b.id),
+  )
+
+/** Whether a user works on the company: a member of it, or an organisation admin (who reaches every company). */
+const worksAt = (found: CompanySeed, user: unknown) =>
+  found.members.some((m) => m.user === user) ||
+  (user === state.me.user.id && state.me.role === "admin")
+
+/**
+ * A company's or a project's meeting notes, with the API's rules: a `PUT` replaces the whole note, the
+ * fields are checked one by one in the API's order, each attendee must work on the company and each
+ * stakeholder must be in it. All of it needs `work`, which the caller has here.
+ */
+async function noteRoutes(
+  method: string,
+  id: string | undefined,
+  found: CompanySeed,
+  notes: Array<S["MeetingNoteOut"]>,
+  request: Request,
+) {
+  const at = id === undefined ? -1 : notes.findIndex((n) => n.id === id)
+  if (method === "GET") {
+    if (id === undefined) return json(latestFirst(notes))
+    return at < 0 ? refuse(404, "not_found") : json(notes[at])
+  }
+  if (method === "DELETE" && id !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    notes.splice(at, 1)
+    return noContent()
+  }
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
+  const b = await readBody(request)
+  if (!b) return refuse(400, "invalid")
+  const people = (value: unknown) =>
+    Array.isArray(value) && value.every((x) => typeof x === "string") ? value : []
+  const stakeholders = people(b.stakeholders)
+  const attendees = people(b.attendees)
+  if (stakeholders.length > MAX_PEOPLE) return refuse(400, "invalid_stakeholders")
+  if (attendees.length > MAX_PEOPLE) return refuse(400, "invalid_attendees")
+  if (!plain(b.title, 200, false)) return refuse(400, "invalid_title")
+  const heldOn = typeof b.held_on === "string" ? b.held_on : ""
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(heldOn) || Number.isNaN(Date.parse(heldOn)))
+    return refuse(400, "invalid_held_on")
+  const text = typeof b.body === "string" ? b.body.trim() : ""
+  if ([...text].length < 1 || [...text].length > 20_000 || NOTE_CONTROL.test(text))
+    return refuse(400, "invalid_body")
+  if (!attendees.every((user) => worksAt(found, user))) return refuse(400, "invalid_attendees")
+  if (!stakeholders.every((one) => found.stakeholders.some((x) => x.id === one)))
+    return refuse(400, "invalid_stakeholders")
+  if (!adding && at < 0) return refuse(404, "not_found")
+
+  const now = new Date().toISOString()
+  const before = adding ? undefined : notes[at]
+  const saved: S["MeetingNoteOut"] = {
+    id: before?.id ?? `mtg_new${++noteCount}`,
+    title: (b.title as string).trim(),
+    held_on: heldOn,
+    body: text,
+    stakeholders: [...new Set(stakeholders)].sort(),
+    attendees: [...new Set(attendees)].sort(),
+    created_by: before?.created_by ?? state.me.user.id,
+    created_at: before?.created_at ?? now,
+    updated_at: now,
+  }
+  if (before) notes[at] = saved
+  else notes.push(saved)
+  return json(saved, adding ? 201 : 200)
+}
+
 /** The log as the API lists it: the newest decision first. */
 const newestFirst = (list: Array<S["DecisionOut"]>) =>
   [...list].sort(
@@ -1171,6 +1334,7 @@ async function createCompany(request: Request) {
       created_at: now,
       updated_at: now,
     },
+    notes: [],
     members: [{ user: state.me.user.id, role: "lead", added_at: now }],
     stakeholders: [],
     systems: [],
@@ -1507,7 +1671,7 @@ const CHECKS: Record<
   discovery_notes: {
     stage: "discover",
     label: "A meeting note on the project",
-    met: (_, r) => r.notes > 0,
+    met: (_, r) => r.notes.length > 0,
   },
   scope_signed_off: {
     stage: "scope",
@@ -1623,6 +1787,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     return systemRoutes(method, projectId, found, request)
   if (collection === "members" && method !== "GET")
     return memberRoutes(method, projectId, found, request)
+  if (collection === "meeting-notes")
+    return noteRoutes(method, projectId, found, found.notes, request)
   if (collection === "projects" && method === "POST" && projectId === undefined)
     return projectWrites(method, undefined, found, request)
   if (collection === "projects" && method === "PATCH" && record === undefined)
@@ -1640,6 +1806,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (record === "agent-runs")
     return runRoutes((state.runs[projectId] ??= []), method, rest, request, state.me.user.id)
   if (record === "assignees") return assigneeRoutes(method, rest[0], found, projectId)
+  if (record === "meeting-notes")
+    return noteRoutes(method, rest[0], found, p.records.notes, request)
   if (method === "GET") {
     if (record === "stage-checklist") {
       const items = checklist(p.project.stage, found, p.records)

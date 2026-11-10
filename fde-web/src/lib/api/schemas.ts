@@ -35,6 +35,8 @@ export type AccessRequestId = z.infer<typeof AccessRequestId>
 export const TaskId = id<"TaskId">()
 export type TaskId = z.infer<typeof TaskId>
 export const DecisionId = id<"DecisionId">()
+export const MeetingNoteId = id<"MeetingNoteId">()
+export type MeetingNoteId = z.infer<typeof MeetingNoteId>
 
 /** Every project-scoped call takes both ids, as `ProjectScope` does in `oryxa-fde-core`. */
 export type ProjectScope = { company: CompanyId; project: ProjectId }
@@ -242,6 +244,26 @@ export const DecisionOut = z.object({
   created_at: instant,
 })
 export type DecisionOut = z.infer<typeof DecisionOut>
+
+/** A meeting note at a company or a project. Its body is customer text: shown as plain text, never as markup. */
+export const MeetingNoteOut = z.object({
+  id: MeetingNoteId,
+  title: z.string(),
+  /** The day the meeting was held, `YYYY-MM-DD`. */
+  held_on: day,
+  body: z.string(),
+  /** The company's stakeholders who took part. */
+  stakeholders: z.array(StakeholderId),
+  /** The workspace's users who took part, by id: the API has no names for them yet. */
+  attendees: z.array(UserId),
+  created_by: UserId,
+  created_at: instant,
+  updated_at: instant,
+})
+export type MeetingNoteOut = z.infer<typeof MeetingNoteOut>
+
+/** Where notes are kept: a company, or one of its projects. */
+export type NotePlace = { company: CompanyId; project?: ProjectId }
 
 /** What a thread is about (`SubjectKind`): a record of the project or company, or a canvas shape. */
 export const SubjectKind = z.enum([

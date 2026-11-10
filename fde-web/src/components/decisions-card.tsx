@@ -13,7 +13,7 @@ import {
   newestFirst,
   subjectOf,
 } from "@/lib/access"
-import type { Project, ProjectScope } from "@/lib/api/schemas"
+import type { DecisionOut, Project, ProjectScope } from "@/lib/api/schemas"
 import { attemptAt } from "@/lib/records"
 import { dayOf, localDay, shortDate } from "@/lib/time"
 
@@ -86,20 +86,25 @@ export function DecisionsCard({
   )
 }
 
-function DecisionDialog({
+/** Logs a decision. `title` starts it (a line of a meeting note); `onLogged` hears of it once the API confirms. */
+export function DecisionDialog({
   scope,
   project,
   me,
+  title: startWith,
+  onLogged,
   onClose,
 }: {
   scope: ProjectScope
   project: Project
   me: string | undefined
+  title?: string
+  onLogged?: (decision: DecisionOut) => void
   onClose: () => void
 }) {
   const client = useQueryClient()
   const today = localDay()
-  const [fields, setFields] = useState(blankDecision(today))
+  const [fields, setFields] = useState({ ...blankDecision(today), title: startWith ?? "" })
   const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
   // Who may have decided: the customer's people, and the FDE. Anyone else can be typed.
   const suggestions = [
@@ -116,6 +121,7 @@ function DecisionDialog({
           queries.project(scope).queryKey,
           (old) => old && { ...old, decisions: [...old.decisions, saved] },
         )
+        onLogged?.(saved)
       },
       "decision",
       DECISION_FIELD,
