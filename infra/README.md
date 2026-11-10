@@ -57,7 +57,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | --- | --- | --- |
 | `env` | `dev` | Environment name in every resource name (`oryxa-fde-<env>`); 2 to 10 lowercase letters or digits |
 | `aws_account_id` | required | The only account the AWS provider will touch (`allowed_account_ids`) |
-| `aws_region` | `us-west-2` | The platform's region, until the first region is decided (plan, open decisions) |
+| `aws_region` | `ap-south-1` | Mumbai, chosen by the founder to see real latency from the team and first customers (#144). Everything in AWS runs and rests here; what Mumbai does and does not offer is in Mumbai (ap-south-1) below |
 | `cloudflare_account_id` | required | Account for the tunnel, the Workers VPC service and Access |
 | `cloudflare_zone_id` | required | Zone holding `domain` |
 | `domain` | required | Base hostname for dev; `app.<domain>` (fde-web) and `admin.<domain>` hang off it |
@@ -85,8 +85,8 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `log_retention_days` | `14` | CloudWatch retention for every task's logs |
 | `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's role may invoke this model only, in `aws_region` |
 | `sandbox_gateway_url` | `null` | Gateway Worker's URL (`SANDBOX_GATEWAY_URL`), known after `deploy-workers`. Null: agent and eval routes are not mounted, and the next three are unused |
-| `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url` |
-| `agent_region` | `null` | Its region (`AGENT_REGION`); null means `aws_region` |
+| `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url`. In Mumbai the Claude models need an inference profile, and which one decides where prompts are processed (Where prompts are processed) |
+| `agent_region` | `null` | The Region the agent's Bedrock calls start from (`AGENT_REGION`); null means `aws_region`. Set it only to call a geography profile from a Region inside that geography |
 | `realtime_url` | `null` | Realtime Worker's URL (`REALTIME_URL`); null: output is stored, not streamed |
 | `github_app` | `null` | `{ app_id, slug, client_id }` of the GitHub App (all public). Null: GitHub routes answer 503 |
 | `slack_client_id` | `null` | The Slack app's client id (public). Null: Slack routes answer 503 |
@@ -209,8 +209,8 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:301` | never set |
 | `SANDBOX_GATEWAY_URL` | agent | config | none: agent routes off | `oryxa-fde-agent/src/prod.rs:124` | `sandbox_gateway_url` |
 | `SANDBOX_GATEWAY_TOKEN` | agent | secret | none | `prod.rs:128` | `api/sandbox-gateway-token` |
-| `AGENT_MODEL` | agent | config | none | `prod.rs:149` | `agent_model` |
-| `AGENT_REGION` | agent | config | none | `prod.rs:150` | `agent_region`, else `aws_region` |
+| `AGENT_MODEL` | agent | config | none | `prod.rs:149` | `agent_model` (in Mumbai a profile id; Where prompts are processed) |
+| `AGENT_REGION` | agent | config | none | `prod.rs:150` | `agent_region`, else `aws_region`; the test reads it from output `agent_model_target` |
 | `REALTIME_URL` | realtime | config | none: output not streamed | `prod.rs:130` | `realtime_url` |
 | `REALTIME_TOKEN` | realtime | secret | none; both or neither | `prod.rs:130` | `api/realtime-token` |
 | `AGENT_MAX_TURNS` | optional | config | `100` | `prod.rs:151` | not set |
@@ -264,7 +264,7 @@ These have no image and no task definition yet; the facts for the issue that add
 | Binary | Variables (Read at) | Permissions it will need |
 | --- | --- | --- |
 | `oryxa-fde-ingest` | `DATABASE_URL` (`oryxa-fde-context/src/bin/ingest.rs:38`: **a password URL, no IAM auth; the API stream must switch it to `Store::from_env()`** before it can run on ECS), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:39`, as the API), `EVENT_SIGNING_KID` (`:41`), `EVENT_PUBLIC_KEY` (`:43`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:45`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
-| `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
+| `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
 | `oryxa-fde-mcp` | `DATABASE_URL` (`oryxa-fde-mcp/src/bin/mcp.rs:27`: same code gap as ingest), `SPICEDB_ENDPOINT` (`:29`), `SPICEDB_PRESHARED_KEY` (`:30`), `WORKOS_API_KEY` (`:34`), `WORKOS_CLIENT_ID` (`:35`), `MCP_ALLOWED_HOSTS` (`:40`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:39`); optional `WORKOS_ISSUER` (`:37`), `LISTEN_ADDR` (`:46`, default `0.0.0.0:8081`) | as the API's database, S3 read and embedding permissions; a route to it (its own ALB listener or service), which dev does not have |
 | `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
 
@@ -282,8 +282,8 @@ and zone with these permissions, all Edit: Cloudflare Tunnel, Access: Apps and P
 workflows (Deploys, below), not from the owner's machine.
 
 1. **State.** Create a versioned, encrypted, private S3 bucket by hand, then run
-   `tofu -chdir=infra/envs/dev init -backend-config="bucket=<state bucket>" -backend-config="region=us-west-2"`.
-2. **Bus.** Run `infra/scripts/create-event-bus.sh dev <account id> us-west-2`, with the region you
+   `tofu -chdir=infra/envs/dev init -backend-config="bucket=<state bucket>" -backend-config="region=ap-south-1"` (the state bucket is in `aws_region`).
+2. **Bus.** Run `infra/scripts/create-event-bus.sh dev <account id> ap-south-1`, with the region you
    set as `aws_region`. It refuses any other account and prints the ARN for `event_bus_arn`.
 3. **The protected `dev` environment, before the deploy role exists.** In GitHub, Settings,
    Environments, New environment `dev`: deployment branches, selected branches, `main` only. Add the
@@ -396,7 +396,7 @@ Worker secrets are set by hand with `wrangler secret put` and are never in the w
    both buckets and the ECR repository for emptying on destroy; nothing is deleted yet.
 2. Run `tofu -chdir=infra/envs/dev destroy`. It deletes every object version in the data and
    CloudTrail buckets and every image in ECR.
-3. Delete the bus: `aws eventsv2 delete-event-bus --region us-west-2 --name oryxa-fde-dev`.
+3. Delete the bus: `aws eventsv2 delete-event-bus --region ap-south-1 --name oryxa-fde-dev`.
 
 What stays behind:
 - RDS keeps a final snapshot named `oryxa-fde-dev-final-<time the instance was created>`, so a
@@ -406,43 +406,117 @@ What stays behind:
 - Secrets stay recoverable for 7 days. To rebuild within that window, restore them
   (`aws secretsmanager restore-secret`) and `tofu import` them, or the first apply fails on their names.
 
+## Mumbai (ap-south-1)
+
+The founder chose Mumbai for the first environment (#144). Read from AWS's own pages on 10 November 2026;
+service and model availability changes, so `tofu plan` and the first apply are still the test. **In Mumbai**
+means the service or model runs there. **Profile only** means the model has no in-Region endpoint in Mumbai and
+is reached by naming a cross-Region inference profile, so Bedrock runs the request in another Region.
+
+| What the code or infra uses | In Mumbai? | Source |
+| --- | --- | --- |
+| ECS Fargate, Linux | In Mumbai | [Fargate Regions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate-Regions.html) lists `ap-south-1` |
+| Fargate on ARM64 | In Mumbai (no exception listed) | [ARM64 task definitions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-arm64.html): the only Fargate exception is `use1-az3`; the [price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonECS/current/ap-south-1/index.json) has Fargate ARM vCPU and memory SKUs for Mumbai |
+| RDS PostgreSQL 17 on `db.t4g.micro` | In Mumbai. The class and engine pairing is from the docs; Mumbai from AWS's T4g announcement and the price list | [DB engines per instance class](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.Support.html) (`db.t4g.micro`: all PostgreSQL 17 versions); [T4g in 28 Regions incl. Mumbai, Aug 2023](https://aws.amazon.com/about-aws/whats-new/2023/08/amazon-rds-t4g-instances-6-regions/); [RDS price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/ap-south-1/index.json) has `db.t4g.micro` PostgreSQL Single-AZ. AWS has no per-Region table for this pairing: `aws rds describe-orderable-db-instance-options --engine postgres --engine-version 17 --db-instance-class db.t4g.micro --region ap-south-1` is the check |
+| pgvector on RDS PostgreSQL 17 | In the engine (0.8.x) | [Extension versions](https://docs.aws.amazon.com/AmazonRDS/latest/PostgreSQLReleaseNotes/postgresql-extensions.html); AWS lists extensions per engine version, not per Region |
+| EventBridge v2 bus and `aws eventsv2` | In Mumbai | [Launch announcement, 24 Sep 2026](https://aws.amazon.com/about-aws/whats-new/2026/09/eventbridge-relaunches-custom-event-buses/): 14 Regions including Mumbai and Oregon; [API reference](https://docs.aws.amazon.com/eventbridgev2/latest/APIReference/Welcome.html); [price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSEvents/current/ap-south-1/index.json) has `EventsV2` SKUs for Mumbai |
+| Bedrock embeddings, `amazon.titan-embed-text-v2:0` (`EMBEDDING_MODEL`) | **In Mumbai, in-Region** (not a profile; there is no geography or global profile for it) | [Titan Text Embeddings V2 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-titan-text-embeddings-v2.html): `ap-south-1` In-Region yes, Geo no, Global no |
+| Claude Opus 5.5 (`anthropic.claude-opus-5-5`; the id the code's lifecycle note and tests name) | **Profile only**: `global.anthropic.claude-opus-5-5` | [Opus 5.5 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html): Mumbai In-Region no, Geo no, Global yes. The bare id works in `eu-west-2` only. There is no India or Asia Pacific-wide profile; the geography profiles are `us.`, `eu.`, `au.` and `jp.` |
+| Claude Sonnet 5.5, Haiku 5.5, Fable 5.2 | **Profile only**, `global.` from Mumbai | [Sonnet 5.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html), [Haiku 5.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html), [Fable 5.2](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-2.html): Mumbai In-Region no, Geo no, Global yes for each |
+| Claude Opus 5 (the previous Opus) | **Profile only, but inside India**: `in.anthropic.claude-opus-5`, from Mumbai to Mumbai or Hyderabad | [Opus 5 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html): Geo India, source `ap-south-1`, destinations `ap-south-1`, `ap-south-2` |
+| SES (the lifecycle digest; the code uses the SES v2 API) | In Mumbai | [SES endpoints](https://docs.aws.amazon.com/general/latest/gr/ses.html): `email.ap-south-1.amazonaws.com`. SES sandbox status is [per Region](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html): the digest needs production access in Mumbai and a verified `DIGEST_FROM` identity there |
+| fck-nat AMI (`fck-nat-al2023-*-arm64-ebs`, owner `568608671756`) | In Mumbai | [fck-nat's published Region list](https://github.com/AndrewGuenther/fck-nat/blob/main/packer/fck-nat-public-all-regions.pkrvars.hcl) includes `ap-south-1` (last changed 31 May 2026); the owner id is in [its deploy guide](https://fck-nat.dev/stable/deploying/). The list says what the build publishes; `aws ec2 describe-images --owners 568608671756 --filters 'Name=name,Values=fck-nat-al2023-*-arm64-ebs' --region ap-south-1` is the check |
+| `t4g.nano` (the NAT), ALB, KMS, Secrets Manager, Cloud Map, CloudTrail, ECR, S3, SQS FIFO | In Mumbai | each has Mumbai SKUs in AWS's price list for `ap-south-1` (the Monthly cost estimate below links them by name) |
+
+Not offered in Mumbai: nothing the infra creates. Two things the code asks for are offered only through a
+profile: the agent's Claude model and the weekly drafting model.
+
+### Where prompts are processed
+
+ADR 0003 keeps customer data **at rest** in AWS in one Region, and in dev that Region is Mumbai: the database,
+the data bucket, the queues, the secrets and the logs. A Bedrock request is different. A prompt and its
+answer pass through whatever Region serves the model:
+
+- **Titan embeddings** (document text and search queries): processed in Mumbai.
+- **A `global.` profile** (the only kind that reaches Opus 5.5, Sonnet 5.5, Haiku 5.5 or Fable 5.2 from Mumbai):
+  [global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)
+  may process a request in any supported commercial AWS Region, and [AWS lists the destinations as all
+  commercial Regions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html), which
+  [can include Regions an account has not enabled](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html).
+  The model cards do not list the current set for Opus 5.5; `aws bedrock get-inference-profile --region ap-south-1
+  --inference-profile-identifier global.anthropic.claude-opus-5-5 --query 'models[].modelArn'` does. Prompts and
+  outputs may be stored for abuse detection in the Region that processes them. CloudTrail records the Region in
+  `additionalEventData.inferenceRegion` of each call, in Mumbai's trail.
+- **A geography profile** keeps processing inside its geography: [AWS's page](https://docs.aws.amazon.com/bedrock/latest/userguide/geographic-cross-region-inference.html)
+  says to check the destinations with `GetInferenceProfile` from the Region you call, not to trust the id's prefix.
+  For Opus 5.5 the cards give: `eu.` from `eu-west-2` (London), to Frankfurt, Stockholm, Milan, Spain, Ireland,
+  Paris and London; `au.` from Sydney or Melbourne, to those two; `jp.` from Tokyo or Osaka, to those two; `us.`
+  from the US Regions. None of them can be called from Mumbai, so a geography profile means setting
+  `agent_region` to a Region in that geography and calling Bedrock there, with the round trip that adds.
+- **`in.anthropic.claude-opus-5`** is the one profile that keeps Opus-class inference inside India (Mumbai and
+  Hyderabad), on the previous model.
+
+What dev may do is the lead's and the founder's call (P0 holds sample data only, and the Cloudflare sandboxes
+already work that way, ADR 0003's amendment). This PR changes no model setting: `agent_model` stays null, and
+the example in `terraform.tfvars.example` is commented out. Before real customer data reaches an agent run,
+decide between a `global.` profile (cheapest, lowest latency from Mumbai, processed anywhere), a geography profile
+called from another Region, and `in.` on Opus 5; and write the answer into the ADR.
+
+A role that calls a `global.` profile needs the three statements AWS documents
+([IAM policy for global inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)):
+the profile in the calling Region, the foundation model in that Region only when called through the profile, and
+the foundation model with `aws:RequestedRegion` set to `unspecified`. The API's role has none of it today, because
+the agent's Bedrock calls are signed by the gateway's outbound handler and the lifecycle worker is not deployed; the
+streams that add those identities need this, and an SCP that denies Regions will refuse the call.
+
 ## Monthly dev cost estimate
 
-us-west-2 list prices, 730 hours a month, dev traffic. Check against the AWS pricing calculator
-before apply.
+`ap-south-1` list prices, 730 hours a month, dev traffic, in US dollars. Prices were read on 10 November 2026
+from AWS's public price lists (`https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/<offer>/current/ap-south-1/index.json`;
+the Checked column names the offer and its publication date). Check against the AWS pricing calculator before apply.
 
-| Item | Assumption | $/month |
-| --- | --- | --- |
-| Fargate: oryxa-fde-api, SpiceDB, cloudflared | 3 tasks, each 0.25 vCPU + 0.5 GB ARM64, always on ($7.21 each) | 21.63 |
-| Internal ALB | 730 h at $0.0225, under 1 LCU | 16.50 to 18.50 |
-| RDS PostgreSQL | `db.t4g.micro` single-AZ ($11.68), 20 GB gp3 ($2.30), backups inside the free allowance | 14 |
-| NAT instance | fck-nat on `t4g.nano` ($3.07), its public IPv4 ($3.65), root volume and transfer | 7 to 8.50 |
-| Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 |
-| KMS | environment key + CloudTrail key at $1, requests (S3 Bucket Keys on) | 2 to 2.50 |
-| Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance | 0.60 |
-| CloudWatch Logs | 14-day retention, low volume | 1 to 2 |
-| CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 |
-| S3 (data, trail logs), ECR (under 1 GB) | low volume | 0.50 to 1 |
-| SQS, EventBridge v2 | no consumer polls yet; low event volume | 0 to 1 |
-| S3 gateway endpoint, one-off tasks | free; one-off tasks bill seconds | 0 |
-| Cloudflare Workers Paid | needed for Sandboxes and Durable Objects anyway | 5 |
-| Cloudflare Tunnel, Workers VPC, Access (under 50 users), DNS | free tiers; confirm Workers VPC pricing before apply | 0 |
-| **Total** | excluding Bedrock tokens and sandbox container time | **about $70 to 78** |
+| Item | Assumption | $/month | Checked |
+| --- | --- | --- | --- |
+| Fargate: oryxa-fde-api, SpiceDB, cloudflared | 3 tasks, each 0.25 vCPU + 0.5 GB ARM64, always on ($0.02383 per vCPU-hour, $0.00261 per GB-hour: $5.30 each) | 15.90 | AmazonECS, 19 Oct |
+| Internal ALB | 730 h at $0.0239, plus under about 0.35 average LCU at $0.008 | 17.50 to 19.50 | AWSELB, 5 Nov |
+| RDS PostgreSQL | `db.t4g.micro` single-AZ ($0.021 an hour: $15.33), 20 GB gp3 ($0.131 a GB: $2.62), backups inside the free allowance | 18 | AmazonRDS, 29 Oct |
+| NAT instance | fck-nat on `t4g.nano` ($0.0028 an hour: $2.04), its public IPv4 ($0.005 an hour: $3.65), 8 GB gp3 root volume ($0.0912 a GB: $0.73), and an assumed 10 GB or less a month out to the internet at $0.1093 a GB | 6.50 to 8 | AmazonEC2, 7 Nov; AmazonVPC, 5 Nov; AWSDataTransfer, 3 Nov; the root volume's size and the traffic are assumptions |
+| Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 | AWSSecretsManager, 11 Sep |
+| KMS | environment key + CloudTrail key at $1, requests at $0.03 per 10,000 (S3 Bucket Keys on) | 2 to 2.50 | awskms, 8 Nov |
+| Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance ($0.10) | 0.60 | instance: AWSCloudMap, 6 Nov; the hosted zone's price is global and **was not rechecked** |
+| CloudWatch Logs | 14-day retention, about 2 to 3 GB a month ingested at $0.67 a GB, storage $0.03 a GB-month | 1.50 to 2.50 | AmazonCloudWatch, 4 Nov; the volume is an assumption |
+| CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 | AWSCloudTrail, 2 Nov |
+| S3 (data, trail logs), ECR (under 1 GB) | low volume, S3 $0.025 a GB-month, ECR $0.10 a GB-month | 0.50 to 1 | AmazonS3, 9 Nov; AmazonECR, 11 Sep |
+| SQS, EventBridge v2 | no consumer polls yet; low event volume. SQS FIFO $0.50 per million requests; EventBridge v2 is priced by data: $0.19 a GB in, $0.059 a GB out, $0.087 a GB-month retained | 0 to 1 | AWSQueueService, 11 Sep; AWSEvents, 8 Nov |
+| S3 gateway endpoint, one-off tasks | free; one-off tasks bill seconds | 0 | not rechecked (free) |
+| Cloudflare Workers Paid | needed for Sandboxes and Durable Objects anyway | 5 | not AWS; unchanged |
+| Cloudflare Tunnel, Workers VPC, Access (under 50 users), DNS | free tiers; confirm Workers VPC pricing before apply | 0 | not AWS; unchanged |
+| **Total** | excluding Bedrock tokens and sandbox container time | **about $70 to 77** | |
 
-With `start_services = false` the three tasks cost nothing, so the total is about $49 to 56. If the
-account already has a CloudTrail trail, this trail's management events add about $2 to 5.
+With `start_services = false` the three tasks cost nothing, so the total is about $54 to 61. If the
+account already has a CloudTrail trail, this trail's management events add about $2 to 5 (that rate was not
+rechecked). The table for Oregon (us-west-2 list prices) came to $70 to 78: the Fargate and NAT instance lines
+fell in Mumbai, the RDS and ALB lines rose, and the total barely moved.
 
-Compared with the platform's $38 to 50, the difference is the internal ALB ($16.50) and an
+Bedrock tokens are not in the total. Mumbai list prices, from the Bedrock price lists
+([foundation models](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/ap-south-1/index.json),
+[Titan](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/ap-south-1/index.json), 9 and 6 Nov), per million tokens
+input and output: Titan Embeddings V2 $0.024 in; Opus 5.5 through the global profile $4 and $20; Opus 5 through
+`in.` $5.50 and $27.50 (global $5 and $25); Sonnet 5.5 global $2 and $10; Haiku 5.5 global $0.10 and $0.50;
+Fable 5.2 global $8 and $40. The Mumbai list prices Opus 5.5 only for global use.
+
+Compared with the platform's $38 to 50, the difference is the internal ALB ($17.50) and an
 always-on API on Fargate plus an RDS instance instead of Lambda and scale-to-zero Aurora (ADR 0003
 picks Fargate because agent runs and live streams outlast Lambda). Cuts, each with a cost:
 
-- Drop the ALB and point the VPC service at the API task through Cloud Map: saves about $17, but
+- Drop the ALB and point the VPC service at the API task through Cloud Map: saves about $17.50, but
   loses health-checked rolling deploys. The issue asks for the ALB, so that is the lead's call.
-- Fargate Spot for the three tasks, if ARM64 Spot is offered in the region: saves about $15, but
-  tasks can be interrupted.
-- Run cloudflared as a sidecar in the API task: saves $7.21, but ties the tunnel to API deploys and
+- Fargate Spot for the three tasks, if ARM64 Spot is offered in the region: saves up to about $11 (the
+  earlier estimate's roughly 70% discount, applied to $15.90; Spot prices are not in the price list, and AWS's
+  Fargate capacity-provider page names no Region limit, so Mumbai was **not rechecked**), but tasks can be interrupted.
+- Run cloudflared as a sidecar in the API task: saves $5.30, but ties the tunnel to API deploys and
   bypasses the ALB.
-- Stop the RDS instance while unused (at most 7 days at a time): up to $11.68, prorated.
+- Stop the RDS instance while unused (at most 7 days at a time): up to $15.33, prorated.
 
 ## Verify before apply
 
@@ -454,7 +528,8 @@ These could not be checked without an account. Each one is flagged at the place 
 - **Workers VPC.** `cloudflare_connectivity_directory_service` (provider 5.27) resolves the ALB's
   hostname through the tunnel (`resolver_network`). Confirm the service shows healthy and that
   fde-web's binding reaches `/healthz`.
-- **fck-nat AMI owner** `568608671756`. Confirm it against fck-nat's docs, as in the platform.
+- **fck-nat AMI owner** `568608671756` is the one fck-nat's deploy guide gives. That the AMI exists in
+  Mumbai is the project's published Region list; run the `describe-images` check in Mumbai (ap-south-1) first.
 - **zed task.** `authzed/zed:v1.14.0-debug` (busybox shell, ARM64 confirmed on ghcr.io) reads the
   key from `ZED_TOKEN` through zed's `ZED_` env flag binding. If zed reports no token, that binding
   did not apply.
@@ -474,7 +549,11 @@ These could not be checked without an account. Each one is flagged at the place 
   `kms:Decrypt` for the caller; AWS's reference may also list `kms:DescribeKey`. The Slack statement grants
   the first two, only through Secrets Manager. The first Slack install shows whether a third is needed.
 - **Bedrock.** The API's role may `bedrock:InvokeModel` on `foundation-model/amazon.titan-embed-text-v2:0` in
-  `aws_region`. Confirm the model is available there and enabled for the account (model access) before the first upload.
+  `aws_region`. AWS lists the model as in-Region in Mumbai (Mumbai (ap-south-1)); confirm it works for the account
+  (model access) before the first upload. The Claude models need an inference profile there, and the profile
+  chosen decides where prompts are processed (Where prompts are processed).
+- **RDS in Mumbai.** AWS has no per-Region table for PostgreSQL 17 on `db.t4g.micro`; the
+  `describe-orderable-db-instance-options` command in Mumbai (ap-south-1) answers it before the first apply.
 - **`WORKOS_ISSUER`.** The code's default is `https://api.workos.com/`, pinned against the token's `iss`
   (`oryxa-authn/src/workos_jwt.rs:57`). If the WorkOS environment uses a custom auth domain, the issuer is
   that domain and the API needs `WORKOS_ISSUER` (not set here; add it to the contract when it is known).

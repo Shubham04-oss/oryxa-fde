@@ -4,7 +4,7 @@
 # OpenTofu, as in the platform. Safe to re-run: an existing bus is reported, never changed.
 # The owner runs it with credentials for the target account (AWS CLI 2.37.3 or newer); CI never does.
 # Every call names the region, so the bus lands where aws_region says, whatever the CLI's default.
-#   infra/scripts/create-event-bus.sh dev <account id> us-west-2
+#   infra/scripts/create-event-bus.sh dev <account id> ap-south-1
 set -euo pipefail
 
 usage="usage: create-event-bus.sh <env> <aws account id> <aws region> [retention days, default 7]"
@@ -15,7 +15,7 @@ retention="${4:-7}"
 
 [[ "$env" =~ ^[a-z][a-z0-9]{1,9}$ ]] || { echo "env must be 2 to 10 lowercase letters or digits" >&2; exit 2; }
 [[ "$account" =~ ^[0-9]{12}$ ]] || { echo "account id must be 12 digits" >&2; exit 2; }
-[[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "region must look like us-west-2" >&2; exit 2; }
+[[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "region must look like ap-south-1" >&2; exit 2; }
 [[ "$retention" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "retention must be a number of days" >&2; exit 2; }
 
 # Same guard as allowed_account_ids in the provider: refuse to touch any other account.
