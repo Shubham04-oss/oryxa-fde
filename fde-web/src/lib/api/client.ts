@@ -18,7 +18,18 @@ import {
   TaskOut,
   TodayOut,
 } from "./schemas"
-import type { Company, CompanyId, Project, ProjectId, ProjectScope, Stage } from "./schemas"
+import type { TaskBody } from "../board"
+import type { AccessBody } from "../today"
+import type {
+  AccessRequestId,
+  Company,
+  CompanyId,
+  Project,
+  ProjectId,
+  ProjectScope,
+  Stage,
+  TaskId,
+} from "./schemas"
 
 // The app's only way to the FDE API. Screens use `api` and `queries` and never see where the
 // answers come from. Calls go through a client generated from the API's OpenAPI spec
@@ -45,6 +56,14 @@ const SAFE_TEXT: Record<string, string> = {
   unavailable: "The workspace is briefly unavailable. Try again in a minute.",
   invalid_task: "Describe the task in plain text, up to 64 KiB.",
   invalid_repository: "Give the repository's owner, name and branch.",
+  invalid_title: "The title is one line, up to 200 characters.",
+  invalid_blocker: "Keep the blocker to plain text, up to 4000 characters.",
+  invalid_due_on: "Use a date like 2026-11-30.",
+  invalid_assignee: "That person is not on this project.",
+  invalid_waiting_on: "That person is not a stakeholder at this company.",
+  invalid_blocked_by: "That access request is not on this project.",
+  rejected_blocker_required: "Say what is blocking it.",
+  rejected_blocked_by_needs_blocked: "Only a blocked task can name an access request.",
   rejected_over_budget: "This project's agent budget is used up.",
   rejected_ended: "This run has already ended.",
   rejected_not_pending: "This approval is no longer waiting for a decision.",
@@ -235,6 +254,47 @@ function connect(transport: Transport) {
         }),
       ),
 
+    /** Adds a task; the API answers with it as saved. */
+    addTask: (scope: ProjectScope, body: TaskBody) =>
+      read(
+        TaskOut,
+        client.POST("/v1/companies/{company}/projects/{project}/tasks", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    /** Replaces a task: every field, so a change to one sends them all (`toBody`). */
+    updateTask: (scope: ProjectScope, task: TaskId, body: TaskBody) =>
+      read(
+        TaskOut,
+        client.PUT("/v1/companies/{company}/projects/{project}/tasks/{task}", {
+          params: { path: { ...scope, task } },
+          body,
+        }),
+      ),
+
+    /** Replaces an access request: every field, so a change of status sends them all. */
+    updateAccess: (scope: ProjectScope, access: AccessRequestId, body: AccessBody) =>
+      read(
+        AccessRequestOut,
+        client.PUT("/v1/companies/{company}/projects/{project}/access-requests/{access_request}", {
+          params: { path: { ...scope, access_request: access } },
+          body,
+        }),
+      ),
+
+    /** The people at a project's company, for a prompt that asks who a task waits on. */
+    projectStakeholders: (scope: ProjectScope) => get.projectStakeholders(scope),
+
+    async removeTask(scope: ProjectScope, task: TaskId) {
+      const { error, response } = await client.DELETE(
+        "/v1/companies/{company}/projects/{project}/tasks/{task}",
+        { params: { path: { ...scope, task } } },
+      )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
     runs: runsOf,
 
     /** A run with its events so far and its approval requests. */
@@ -334,6 +394,11 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     project: async (scope) => (await use()).project(scope),
     today: async () => (await use()).today(),
     moveStage: async (scope, to) => (await use()).moveStage(scope, to),
+    addTask: async (scope, body) => (await use()).addTask(scope, body),
+    updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
+    updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
+    projectStakeholders: async (scope) => (await use()).projectStakeholders(scope),
+    removeTask: async (scope, task) => (await use()).removeTask(scope, task),
     runs: async (scope) => (await use()).runs(scope),
     run: async (scope, id) => (await use()).run(scope, id),
     startRun: async (scope, body) => (await use()).startRun(scope, body),
@@ -391,6 +456,14 @@ export const queries = {
       ...read,
     }),
   today: () => queryOptions({ queryKey: ["today"], queryFn: api.today, ...read }),
+  /** The people at a project's company, read when a prompt needs them. */
+  projectStakeholders: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "stakeholders"],
+      queryFn: () => api.projectStakeholders(scope),
+      ...read,
+      staleTime: 60_000,
+    }),
   runs: (scope: ProjectScope) =>
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project, "runs"],

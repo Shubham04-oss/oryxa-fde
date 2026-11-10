@@ -440,3 +440,25 @@
     animation: none;
   }
 }
+
+/* The board's sideways scroll must be seen: a classic, always-visible bar on the tokens (an
+   overlay bar that hides itself would leave a cut-off column looking like the end). Firefox
+   gets the same from scrollbar-color. */
+@supports selector(::-webkit-scrollbar) {
+  .board-scroll::-webkit-scrollbar {
+    height: 10px;
+  }
+  .board-scroll::-webkit-scrollbar-track {
+    border-radius: 5px;
+    background: var(--raised);
+  }
+  .board-scroll::-webkit-scrollbar-thumb {
+    border-radius: 5px;
+    background: var(--border-strong);
+  }
+}
+@supports not selector(::-webkit-scrollbar) {
+  .board-scroll {
+    scrollbar-color: var(--border-strong) var(--raised);
+  }
+}

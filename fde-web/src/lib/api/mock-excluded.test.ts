@@ -42,6 +42,8 @@ describe("the mock API", () => {
     expect(code).toContain("/auth/login?return_to=")
     expect(code).not.toContain(MOCK_MARKER)
     expect(code).not.toContain("mock-api")
+    // The test-only switch that fails writes lives in the mock, so it goes with it.
+    expect(code).not.toContain("__fdeMockFailWrites")
   }, 30_000)
 
   it("is in a development build, so the check above can fail", async () => {

@@ -1,0 +1,55 @@
+Oryxa Proprietary Source-Available Licence
+
+Copyright (c) 2026 Oryxa AI Private Limited. All rights reserved.
+
+This repository ("the Software") is the proprietary property of Oryxa AI Private Limited
+("Oryxa"). It is NOT open source software. Making its source code visible does not grant any
+licence under copyright, patent, trademark or any other right, except the narrow permission in
+section 1.
+
+1. Reference only
+
+   You may view and read the Software through the hosting service where Oryxa publishes it, solely
+   to understand how it works.
+
+2. What you may not do
+
+   Without Oryxa's prior written permission you may not, in whole or in part, at any time:
+
+   a. copy, reproduce, download for reuse, fork for reuse or mirror the Software;
+   b. modify it or create derivative works based on it;
+   c. use, run, deploy, host or offer it, or any part of it, as a service, whether commercially
+      or not;
+   d. distribute, sublicense, sell, lease or otherwise make it available to anyone;
+   e. use it, or any part of it, to build, train or improve a competing product or service,
+      including any machine learning model or dataset;
+   f. remove or alter this notice or any proprietary notices in the Software.
+
+3. Contributions
+
+   Oryxa does not accept unsolicited contributions. Contributions (issues, pull requests,
+   patches or suggestions) are accepted only from people Oryxa has invited, who actively take part
+   in the project and have signed Oryxa's contributor agreement. By submitting a contribution you
+   assign to Oryxa all rights in it, and you confirm that you have the right to do so.
+
+4. Third-party components
+
+   Third-party components included in or used by the Software remain under their own licences.
+   Nothing in this licence restricts rights you have under those licences.
+
+5. No warranty and no liability
+
+   The Software is provided "as is", without warranty of any kind. To the maximum extent permitted
+   by law, Oryxa is not liable for any claim, damage or other liability arising from the Software
+   or from viewing it.
+
+6. Termination
+
+   Any use beyond section 1 is unlicensed and infringes Oryxa's rights. Oryxa may withdraw the
+   permission in section 1 at any time.
+
+7. Governing law
+
+   This licence is governed by the laws of India.
+
+For permissions, licensing or contributor-agreement enquiries, contact Oryxa AI Private Limited.

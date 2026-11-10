@@ -2,7 +2,8 @@
 
 The FDE workspace, built on the Oryxa platform base (authn, authz, events) vendored unchanged in
 `vendor/oryxa-platform`. Several Claude accounts work here in parallel and push as the same GitHub
-user, so these rules are the contract. Read `docs/plan.md` and `docs/adr/` before your first change.
+user, so these rules are the contract. Read `docs/direction.md`, `docs/plan.md` and `docs/adr/` before your
+first change.
 
 ## Roles
 
@@ -15,6 +16,14 @@ user, so these rules are the contract. Read `docs/plan.md` and `docs/adr/` befor
 | Infra | `infra/`, and `.github/workflows/` with lead review | `agent:infra` |
 
 If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the issue instead of guessing.
+
+## Agent fleet
+
+Read `docs/agents.md` before delegating anything. In short: only Claude accounts and OpenCode work
+here. The Claude accounts build and own every PR. OpenCode (DeepSeek V4.1 Flash, GLM 5.3) does fast
+research and checkable sub-tasks for them, and GLM 5.3 gives a second-opinion security pass. It never
+opens PRs and never sees secrets or customer data. Bedrock and Vertex are used only with the lead's OK.
+Respect each machine's heavy-job budget, and clean up the worktrees, containers and processes you start.
 
 ## Workflow (non-negotiable)
 
@@ -50,8 +59,8 @@ If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the iss
   and company. SpiceDB only through `oryxa-authz`.
 - **Events:** publish only via `oryxa-events` (signed, ids only, no emails or content); handlers must
   be idempotent. State changes publish through the outbox in the same transaction.
-- **Customer data:** sample data only until the runner exists. Customer data at rest stays in AWS,
-  never in Cloudflare storage.
+- **Customer data:** sample data only until per-company keys exist (ADR 0003). Sandboxes stay on
+  sample data until the runner exists. Customer data at rest stays in AWS, never in Cloudflare storage.
 - **Outbound HTTP** to third parties only through an explicit host allowlist.
 - **Secrets:** never in code, tests, logs, commits or PR text. Store references, never values.
   `.env*`, `*.pem`, `*.key` are gitignored; keep it that way.

@@ -1,8 +1,10 @@
+import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { ChevronLeft } from "lucide-react"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
 import type { Tone } from "./page"
+import { Board } from "./board"
 import { StageBar } from "./stage-bar"
 import { RunsCard } from "./runs"
 import { ApiError, api, queries } from "@/lib/api/client"
@@ -13,10 +15,8 @@ import type {
   ProjectOut,
   ProjectScope,
   Stage,
-  TaskOut,
-  TaskState,
 } from "@/lib/api/schemas"
-import { dayOf, daysBetween, dueLabel, localDay, shortDate, waitingLabel } from "@/lib/time"
+import { dayOf, shortDate } from "@/lib/time"
 
 const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   requested: { label: "Requested", tone: "neutral" },
@@ -24,14 +24,6 @@ const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   granted: { label: "Granted", tone: "success" },
   denied: { label: "Denied", tone: "attention" },
   revoked: { label: "Revoked", tone: "attention" },
-}
-
-const TASK: Record<TaskState, { label: string; tone: Tone }> = {
-  todo: { label: "To do", tone: "neutral" },
-  in_progress: { label: "In progress", tone: "neutral" },
-  blocked: { label: "Blocked", tone: "attention" },
-  waiting_on_customer: { label: "Waiting on the customer", tone: "neutral" },
-  done: { label: "Done", tone: "success" },
 }
 
 const COMPARATOR: Record<CriterionOut["comparator"], string> = {
@@ -45,21 +37,11 @@ function target({ metric, comparator, target: value, unit }: CriterionOut) {
   return `${metric}, ${COMPARATOR[comparator]} ${value}${units}`
 }
 
-/** A task's second line: why it is stuck, who it waits on and since when, or when it is due. */
-// ponytail: the API returns only the assignee's WorkOS user id, so a teammate can't be named yet (tracked on the API).
-function assigneeLabel(assignee: string | null | undefined, me: string | undefined) {
-  if (!assignee) return "Unassigned"
-  return assignee === me ? "Assigned to you" : "Assigned to a teammate"
-}
-
-function taskDetail(task: TaskOut, today: string, person: (id: string) => string) {
-  if (task.status === "blocked" && task.blocker) return task.blocker
-  if (task.status === "waiting_on_customer") {
-    const days = daysBetween(dayOf(task.waiting_since ?? task.updated_at), today)
-    return waitingLabel(days, task.waiting_on ? person(task.waiting_on) : null)
-  }
-  if (task.status !== "done" && task.due_on) return dueLabel(task.due_on, today)
-  return null
+/** The page column (1040px) the cards sit in; the board alone breaks out to the canvas. */
+function Column({ children }: { children: ReactNode }) {
+  return (
+    <div className="mx-auto grid w-[min(1040px,100%)] gap-4 max-[800px]:gap-3.5">{children}</div>
+  )
 }
 
 /** How scope sign-off stands: signed for this version, signed before a change, or never. */
@@ -82,7 +64,6 @@ function signOffStatus(p: Project, person: (id: string) => string) {
 export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const queryClient = useQueryClient()
   const project = useQuery(queries.project(scope))
-  const me = useQuery(queries.me())
   const move = useMutation({
     mutationFn: (to: Stage) => api.moveStage(scope, to),
     onSuccess: (moved: ProjectOut) => {
@@ -124,152 +105,128 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
   const inScope = p.scope.items.filter((item) => item.kind === "in")
   const outOfScope = p.scope.items.filter((item) => item.kind === "out")
-  const today = localDay()
 
   return (
-    <Page wide>
-      <div className="grid gap-2">
-        <Link
-          to="/companies/$companyId"
-          params={{ companyId: p.company.id }}
-          className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
-          {p.company.name}
-        </Link>
-        {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
-      </div>
+    <Page full>
+      <Column>
+        <div className="grid gap-2">
+          <Link
+            to="/companies/$companyId"
+            params={{ companyId: p.company.id }}
+            className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
+            {p.company.name}
+          </Link>
+          {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
+        </div>
 
-      <StageBar
-        stage={p.stage}
-        moving={move.isPending}
-        error={moveError}
-        onMove={(to) => move.mutate(to)}
-      />
+        <StageBar
+          stage={p.stage}
+          moving={move.isPending}
+          error={moveError}
+          onMove={(to) => move.mutate(to)}
+        />
+      </Column>
 
-      <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-        <Card title="Scope" aside={signOffStatus(p, person)}>
-          {p.scope.items.length === 0 ? (
-            <Quiet>No scope written yet.</Quiet>
+      <Board scope={scope} project={p} />
+
+      <Column>
+        <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
+          <Card title="Scope" aside={signOffStatus(p, person)}>
+            {p.scope.items.length === 0 ? (
+              <Quiet>No scope written yet.</Quiet>
+            ) : (
+              <div className="grid gap-3 text-xs">
+                {(
+                  [
+                    ["In scope", inScope],
+                    ["Out of scope", outOfScope],
+                  ] as const
+                ).map(([heading, items]) => (
+                  <div key={heading}>
+                    <h3 className="text-[11px] text-muted-foreground">{heading}</h3>
+                    {items.length === 0 ? (
+                      <Quiet>None listed.</Quiet>
+                    ) : (
+                      <ul className="mt-1 grid list-disc gap-1 pl-4 marker:text-muted-foreground">
+                        {items.map((item) => (
+                          <li key={item.id}>{item.description}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card title="Success criteria">
+            {p.scope.criteria.length === 0 ? (
+              <Quiet>No success criteria yet.</Quiet>
+            ) : (
+              <Rows>
+                {p.scope.criteria.map((criterion) => (
+                  <Row key={criterion.id}>
+                    <p className="min-w-0 text-xs">{criterion.description}</p>
+                    <Quiet>Target: {target(criterion)}</Quiet>
+                  </Row>
+                ))}
+              </Rows>
+            )}
+          </Card>
+        </div>
+
+        <Card title="Access">
+          {p.access.length === 0 ? (
+            <Quiet>No access requested yet.</Quiet>
           ) : (
-            <div className="grid gap-3 text-xs">
-              {(
-                [
-                  ["In scope", inScope],
-                  ["Out of scope", outOfScope],
-                ] as const
-              ).map(([heading, items]) => (
-                <div key={heading}>
-                  <h3 className="text-[11px] text-muted-foreground">{heading}</h3>
-                  {items.length === 0 ? (
-                    <Quiet>None listed.</Quiet>
-                  ) : (
-                    <ul className="mt-1 grid list-disc gap-1 pl-4 marker:text-muted-foreground">
-                      {items.map((item) => (
-                        <li key={item.id}>{item.description}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
+            <Rows>
+              {p.access.map((request) => {
+                const open = request.status === "requested" || request.status === "in_progress"
+                const days = request.days_waiting
+                const detail = [
+                  request.system && systems.get(request.system),
+                  request.owner && `Owner: ${person(request.owner)}`,
+                  `Requested ${shortDate(dayOf(request.requested_at))}`,
+                  open && `${days} ${days === 1 ? "day" : "days"} waiting`,
+                ]
+                return (
+                  <Row key={request.id}>
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                      <p className="min-w-0 text-xs">{request.description}</p>
+                      <Status tone={ACCESS[request.status].tone}>
+                        {ACCESS[request.status].label}
+                      </Status>
+                    </div>
+                    <Quiet>{detail.filter(Boolean).join(" · ")}</Quiet>
+                  </Row>
+                )
+              })}
+            </Rows>
           )}
         </Card>
 
-        <Card title="Success criteria">
-          {p.scope.criteria.length === 0 ? (
-            <Quiet>No success criteria yet.</Quiet>
+        <RunsCard scope={scope} />
+
+        <Card title="Decisions">
+          {p.decisions.length === 0 ? (
+            <Quiet>No decisions logged yet.</Quiet>
           ) : (
             <Rows>
-              {p.scope.criteria.map((criterion) => (
-                <Row key={criterion.id}>
-                  <p className="min-w-0 text-xs">{criterion.description}</p>
-                  <Quiet>Target: {target(criterion)}</Quiet>
+              {p.decisions.map((decision) => (
+                <Row key={decision.id}>
+                  <p className="text-xs">{decision.title}</p>
+                  <p className="mt-0.5 text-xs text-soft">{decision.rationale}</p>
+                  <Quiet>
+                    {decision.decided_by}, {shortDate(dayOf(decision.decided_at))}
+                  </Quiet>
                 </Row>
               ))}
             </Rows>
           )}
         </Card>
-      </div>
-
-      <Card title="Access">
-        {p.access.length === 0 ? (
-          <Quiet>No access requested yet.</Quiet>
-        ) : (
-          <Rows>
-            {p.access.map((request) => {
-              const open = request.status === "requested" || request.status === "in_progress"
-              const days = request.days_waiting
-              const detail = [
-                request.system && systems.get(request.system),
-                request.owner && `Owner: ${person(request.owner)}`,
-                `Requested ${shortDate(dayOf(request.requested_at))}`,
-                open && `${days} ${days === 1 ? "day" : "days"} waiting`,
-              ]
-              return (
-                <Row key={request.id}>
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                    <p className="min-w-0 text-xs">{request.description}</p>
-                    <Status tone={ACCESS[request.status].tone}>
-                      {ACCESS[request.status].label}
-                    </Status>
-                  </div>
-                  <Quiet>{detail.filter(Boolean).join(" · ")}</Quiet>
-                </Row>
-              )
-            })}
-          </Rows>
-        )}
-      </Card>
-
-      <Card title="Tasks">
-        {p.tasks.length === 0 ? (
-          <Quiet>No tasks yet.</Quiet>
-        ) : (
-          <Rows>
-            {p.tasks.map((task) => {
-              const detail = [
-                assigneeLabel(task.assignee, me.data?.user.id),
-                taskDetail(task, today, person),
-              ]
-                .filter(Boolean)
-                .join(" · ")
-              const late = task.status !== "done" && !!task.due_on && task.due_on < today
-              return (
-                <Row key={task.id}>
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                    <p className="min-w-0 text-xs">{task.title}</p>
-                    <Status tone={late ? "attention" : TASK[task.status].tone}>
-                      {TASK[task.status].label}
-                    </Status>
-                  </div>
-                  {detail && <Quiet>{detail}</Quiet>}
-                </Row>
-              )
-            })}
-          </Rows>
-        )}
-      </Card>
-
-      <RunsCard scope={scope} />
-
-      <Card title="Decisions">
-        {p.decisions.length === 0 ? (
-          <Quiet>No decisions logged yet.</Quiet>
-        ) : (
-          <Rows>
-            {p.decisions.map((decision) => (
-              <Row key={decision.id}>
-                <p className="text-xs">{decision.title}</p>
-                <p className="mt-0.5 text-xs text-soft">{decision.rationale}</p>
-                <Quiet>
-                  {decision.decided_by}, {shortDate(dayOf(decision.decided_at))}
-                </Quiet>
-              </Row>
-            ))}
-          </Rows>
-        )}
-      </Card>
+      </Column>
     </Page>
   )
 }
