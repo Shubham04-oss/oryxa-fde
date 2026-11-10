@@ -198,6 +198,22 @@ module "data_bucket" {
   name          = var.data_bucket_name
   kms_key_arn   = aws_kms_key.this.arn
   force_destroy = var.allow_destroy
+  # Writes under a company prefix may name only a company key (infra/README.md, Company keys).
+  extra_policy_statements = module.company_keys.bucket_policy_statements
+}
+
+# One KMS key per company (ADR 0003). Keys are made per company by infra/scripts/company-key.sh, not by
+# this config: this holds the identities that make and retire them, the policy each key gets, and the
+# bucket rules. The bucket is named, not referenced, so the bucket's policy can take this module's output.
+module "company_keys" {
+  source               = "../../modules/company_keys"
+  env                  = var.env
+  bucket_name          = var.data_bucket_name
+  operator_arns        = var.company_key_operator_arns
+  writer_role_arns     = [module.api.task_role_arn]
+  reader_role_arns     = var.company_key_reader_role_arns
+  require_company_keys = var.require_company_keys
+  key_rotation         = var.company_key_rotation
 }
 
 # Private subnets. 5432 only from the API, SpiceDB and the one-off db-admin and migrate tasks.
@@ -295,8 +311,10 @@ data "aws_iam_policy_document" "api" {
   }
 
   statement {
-    sid       = "FileKeyViaS3"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    sid = "FileKeyViaS3"
+    # Once company keys are required no write may use the environment key, so it keeps only the right to
+    # read what it protects (files written before the company's key existed).
+    actions   = var.require_company_keys ? ["kms:Decrypt"] : ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [aws_kms_key.this.arn]
     condition {
       test     = "StringEquals"

@@ -15,6 +15,9 @@ mock_provider "aws" {
   mock_data "aws_region" {
     defaults = { region = "ap-south-1" }
   }
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
   mock_data "aws_availability_zones" {
     defaults = { names = ["ap-south-1a", "ap-south-1b"] }
   }
@@ -79,6 +82,8 @@ variables {
   data_bucket_name       = "oryxa-fde-dev-data-mock"
   cloudtrail_bucket_name = "oryxa-fde-dev-trail-mock"
   api_image_tag          = "mock"
+
+  company_key_operator_arns = ["arn:aws:iam::000000000000:user/operator"]
 }
 
 # ---------------------------------------------------------------- the environment
@@ -436,6 +441,74 @@ run "only_the_migrate_task_connects_as_the_table_owner" {
     condition     = module.migrate.service_name == null && contains(module.migrate.env_names, "DB_USER")
     error_message = "migrations run as a one-off task, never as a service"
   }
+}
+
+# One KMS key per company (#109; the rules themselves are pinned in tests/company_keys.tftest.hcl). The
+# bucket's policy carries the write rules, the API's role holds no IAM grant on any company key (each key's
+# own policy names it), and the environment key stays readable for what was written under it.
+run "company_keys_reach_the_bucket_policy_and_name_the_api_role" {
+  command = plan
+
+  assert {
+    condition = [for s in jsondecode(module.data_bucket.policy).Statement : s.Sid] == [
+      "DenyInsecureTransport", "DenyWriteNamingAnotherKey", "DenyWriteWithAnotherEncryption",
+    ]
+    error_message = "until company keys are required, a write may name no key (the bucket default) or a company alias"
+  }
+  assert {
+    condition     = jsonencode([for s in output.company_keys.key_policy.Statement : s.Principal.AWS if s.Sid == "ServingRolesUseTheKeyThroughS3"][0]) == jsonencode([module.api.task_role_arn])
+    error_message = "the API's task role is the role that uses company keys"
+  }
+  assert {
+    condition = length([
+      for s in data.aws_iam_policy_document.api.statement : s
+      if anytrue([for a in s.actions : startswith(a, "kms:")]) && !contains(s.resources, aws_kms_key.this.arn)
+    ]) == 0
+    error_message = "the API's IAM policy names the environment key only; company keys name the API in their own policies"
+  }
+  assert {
+    condition = toset([
+      for s in data.aws_iam_policy_document.api.statement : s.actions if s.sid == "FileKeyViaS3"
+    ][0]) == toset(["kms:Decrypt", "kms:GenerateDataKey"])
+    error_message = "while company keys are optional the environment key still encrypts new files"
+  }
+  assert {
+    condition     = output.company_key_alias_arn_prefix == "arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-dev/companies/"
+    error_message = "the alias prefix the API stream names on write"
+  }
+  assert {
+    condition     = output.company_keys.rotation == false
+    error_message = "company keys do not rotate unless company_key_rotation is set (the lead's decision on cost)"
+  }
+}
+
+run "required_company_keys_refuse_writes_that_name_no_company_key_and_stop_environment_key_writes" {
+  command = plan
+  variables {
+    require_company_keys = true
+  }
+
+  assert {
+    condition = [for s in jsondecode(module.data_bucket.policy).Statement : s.Sid] == [
+      "DenyInsecureTransport", "DenyWriteNamingAnotherKey", "DenyWriteWithAnotherEncryption",
+      "DenyWriteWithoutCompanyKey", "DenyWriteNotUsingKms",
+    ]
+    error_message = "every write must name a company key"
+  }
+  assert {
+    condition = toset([
+      for s in data.aws_iam_policy_document.api.statement : s.actions if s.sid == "FileKeyViaS3"
+    ][0]) == toset(["kms:Decrypt"])
+    error_message = "the environment key keeps Decrypt for old files and loses GenerateDataKey"
+  }
+}
+
+run "rejects_no_company_key_operators" {
+  command = plan
+  variables {
+    company_key_operator_arns = []
+  }
+  expect_failures = [var.company_key_operator_arns]
 }
 
 # GitHub deploys (#31): only deploy-api.yml on main, in this repository's dev environment, may assume

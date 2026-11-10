@@ -1,4 +1,5 @@
-# Adapted from oryxa-platform infra/modules/s3 (2b064a3), unchanged apart from this line and force_destroy.
+# Adapted from oryxa-platform infra/modules/s3 (2b064a3), unchanged apart from this line, force_destroy and
+# extra_policy_statements (the policy is built with jsonencode so the mock-provider tests can read it).
 # Private bucket: KMS-encrypted, versioned, public access blocked, TLS only.
 
 variable "name" {
@@ -13,6 +14,12 @@ variable "force_destroy" {
   description = "Let destroy delete every object version. Only for tearing an environment down."
   type        = bool
   default     = false
+}
+
+variable "extra_policy_statements" {
+  description = "Statements added to the bucket policy after the TLS-only one (the company key rules, modules/company_keys)."
+  type        = any
+  default     = []
 }
 
 variable "noncurrent_days" {
@@ -75,27 +82,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
   }
 }
 
-data "aws_iam_policy_document" "tls_only" {
-  statement {
-    sid       = "DenyInsecureTransport"
-    effect    = "Deny"
-    actions   = ["s3:*"]
-    resources = [aws_s3_bucket.this.arn, "${aws_s3_bucket.this.arn}/*"]
-    principals {
-      type        = "*"
-      identifiers = ["*"]
-    }
-    condition {
-      test     = "Bool"
-      variable = "aws:SecureTransport"
-      values   = ["false"]
-    }
+locals {
+  tls_only = {
+    Sid       = "DenyInsecureTransport"
+    Effect    = "Deny"
+    Principal = "*"
+    Action    = "s3:*"
+    Resource  = [aws_s3_bucket.this.arn, "${aws_s3_bucket.this.arn}/*"]
+    Condition = { Bool = { "aws:SecureTransport" = "false" } }
   }
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = concat([local.tls_only], var.extra_policy_statements)
+  })
 }
 
 resource "aws_s3_bucket_policy" "this" {
   bucket     = aws_s3_bucket.this.id
-  policy     = data.aws_iam_policy_document.tls_only.json
+  policy     = local.policy
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
@@ -105,4 +109,9 @@ output "arn" {
 
 output "name" {
   value = aws_s3_bucket.this.id
+}
+
+output "policy" {
+  description = "The bucket policy as applied."
+  value       = local.policy
 }
