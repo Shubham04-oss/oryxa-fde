@@ -30,6 +30,7 @@ mod documents;
 mod engine;
 mod error;
 mod export;
+pub mod health;
 pub mod integrations;
 mod lifecycle;
 mod meetings;
@@ -38,6 +39,7 @@ mod projects;
 pub mod reads;
 mod records;
 pub mod session;
+pub mod shutdown;
 mod threads;
 
 mod share;
@@ -263,9 +265,9 @@ pub fn router(app: Arc<App>) -> Router {
 /// is merged before the session layer, so a browser's cookie and its CSRF check apply to those routes as to ours.
 pub fn router_with(app: Arc<App>, extra: Router) -> Router {
     let (router, _) = routes().split_for_parts();
-    // Load balancer health check; reads nothing, so it is not in the spec.
+    // The container health check (`oryxa-fde-ops healthcheck`); reads nothing, so it is not in the spec.
     router
-        .route("/healthz", get(|| async { "ok" }))
+        .route(health::HEALTH_PATH, get(|| async { "ok" }))
         .with_state(app.clone())
         .merge(extra)
         .layer(middleware::from_fn_with_state(app, session::layer))

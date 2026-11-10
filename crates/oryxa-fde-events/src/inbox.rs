@@ -80,25 +80,37 @@ pub mod sqs {
     /// Far above a real document (2M characters is under 2,000 chunks to embed).
     const MAX_HANDLING: Duration = Duration::from_secs(15 * 60);
 
-    /// Runs forever. `handle` must be idempotent: SQS delivers at least once.
-    pub async fn run<F, Fut>(client: Client, queue_url: String, handle: F)
+    /// Runs until `stop` completes. `handle` must be idempotent: SQS delivers at least once.
+    ///
+    /// `stop` ends a receive or a pause between receives at once, but never a message in hand:
+    /// that one is handled and settled first. A receive cut short may already have taken a
+    /// message; it stays hidden for the queue's visibility timeout and is then delivered again.
+    pub async fn run<F, Fut>(client: Client, queue_url: String, handle: F, stop: impl Future<Output = ()>)
     where
         F: Fn(Message) -> Fut,
         Fut: Future<Output = Outcome>,
     {
+        let mut stop = std::pin::pin!(stop);
         loop {
-            let received = client
+            let receive = client
                 .receive_message()
                 .queue_url(&queue_url)
                 .max_number_of_messages(BATCH)
                 .wait_time_seconds(WAIT)
-                .send()
-                .await;
+                .send();
+            let received = tokio::select! {
+                biased;
+                () = &mut stop => return,
+                r = receive => r,
+            };
             let messages = match received {
                 Ok(r) => r.messages.unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(error = %e, "sqs receive failed");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        () = &mut stop => return,
+                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
                     continue;
                 }
             };
@@ -211,6 +223,92 @@ pub mod sqs {
                 .http_client(http)
                 .build();
             (Client::from_conf(conf), requests)
+        }
+
+        fn client_with(http: impl aws_sdk_sqs::config::HttpClient + 'static) -> Client {
+            use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region};
+            let conf = aws_sdk_sqs::Config::builder()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("eu-west-2"))
+                .credentials_provider(Credentials::new("AKIDTEST", "secret", None, None, "test"))
+                .http_client(http)
+                .build();
+            Client::from_conf(conf)
+        }
+
+        fn replay(request: &str, status: u16, body: &str) -> aws_smithy_http_client::test_util::ReplayEvent {
+            use aws_smithy_types::body::SdkBody;
+            aws_smithy_http_client::test_util::ReplayEvent::new(
+                http::Request::builder().uri(request).body(SdkBody::empty()).unwrap(),
+                http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/x-amz-json-1.0")
+                    .body(SdkBody::from(body.to_owned()))
+                    .unwrap(),
+            )
+        }
+
+        const QUEUE: &str = "https://sqs.eu-west-2.amazonaws.com/123456789012/lifecycle.fifo";
+
+        #[tokio::test]
+        async fn a_stop_ends_a_receive_that_is_waiting() {
+            use aws_smithy_http_client::test_util::NeverClient;
+            let never = NeverClient::new();
+            let run = run(
+                client_with(never.clone()),
+                QUEUE.into(),
+                |_| async { Outcome::Done },
+                tokio::time::sleep(Duration::from_millis(100)),
+            );
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the loop stops while its receive waits");
+            assert_eq!(never.num_calls(), 1);
+        }
+
+        #[tokio::test]
+        async fn the_message_in_hand_is_settled_before_the_loop_stops() {
+            use aws_smithy_http_client::test_util::StaticReplayClient;
+            let event = r#"{\"source\":\"oryxa.fde\",\"detail-type\":\"fde.x.v1\",\"detail\":{}}"#;
+            let message =
+                format!(r#"{{"Messages":[{{"MessageId":"m-1","ReceiptHandle":"receipt-1","Body":"{event}"}}]}}"#);
+            let http = StaticReplayClient::new(vec![
+                replay(QUEUE, 200, &message),
+                replay(QUEUE, 200, "{}"),
+                // Never asked for: the stop comes first.
+                replay(QUEUE, 200, &message),
+            ]);
+            let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+            let stopping = std::sync::Mutex::new(Some(stopping));
+            let handled = Cell::new(0);
+            let run = run(
+                client_with(http.clone()),
+                QUEUE.into(),
+                |msg| {
+                    // The stop arrives while the message is in hand.
+                    if let Some(tx) = stopping.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    handled.set(handled.get() + 1);
+                    async move {
+                        assert_eq!(msg.detail_type, "fde.x.v1");
+                        tokio::task::yield_now().await;
+                        Outcome::Done
+                    }
+                },
+                async {
+                    let _ = stopped.await;
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the loop stops");
+            assert_eq!(handled.get(), 1);
+            let actions: Vec<String> = http
+                .actual_requests()
+                .map(|r| r.headers().get("x-amz-target").unwrap_or_default().to_owned())
+                .collect();
+            assert_eq!(actions, ["AmazonSQS.ReceiveMessage", "AmazonSQS.DeleteMessage"]);
         }
 
         #[tokio::test]

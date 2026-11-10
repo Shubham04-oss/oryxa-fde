@@ -453,9 +453,9 @@ module "api" {
 # an essential container and ECS replaces the task when it exits (a worker that is alive but stuck is not detected;
 # the queue's heartbeat and 15 minute ceiling in oryxa-fde-events inbox.rs bound a stuck message, not a stuck loop).
 # A deploy replaces a task in place (single_task): the queue holds events meanwhile, and two consumers never
-# overlap. stop_timeout 120 is Fargate's longest wait after SIGTERM, for a handler to finish and delete its message;
-# the workers have no graceful shutdown yet (#150), so until it lands SIGTERM ends them at once, and the message
-# comes back after its visibility timeout, which the handlers allow (idempotent).
+# overlap. stop_timeout 120 is Fargate's longest wait after SIGTERM: on SIGTERM a worker stops receiving and finishes
+# the message in hand (#150, oryxa-fde-events shutdown.rs). Past 120 s it is killed, and the message comes back after
+# its visibility timeout, which the handlers allow (idempotent).
 
 # oryxa-fde-ingest: `fde.document.uploaded.v1` in, text, chunks and embeddings in the database out. Reads the
 # document from S3 under <tenant>/<company>/documents/<id> (oryxa-fde-context blob.rs `document_key`), never writes

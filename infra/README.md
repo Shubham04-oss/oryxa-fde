@@ -837,7 +837,7 @@ migrate task already did this). Why one and not one per binary:
   That is no new permission: the task role, its entrypoint and its security group decide what a task can do, and an image holds
   no credentials. If a worker ever needs a different base or its own release rhythm, it gets its own repository then.
 
-Until #150 and the follow-up to this PR land, **`deploy-api` rolls only the API**. A worker takes the image tag in
+Until the follow-up to this PR (#165) lands, **`deploy-api` rolls only the API**. A worker takes the image tag in
 `/oryxa-fde-dev/api-image-tag` when OpenTofu applies, which registers a new revision and replaces its task in place.
 **Run `tofu apply` after every `deploy-api`**: until then the workers run the sha of the last apply, which can be older
 than the API's. So a migration must keep working for the workers' image too (step 4), and an event may gain a field (the
@@ -1178,11 +1178,11 @@ These could not be checked without an account. Each one is flagged at the place 
   the busybox stage.
 - `ponytail:` a queue worker has no health endpoint, so ECS judges it by its process: an essential container whose exit
   replaces the task. A worker that is alive but stuck is not detected (the queue's heartbeat and 15 minute ceiling bound one
-  stuck message, not a stuck loop). Add a liveness signal with the graceful-shutdown work (#150) if it ever happens.
+  stuck message, not a stuck loop). Add a liveness signal if it ever happens.
 - `ponytail:` workers stop with SIGTERM and Fargate's longest wait (`stopTimeout` 120 s), and a deploy replaces the task
-  in place, so processing pauses for the swap (the queue holds the events) and two consumers never overlap. Neither worker
-  has a graceful shutdown yet (#150): SIGTERM ends it at once, and the message it held returns after its visibility timeout
-  (120 s), which the handlers allow. The 120 s only matters once #150 lands.
+  in place, so processing pauses for the swap (the queue holds the events) and two consumers never overlap. On SIGTERM a
+  worker stops receiving and finishes the message in hand (#150); one still running at 120 s is killed, and its message
+  returns after its visibility timeout, which the handlers allow.
 - `ponytail:` until the follow-up to #130, `deploy-api` does not roll the workers: an `apply` does, with the sha it last
   recorded. The deploy role cannot touch a worker's service or roles.
 - `ponytail:` the workers' tasks carry the API's `busybox` and the API's binary (one image). They have no credentials of
@@ -1200,8 +1200,8 @@ These could not be checked without an account. Each one is flagged at the place 
     and test runs keep `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). So do the workers and the MCP
     server since #143, each as a login of its own (Database logins).
   - **Workers (#130).** The ingest and lifecycle workers are the images' other two entrypoints; each variable they read is in
-    its table above, read from the binary. They need graceful shutdown on SIGTERM (#150) to use their 120 s stop
-    timeout; until then they stop at once and rely on redelivery.
+    its table above, read from the binary. On SIGTERM they finish the message in hand (#150) within their 120 s stop
+    timeout; past it they are killed and rely on redelivery.
   - **Migrations run as a one-off task, never at startup** (#32, #39). The migrate task runs
     `oryxa-fde-ops migrate` from the API's image (`/usr/local/bin/oryxa-fde-ops`, beside
     `/usr/local/bin/oryxa-fde-api`), connected as `oryxa_fde_migrator`, and exits 0 when done. The
