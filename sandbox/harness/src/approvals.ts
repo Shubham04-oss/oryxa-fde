@@ -38,17 +38,27 @@ export function ruleFor(
   tool: string,
   input: Record<string, unknown>,
 ): CompiledRule | undefined {
-  const subjects =
-    inputBytes(input) > MAX_APPROVAL_INPUT_BYTES
-      ? undefined
-      : tool === "Bash" && typeof input["command"] === "string"
-        ? [input["command"]]
-        : strings(input);
-  return rules.find(
+  return match(rules, tool, input).rule;
+}
+
+/** `ruleFor`'s rule, and whether the input is too large to show; the input is serialised once for both. */
+function match(
+  rules: readonly CompiledRule[],
+  tool: string,
+  input: Record<string, unknown>,
+): { rule: CompiledRule | undefined; tooLarge: boolean } {
+  const tooLarge = inputBytes(input) > MAX_APPROVAL_INPUT_BYTES;
+  const subjects = tooLarge
+    ? undefined
+    : tool === "Bash" && typeof input["command"] === "string"
+      ? [input["command"]]
+      : strings(input);
+  const rule = rules.find(
     (rule) =>
       (rule.tool === "*" || rule.tool === tool) &&
       (rule.regex === undefined || subjects === undefined || subjects.some((s) => rule.regex?.test(s))),
   );
+  return { rule, tooLarge };
 }
 
 /** Deeper than any tool's real input; bounds the walk well below the stack's limit. */
@@ -101,9 +111,9 @@ export class ApprovalGate {
     signal: AbortSignal,
     describe: () => { toolCallId: string; title: string },
   ): Promise<Verdict> {
-    const rule = ruleFor(this.rules, tool, input);
+    const { rule, tooLarge } = match(this.rules, tool, input);
     if (rule === undefined) return "unlisted";
-    if (inputBytes(input) > MAX_APPROVAL_INPUT_BYTES) return "too_large";
+    if (tooLarge) return "too_large";
     const decision = this.#queue.then(() => {
       if (this.stopped.aborted) return "rejected" as const;
       const id = this.newApprovalId();
