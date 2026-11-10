@@ -193,6 +193,10 @@ run "the_api_task_carries_its_own_tunnel_and_admits_nothing" {
     error_message = "the tunnel starts only once the API is healthy, and a task that loses either container is replaced"
   }
   assert {
+    condition     = strcontains(module.api.containers[1].image, "@sha256:")
+    error_message = "cloudflared runs with the API task's role, so its image is pinned by digest, not a tag"
+  }
+  assert {
     condition     = module.api.containers[1].stopTimeout > 30
     error_message = "cloudflared's 30 second drain must finish before ECS kills it"
   }

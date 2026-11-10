@@ -144,8 +144,9 @@ variable "spicedb_image" {
 }
 
 variable "cloudflared_image" {
-  type    = string
-  default = "cloudflare/cloudflared:2026.10.7"
+  description = "Tunnel connector (2026.10.7), pinned by digest: it runs with the API task's role, so a re-pushed tag must not reach it."
+  type        = string
+  default     = "cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba"
 }
 
 variable "db_instance_class" {

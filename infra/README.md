@@ -81,7 +81,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `api_cpu` | `256` | CPU units of the API task, shared by the API and the cloudflared sidecar (0.25 vCPU) |
 | `api_memory` | `512` | Memory of the API task in MiB, shared by both containers |
 | `spicedb_image` | `authzed/spicedb:v1.56.2` | Same version as CI |
-| `cloudflared_image` | `cloudflare/cloudflared:2026.10.7` | Tunnel connector, the sidecar of the API task |
+| `cloudflared_image` | `cloudflare/cloudflared@sha256:4955524aeaa3...` (2026.10.7) | Tunnel connector, the sidecar of the API task. Pinned by digest because it runs with the API task's role |
 | `db_instance_class` | `db.t4g.micro` | RDS instance class |
 | `allow_destroy` | `false` | Set `true` only to tear the environment down: lifts RDS deletion protection and lets `destroy` empty both buckets and the ECR repository |
 | `vpc_cidr` | `10.50.0.0/16` | Distinct from the platform's `10.40.0.0/16`, so the two can be peered later |
@@ -399,17 +399,22 @@ before the new one answered. Without it:
 | ALB did | Now |
 | --- | --- |
 | Polled `/healthz`; ECS replaced an unhealthy target | The `api` container has its own health check (`busybox wget` on `127.0.0.1:<api_port><api_health_check_path>`, every 10 s, 3 failures, 30 s start period). ECS replaces the task when it fails |
-| Held the old task until the new target was healthy | The service keeps `deployment_minimum_healthy_percent = 100` and `maximum_percent = 200`: ECS starts the new task, counts it healthy only when its essential containers' health checks pass, then stops the old one. The deployment circuit breaker rolls back a task that never gets there. A rollout never runs fewer than one healthy task |
+| Held the old task until the new target was healthy | The service keeps `deployment_minimum_healthy_percent = 100` and `maximum_percent = 200`: ECS starts the new task, counts it healthy once the `api` container's health check passes (cloudflared has none, so it does not count), then stops the old one. The deployment circuit breaker rolls back a task that never gets there. A rollout never runs fewer than one healthy task |
 | Kept traffic off a target that was not ready | `cloudflared` has `dependsOn` the `api` container being `HEALTHY`, so the tunnel does not connect until the API answers |
 | Drained connections for 30 s on deregistration | ECS stops a task's containers in reverse start order, so cloudflared gets SIGTERM first (per AWS's container dependency docs; the first deploy's logs confirm it). It stops taking new requests and lets those in flight finish for up to 30 s (`stopTimeout` 45 s), and only then does the API get SIGTERM |
 
 **What happens to requests during a deploy, honestly.** For a moment two tasks hold two connectors of
 one tunnel, and Cloudflare sends each request to either. A request in flight on the old connector
 finishes if it takes under 30 s. Before, an API deploy never touched the tunnel (the ALB drained the old
-API task); now every API deploy replaces a connector, and a request that Cloudflare routes to the old
-one in the instant it begins shutting down can fail with a 502. Nothing closes that window. A web Worker that retries an idempotent request once covers it (that is the web stream's to
-add). A stream that runs longer than 30 s (an SSE response, an agent run's live output) is cut at the
-drain limit and has to reconnect. The API has no graceful-shutdown handler of its own
+API task); now every API deploy replaces a connector. ECS counts the new task healthy on the API's
+check alone, so the old connector can start shutting down a few seconds before the new one has
+registered with Cloudflare; a request in that gap, or one routed to the old connector as it begins
+shutting down, fails with a 502. Nothing closes that window. A web Worker that retries an idempotent
+request once covers it (that is the web stream's to add). **Every API deploy cuts every long-lived
+connection through the API**: a WebSocket or streamed response ends when the old connector's 30 s drain
+runs out, and the client has to reconnect. Today the API serves no stream (live agent output is a
+Durable Object, `docs/plan.md`); anything that later streams through the API, live agent output
+included, gets cut on each deploy and must resume on reconnect. The API has no graceful-shutdown handler of its own
 (`axum::serve` without `with_graceful_shutdown`, `crates/oryxa-fde-api/src/main.rs:84`), so SIGTERM ends
 it at once; adding one is the API stream's call. Migrations still run before the service changes.
 
@@ -574,16 +579,14 @@ These could not be checked without an account. Each one is flagged at the place 
   cloudflared waits for it (`describe-tasks`). The shutdown order (cloudflared first) is from AWS's
   `dependsOn` docs ("for container shutdown it is reversed"); the first deploy's CloudWatch streams
   (`api/` and `cloudflared/` in `/ecs/oryxa-fde-dev-api`) show whether the tunnel drained first.
-- **Shared task role.** Containers of a task share its task role and security group. cloudflared makes no
-  AWS call, but a compromised cloudflared could use the API's task role credentials, where the separate
-  service had a role with no permissions.
 - **fck-nat AMI owner** `568608671756` is the one fck-nat's deploy guide gives. That the AMI exists in
   Mumbai is the project's published Region list; run the `describe-images` check in Mumbai (ap-south-1) first.
 - **zed task.** `authzed/zed:v1.14.0-debug` (busybox shell, ARM64 confirmed on ghcr.io) reads the
   key from `ZED_TOKEN` through zed's `ZED_` env flag binding. If zed reports no token, that binding
   did not apply.
 - **Docker Hub pulls** (SpiceDB, cloudflared, zed) are anonymous and rate-limited per NAT IP. An ECR
-  pull-through cache fixes it if it bites. Images are pinned by tag, not digest.
+  pull-through cache fixes it if it bites. SpiceDB and zed are pinned by tag; cloudflared by digest (it
+  holds the API's role).
 - **Deploy role.** `ecs:RegisterTaskDefinition` and `ecs:DescribeTaskDefinition` take `*` (not
   scoped to a family); `iam:PassRole` on four roles is what limits a new revision. If the account
   already has a GitHub OIDC provider, set `github_oidc_provider_arn` or the first apply fails on it.
@@ -625,8 +628,18 @@ These could not be checked without an account. Each one is flagged at the place 
   cloudflared is small, but a busy tunnel and a busy API compete; raise the task, not one container.
 - `ponytail:` no health check on cloudflared itself: a connector that is running but not connected is not
   replaced (the standalone service had none either). A crashed one stops the task, and ECS replaces it.
-- A rollout can fail a request in the moment the old connector begins to shut down, and cuts a stream longer
-  than 30 s (Deploys, "What the load balancer gave").
+- A rollout can fail a request in the seconds the old connector shuts down before the new one registers, and
+  cuts every stream or WebSocket through the API (Deploys, "What the load balancer gave").
+- `ponytail:` cloudflared shares the API task's role and security group. It makes no AWS call, but a
+  compromised connector gets the API's credentials (S3 company prefixes, Bedrock, `rds-db:connect` as the
+  API, its Secrets Manager reads), where the separate service had a role with no permissions. Its image is
+  pinned by digest for that reason. Dev holds sample data only (ADR 0003). Prod runs the connector as its
+  own service with an empty role, reaching the API through an internal load balancer (`modules/internal_alb`)
+  or Cloud Map, with an ingress rule from the connector's group only.
+- `ponytail:` the API image carries a static `busybox` so the container health check has a command to run.
+  It gives code running in the container a shell and network tools it did not have (no new permission:
+  nonroot, read-only root). Replace it with a health-check subcommand in `oryxa-fde-ops` (API stream) and drop
+  the busybox stage.
 - ECR lives in the dev stack until a second environment needs it.
 
 ## Contracts with other streams
