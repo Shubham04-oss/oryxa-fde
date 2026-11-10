@@ -27,3 +27,9 @@ cargo test --workspace
 cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace   # the vendored base
 cargo deny check
 ```
+
+## Licence
+
+Proprietary, not open source. Copyright (c) 2026 Oryxa AI Private Limited, all rights reserved.
+The source is visible for reference only. Copying, use, deployment or derivative works are not
+permitted, and contributions are accepted only from invited contributors. See [LICENSE](LICENSE).
