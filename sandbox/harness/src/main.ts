@@ -8,7 +8,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { StdioApprovals } from "./approvals.js";
 import { EventWriter, type Outcome } from "./events.js";
-import { runHarness } from "./harness.js";
+import { type BackendDeps, runHarness } from "./harness.js";
+import { runOpenCode, startOpenCode } from "./opencode.js";
 import { type LoadedPack, loadPack } from "./pack.js";
 import { agentSpawner } from "./users.js";
 
@@ -27,6 +28,10 @@ function fail(reason: string): never {
   process.exit(1);
 }
 
+// ponytail: the backend comes from the harness's environment until the pack names it.
+const backend = process.env["ORYXA_FDE_HARNESS"] ?? "claude";
+if (backend !== "claude" && backend !== "opencode") fail("unknown_harness");
+
 // Root is needed to read the pack and to start the agent as another user; the harness gives it up right after.
 if (process.getuid?.() !== 0) fail("not_root");
 let loaded: LoadedPack;
@@ -39,12 +44,14 @@ try {
 }
 
 const input = new StdioApprovals(process.stdin);
-const outcome = await runHarness(loaded, {
-  query,
+const deps: BackendDeps = {
   approvals: input,
   cancel: input.cancelled,
-  spawn: agentSpawner(),
   emit: (e) => events.emit(e),
   env: process.env,
-});
+};
+const outcome =
+  backend === "opencode"
+    ? await runOpenCode(loaded, { ...deps, start: startOpenCode(agentSpawner(), process.env) })
+    : await runHarness(loaded, { ...deps, query, spawn: agentSpawner() });
 process.exit(EXIT_CODES[outcome]);

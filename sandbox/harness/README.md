@@ -61,6 +61,36 @@ into the system prompt as fenced data, not as instructions.
   harness asks for partial messages (`includePartialMessages`) and takes the final count from each response's
   `message_delta`. Cache reads and writes count as input in full, so a budget stops a run early rather than late.
 
+## OpenCode backend
+
+`ORYXA_FDE_HARNESS=opencode` in the harness's environment runs the run on OpenCode instead of the Claude Agent SDK
+(`claude`, the default). Until the pack names the harness, the gateway sets it. ADR 0004 keeps it off until the pinned
+version passes the gate, and the sandbox image does not carry the binary yet. What it does rests on the spike's
+findings in `OPENCODE.md`:
+
+- **Protocol.** The harness starts `opencode acp` as `agent` and speaks to it with the Agent Client Protocol's own
+  TypeScript library (`@agentclientprotocol/sdk`, pinned). It handles two things: permission requests and session
+  updates. It offers OpenCode no file system or terminal.
+- **Policy is a file.** `src/opencode.json` is the spike's verified `intended.json` (every tool asks, the rest denied,
+  project config, plugins, MCP, sharing and updates off). Root writes it per run into a fresh directory under
+  `/etc/oryxa` with only the model, region and turn limit filled in, and the environment is built from a list:
+  OpenCode's disable switches, a fresh home and XDG and temp directories under `/tmp`, and placeholder Bedrock keys
+  (`placeholder-access-key-id`), which the outbound handler drops before it signs again.
+- **Approvals.** Every tool call asks, reads included. A call the company's list does not cover is approved at once;
+  one it covers waits for an engineer, as on the Claude backend. Rules name the SDK's tools, so OpenCode's are mapped
+  (`shell` is `Bash`, `read` is `Read`, …). The answer is always once or reject, never always. A tool outside the
+  coding set (`skill`, `opencode_worktree_remove`, anything new) is rejected, and a rejection ends the run.
+- **Events.** Message chunks are joined, OpenCode's todo list becomes the plan, an edit's diff becomes a
+  `file_change`, and a `shell` call becomes a `command` that fails when its exit code is not 0 (ACP says `completed`).
+- **Usage and limits.** OpenCode reports usage once per turn, and a run is one turn, so the `usage` event comes at
+  the end, with cache and reasoning tokens counted in full. The pack's turn limit is OpenCode's step limit, and the
+  harness has its own one-hour deadline, because OpenCode retries a failing model forever. Cancel and the deadline
+  send `session/cancel`; OpenCode then gets five seconds before its stdin is closed. A model OpenCode reports
+  differently from the one asked for ends the run (`model_unavailable`), since an unknown id falls back to another.
+
+`test/opencode.test.ts` replays the spike's recorded sessions through the backend against a fake ACP peer
+(`test/acp-peer.ts`); `test/fixtures/opencode/session-healthz.events.jsonl` pins the events of the full session.
+
 ## Develop
 
 ```bash

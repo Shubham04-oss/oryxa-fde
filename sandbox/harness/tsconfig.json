@@ -10,6 +10,7 @@
     "noImplicitOverride": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "noEmit": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

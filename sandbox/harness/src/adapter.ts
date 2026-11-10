@@ -188,7 +188,7 @@ function truncate(text: string): string {
   return line.length > MAX_TITLE ? `${line.slice(0, MAX_TITLE - 1)}…` : line;
 }
 
-function count(usage: unknown, key: string): number {
+export function count(usage: unknown, key: string): number {
   const value = isRecord(usage) ? usage[key] : undefined;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
@@ -200,6 +200,6 @@ function inputTokens(usage: unknown): number {
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
