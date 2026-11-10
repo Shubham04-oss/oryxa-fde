@@ -17,6 +17,7 @@ function task(id: string, fields: Partial<Record<keyof TaskOut, string | null>> 
     status: "todo",
     created_at: at("2026-10-01"),
     updated_at: at("2026-11-01"),
+    version: 1,
     ...fields,
   })
   return { kind: "task", task: t, ...where }
@@ -30,6 +31,7 @@ function access(id: string, status: AccessState, asked: string, changed = asked)
     requested_at: at(asked),
     status_changed_at: at(changed),
     days_waiting: 0,
+    version: 1,
   })
   return { kind: "access_request", access: a, owner: "Tomas Becker", ...where }
 }

@@ -243,6 +243,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether the company has its own encryption key, which real customer data needs (ADR 0003).
+         *     A route of its own rather than a field on the company, so a company list never waits on KMS.
+         */
+        get: operations["get_company_key"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/meeting-notes": {
         parameters: {
             query?: never;
@@ -1719,6 +1739,16 @@ export interface components {
             /** @description Up to 4000 characters. */
             summary?: string | null;
         };
+        /** @description Whether the company has an encryption key of its own. */
+        CompanyKeyOut: {
+            /**
+             * @description True when the company's own KMS key exists and is enabled: its files are written under it.
+             *     False when it has none (or it is disabled, or the check failed): its files are under the
+             *     environment's key, which holds sample data only, and once company keys are required its
+             *     uploads are refused with `company_key_missing`. Checked against KMS, at most a minute old.
+             */
+            has_key: boolean;
+        };
         CompanyOut: {
             created_at: string;
             id: string;
@@ -1813,7 +1843,10 @@ export interface components {
             chunks: number;
             content_type: string;
             created_at: string;
-            /** @description Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`. */
+            /**
+             * @description Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow`, `checksum`, or
+             *     `key_unavailable` (S3 or KMS refused the company's key: upload it again once the key works).
+             */
             failure?: string | null;
             id: string;
             ingested_at?: string | null;
@@ -1827,6 +1860,8 @@ export interface components {
         ErrorBody: {
             /** @description A short machine-readable code, e.g. `forbidden`. */
             error: string;
+            /** @description What a person can do about it, for the few codes that need one (`company_key_missing`). */
+            message?: string | null;
         };
         ExportOut: {
             company: components["schemas"]["CompanyOut"];
@@ -3280,6 +3315,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description `company_key_missing`: the company has no usable key of its own and the bucket requires one. Nothing was stored; it works once the company's key is provisioned. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Over 20 MiB */
             413: {
                 headers: {
@@ -3360,6 +3404,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExportOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_company_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanyKeyOut"];
                 };
             };
             /** @description Forbidden */

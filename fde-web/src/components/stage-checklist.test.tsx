@@ -281,7 +281,7 @@ describe("the checklist stays true as the page changes", () => {
     await userEvent.click(within(box).getByRole("button", { name: "Record sign-off" }))
     const form = await dialog("Record sign-off")
     await userEvent.selectOptions(within(form).getByLabelText("Signed off by"), "stk_a2")
-    await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"))
+    await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"), (await api.scope(FNOL)).version)
     await userEvent.click(within(form).getByRole("button", { name: "Record sign-off" }))
     await within(form).findByRole("alert")
 

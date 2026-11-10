@@ -6,10 +6,13 @@ import { Card, Quiet, Row, Rows } from "./page"
 import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
 import { FIELD, Labelled } from "./task-move"
+import { StaleNotice, useVersionedForm } from "./versioned-form"
 import { api } from "@/lib/api/client"
 import type { CompanyId, StakeholderOut, StakeholderPart, SystemOut } from "@/lib/api/schemas"
 import {
   PART_LABEL,
+  STAKEHOLDER_LABELS,
+  SYSTEM_LABELS,
   attempt,
   commitRecord,
   stakeholderBody,
@@ -118,27 +121,33 @@ function StakeholderDialog({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [fields, setFields] = useState(stakeholderFields(person))
-  const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
-
-  // The whole record goes back on an edit (the API's PUT replaces it), so what the form holds is
-  // every field the record has.
-  const save = () =>
-    attempt(async () => {
-      const body = stakeholderBody(fields)
-      const saved = person
-        ? await api.updateStakeholder(company, person.id, body)
+  // The whole record goes back on an edit (the API's PUT replaces it), so the form holds every field
+  // the record has, from the copy it opened on, and sends that copy's version.
+  const form = useVersionedForm({
+    record: person,
+    snapshot: stakeholderFields,
+    initial: stakeholderFields(person),
+    labels: STAKEHOLDER_LABELS,
+    send: async (base, f) => {
+      const body = stakeholderBody(f)
+      const saved = base
+        ? await api.updateStakeholder(company, base.id, body, base.version)
         : await api.addStakeholder(company, body)
       await commitRecord(client, company, "stakeholders", { saved })
-    }, "stakeholder")
+    },
+    adopt: (current) => commitRecord(client, company, "stakeholders", { saved: current }),
+    what: "stakeholder",
+  })
+  const { fields, set } = form
 
   return (
     <FormDialog
       title={person ? "Edit stakeholder" : "Add stakeholder"}
       description={person ? "Change this person, or remove them." : "Add a person at the customer."}
-      save={person ? "Save" : "Add stakeholder"}
+      save={form.save(person ? "Save" : "Add stakeholder")}
       validate={() => stakeholderProblem(fields)}
-      onSubmit={save}
+      onSubmit={form.submit}
+      notice={<StaleNotice stale={form.stale} noun="stakeholder" />}
       remove={
         person && {
           label: "Remove stakeholder",
@@ -243,25 +252,31 @@ function SystemDialog({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [fields, setFields] = useState(systemFields(system))
-  const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
-
-  const save = () =>
-    attempt(async () => {
-      const body = systemBody(fields)
-      const saved = system
-        ? await api.updateSystem(company, system.id, body)
+  const form = useVersionedForm({
+    record: system,
+    snapshot: systemFields,
+    initial: systemFields(system),
+    labels: SYSTEM_LABELS,
+    send: async (base, f) => {
+      const body = systemBody(f)
+      const saved = base
+        ? await api.updateSystem(company, base.id, body, base.version)
         : await api.addSystem(company, body)
       await commitRecord(client, company, "systems", { saved })
-    }, "system")
+    },
+    adopt: (current) => commitRecord(client, company, "systems", { saved: current }),
+    what: "system",
+  })
+  const { fields, set } = form
 
   return (
     <FormDialog
       title={system ? "Edit system" : "Add system"}
       description={system ? "Change this system, or remove it." : "Add a system at the customer."}
-      save={system ? "Save" : "Add system"}
+      save={form.save(system ? "Save" : "Add system")}
       validate={() => systemProblem(fields)}
-      onSubmit={save}
+      onSubmit={form.submit}
+      notice={<StaleNotice stale={form.stale} noun="system" />}
       remove={
         system && {
           label: "Remove system",

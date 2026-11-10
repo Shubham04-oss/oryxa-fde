@@ -414,13 +414,18 @@ describe("Board", () => {
     const { queryClient } = renderWithRouter(<ProjectPage scope={scope} />)
     await screen.findAllByText("Assigned to you")
     const blocked = (await api.project(scope)).tasks.find((t) => t.title === TELEMATICS)!
-    await api.updateTask(scope, blocked.id, {
-      title: TELEMATICS,
-      status: "blocked",
-      blocker: blocked.blocker,
-      assignee: "usr_jonah",
-      blocked_by: "acc_k1",
-    })
+    await api.updateTask(
+      scope,
+      blocked.id,
+      {
+        title: TELEMATICS,
+        status: "blocked",
+        blocker: blocked.blocker,
+        assignee: "usr_jonah",
+        blocked_by: "acc_k1",
+      },
+      blocked.version,
+    )
     await queryClient.invalidateQueries()
     await within(column("Blocked")).findByText("Assigned to a teammate")
 
@@ -447,7 +452,7 @@ describe("Board", () => {
 
     // The API's own rule, if the form ever let it through.
     await expect(
-      api.updateTask(scope, TaskId.parse("tsk_k2"), { title: REPLAY, status: "blocked" }),
+      api.updateTask(scope, TaskId.parse("tsk_k2"), { title: REPLAY, status: "blocked" }, 1),
     ).rejects.toMatchObject({ status: 409, message: "Say what is blocking it." })
   })
 

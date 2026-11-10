@@ -133,6 +133,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(companies::list, companies::create))
         .routes(routes!(companies::get, companies::update))
         .routes(routes!(companies::members))
+        .routes(routes!(companies::key))
         .routes(routes!(export::export))
         .routes(routes!(companies::set_member, companies::remove_member))
         .routes(routes!(projects::list, projects::create))

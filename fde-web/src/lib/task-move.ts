@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query"
 import { ApiError, queries } from "./api/client"
-import type { ProjectScope, TaskOut } from "./api/schemas"
+import type { ProjectScope, TaskOut, TaskState } from "./api/schemas"
+import { STATUS_LABEL } from "./board"
 
 // What the board and Today share when a task changes: how a refusal reads, and how a saved or
 // removed task reaches every cached view of it. The rules for what a move sends are in board.ts.
@@ -12,6 +13,32 @@ export function reason(error: unknown, what = "task") {
     if (error.message !== error.code) return error.message
   }
   return "Check your connection and try again."
+}
+
+/**
+ * A move that did not happen, and why: the API refused it (`refused`), the task had changed since
+ * the page read it (`stale`: `task` is then the task as it now stands), or someone had already made
+ * the move (`already`). Only a stale move is offered again.
+ */
+export type Refusal = {
+  scope: ProjectScope
+  task: TaskOut
+  to: TaskState
+  why: string
+  kind: "refused" | "stale" | "already"
+}
+
+/**
+ * A refusal in a sentence. `named` says which task, for a place that is not the task's own row
+ * (above the board, or above Today's groups); a row already shows it.
+ */
+export function refusalLine({ task, to, why, kind }: Refusal, named: boolean) {
+  const it = named ? `“${task.title}”` : "it"
+  const wording = named ? `“${task.title}”` : "This task"
+  if (kind === "already") return `Someone already moved ${it} to ${STATUS_LABEL[to]}.`
+  if (kind === "stale")
+    return `${wording} changed since you last read it, so it was not moved. It is now ${STATUS_LABEL[task.status]}.`
+  return `Couldn't move ${it} to ${STATUS_LABEL[to]}. ${why}`
 }
 
 /** Drops the reads of a project and of Today that were sent before a write: they would land after it with the old record. */
@@ -64,4 +91,16 @@ export async function commitRemoved(client: QueryClient, scope: ProjectScope, ta
       },
   )
   void client.invalidateQueries({ queryKey: queries.today().queryKey })
+}
+
+/** What a refusal shows and, for a stale move, the offer to do it again. `again` is what the offer does. */
+export function refusalNote(refusal: Refusal, named: boolean, again: () => void) {
+  return {
+    text: refusalLine(refusal, named),
+    held: refusal.kind !== "refused",
+    again:
+      refusal.kind === "stale"
+        ? { label: `Move to ${STATUS_LABEL[refusal.to]}`, run: again }
+        : undefined,
+  }
 }

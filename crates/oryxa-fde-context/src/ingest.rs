@@ -4,7 +4,8 @@
 //! after the last batch stored. The document becomes `ingested`, and searchable, only once every
 //! chunk is stored. A document ingested with a model this one replaces is re-embedded the same way, keeping
 //! its old chunks searchable until the new set is complete. A file that cannot be read marks the
-//! document `failed` with a short code.
+//! document `failed` with a short code; so does one whose company key S3 or KMS refuses
+//! (`key_unavailable`), which no redelivery would change.
 
 use std::collections::HashSet;
 
@@ -57,7 +58,13 @@ pub async fn ingest(
     if !key.starts_with(&company_prefix(scope)) {
         return fail(store, scope, id, (model, replaces), "blob_key").await;
     }
-    let bytes = ctx.blobs.get(&key).await?;
+    let bytes = match ctx.blobs.get(&key).await {
+        Ok(b) => b,
+        // The key is missing, disabled or going, or this worker may not use it: the event is
+        // settled, never retried.
+        Err(ContextError::KeyUnavailable) => return fail(store, scope, id, (model, replaces), "key_unavailable").await,
+        Err(e) => return Err(e),
+    };
     let digest: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if bytes.len() as i64 != doc.size_bytes || digest != doc.sha256 {
         return fail(store, scope, id, (model, replaces), "checksum").await;

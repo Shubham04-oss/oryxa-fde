@@ -126,10 +126,18 @@ export type StakeholderPart = z.infer<typeof StakeholderPart>
 const version = z.int().nonnegative()
 
 /**
- * A record's version, bumped by every change to it; a `PUT` sends it back as `version`. The API
- * always sends it, but the spec marks it optional until the web's fixtures carry it.
+ * A record's version, bumped by every change to it; a `PUT` sends back the one its edit was based
+ * on. The API always sends it, though the spec does not mark it required yet, so a missing one is
+ * refused here: a record without a version would be saved unchecked, the last writer winning,
+ * which is the failure versions exist to end. Its input type is still the spec's.
  */
-const recordVersion = version.optional()
+const recordVersion = version.optional().transform((v, ctx) => {
+  if (v === undefined) {
+    ctx.issues.push({ code: "custom", message: "A record is missing its version.", input: v })
+    return z.NEVER
+  }
+  return v
+})
 
 export const StakeholderOut = z.object({
   id: StakeholderId,

@@ -9,7 +9,7 @@ use oryxa_core::{TenantId, UserId};
 use oryxa_events::{Encoded, Signer, Verifier};
 use oryxa_fde_context::ingest::{Ingested, handle, ingest};
 use oryxa_fde_context::search::{search_company, search_project};
-use oryxa_fde_context::{Context, SearchQuery, document_key};
+use oryxa_fde_context::{Context, FakeCompanyKeys, MemoryBlobs, SearchQuery, document_key};
 use oryxa_fde_core::{CompanyId, CompanyScope, DocumentId, ProjectId};
 use oryxa_fde_events::inbox::{Message, Outcome};
 use oryxa_fde_store::{
@@ -55,7 +55,7 @@ async fn upload(
         content_type: ct,
         size_bytes: bytes.len() as i64,
         sha256: Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
-        blob_key: key,
+        blob_key: key.key().to_owned(),
     };
     let mut tx = store.company(s).await.unwrap();
     tx.add_document(&id, &v, &actor()).await.unwrap().unwrap();
@@ -161,6 +161,47 @@ async fn a_redelivered_upload_adds_nothing() {
         tx.document(&doc2).await.unwrap().unwrap().status,
         DocumentStatus::Pending
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres with pgvector (DATABASE_URL)"]
+async fn a_file_whose_company_key_is_refused_fails_for_good_and_is_not_retried() {
+    let store = testing::store().await;
+    let company_keys = std::sync::Arc::new(FakeCompanyKeys::default());
+    let ctx = Context {
+        blobs: std::sync::Arc::new(MemoryBlobs::requiring_company_keys(company_keys.clone())),
+        keys: company_keys.clone(),
+        ..Context::fake()
+    };
+    let (signer, verifier) = keys();
+    let t = TenantId::new(new_id("org")).unwrap();
+    let s = company(&store, &t).await;
+    company_keys.give(&s);
+    let doc = upload(
+        &ctx,
+        &store,
+        &s,
+        "runbook.md",
+        ContentType::Markdown,
+        RUNBOOK.as_bytes(),
+    )
+    .await;
+    let msg = uploaded_event(&t, &doc, &signer).await;
+
+    // Offboarded (or the worker not yet in the key's policy) before the event is handled: the
+    // read is refused. The event is settled, not left for redelivery, and the document says why.
+    company_keys.take(&s);
+    assert_eq!(handle(&ctx, &store, &verifier, &msg).await, Outcome::Done);
+    let mut tx = store.company(&s).await.unwrap();
+    let d = tx.document(&doc).await.unwrap().unwrap();
+    drop(tx);
+    assert_eq!(
+        (d.status, d.failure.as_deref(), d.chunks),
+        (DocumentStatus::Failed, Some("key_unavailable"), 0)
+    );
+    // Delivered again: nothing to do, still no retry.
+    assert_eq!(handle(&ctx, &store, &verifier, &msg).await, Outcome::Done);
+    assert_eq!(ingest(&ctx, &store, &s, &doc).await.unwrap(), Ingested::Settled);
 }
 
 #[tokio::test]
@@ -335,6 +376,7 @@ impl oryxa_fde_context::Embedder for Scripted {
 fn with(ctx: &Context, embedder: &std::sync::Arc<Scripted>, replaces: &[&str]) -> Context {
     Context {
         blobs: ctx.blobs.clone(),
+        keys: ctx.keys.clone(),
         embedder: embedder.clone(),
         replaces: replaces.iter().map(|m| m.to_string()).collect(),
         extractor: ctx.extractor.clone(),

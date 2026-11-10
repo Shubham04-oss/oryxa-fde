@@ -35,6 +35,10 @@ pub enum ApiError {
     /// what, e.g. `bot_not_in_channel` (invite the Slack bot).
     #[error("needs {0}")]
     NeedsAction(&'static str),
+    /// The company has no usable KMS key of its own, so its files can be neither stored nor read
+    /// (ADR 0003). Nothing was stored; a retry fails the same way until the key is provisioned.
+    #[error("company key missing")]
+    CompanyKeyMissing,
     /// A dependency (SpiceDB, WorkOS keys) failed; the request is denied, never allowed.
     #[error("unavailable")]
     Unavailable,
@@ -46,6 +50,9 @@ pub enum ApiError {
 pub struct ErrorBody {
     /// A short machine-readable code, e.g. `forbidden`.
     pub error: String,
+    /// What a person can do about it, for the few codes that need one (`company_key_missing`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// A whole-record save refused because the record has moved on from the `version` it was based
@@ -96,6 +103,7 @@ impl ApiError {
             ApiError::UnsupportedType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
             ApiError::Conflict => (StatusCode::CONFLICT, "conflict"),
             ApiError::Rejected(_) => (StatusCode::CONFLICT, "rejected"),
+            ApiError::CompanyKeyMissing => (StatusCode::CONFLICT, "company_key_missing"),
             ApiError::NeedsAction(what) => (StatusCode::BAD_REQUEST, *what),
             ApiError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -112,12 +120,28 @@ impl ApiError {
             _ => code.to_owned(),
         }
     }
+
+    /// The sentence a person reads, for the codes that carry one.
+    pub fn message(&self) -> Option<&'static str> {
+        match self {
+            ApiError::CompanyKeyMissing => Some(
+                "This company has no encryption key of its own yet, or its key is disabled, so its files cannot be \
+                 stored or read. Nothing was saved. Ask your Oryxa administrator to provision the company's key, \
+                 then try again.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, _) = self.status();
-        (status, Json(ErrorBody { error: self.code() })).into_response()
+        let body = ErrorBody {
+            error: self.code(),
+            message: self.message().map(str::to_owned),
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -172,5 +196,35 @@ mod tests {
             ApiError::from(StoreError::Corrupt("name")),
             ApiError::Internal
         ));
+    }
+
+    #[tokio::test]
+    async fn a_missing_company_key_is_a_409_with_a_code_and_a_sentence() {
+        let missing = ApiError::CompanyKeyMissing;
+        assert_eq!(
+            (missing.status().0, missing.code().as_str()),
+            (StatusCode::CONFLICT, "company_key_missing")
+        );
+        let r = missing.into_response();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        let bytes = http_body_util::BodyExt::collect(r.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "company_key_missing");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("provision the company's key")
+        );
+        // Other errors stay a bare code.
+        let r = ApiError::Forbidden.into_response();
+        let bytes = http_body_util::BodyExt::collect(r.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), br#"{"error":"forbidden"}"#);
     }
 }

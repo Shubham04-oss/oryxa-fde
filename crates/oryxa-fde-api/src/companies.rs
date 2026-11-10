@@ -257,6 +257,37 @@ pub(crate) async fn get(
     Ok(Json(found.into()))
 }
 
+/// Whether the company has an encryption key of its own.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CompanyKeyOut {
+    /// True when the company's own KMS key exists and is enabled: its files are written under it.
+    /// False when it has none (or it is disabled, or the check failed): its files are under the
+    /// environment's key, which holds sample data only, and once company keys are required its
+    /// uploads are refused with `company_key_missing`. Checked against KMS, at most a minute old.
+    pub has_key: bool,
+}
+
+/// Whether the company has its own encryption key, which real customer data needs (ADR 0003).
+/// A route of its own rather than a field on the company, so a company list never waits on KMS.
+#[utoipa::path(get, operation_id = "get_company_key", path = "/v1/companies/{company}/key", tag = "companies",
+    params(("company" = String, Path, description = "Company id")),
+    responses((status = 200, body = CompanyKeyOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn key(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path(id): Path<CompanyId>,
+) -> Result<Json<CompanyKeyOut>, ApiError> {
+    let scope = who.company(id);
+    app.require(&who, company(&scope), "work").await?;
+    // No KMS call for a company that does not exist.
+    let mut tx = app.store.company(&scope).await?;
+    tx.get().await?.ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(CompanyKeyOut {
+        has_key: app.context.keys.has_key(&scope).await,
+    }))
+}
+
 /// Change some of a company's fields.
 #[utoipa::path(patch, operation_id = "update_company", path = "/v1/companies/{company}", tag = "companies",
     request_body = CompanyPatch, params(("company" = String, Path, description = "Company id")),

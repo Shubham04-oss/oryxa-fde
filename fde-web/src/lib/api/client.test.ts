@@ -147,6 +147,7 @@ describe("api over the network", () => {
                 requested_at: at,
                 status_changed_at: at,
                 days_waiting: 3,
+                version: 1,
               },
               owner: "Tomas Becker",
               company: { id: "cmp_1", name: "Kestrel" },
@@ -380,7 +381,9 @@ describe("api over the network", () => {
       [`${p}/tasks`]: () => Response.json([]),
       [`${p}/decisions`]: () => Response.json([]),
       [`${p}/stakeholders`]: () =>
-        Response.json([{ id: "stk_1", name: "Mara Lindqvist", role: "sponsor", updated_at: at }]),
+        Response.json([
+          { id: "stk_1", name: "Mara Lindqvist", role: "sponsor", updated_at: at, version: 1 },
+        ]),
       [`${p}/systems`]: () => Response.json([]),
     })
 

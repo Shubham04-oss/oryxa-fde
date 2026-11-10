@@ -7,6 +7,7 @@ import {
   accessEditBody,
   accessFields,
   accessProblem,
+  accessRefusalNote,
   blockedBy,
   blockers,
   blankDecision,
@@ -55,7 +56,14 @@ describe("the access form", () => {
   })
 
   it("starts a new request as requested, a blank pick left out as null", () => {
-    expect(accessBody({ description: " Read replica ", system: null, owner: "stk_1" })).toEqual({
+    expect(
+      accessBody({
+        ...accessFields(),
+        description: " Read replica ",
+        system: null,
+        owner: "stk_1",
+      }),
+    ).toEqual({
       description: "Read replica",
       system: null,
       owner: "stk_1",
@@ -69,31 +77,18 @@ describe("the access form", () => {
     expect(accessChanged(was, { ...accessFields(was), owner: null })).toBe(true)
   })
 
-  it("sends every field on an edit: the form's changes, and the rest as the request is now", () => {
-    const now = { ...was, status: "granted", system: "sys_2", owner: "stk_2" } as AccessRequestOut
-    // The form changed only the words: the system, owner and status are the request's today.
-    expect(accessEditBody(was, now, { ...accessFields(was), description: "New words" })).toEqual({
+  it("sends every field on an edit, all from the form: the copy it opened on with the person's changes", () => {
+    // The status is not in the form: it is the copy's, and goes with that copy's version.
+    expect(accessEditBody({ ...accessFields(was), description: " New words " })).toEqual({
       description: "New words",
-      system: "sys_2",
-      owner: "stk_2",
-      status: "granted",
-    })
-    // It changed the owner: that is the form's, the words are the request's today.
-    expect(
-      accessEditBody(
-        was,
-        { ...now, description: "Edited elsewhere" },
-        {
-          ...accessFields(was),
-          owner: null,
-        },
-      ),
-    ).toEqual({ description: "Edited elsewhere", system: "sys_2", owner: null, status: "granted" })
-    // With no newer copy the one it opened on stands in.
-    expect(accessEditBody(was, undefined, accessFields(was))).toEqual({
-      description: "Request acc_1",
       system: "sys_1",
       owner: "stk_1",
+      status: "in_progress",
+    })
+    expect(accessEditBody({ ...accessFields(was), owner: null })).toEqual({
+      description: "Request acc_1",
+      system: "sys_1",
+      owner: null,
       status: "in_progress",
     })
   })
@@ -322,5 +317,31 @@ describe("commitAccess", () => {
     invalidate.mockClear()
     await vi.advanceTimersByTimeAsync(UNBLOCK_REREAD_MS + 1)
     expect(invalidate).not.toHaveBeenCalled()
+  })
+})
+
+describe("a status change held back because the request had changed", () => {
+  const stale = (now: AccessState, to: AccessState) =>
+    accessRefusalNote(
+      {
+        scope: { company: "cmp_1", project: "prj_1" } as never,
+        access: request("acc_1", now, 3),
+        to,
+        why: "",
+        kind: "stale",
+      },
+      null,
+      () => {},
+    )
+
+  it("offers the move again in the row's own words when the request as it is now still has it", () => {
+    expect(stale("denied", "requested").again?.label).toBe("Ask again")
+    expect(stale("in_progress", "granted").again?.label).toBe("Mark granted")
+  })
+
+  it("offers nothing the row would not offer now: a granted request is not marked denied", () => {
+    expect(stale("granted", "denied").again).toBeUndefined()
+    expect(stale("revoked", "denied").again).toBeUndefined()
+    expect(stale("granted", "denied").text).toContain("It is now Granted.")
   })
 })

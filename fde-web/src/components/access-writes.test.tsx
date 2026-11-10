@@ -214,24 +214,38 @@ describe("changing an access request", () => {
     expect(wire.sent).toEqual([])
   })
 
-  it("does not undo a status that was moved while the form was open", async () => {
+  it("does not undo a status that was moved while the form was open: the save is held, then goes on the current version", async () => {
     const view = renderWithRouter(<ProjectPage scope={REFERRALS} />)
     await pick(rowFor(await card(), "Intake form API, staging"), "Edit request")
     const box = await dialog("Edit access request")
     // A teammate marks it in progress, and the page reads it again behind the form.
-    await api.updateAccess(REFERRALS, accessId("acc_b2"), {
-      description: "Intake form API, staging",
-      system: "sys_b1",
-      owner: "stk_b2",
-      status: "in_progress",
-    })
+    await api.updateAccess(
+      REFERRALS,
+      accessId("acc_b2"),
+      {
+        description: "Intake form API, staging",
+        system: "sys_b1",
+        owner: "stk_b2",
+        status: "in_progress",
+      },
+      1,
+    )
     await view.queryClient.invalidateQueries({ queryKey: queries.project(REFERRALS).queryKey })
     wire.sent = []
     await userEvent.type(field(box, "What access is needed"), " (write too)")
     await click(box, "Save")
+    // The form was opened on version 1, so the save is refused and nothing is overwritten.
+    expect(await within(box).findByText(/Someone changed the status/)).toBeInTheDocument()
+    expect(wire.sent[0]).toMatchObject({ body: { version: 1, status: "requested" } })
+    expect(field(box, "What access is needed")).toHaveValue("Intake form API, staging (write too)")
+    await click(box, "Save on the current version")
     await closed()
-    expect(wire.sent[0]).toMatchObject({
-      body: { description: "Intake form API, staging (write too)", status: "in_progress" },
+    expect(wire.sent[1]).toMatchObject({
+      body: {
+        description: "Intake form API, staging (write too)",
+        status: "in_progress",
+        version: 2,
+      },
     })
   })
 

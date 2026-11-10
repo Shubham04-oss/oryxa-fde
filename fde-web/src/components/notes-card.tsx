@@ -361,11 +361,11 @@ function MakeFromNote({
           people={project.stakeholders}
           requests={project.access}
           me={me.data?.user.id}
-          onSave={async (fields) => {
-            const failed = await mover.submit(scope, null, fields)
-            if (!failed) onMade("task", fields.title.trim())
-            return failed
+          send={async (_, fields) => {
+            await mover.send(scope, null, fields)
+            onMade("task", fields.title.trim())
           }}
+          adopt={(current) => mover.adopt(scope, current)}
           onDelete={undefined}
           onClose={onClose}
         />

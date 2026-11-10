@@ -91,10 +91,24 @@ export class ChecklistOpenError extends ApiError {
   }
 }
 
+/**
+ * A save refused because the record moved on from the version it was based on (409 `stale_version`).
+ * Nothing was changed. `current` is the record, or for a sign-off the whole scope, as it stands now.
+ * Never retried and never forced: the person is told, and decides.
+ */
+export class StaleSaveError<T> extends ApiError {
+  constructor(readonly current: T) {
+    super(409, "stale_version", SAFE_TEXT.stale_version)
+    this.name = "StaleSaveError"
+  }
+}
+
 /** Words for refusals the API answers with a code only. Anything else shows generic copy. */
 export const SAFE_TEXT: Record<string, string> = {
   forbidden: "You are not allowed to do that here. Ask a lead, or an organisation admin.",
   conflict: "That clashes with a change made a moment ago. Reload the page and try again.",
+  stale_version: "Someone changed this since you opened it. Reload the page and try again.",
+  invalid_version: "That save named a version it should not have. Reload the page and try again.",
   invalid_name: "A name is one line, 1 to 200 characters.",
   invalid_industry: "Industry is one line, up to 200 characters.",
   invalid_region: "Region is one line, up to 200 characters.",
@@ -241,6 +255,26 @@ function connect(transport: Transport) {
     call: Promise<{ data?: unknown; error?: unknown; response: Response }>,
   ): Promise<T> {
     const { data, error, response } = await call
+    if (!response.ok) throw refusal(response.status, error)
+    return schema.parse(data)
+  }
+
+  /**
+   * A save that sends the record's version: `read`, except that a 409 `stale_version` throws a
+   * `StaleSaveError` carrying the record as it stands. Any other 409 is an ordinary refusal, told
+   * apart by its code (a task's `rejected_blocker_required`, a sign-off's `conflict`).
+   */
+  async function save<T>(
+    schema: z.ZodType<T>,
+    call: Promise<{ data?: unknown; error?: unknown; response: Response }>,
+  ): Promise<T> {
+    const { data, error, response } = await call
+    if (response.status === 409) {
+      const stale = z
+        .object({ error: z.literal("stale_version"), current: schema })
+        .safeParse(error)
+      if (stale.success) throw new StaleSaveError(stale.data.current)
+    }
     if (!response.ok) throw refusal(response.status, error)
     return schema.parse(data)
   }
@@ -410,13 +444,21 @@ function connect(transport: Transport) {
         client.POST("/v1/companies/{company}/stakeholders", { ...company(id), body }),
       ),
 
-    /** Replaces a stakeholder: every field, so a change to one sends them all. */
-    updateStakeholder: (id: CompanyId, stakeholder: StakeholderId, body: StakeholderBody) =>
-      read(
+    /**
+     * Replaces a stakeholder: every field, so a change to one sends them all. `version` is the
+     * stakeholder's own, from the copy the edit was based on.
+     */
+    updateStakeholder: (
+      id: CompanyId,
+      stakeholder: StakeholderId,
+      body: StakeholderBody,
+      version: number,
+    ) =>
+      save(
         StakeholderOut,
         client.PUT("/v1/companies/{company}/stakeholders/{stakeholder}", {
           params: { path: { company: id, stakeholder } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
@@ -438,12 +480,12 @@ function connect(transport: Transport) {
       read(SystemOut, client.POST("/v1/companies/{company}/systems", { ...company(id), body })),
 
     /** Replaces a system: every field. */
-    updateSystem: (id: CompanyId, system: SystemId, body: SystemBody) =>
-      read(
+    updateSystem: (id: CompanyId, system: SystemId, body: SystemBody, version: number) =>
+      save(
         SystemOut,
         client.PUT("/v1/companies/{company}/systems/{system}", {
           params: { path: { company: id, system } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
@@ -531,22 +573,27 @@ function connect(transport: Transport) {
       ),
 
     /** Replaces a task: every field, so a change to one sends them all (`toBody`). */
-    updateTask: (scope: ProjectScope, task: TaskId, body: TaskBody) =>
-      read(
+    updateTask: (scope: ProjectScope, task: TaskId, body: TaskBody, version: number) =>
+      save(
         TaskOut,
         client.PUT("/v1/companies/{company}/projects/{project}/tasks/{task}", {
           params: { path: { ...scope, task } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
     /** Replaces an access request: every field, so a change of status sends them all. */
-    updateAccess: (scope: ProjectScope, access: AccessRequestId, body: AccessBody) =>
-      read(
+    updateAccess: (
+      scope: ProjectScope,
+      access: AccessRequestId,
+      body: AccessBody,
+      version: number,
+    ) =>
+      save(
         AccessRequestOut,
         client.PUT("/v1/companies/{company}/projects/{project}/access-requests/{access_request}", {
           params: { path: { ...scope, access_request: access } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
@@ -691,12 +738,17 @@ function connect(transport: Transport) {
       ),
 
     /** Replaces an item: its side and its words. */
-    updateScopeItem: (scope: ProjectScope, item: ScopeItemId, body: ScopeItemBody) =>
-      read(
+    updateScopeItem: (
+      scope: ProjectScope,
+      item: ScopeItemId,
+      body: ScopeItemBody,
+      version: number,
+    ) =>
+      save(
         ScopeItemOut,
         client.PUT("/v1/companies/{company}/projects/{project}/scope/items/{item}", {
           params: { path: { ...scope, item } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
@@ -718,12 +770,17 @@ function connect(transport: Transport) {
       ),
 
     /** Replaces a criterion: every field. */
-    updateCriterion: (scope: ProjectScope, criterion: CriterionId, body: CriterionBody) =>
-      read(
+    updateCriterion: (
+      scope: ProjectScope,
+      criterion: CriterionId,
+      body: CriterionBody,
+      version: number,
+    ) =>
+      save(
         CriterionOut,
         client.PUT("/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}", {
           params: { path: { ...scope, criterion } },
-          body,
+          body: { ...body, version },
         }),
       ),
 
@@ -735,12 +792,21 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
-    /** Records that `stakeholder` signed off the scope as it is now. */
-    async signOffScope(scope: ProjectScope, stakeholder: StakeholderId) {
+    /**
+     * Records that `stakeholder` signed off the scope at `version`, the one that was read. A scope
+     * that has moved on is refused with a `StaleSaveError` carrying the scope as it is now.
+     */
+    async signOffScope(scope: ProjectScope, stakeholder: StakeholderId, version: number) {
       const { data, error, response } = await client.POST(
         "/v1/companies/{company}/projects/{project}/scope/sign-offs",
-        { ...project(scope), body: { stakeholder } },
+        { ...project(scope), body: { stakeholder, version } },
       )
+      if (response.status === 409) {
+        const stale = z
+          .object({ error: z.literal("stale_version"), current: ScopeOut })
+          .safeParse(error)
+        if (stale.success) throw new StaleSaveError(stale.data.current)
+      }
       // One sign-off per version: the unique key refuses a second.
       if (
         response.status === 409 &&
@@ -859,11 +925,12 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     createProject: async (id, body) => (await use()).createProject(id, body),
     updateProject: async (scope, patch) => (await use()).updateProject(scope, patch),
     addStakeholder: async (id, body) => (await use()).addStakeholder(id, body),
-    updateStakeholder: async (id, stakeholder, body) =>
-      (await use()).updateStakeholder(id, stakeholder, body),
+    updateStakeholder: async (id, stakeholder, body, version) =>
+      (await use()).updateStakeholder(id, stakeholder, body, version),
     removeStakeholder: async (id, stakeholder) => (await use()).removeStakeholder(id, stakeholder),
     addSystem: async (id, body) => (await use()).addSystem(id, body),
-    updateSystem: async (id, system, body) => (await use()).updateSystem(id, system, body),
+    updateSystem: async (id, system, body, version) =>
+      (await use()).updateSystem(id, system, body, version),
     removeSystem: async (id, system) => (await use()).removeSystem(id, system),
     members: async (id) => (await use()).members(id),
     setMember: async (id, user, role) => (await use()).setMember(id, user, role),
@@ -874,8 +941,10 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     stageChecklist: async (scope) => (await use()).stageChecklist(scope),
     moveStage: async (scope, to, reason) => (await use()).moveStage(scope, to, reason),
     addTask: async (scope, body) => (await use()).addTask(scope, body),
-    updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
-    updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
+    updateTask: async (scope, task, body, version) =>
+      (await use()).updateTask(scope, task, body, version),
+    updateAccess: async (scope, access, body, version) =>
+      (await use()).updateAccess(scope, access, body, version),
     projectStakeholders: async (scope) => (await use()).projectStakeholders(scope),
     accessRequests: async (scope) => (await use()).accessRequests(scope),
     threads: async (scope) => (await use()).threads(scope),
@@ -891,13 +960,15 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     removeNote: async (place, note) => (await use()).removeNote(place, note),
     removeTask: async (scope, task) => (await use()).removeTask(scope, task),
     addScopeItem: async (scope, body) => (await use()).addScopeItem(scope, body),
-    updateScopeItem: async (scope, item, body) => (await use()).updateScopeItem(scope, item, body),
+    updateScopeItem: async (scope, item, body, version) =>
+      (await use()).updateScopeItem(scope, item, body, version),
     removeScopeItem: async (scope, item) => (await use()).removeScopeItem(scope, item),
     addCriterion: async (scope, body) => (await use()).addCriterion(scope, body),
-    updateCriterion: async (scope, criterion, body) =>
-      (await use()).updateCriterion(scope, criterion, body),
+    updateCriterion: async (scope, criterion, body, version) =>
+      (await use()).updateCriterion(scope, criterion, body, version),
     removeCriterion: async (scope, criterion) => (await use()).removeCriterion(scope, criterion),
-    signOffScope: async (scope, stakeholder) => (await use()).signOffScope(scope, stakeholder),
+    signOffScope: async (scope, stakeholder, version) =>
+      (await use()).signOffScope(scope, stakeholder, version),
     runs: async (scope) => (await use()).runs(scope),
     run: async (scope, id) => (await use()).run(scope, id),
     startRun: async (scope, body) => (await use()).startRun(scope, body),

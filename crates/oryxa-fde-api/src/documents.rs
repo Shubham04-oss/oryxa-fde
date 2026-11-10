@@ -38,7 +38,8 @@ pub struct DocumentOut {
     pub size_bytes: i64,
     pub sha256: String,
     pub status: IngestState,
-    /// Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`.
+    /// Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow`, `checksum`, or
+    /// `key_unavailable` (S3 or KMS refused the company's key: upload it again once the key works).
     pub failure: Option<String>,
     pub chunks: u32,
     pub uploaded_by: String,
@@ -112,6 +113,7 @@ impl From<ContextError> for ApiError {
     fn from(e: ContextError) -> Self {
         match e {
             ContextError::Store(e) => e.into(),
+            ContextError::KeyUnavailable => ApiError::CompanyKeyMissing,
             e => {
                 tracing::error!(error = %e, "context");
                 ApiError::Unavailable
@@ -139,8 +141,10 @@ fn query(p: SearchParams) -> Result<(SearchQuery, usize), ApiError> {
         content(("text/plain"), ("text/markdown"), ("application/pdf"),
             ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"))),
     responses((status = 201, body = DocumentOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody), (status = 413, description = "Over 20 MiB"),
-        (status = 415, body = ErrorBody)))]
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "`company_key_missing`: the company has no usable key of its own and \
+            the bucket requires one. Nothing was stored; it works once the company's key is provisioned."),
+        (status = 413, description = "Over 20 MiB"), (status = 415, body = ErrorBody)))]
 pub(crate) async fn upload(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -160,7 +164,9 @@ pub(crate) async fn upload(
     if body.is_empty() {
         return Err(ApiError::Invalid("body"));
     }
-    // The company must exist before its file goes to S3.
+    // The company must exist before its file goes to S3. The file goes first and its row after, so
+    // a write S3 refuses (no company key) leaves no row and queues no event. ponytail: a row write
+    // that fails after the upload leaves its object behind, unreferenced and never ingested.
     let mut tx = app.store.company(&s).await?;
     tx.get().await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
@@ -172,7 +178,7 @@ pub(crate) async fn upload(
         content_type,
         size_bytes: body.len() as i64,
         sha256: Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect(),
-        blob_key: key.clone(),
+        blob_key: key.key().to_owned(),
     };
     app.context
         .blobs

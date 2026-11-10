@@ -49,9 +49,48 @@ describe("schemas", () => {
 
   it("take the API's timestamps, nanoseconds and all", () => {
     const at = "2026-11-04T10:06:24.123456789Z"
-    const task = { id: "tsk_1", title: "t", status: "todo", created_at: at, updated_at: at }
+    const task = {
+      id: "tsk_1",
+      title: "t",
+      status: "todo",
+      created_at: at,
+      updated_at: at,
+      version: 1,
+    }
     expect(S.TaskOut.parse(task).blocker).toBeUndefined()
     expect(S.TaskOut.safeParse({ ...task, updated_at: "yesterday" }).success).toBe(false)
+  })
+
+  it("refuse a record that has no version: it could only be saved unchecked", () => {
+    const at = "2026-11-04T10:06:24Z"
+    const records = {
+      TaskOut: { id: "t", title: "t", status: "todo", created_at: at, updated_at: at },
+      StakeholderOut: { id: "s", name: "n", role: "user", updated_at: at },
+      SystemOut: { id: "s", name: "n", updated_at: at },
+      ScopeItemOut: { id: "i", kind: "in", description: "d", updated_at: at },
+      CriterionOut: {
+        id: "c",
+        description: "d",
+        metric: "m",
+        comparator: "at_least",
+        target: 1,
+        updated_at: at,
+      },
+      AccessRequestOut: {
+        id: "a",
+        description: "d",
+        status: "requested",
+        requested_at: at,
+        status_changed_at: at,
+        days_waiting: 0,
+      },
+    } as const
+    for (const [name, record] of Object.entries(records)) {
+      const schema = S[name as keyof typeof records]
+      expect(schema.safeParse(record).success, `${name} without a version`).toBe(false)
+      expect(schema.safeParse({ ...record, version: 1 }).success, `${name} with one`).toBe(true)
+      expect(schema.safeParse({ ...record, version: -1 }).success, `${name} negative`).toBe(false)
+    }
   })
 
   it("fail loudly on an answer that drifts from the contract", () => {
