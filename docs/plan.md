@@ -35,8 +35,9 @@ Browser -> Cloudflare (DNS, WAF, Turnstile) -> fde-web on Workers
   -> outbox -> EventBridge v2 bus oryxa-fde-<env> -> FIFO subscribers -> SQS FIFO + DLQ -> consumers
 
 Agent run: oryxa-fde-api -> sandbox gateway Worker -> Cloudflare Sandbox for the company
-  -> the harness (OpenCode or the Claude Agent SDK, ADR 0004) with the context pack; every outbound request through the outbound
-     handler (allowlist, secrets added there) -> branch, PR, eval run -> events -> lifecycle engine
+  -> the harness (OpenCode or the Claude Agent SDK, ADR 0004) with the context pack; every
+     outbound request through the outbound handler (allowlist, secrets added there)
+  -> branch, PR, eval run -> events -> lifecycle engine
 Live updates: Durable Objects (presence, agent output, notifications)
 ```
 
@@ -79,8 +80,9 @@ vendor/oryxa-platform/       the platform base, synced by script only
 | Evals | Suite format, runner in the sandbox, graders, links to criteria, CSV import | Each criterion shows a pass rate the customer can see |
 | Billing | Free and Pro, agent-hour and AI-credit meters, Stripe | The first design partners pay |
 
-Not in P0: the runner in customer clouds, real customer data in a sandbox, harnesses beyond those in ADR 0004, handoff pack and
-ownership transfer, Team plan, enterprise sign-on and regions, self-efficiency.
+Not in P0: the runner in customer clouds, real customer data in a sandbox, harnesses beyond those in
+ADR 0004, handoff pack and ownership transfer, Team plan, enterprise sign-on and regions,
+self-efficiency.
 
 ## 6. Workstreams
 

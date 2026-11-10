@@ -21,11 +21,13 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   adds secrets to.
 - **A harness reads nothing from the repository it works on, or from anywhere else the agent can
   write:** no settings, instructions, plugins, skills or MCP servers. That includes the agent's
-  home directory, which must not carry anything from one run into the next. The run's configuration comes only from the adapter: passed in at start,
-  or written by root where the agent cannot write.
+  home directory, which must not carry anything from one run into the next. The run's
+  configuration comes only from the adapter: passed in at start, or written by root where the
+  agent cannot write.
 - **A harness's own permission system is a convenience, not a boundary.** OpenCode says so of its
   own. The adapter decides every approval against the company's list, an approval covers one call
-  and is never remembered, and the outbound handler's held hosts back it.
+  and is never remembered, and the outbound handler's held hosts back it. For OpenCode the adapter
+  sets every permission to ask, so every call reaches it.
 - Actions on the company's approval list (deploys, new network hosts, anything sent to the
   customer) pause the run until an FDE approves.
 - **A harness version is pinned exactly and checked by hash.** It is enabled only after it passes
@@ -46,18 +48,19 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
 - Hosted sandboxes take sample data only; real data waits for the runner (ADR 0003).
 
 ## The gate's tests
-- **Recorded session:** the backend replays a session recorded from the pinned version and
-  produces exactly the expected internal events, including an approval that is asked, answered
-  once and not remembered.
+- **Recorded session:** the adapter, fed a session recorded from the pinned version, produces
+  exactly the expected internal events, including an approval that is asked, answered once and
+  not remembered.
 - **Hostile repository:** a repository and a home directory seeded with harness configuration,
   plugins, a local MCP server, skills and instruction files that try to redirect the agent change
   nothing about the run: same tools, same permissions, same hosts.
 - **Egress:** with the outbound handler recording, a run contacts only the model host and the hosts
   the company's policy allows. A catalogue fetch, update check, share, plugin install or telemetry
   call fails the test. It runs in CI against a recorded or stubbed model, not by hand.
-- **Eval comparison:** on the sample tasks, the candidate's pass rate is not lower than the current
-  default's by more than the run-to-run spread of the default, and its cost per passed task is
-  stated. The lead PR that changes the default records both.
+- **Eval comparison:** the candidate and the current default each run the sample tasks three times
+  on the same model. The candidate passes if its mean pass rate is at least the default's lowest
+  of its three runs. The lead PR that changes the default records the pass rates of every run and
+  each harness's cost per passed task.
 
 ## Why OpenCode first
 Model choice: a run can use a cheap, fast model for routine work and a stronger one where it
