@@ -93,9 +93,13 @@ variable "company_key_operator_arns" {
 }
 
 variable "company_key_reader_role_arns" {
-  description = "Roles that only read company files (the ingest worker, the MCP server) once they run. Each is named in every company key's policy, so adding one means `company-key.sh sync` for each company that has a key."
+  description = "Roles other than the ingest worker's that only read company files (the MCP server, once it runs). The ingest worker's task role is always a reader and is added by envs/dev, so it must not be listed here. Each is named in every company key's policy, so adding one means `company-key.sh sync` for each company that has a key."
   type        = list(string)
   default     = []
+  validation {
+    condition     = alltrue([for a in var.company_key_reader_role_arns : !can(regex("role/oryxa-fde-[a-z0-9]+-ingest-task$", a))])
+    error_message = "company_key_reader_role_arns must not list the ingest worker's task role: it is added automatically."
+  }
 }
 
 variable "company_key_rotation" {
@@ -162,10 +166,14 @@ variable "api_port" {
   default     = 8080
 }
 
-variable "api_health_check_path" {
-  description = "Path the API container's health check polls; must answer 200 without auth."
-  type        = string
-  default     = "/healthz"
+variable "api_shutdown_grace_seconds" {
+  description = "Seconds the API drains requests and its background loops after SIGTERM (SHUTDOWN_GRACE_SECONDS, shutdown.rs). The api container's stop timeout is this plus 10, and the task's stop sequence (cloudflared's 45 s, then the API's) must fit 120 s, which the fargate_service module checks. The code accepts 1 to 119 and stops at start for anything else."
+  type        = number
+  default     = 20
+  validation {
+    condition     = var.api_shutdown_grace_seconds == floor(var.api_shutdown_grace_seconds) && var.api_shutdown_grace_seconds >= 1 && var.api_shutdown_grace_seconds <= 119
+    error_message = "api_shutdown_grace_seconds must be a whole number of seconds from 1 to 119: the API refuses to start with anything else."
+  }
 }
 
 variable "api_cpu" {

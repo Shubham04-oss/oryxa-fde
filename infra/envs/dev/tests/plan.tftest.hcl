@@ -185,11 +185,10 @@ run "the_api_task_carries_its_own_tunnel_and_admits_nothing" {
   }
   assert {
     condition = (
-      module.api.containers[0].healthCheck.command[0] == "CMD"
-      && endswith(join(" ", module.api.containers[0].healthCheck.command), "http://127.0.0.1:8080/healthz")
+      module.api.containers[0].healthCheck.command == ["CMD", "/usr/local/bin/oryxa-fde-ops", "healthcheck"]
       && module.api.containers[0].healthCheck.retries >= 2
     )
-    error_message = "the API container has its own health check on /healthz, on the loopback"
+    error_message = "the API container's health check is the API's own `oryxa-fde-ops healthcheck` (no shell in the image), run as CMD; it tolerates a miss"
   }
   assert {
     condition = (
@@ -266,6 +265,107 @@ run "contract_with_every_feature_off" {
     condition     = length(output.injected_non_secrets) == 0
     error_message = "injected from Secrets Manager but not a secret in the table: ${join(", ", output.injected_non_secrets)}"
   }
+}
+
+# The container health check and the shutdown grace against the API's source, the Dockerfile and infra/README.md
+# (./tests/code reads them as text). Wrong here means: the check runs something the image does not have or the code
+# does not dispatch, ECS would kill the check before it gives up, the grace is a value the API refuses to start with,
+# or the container is killed before the grace is over.
+run "the_api_health_check_and_the_stop_sequence_match_the_code" {
+  command = plan
+  module {
+    source = "./tests/code"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    task = run.api_task_with_every_feature_off.api_task_timing
+  }
+
+  assert {
+    condition     = output.healthcheck_subcommand_exists && output.health_path == "/healthz"
+    error_message = "oryxa-fde-ops no longer dispatches `healthcheck`, or its path is not /healthz: re-read crates/oryxa-fde-api/src/health.rs and bin/ops.rs"
+  }
+  assert {
+    condition     = var.task.health_check.command == concat(["CMD"], split(" ", output.readme_healthcheck_command))
+    error_message = "the API container's health check differs from the command infra/README.md's oryxa-fde-ops table gives (`healthcheck` row): change both together"
+  }
+  assert {
+    condition = (
+      split(" ", output.readme_healthcheck_command)[1] == "healthcheck"
+      && dirname(split(" ", output.readme_healthcheck_command)[0]) == "/usr/local/bin"
+      && anytrue([
+        for i in output.image : startswith(i, "COPY ") && endswith(i, " /usr/local/bin/") && contains(split(" ", i), basename(split(" ", output.readme_healthcheck_command)[0]))
+      ])
+    )
+    error_message = "the health check names a binary or subcommand the image does not carry in /usr/local/bin"
+  }
+  assert {
+    condition = (
+      var.task.health_check.timeout > output.health_timeout_seconds
+      && var.task.health_check.interval >= var.task.health_check.timeout
+    )
+    error_message = "ECS's health check timeout must outlast the check's own timeout (health.rs TIMEOUT), so its exit code arrives first, and the interval must not be shorter than that timeout"
+  }
+  assert {
+    condition     = contains(keys(var.task.environment), output.grace_var)
+    error_message = "the API task does not set ${output.grace_var}, the variable shutdown.rs reads (renamed in the code, or dropped here)"
+  }
+  assert {
+    condition = (
+      tonumber(var.task.environment[output.grace_var]) >= 1
+      && tonumber(var.task.environment[output.grace_var]) <= output.grace_max_seconds
+    )
+    error_message = "the grace is outside the range the API starts with (shutdown.rs MAX_GRACE_SECS)"
+  }
+  assert {
+    condition     = var.task.stop_timeouts["api"] == tonumber(var.task.environment[output.grace_var]) + 10
+    error_message = "the api container's stop timeout must be the grace plus 10 s, so ECS cannot kill it before the drain is over"
+  }
+  assert {
+    condition     = var.task.stop_timeouts["cloudflared"] + var.task.stop_timeouts["api"] <= 120
+    error_message = "cloudflared's stop timeout plus the API's is over Fargate's 120 s"
+  }
+  assert {
+    condition     = output.grace_max_seconds == 119
+    error_message = "the code's grace range changed: update api_shutdown_grace_seconds' validation (variables.tf), the README row and this test together"
+  }
+  assert {
+    condition     = output.readme_grace_default_seconds == output.grace_default_seconds && output.readme_grace_max_seconds == output.grace_max_seconds
+    error_message = "the README's row for the grace variable gives a default or range that is not the code's"
+  }
+  # The image: distroless, nonroot, the four binaries, and nothing else (no busybox for the old check).
+  assert {
+    condition = (
+      length([for i in output.image : i if startswith(i, "FROM ")]) == 1
+      && anytrue([for i in output.image : startswith(i, "FROM gcr.io/distroless/cc-debian13:nonroot@sha256:")])
+      && contains(output.image, "USER nonroot")
+      && contains(output.image, "COPY --chmod=0555 oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle /usr/local/bin/")
+      && length([for i in output.image : i if startswith(i, "COPY ") || startswith(i, "ADD ") || startswith(i, "RUN ")]) == 1
+    )
+    error_message = "the image is one distroless nonroot stage that adds the four binaries and nothing else"
+  }
+  assert {
+    condition     = !anytrue([for i in output.image : strcontains(lower(i), "busybox")])
+    error_message = "busybox is back in the image"
+  }
+}
+
+run "rejects_a_shutdown_grace_the_api_would_refuse_to_start_with" {
+  command = plan
+  variables {
+    api_shutdown_grace_seconds = 120
+  }
+  expect_failures = [var.api_shutdown_grace_seconds]
+}
+
+run "rejects_a_shutdown_grace_of_zero_or_a_fraction" {
+  command = plan
+  variables {
+    api_shutdown_grace_seconds = 0.5
+  }
+  expect_failures = [var.api_shutdown_grace_seconds]
 }
 
 run "api_task_with_agent_github_and_slack_on" {
@@ -481,6 +581,70 @@ run "company_keys_reach_the_bucket_policy_and_name_the_api_role" {
     condition     = output.company_keys.rotation == false
     error_message = "company keys do not rotate unless company_key_rotation is set (the lead's decision on cost)"
   }
+}
+
+# Every company's key policy names the ingest worker's task role as a reader (Decrypt through S3), and nobody else's
+# unless it is listed: the roles get distinct ARNs here, since the mock gives every role the same one.
+run "the_ingest_worker_reads_every_company_key_and_nothing_else_does" {
+  command = apply
+  override_resource {
+    target = module.api.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/oryxa-fde-dev-api-task" }
+  }
+  override_resource {
+    target = module.ingest.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/oryxa-fde-dev-ingest-task" }
+  }
+  override_resource {
+    target = module.lifecycle.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/oryxa-fde-dev-lifecycle-task" }
+  }
+  variables {
+    update_model                 = "global.anthropic.claude-sonnet-5-5"
+    company_key_reader_role_arns = ["arn:aws:iam::000000000000:role/oryxa-fde-dev-mcp-task"]
+  }
+
+  assert {
+    condition = jsonencode([
+      for s in module.company_keys.config.key_policy.Statement : s.Principal.AWS if s.Sid == "ReadingRolesDecryptThroughS3"
+    ][0]) == jsonencode(["arn:aws:iam::000000000000:role/oryxa-fde-dev-ingest-task", "arn:aws:iam::000000000000:role/oryxa-fde-dev-mcp-task"])
+    error_message = "the readers of a company key are the ingest worker's task role, then the roles listed in company_key_reader_role_arns, and not the API's or the lifecycle worker's"
+  }
+  assert {
+    condition = jsonencode([
+      for s in module.company_keys.config.key_policy.Statement : s.Principal.AWS if s.Sid == "ServingRolesUseTheKeyThroughS3"
+    ][0]) == jsonencode(["arn:aws:iam::000000000000:role/oryxa-fde-dev-api-task"])
+    error_message = "only the API's role writes: the ingest worker never gets GenerateDataKey"
+  }
+  assert {
+    condition = jsonencode([
+      for s in module.company_keys.config.key_policy.Statement : s.Action if s.Sid == "ReadingRolesDecryptThroughS3"
+    ][0]) == jsonencode(["kms:Decrypt"])
+    error_message = "a reader may only decrypt"
+  }
+}
+
+run "the_ingest_worker_is_a_reader_with_no_extra_readers_listed" {
+  command = apply
+  override_resource {
+    target = module.ingest.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/oryxa-fde-dev-ingest-task" }
+  }
+
+  assert {
+    condition = jsonencode([
+      for s in module.company_keys.config.key_policy.Statement : s.Principal.AWS if s.Sid == "ReadingRolesDecryptThroughS3"
+    ][0]) == jsonencode(["arn:aws:iam::000000000000:role/oryxa-fde-dev-ingest-task"])
+    error_message = "with company_key_reader_role_arns empty, the ingest worker is still a reader"
+  }
+}
+
+run "rejects_listing_the_ingest_role_as_an_extra_reader" {
+  command = plan
+  variables {
+    company_key_reader_role_arns = ["arn:aws:iam::000000000000:role/oryxa-fde-dev-ingest-task"]
+  }
+  expect_failures = [var.company_key_reader_role_arns]
 }
 
 run "required_company_keys_refuse_writes_that_name_no_company_key_and_stop_environment_key_writes" {
@@ -895,7 +1059,7 @@ run "a_sidecar_waits_for_a_healthy_main_container_and_shares_its_log_group" {
     vpc_id         = "vpc-mock"
     subnet_ids     = ["subnet-a"]
     egress         = {}
-    health_check   = { command = ["/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"] }
+    health_check   = { command = ["/usr/local/bin/oryxa-fde-ops", "healthcheck"] }
     sidecars = {
       tunnel = { image = "example/tunnel:1", secrets = { TOKEN = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:tunnel" } } }
     }
@@ -908,7 +1072,7 @@ run "a_sidecar_waits_for_a_healthy_main_container_and_shares_its_log_group" {
   }
   assert {
     condition = jsondecode(aws_ecs_task_definition.this.container_definitions)[0].healthCheck == {
-      command  = ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      command  = ["CMD", "/usr/local/bin/oryxa-fde-ops", "healthcheck"]
       interval = 10, timeout = 5, retries = 3, startPeriod = 30
     }
     error_message = "the health check runs as CMD (no shell in the image) with the defaults"
@@ -921,6 +1085,84 @@ run "a_sidecar_waits_for_a_healthy_main_container_and_shares_its_log_group" {
     condition     = length(aws_vpc_security_group_ingress_rule.this) == 0
     error_message = "a sidecar needs no ingress rule: it shares the main container's network"
   }
+}
+
+# A task stops its sidecars first and then its main container, each for up to its stop timeout: the longest sidecar
+# plus the main container must fit Fargate's 120 s. 75 + 45 is the most the API task can ask (a grace of 65).
+run "a_stop_sequence_of_120_seconds_is_accepted_and_one_second_more_is_refused" {
+  command = plan
+  module {
+    source = "../../modules/fargate_service"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name           = "oryxa-fde-test-api"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
+    container_name = "api"
+    image          = "example/api:1"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+    vpc_id         = "vpc-mock"
+    subnet_ids     = ["subnet-a"]
+    egress         = {}
+    stop_timeout   = 75
+    sidecars       = { tunnel = { image = "example/tunnel:1", stop_timeout = 45 } }
+    desired_count  = 0
+  }
+
+  assert {
+    condition     = [for c in jsondecode(aws_ecs_task_definition.this.container_definitions) : c.stopTimeout] == [75, 45]
+    error_message = "the main container and the sidecar keep the stop timeouts they were given"
+  }
+}
+
+run "a_stop_sequence_over_120_seconds_is_refused" {
+  command = plan
+  module {
+    source = "../../modules/fargate_service"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name           = "oryxa-fde-test-api"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
+    container_name = "api"
+    image          = "example/api:1"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+    vpc_id         = "vpc-mock"
+    subnet_ids     = ["subnet-a"]
+    egress         = {}
+    stop_timeout   = 76
+    sidecars       = { tunnel = { image = "example/tunnel:1", stop_timeout = 45 } }
+    desired_count  = 0
+  }
+  expect_failures = [aws_ecs_task_definition.this]
+}
+
+run "a_sidecar_with_no_stop_timeout_counts_as_ecs_default_30_seconds" {
+  command = plan
+  module {
+    source = "../../modules/fargate_service"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name           = "oryxa-fde-test-api"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
+    container_name = "api"
+    image          = "example/api:1"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+    vpc_id         = "vpc-mock"
+    subnet_ids     = ["subnet-a"]
+    egress         = {}
+    stop_timeout   = 91
+    sidecars       = { tunnel = { image = "example/tunnel:1" } }
+    desired_count  = 0
+  }
+  expect_failures = [aws_ecs_task_definition.this]
 }
 
 run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
