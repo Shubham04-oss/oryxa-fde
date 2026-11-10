@@ -110,6 +110,114 @@ describe("the Worker", () => {
     expect(await fetch.mock.calls[0]![0].json()).toEqual({ name: "Kestrel Freight" })
   })
 
+  it("passes a file's bytes and type through untouched, up to the API's 20 MiB limit", async () => {
+    const { env, fetch } = apiAnswering(() => Response.json({ id: "doc_1" }, { status: 201 }))
+    const bytes = new Uint8Array(20 * 1024 * 1024).fill(7)
+    const response = await call(
+      new Request(`${APP}/api/v1/companies/cmp_1/documents?name=a.pdf`, {
+        method: "POST",
+        headers: {
+          Origin: APP,
+          "Content-Type": "application/pdf",
+          "X-Oryxa-Request": "1",
+          Cookie: "__Host-fde_session=sealed",
+        },
+        body: bytes,
+      }),
+      env,
+    )
+
+    expect(response.status).toBe(201)
+    const sent = fetch.mock.calls[0]![0]
+    expect(sent.url).toBe("http://api.internal/v1/companies/cmp_1/documents?name=a.pdf")
+    expect(sent.headers.get("Content-Type")).toBe("application/pdf")
+    expect(sent.headers.get("X-Oryxa-Request")).toBe("1")
+    const received = new Uint8Array(await sent.arrayBuffer())
+    expect(received.byteLength).toBe(bytes.byteLength)
+    expect(received[0]).toBe(7)
+    expect(received.at(-1)).toBe(7)
+  })
+
+  it("refuses a body over 20 MiB with 413 before the API sees it, declared or not", async () => {
+    const { env, fetch } = apiAnswering()
+    const headers = { Origin: APP, "Content-Type": "application/pdf" }
+    const url = `${APP}/api/v1/companies/cmp_1/documents?name=a.pdf`
+
+    // Its length is declared.
+    const declared = await call(
+      new Request(url, { method: "POST", headers, body: new Uint8Array(20 * 1024 * 1024 + 1) }),
+      env,
+    )
+    expect(declared.status).toBe(413)
+    expect(await declared.json()).toEqual({ error: "payload_too_large" })
+    expect(declared.headers.get("X-Frame-Options")).toBe("DENY")
+
+    // Its length is not: a stream that keeps going is stopped when it passes the limit.
+    let pulled = 0
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++
+        controller.enqueue(new Uint8Array(1024 * 1024))
+      },
+    })
+    const chunked = await call(
+      new Request(url, { method: "POST", headers, body: endless, duplex: "half" } as RequestInit),
+      env,
+    )
+    expect(chunked.status).toBe(413)
+    expect(pulled).toBeLessThan(30)
+
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it("refuses a declared length over 20 MiB without reading the body, and counts a body that lies low", async () => {
+    const { env, fetch } = apiAnswering()
+    const url = `${APP}/api/v1/companies/cmp_1/documents?name=a.pdf`
+    const stream = (chunks: number) => {
+      const counted = { pulled: 0 }
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (counted.pulled++ === chunks) return controller.close()
+            controller.enqueue(new Uint8Array(1024 * 1024))
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      return { body, counted }
+    }
+
+    // A declared length over the limit is refused before a byte is read.
+    const big = stream(1)
+    const declared = await call(
+      new Request(url, {
+        method: "POST",
+        headers: { Origin: APP, "Content-Length": String(20 * 1024 * 1024 + 1) },
+        body: big.body,
+        duplex: "half",
+      } as RequestInit),
+      env,
+    )
+    expect(declared.status).toBe(413)
+    expect(big.counted.pulled).toBe(0)
+
+    // A small declared length does not let a longer body through: what arrives is counted.
+    const lying = stream(25)
+    const low = await call(
+      new Request(url, {
+        method: "POST",
+        headers: { Origin: APP, "Content-Length": "10" },
+        body: lying.body,
+        duplex: "half",
+      } as RequestInit),
+      env,
+    )
+    expect(low.status).toBe(413)
+    expect(lying.counted.pulled).toBeLessThan(25)
+
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it("answers 503 when it has no way to the API, never anything else", async () => {
     const response = await call(new Request(`${APP}/api/v1/companies`), {})
 

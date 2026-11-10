@@ -17,8 +17,7 @@ locals {
   # and its task role may connect as that user only. No database password exists for services.
   # The migrator owns the tables; only the one-off migrate task may connect as it, never the API.
   db_name = "oryxa_fde"
-  # The workers each have a login of their own (lead decision on #130: none connects as oryxa_fde_api).
-  # mcp's is created by the bootstrap now; its service comes later.
+  # The workers and the MCP server each have a login of their own (lead decision on #130: none connects as oryxa_fde_api).
   db_user = {
     api       = "oryxa_fde_api"
     migrate   = "oryxa_fde_migrator"
@@ -57,6 +56,10 @@ locals {
   # is on within it while digest_from is set. Ingest has no such switch: document search needs no model of ours.
   lifecycle_on = var.update_model != null
   digest_on    = local.lifecycle_on && var.digest_from != null
+  # The MCP server exists only with enable_mcp: until an FDE's agent can sign in to it, nothing of it is deployed.
+  mcp_on = var.enable_mcp
+  # Where the server listens, on the loopback of its own task: its tunnel's connector is the only client.
+  mcp_port = 8081
 
   # Slack bot tokens are created by the API at run time, one secret per workspace, under this prefix
   # (SLACK_SECRET_PREFIX, which the code wants as oryxa-fde/<env>/slack/). Not OpenTofu's, so teardown leaves them.
@@ -78,6 +81,7 @@ locals {
     "api/slack-signing-secret"     = "Slack app signing secret (16+ bytes): oryxa-fde-api"
     "shared/spicedb-preshared-key" = "SpiceDB preshared key: SpiceDB and oryxa-fde-api"
     "cloudflared/tunnel-token"     = "Cloudflare Tunnel token: the cloudflared sidecar of the oryxa-fde-api task"
+    "cloudflared/mcp-tunnel-token" = "Cloudflare Tunnel token: the cloudflared sidecar of the oryxa-fde-mcp task"
   }
 
   # Env name => secret the API task gets it from (the API contract, infra/README.md).
@@ -101,7 +105,11 @@ locals {
     } : {},
     local.github_on || local.slack_on ? { INSTALL_STATE_KEY = "api/install-state-key" } : {},
   )
-  secrets    = { for k, d in local.secret_catalog : k => d if contains(concat(values(local.api_secrets), ["cloudflared/tunnel-token"]), k) }
+  # The MCP server reads two secrets the API already has (listed in mcp_secrets) and has one tunnel token of its own.
+  secrets = {
+    for k, d in local.secret_catalog : k => d
+    if contains(concat(values(local.api_secrets), ["cloudflared/tunnel-token"], local.mcp_on ? ["cloudflared/mcp-tunnel-token"] : []), k)
+  }
   secret_arn = { for k, s in aws_secretsmanager_secret.this : k => s.arn }
 
   # Plain configuration the API reads (the contract). Anything optional is set only when its feature is on.
@@ -142,6 +150,57 @@ locals {
       SLACK_KMS_KEY_ID    = aws_kms_key.this.arn
     } : {},
   )
+
+  # The MCP server (infra/README.md, the contract of oryxa-fde-mcp, read from its binary): the API's token verification and
+  # reads, as its own login. MCP_ALLOWED_HOSTS is its own name only, so a request that arrives under any other Host is refused.
+  mcp_environment = merge(
+    {
+      AWS_REGION         = local.region
+      LISTEN_ADDR        = "127.0.0.1:${local.mcp_port}" # the tunnel sidecar is the only client
+      DB_HOST            = module.db.address
+      DB_PORT            = tostring(module.db.port)
+      DB_NAME            = local.db_name
+      DB_USER            = local.db_user["mcp"]
+      SPICEDB_ENDPOINT   = local.spicedb_endpoint
+      WORKOS_CLIENT_ID   = var.workos_client_id
+      MCP_ALLOWED_HOSTS  = module.cloudflare.mcp_hostname
+      DOCUMENTS_BUCKET   = module.data_bucket.name # required by the binary's context; no tool reads a file (the role has no S3)
+      EMBEDDING_PROVIDER = "bedrock"
+      EMBEDDING_MODEL    = var.embedding_model
+    },
+    var.workos_issuer != null ? { WORKOS_ISSUER = var.workos_issuer } : {},
+  )
+  # The same two secrets the API has: the pre-shared key SpiceDB checks, and the WorkOS key its client is built with.
+  mcp_secrets = {
+    WORKOS_API_KEY        = "api/workos-api-key"
+    SPICEDB_PRESHARED_KEY = "shared/spicedb-preshared-key"
+  }
+
+  # Who the NAT instance carries for: HTTPS out for every task, and the tunnel's port for the tasks that run a connector.
+  nat_https_clients = merge({
+    api      = module.api.security_group_id
+    spicedb  = module.spicedb.security_group_id
+    db_admin = module.db_admin.security_group_id
+    migrate  = module.migrate.security_group_id
+    zed      = module.zed.security_group_id
+    ingest   = module.ingest.security_group_id
+    },
+    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
+    local.mcp_on ? { mcp = module.mcp[0].security_group_id } : {},
+  )
+  nat_tunnel_clients = merge({ api = module.api.security_group_id }, local.mcp_on ? { mcp = module.mcp[0].security_group_id } : {})
+  # Who reaches the database on 5432, and SpiceDB on 50051 (the API, the zed task and the MCP server: it checks permissions).
+  db_clients = merge({
+    api      = module.api.security_group_id
+    spicedb  = module.spicedb.security_group_id
+    db_admin = module.db_admin.security_group_id
+    migrate  = module.migrate.security_group_id
+    ingest   = module.ingest.security_group_id
+    },
+    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
+    local.mcp_on ? { mcp = module.mcp[0].security_group_id } : {},
+  )
+  spicedb_clients = merge({ api = module.api.security_group_id, zed = module.zed.security_group_id }, local.mcp_on ? { mcp = module.mcp[0].security_group_id } : {})
 
   # The workers verify every event with the API's public signing key and read their own queue (infra/README.md,
   # the contracts of oryxa-fde-ingest and oryxa-fde-lifecycle, read from their binaries). Each connects as its own
@@ -206,18 +265,10 @@ module "network" {
   name                = local.prefix
   cidr                = var.vpc_cidr
   interface_endpoints = var.interface_endpoints
-  nat_https_clients = merge({
-    api      = module.api.security_group_id
-    spicedb  = module.spicedb.security_group_id
-    db_admin = module.db_admin.security_group_id
-    migrate  = module.migrate.security_group_id
-    zed      = module.zed.security_group_id
-    ingest   = module.ingest.security_group_id
-    },
-    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
-  )
-  # The tunnel connector is the API task's sidecar, so the API's group is the one that dials out.
-  nat_tunnel_clients = { api = module.api.security_group_id }
+  nat_https_clients   = local.nat_https_clients
+  # The tunnel connector is the API task's sidecar, so the API's group is the one that dials out; the MCP task's
+  # (its own sidecar) when it exists.
+  nat_tunnel_clients = local.nat_tunnel_clients
 }
 
 resource "aws_service_discovery_private_dns_namespace" "this" {
@@ -270,23 +321,15 @@ module "company_keys" {
 
 # Private subnets. 5432 only from the API, SpiceDB and the one-off db-admin and migrate tasks.
 module "db" {
-  source              = "../../modules/postgres"
-  name                = local.prefix
-  database_name       = local.db_name
-  instance_class      = var.db_instance_class
-  kms_key_arn         = aws_kms_key.this.arn
-  vpc_id              = module.network.vpc_id
-  subnet_ids          = local.subnets
-  deletion_protection = !var.allow_destroy
-  allowed_security_groups = merge({
-    api      = module.api.security_group_id
-    spicedb  = module.spicedb.security_group_id
-    db_admin = module.db_admin.security_group_id
-    migrate  = module.migrate.security_group_id
-    ingest   = module.ingest.security_group_id
-    },
-    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
-  )
+  source                  = "../../modules/postgres"
+  name                    = local.prefix
+  database_name           = local.db_name
+  instance_class          = var.db_instance_class
+  kms_key_arn             = aws_kms_key.this.arn
+  vpc_id                  = module.network.vpc_id
+  subnet_ids              = local.subnets
+  deletion_protection     = !var.allow_destroy
+  allowed_security_groups = local.db_clients
 }
 
 # ---------------------------------------------------------------- events
@@ -670,6 +713,65 @@ module "lifecycle" {
   log_retention_days  = var.log_retention_days
 }
 
+# oryxa-fde-mcp: a read-only server for an FDE's agent (four tools: search, scope, decisions, tasks). It reads the database
+# as its own login and asks SpiceDB, and the one thing it calls in AWS is Bedrock, to embed a search query. It reads
+# no file: `reads::search` runs over the chunks in the database, so there is no S3 permission, no KMS permission and no
+# place in the company keys' reader list. Exists only with enable_mcp.
+data "aws_iam_policy_document" "mcp" {
+  count = local.mcp_on ? 1 : 0
+
+  statement {
+    sid       = "ConnectAsOwnUser"
+    actions   = ["rds-db:connect"]
+    resources = [local.db_user_arn["mcp"]]
+  }
+
+  statement {
+    sid       = "EmbedOnTheConfiguredModel"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${local.region}::foundation-model/${var.embedding_model}"]
+  }
+}
+
+# One task, two containers, as the API's: the server on its loopback and its own cloudflared, with its own tunnel and
+# token. No security group admits anything to the task, there is no load balancer, no Cloud Map name and no listener
+# outside the task: an FDE's agent reaches it at mcp.<domain> through Cloudflare's edge and the tunnel. The binary has
+# no health route (`oryxa-fde-ops healthcheck` calls /healthz, which it does not serve), so the connector starts once the
+# server's process has, and a process that exits (a missing variable, no database) replaces the task.
+module "mcp" {
+  count               = local.mcp_on ? 1 : 0
+  source              = "../../modules/fargate_service"
+  name                = "${local.prefix}-mcp"
+  service_name        = "oryxa-fde-mcp"
+  cluster_arn         = aws_ecs_cluster.this.arn
+  container_name      = "mcp"
+  image               = local.api_image
+  ecr_repository_arns = [aws_ecr_repository.api.arn]
+  entry_point         = ["/usr/local/bin/oryxa-fde-mcp"]
+  cpu                 = var.mcp_cpu
+  memory              = var.mcp_memory
+  environment         = local.mcp_environment
+  secrets             = { for env, k in local.mcp_secrets : env => { arn = local.secret_arn[k] } }
+  kms_key_arn         = aws_kms_key.this.arn
+  vpc_id              = module.network.vpc_id
+  subnet_ids          = local.subnets
+  egress = merge(local.https_out, local.db_out, local.tunnel_out, {
+    spicedb = { port = 50051, security_group_id = module.spicedb.security_group_id }
+  })
+  task_policies = { mcp = data.aws_iam_policy_document.mcp[0].json }
+  sidecars = {
+    cloudflared = {
+      image   = var.cloudflared_image
+      command = ["tunnel", "--no-autoupdate", "run"]
+      secrets = { TUNNEL_TOKEN = { arn = local.secret_arn["cloudflared/mcp-tunnel-token"] } }
+      # Drains requests in flight for 30 s after SIGTERM, as the API's connector does.
+      stop_timeout = 45
+    }
+  }
+  desired_count      = local.desired
+  log_retention_days = var.log_retention_days
+}
+
 data "aws_iam_policy_document" "spicedb" {
   statement {
     sid       = "ConnectAsOwnUser"
@@ -678,8 +780,8 @@ data "aws_iam_policy_document" "spicedb" {
   }
 }
 
-# Postgres datastore in its own database, IAM auth like the services. Reached by the API (and the
-# one-off zed task) only.
+# Postgres datastore in its own database, IAM auth like the services. Reached by the API, the MCP server (when it
+# is deployed) and the one-off zed task only.
 # ponytail: plaintext gRPC inside the VPC (security groups admit only the API and zed) and
 # sslmode=require without CA verification to RDS; prod adds SpiceDB TLS and the RDS CA bundle.
 module "spicedb" {
@@ -711,7 +813,7 @@ module "spicedb" {
   kms_key_arn        = aws_kms_key.this.arn
   vpc_id             = module.network.vpc_id
   subnet_ids         = local.subnets
-  ingress            = { api = module.api.security_group_id, zed = module.zed.security_group_id }
+  ingress            = local.spicedb_clients
   egress             = merge(local.https_out, local.db_out)
   task_policies      = { spicedb = data.aws_iam_policy_document.spicedb.json }
   service_registry   = { arn = aws_service_discovery_service.spicedb.arn }
@@ -828,5 +930,7 @@ module "cloudflare" {
   name         = local.prefix
   domain       = var.domain
   api_port     = var.api_port
+  mcp_enabled  = local.mcp_on
+  mcp_port     = local.mcp_port
   admin_emails = var.admin_emails
 }

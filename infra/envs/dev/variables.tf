@@ -93,7 +93,7 @@ variable "company_key_operator_arns" {
 }
 
 variable "company_key_reader_role_arns" {
-  description = "Roles other than the ingest worker's that only read company files (the MCP server, once it runs). The ingest worker's task role is always a reader and is added by envs/dev, so it must not be listed here. Each is named in every company key's policy, so adding one means `company-key.sh sync` for each company that has a key."
+  description = "Roles other than the ingest worker's that only read company files. Not the MCP server: none of its tools reads a file (infra/README.md, oryxa-fde-mcp), so its role has no S3 or KMS permission and is not a reader. The ingest worker's task role is always a reader and is added by envs/dev, so it must not be listed here. Each is named in every company key's policy, so adding one means `company-key.sh sync` for each company that has a key."
   type        = list(string)
   default     = []
   validation {
@@ -306,6 +306,26 @@ variable "workos_issuer" {
     condition     = var.workos_issuer == null || can(regex("^https://[a-z0-9.-]+/?$", var.workos_issuer))
     error_message = "workos_issuer must be an https origin, such as https://auth.example.com/."
   }
+}
+
+# ---- the MCP server (infra/README.md, oryxa-fde-mcp and How the MCP server is reached)
+
+variable "enable_mcp" {
+  description = "Deploy the MCP server for FDE agents: a task of its own with its own tunnel and the hostname mcp.<domain> at Cloudflare's edge (no listener in AWS), the service, its role, the secret for its tunnel and the Cloudflare tunnel, record and ingress rule. Default off, because how an FDE's agent signs in to it is not decided yet (infra/README.md, What is missing before an agent can sign in): with it on, the name answers on the internet and refuses every request without a valid WorkOS token. Off: nothing for it exists, though the binary ships in the image."
+  type        = bool
+  default     = false
+}
+
+variable "mcp_cpu" {
+  description = "CPU units of the MCP server's task, shared by the server and its cloudflared sidecar."
+  type        = number
+  default     = 256
+}
+
+variable "mcp_memory" {
+  description = "Memory of the MCP server's task in MiB, shared by both containers."
+  type        = number
+  default     = 512
 }
 
 # ---- the queue workers (infra/README.md, The workers)

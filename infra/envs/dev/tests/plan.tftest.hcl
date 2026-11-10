@@ -341,7 +341,7 @@ run "the_api_health_check_and_the_stop_sequence_match_the_code" {
       length([for i in output.image : i if startswith(i, "FROM ")]) == 1
       && anytrue([for i in output.image : startswith(i, "FROM gcr.io/distroless/cc-debian13:nonroot@sha256:")])
       && contains(output.image, "USER nonroot")
-      && contains(output.image, "COPY --chmod=0555 oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle /usr/local/bin/")
+      && contains(output.image, "COPY --chmod=0555 oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle oryxa-fde-mcp /usr/local/bin/")
       && length([for i in output.image : i if startswith(i, "COPY ") || startswith(i, "ADD ") || startswith(i, "RUN ")]) == 1
     )
     error_message = "the image is one distroless nonroot stage that adds the four binaries and nothing else"
@@ -688,8 +688,8 @@ run "rejects_no_company_key_operators" {
   expect_failures = [var.company_key_operator_arns]
 }
 
-# GitHub deploys (#31): only deploy-api.yml on main, in this repository's dev environment, may assume
-# the deploy role, and it may only push the API image, run the migrate task and update the API service.
+# GitHub deploys (#31, #165): only deploy-api.yml on main, in this repository's dev environment, may assume
+# the deploy role, and it may only push the API image, run the migrate task and update the API and the worker services.
 run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
   command = plan
 
@@ -710,7 +710,7 @@ run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
   }
 }
 
-run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
+run "deploy_role_reaches_only_the_api_image_migrate_task_and_the_deployed_services" {
   command = plan
 
   assert {
@@ -741,8 +741,133 @@ run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
-    ]) == ["arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-api"]
-    error_message = "the only service the deploy role may update is the API"
+    ]) == ["arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-api", "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-ingest"]
+    error_message = "the services the deploy role may update are the API and the ingest worker: not SpiceDB, and no lifecycle worker while none is deployed"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:DescribeServices")
+    ]) == flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")])
+    error_message = "the deploy waits on exactly the services it updates"
+  }
+  assert {
+    condition     = local.deploy_workers == [{ name = "ingest", service = "oryxa-fde-ingest", task_definition = "oryxa-fde-dev-ingest" }]
+    error_message = "one deploy rolls the ingest worker after the API; the lifecycle worker is not deployed without a model, so it is not listed"
+  }
+}
+
+# What the deploy role may hand a task definition revision to run as (iam:PassRole is the only limit on a family:
+# registering takes no resource). The mock gives every role one ARN, so each role below gets its own: a role the deploy
+# must not pass (SpiceDB, db-admin, zed) keeps the mock's, which none of the lists may hold.
+run "the_deploy_role_passes_only_the_roles_of_the_api_the_migrate_task_and_the_workers" {
+  command = apply
+  override_resource {
+    target = module.api.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-task" }
+  }
+  override_resource {
+    target = module.api.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-exec" }
+  }
+  override_resource {
+    target = module.migrate.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-migrate-task" }
+  }
+  override_resource {
+    target = module.migrate.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-migrate-exec" }
+  }
+  override_resource {
+    target = module.ingest.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-ingest-task" }
+  }
+  override_resource {
+    target = module.ingest.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-ingest-exec" }
+  }
+
+  assert {
+    condition = toset(flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")
+    ])) == toset([for r in ["api-task", "api-exec", "migrate-task", "migrate-exec", "ingest-task", "ingest-exec"] : "arn:aws:iam::000000000000:role/dev-${r}"])
+    error_message = "the deploy role passes the API's, the migrate task's and the ingest worker's task and execution roles, and no other"
+  }
+  assert {
+    condition = (
+      [for s in data.aws_iam_policy_document.github_deploy.statement : s.sid if contains(s.actions, "iam:PassRole")] == ["PassOnlyDeployedServiceRoles"]
+      && !contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), module.spicedb.task_role_arn)
+      && !contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), module.db_admin.task_role_arn)
+    )
+    error_message = "one PassRole statement, and never SpiceDB's, db-admin's or zed's roles (the mock's shared ARN)"
+  }
+  # The deploy parameter is what the workflow reads: the API's family, then the workers in rolling order.
+  assert {
+    condition = (
+      jsondecode(aws_ssm_parameter.deploy.insecure_value).workers == [{ name = "ingest", service = "oryxa-fde-ingest", task_definition = "oryxa-fde-dev-ingest" }]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).api_task_definition == "oryxa-fde-dev-api"
+    )
+    error_message = "the deploy parameter names the ingest worker's service and task family, after the API"
+  }
+}
+
+# Drift: an apply after a deploy must build every service from the sha the workflow recorded, never from api_image_tag
+# (which only seeds the parameter), or it would roll a worker back to an older image than the API's.
+run "every_service_runs_the_recorded_image_tag" {
+  command = plan
+  variables {
+    update_model = "global.anthropic.claude-sonnet-5-5"
+    enable_mcp   = true
+  }
+  override_data {
+    target = data.aws_ssm_parameter.api_image_tag
+    values = { insecure_value = "deployed-sha" }
+  }
+
+  assert {
+    condition = alltrue([
+      for c in [module.api.containers[0], module.migrate.containers[0], module.ingest.containers[0], module.lifecycle[0].containers[0], module.mcp[0].containers[0]] :
+      c.image == "${aws_ecr_repository.api.repository_url}:deployed-sha"
+    ])
+    error_message = "the API, the migrate task, both workers and the MCP server take the tag deploy-api recorded, not api_image_tag"
+  }
+}
+
+# The lifecycle worker joins the deploy with its model, and only then: its service, its roles and its place in the
+# parameter appear together, after the ingest worker.
+run "the_lifecycle_worker_joins_the_deploy_with_its_model" {
+  command = apply
+  variables {
+    update_model = "global.anthropic.claude-sonnet-5-5"
+  }
+  override_resource {
+    target = module.lifecycle.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-lifecycle-task" }
+  }
+  override_resource {
+    target = module.lifecycle.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-lifecycle-exec" }
+  }
+
+  assert {
+    condition = (
+      [for w in jsondecode(aws_ssm_parameter.deploy.insecure_value).workers : w.name] == ["ingest", "lifecycle"]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1].service == "oryxa-fde-lifecycle"
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1].task_definition == "oryxa-fde-dev-lifecycle"
+    )
+    error_message = "with a model the lifecycle worker is rolled last"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
+    ]) == [for s in ["oryxa-fde-api", "oryxa-fde-ingest", "oryxa-fde-lifecycle"] : "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/${s}"]
+    error_message = "the deploy role may update the lifecycle worker's service once it exists"
+  }
+  assert {
+    condition = (
+      contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-lifecycle-task")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-lifecycle-exec")
+    )
+    error_message = "and may pass the lifecycle worker's task and execution roles to ECS"
   }
 }
 
@@ -1593,4 +1718,299 @@ run "the_workers_need_their_queues" {
     consumers = ["lifecycle"]
   }
   expect_failures = [var.consumers]
+}
+
+# ---------------------------------------------------------------- the MCP server (#165)
+
+# oryxa-fde-mcp: a read-only server an FDE's own agent reads project context from (ADR 0006). Behind enable_mcp, off by
+# default: nothing of it exists until the lead decides how an agent signs in (infra/README.md). Reached through a tunnel of
+# its own at Cloudflare's edge, so it has no listener, no security group ingress, no load balancer and no Cloud Map name.
+run "the_mcp_server_does_not_exist_by_default" {
+  command = apply
+
+  assert {
+    condition = (
+      length(module.mcp) == 0 && length(data.aws_iam_policy_document.mcp) == 0
+      && output.mcp_env_names == null && output.mcp_hostname == null && output.mcp_tunnel_id == null
+    )
+    error_message = "without enable_mcp there is no MCP task, role, hostname or tunnel"
+  }
+  assert {
+    condition     = !contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && contains(keys(output.secrets), "cloudflared/tunnel-token")
+    error_message = "the MCP tunnel's token secret exists only with the server; the API's stays"
+  }
+  assert {
+    condition = (
+      !contains(keys(local.db_clients), "mcp") && !contains(keys(local.nat_https_clients), "mcp")
+      && keys(local.nat_tunnel_clients) == ["api"] && keys(local.spicedb_clients) == ["api", "zed"]
+    )
+    error_message = "no network rule names an MCP task that does not exist"
+  }
+  assert {
+    condition     = [for w in local.deploy_workers : w.name] == ["ingest"] && toset(keys(jsondecode(aws_ssm_parameter.deploy.insecure_value))) == toset(["cluster", "service", "workers", "api_task_definition", "migrate_task_definition", "migrate_security_group", "subnets", "ecr_repository_url", "image_tag_parameter"])
+    error_message = "the deploy rolls no MCP service while it is off"
+  }
+}
+
+# With the server on: who it signs in as, what it may call (the database, SpiceDB, one embedding model), how it is reached,
+# and that it joins the deploy. The task roles get distinct ARNs, since the mock gives every role the same one.
+run "the_mcp_server_with_enable_mcp" {
+  command = apply
+  variables {
+    enable_mcp = true
+  }
+  override_resource {
+    target = module.api.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-task" }
+  }
+  override_resource {
+    target = module.mcp.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-mcp-task" }
+  }
+  override_resource {
+    target = module.mcp.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-mcp-exec" }
+  }
+
+  # ---- its login and what it may call: nothing else
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_mcp"] && local.mcp_environment.DB_USER == "oryxa_fde_mcp"
+    error_message = "the MCP server connects as oryxa_fde_mcp only: it never takes the API's login"
+  }
+  assert {
+    condition = (
+      toset(flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.actions])) == toset(["rds-db:connect", "bedrock:InvokeModel"])
+      && flatten([for s in data.aws_iam_policy_document.mcp[0].statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"]) == ["arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0"]
+      && alltrue([for s in data.aws_iam_policy_document.mcp[0].statement : !contains(s.resources, "*") && length(s.condition) == 0])
+    )
+    error_message = "the MCP role may connect as its login and embed a query on the one model: no S3, no KMS (no tool reads a file), no secret, no SQS, no other model, no bare wildcard"
+  }
+  assert {
+    condition     = !strcontains(jsonencode(module.company_keys.config.key_policy), "dev-mcp-task")
+    error_message = "the MCP role is not a reader of any company key: it reads no file"
+  }
+
+  # ---- network: nothing goes in, and the tunnel goes out
+  assert {
+    condition = (
+      length(module.mcp[0].ingress_sources) == 0
+      && module.mcp[0].egress_names == toset(["https", "postgres", "spicedb", "tunnel-tcp", "tunnel-udp"])
+      && alltrue([for c in module.mcp[0].containers : length(try(c.portMappings, [])) == 0])
+    )
+    error_message = "no security group admits anything to the MCP task, it publishes no port, and it dials out to HTTPS, the database, SpiceDB and the tunnel's port only"
+  }
+  assert {
+    condition = (
+      contains(keys(local.db_clients), "mcp") && contains(keys(local.nat_https_clients), "mcp")
+      && keys(local.nat_tunnel_clients) == ["api", "mcp"] && keys(local.spicedb_clients) == ["api", "mcp", "zed"]
+    )
+    error_message = "the database, the NAT (HTTPS and the tunnel port) and SpiceDB admit the MCP task's group, and the API's connector keeps its own"
+  }
+  assert {
+    condition     = module.spicedb.ingress_sources == toset(["api", "zed", "mcp"])
+    error_message = "SpiceDB admits the MCP server, which asks it who may read what"
+  }
+
+  # ---- the task: the server on its loopback, its own connector with its own token
+  assert {
+    condition = (
+      [for c in module.mcp[0].containers : c.name] == ["mcp", "cloudflared"]
+      && module.mcp[0].containers[0].entryPoint == ["/usr/local/bin/oryxa-fde-mcp"]
+      && startswith(module.mcp[0].containers[0].image, "${aws_ecr_repository.api.repository_url}:")
+      && module.mcp[0].containers[0].readonlyRootFilesystem && module.mcp[0].containers[1].readonlyRootFilesystem
+      && startswith(module.mcp[0].containers[1].image, "cloudflare/cloudflared@sha256:")
+    )
+    error_message = "the MCP task is the backend image under its own entrypoint, and the pinned cloudflared, both read-only"
+  }
+  assert {
+    condition = (
+      local.mcp_environment.LISTEN_ADDR == "127.0.0.1:8081"
+      && local.mcp_environment.MCP_ALLOWED_HOSTS == "mcp.fde-dev.example.com" && module.cloudflare.mcp_hostname == "mcp.fde-dev.example.com"
+      && local.mcp_environment.MCP_ALLOWED_HOSTS != local.api_environment.WEB_ORIGIN
+    )
+    error_message = "the server listens on loopback and accepts requests addressed to its own name only (DNS rebinding guard), not the web app's"
+  }
+  assert {
+    condition = (
+      module.mcp[0].secret_env_names == toset(["WORKOS_API_KEY", "SPICEDB_PRESHARED_KEY"])
+      && local.mcp_secrets == { WORKOS_API_KEY = "api/workos-api-key", SPICEDB_PRESHARED_KEY = "shared/spicedb-preshared-key" }
+      && !contains(module.mcp[0].env_names, "DATABASE_URL") && !contains(module.mcp[0].env_names, "TUNNEL_TOKEN")
+    )
+    error_message = "the MCP container gets the two secrets its binary reads and nothing of the API's (no session key, no signing key), never DATABASE_URL, and not the tunnel token"
+  }
+  assert {
+    condition = (
+      [for x in module.mcp[0].containers[1].secrets : x.name] == ["TUNNEL_TOKEN"]
+      && [for x in module.api.containers[1].secrets : x.name] == ["TUNNEL_TOKEN"]
+      && length(module.mcp[0].containers[1].environment) == 0
+      && output.secrets["cloudflared/mcp-tunnel-token"] != output.secrets["cloudflared/tunnel-token"]
+    )
+    error_message = "each connector holds one secret, its tunnel's token, and the MCP tunnel's is a secret of its own (the mock gives every secret one ARN, so which secret each connector reads is checked by name in the plan below)"
+  }
+  assert {
+    condition = (
+      module.mcp[0].containers[1].dependsOn[0].containerName == "mcp" && module.mcp[0].containers[1].dependsOn[0].condition == "START"
+      && try(module.mcp[0].containers[0].healthCheck, null) == null
+      && module.mcp[0].deployment.minimum_healthy_percent == 100 && local.desired == 0
+    )
+    error_message = "the binary has no health route, so the connector starts with the process (not 'healthy'); a rollout keeps the old task until the new runs; 0 tasks until start_services"
+  }
+
+  # ---- the deploy rolls it, last, and may pass its roles
+  assert {
+    condition = (
+      [for w in jsondecode(aws_ssm_parameter.deploy.insecure_value).workers : w.name] == ["ingest", "mcp"]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1] == { name = "mcp", service = "oryxa-fde-mcp", task_definition = "oryxa-fde-dev-mcp" }
+    )
+    error_message = "the deploy parameter lists the MCP server after the ingest worker"
+  }
+  assert {
+    condition = (
+      contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")]), "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-mcp")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-mcp-task")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-mcp-exec")
+    )
+    error_message = "the deploy role may update the MCP service and pass its two roles"
+  }
+  assert {
+    condition     = contains(keys(output.secrets), "cloudflared/mcp-tunnel-token") && output.mcp_hostname == "mcp.fde-dev.example.com"
+    error_message = "the MCP tunnel's token secret exists, and the hostname is mcp.<domain>"
+  }
+}
+
+run "contract_mcp" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    binary           = "oryxa-fde-mcp"
+    min_rows         = 10
+    plain_env_names  = run.the_mcp_server_with_enable_mcp.mcp_env_names.plain
+    secret_env_names = run.the_mcp_server_with_enable_mcp.mcp_env_names.secret
+    features         = []
+  }
+
+  assert {
+    condition     = output.table_read
+    error_message = "the MCP table in infra/README.md was not read (its heading or row format changed?)"
+  }
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "the MCP task definition and its README table disagree: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0 && length(output.injected_non_secrets) == 0
+    error_message = "the MCP server's secrets are injected from Secrets Manager, never set as plain config"
+  }
+}
+
+# The WorkOS issuer is the API's rule for the MCP server too: it verifies the same tokens.
+run "the_mcp_server_pins_the_workos_issuer_when_one_is_set" {
+  command = plan
+  variables {
+    enable_mcp    = true
+    workos_issuer = "https://auth.example.com/"
+  }
+
+  assert {
+    condition     = local.mcp_environment.WORKOS_ISSUER == "https://auth.example.com/"
+    error_message = "a custom auth domain applies to the MCP server's tokens as to the API's"
+  }
+}
+
+# The tunnel, its one hostname and its ingress rule (modules/cloudflare, run on its own).
+run "the_mcp_hostname_is_a_tunnel_at_the_edge_and_nothing_in_aws" {
+  command = apply
+  module {
+    source = "../../modules/cloudflare"
+  }
+  providers = {
+    cloudflare = cloudflare
+  }
+  # The mock gives every tunnel one id; these make the two tunnels, and so what refers to which, distinguishable.
+  override_resource {
+    target = cloudflare_zero_trust_tunnel_cloudflared.api
+    values = { id = "api-tunnel-id" }
+  }
+  override_resource {
+    target = cloudflare_zero_trust_tunnel_cloudflared.mcp
+    values = { id = "mcp-tunnel-id" }
+  }
+  variables {
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    mcp_enabled  = true
+    mcp_port     = 8081
+    admin_emails = ["owner@example.com"]
+  }
+
+  assert {
+    condition = (
+      cloudflare_zero_trust_tunnel_cloudflared.mcp[0].name == "oryxa-fde-test-mcp"
+      && cloudflare_zero_trust_tunnel_cloudflared.mcp[0].config_src == "cloudflare"
+      && cloudflare_zero_trust_tunnel_cloudflared.mcp[0].name != cloudflare_zero_trust_tunnel_cloudflared.api.name
+      && output.mcp_tunnel_id == "mcp-tunnel-id" && output.tunnel_id == "api-tunnel-id"
+    )
+    error_message = "the MCP server has a tunnel of its own, remotely managed, so its token is not the API's"
+  }
+  assert {
+    condition = (
+      [for i in cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].config.ingress : "${coalesce(i.hostname, "*")} ${i.service}"]
+      == ["mcp.fde-dev.example.com http://127.0.0.1:8081", "* http_status:404"]
+      && cloudflare_zero_trust_tunnel_cloudflared_config.mcp[0].tunnel_id == "mcp-tunnel-id"
+    )
+    error_message = "the tunnel serves one name, to the connector's own loopback, and answers 404 to any other"
+  }
+  assert {
+    condition = (
+      cloudflare_dns_record.mcp[0].name == "mcp.fde-dev.example.com" && cloudflare_dns_record.mcp[0].type == "CNAME"
+      && cloudflare_dns_record.mcp[0].proxied == true
+      && cloudflare_dns_record.mcp[0].content == "mcp-tunnel-id.cfargotunnel.com"
+    )
+    error_message = "mcp.<domain> is a proxied record to the MCP tunnel, so it resolves to Cloudflare and never to an address in AWS"
+  }
+  assert {
+    condition = (
+      toset(keys(cloudflare_dns_record.worker)) == toset(["app.fde-dev.example.com", "admin.fde-dev.example.com"])
+      && cloudflare_connectivity_directory_service.api.host.network.tunnel_id == "api-tunnel-id"
+      && output.mcp_hostname == "mcp.fde-dev.example.com"
+    )
+    error_message = "the Worker hostnames and the API's VPC service on its own tunnel are untouched"
+  }
+}
+
+run "no_mcp_hostname_or_tunnel_while_it_is_off" {
+  command = plan
+  module {
+    source = "../../modules/cloudflare"
+  }
+  providers = {
+    cloudflare = cloudflare
+  }
+  variables {
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    admin_emails = ["owner@example.com"]
+  }
+
+  assert {
+    condition = (
+      length(cloudflare_zero_trust_tunnel_cloudflared.mcp) == 0 && length(cloudflare_zero_trust_tunnel_cloudflared_config.mcp) == 0
+      && length(cloudflare_dns_record.mcp) == 0 && output.mcp_hostname == null && output.mcp_tunnel_id == null
+    )
+    error_message = "no tunnel, ingress rule, record or name for the MCP server unless it is enabled"
+  }
 }

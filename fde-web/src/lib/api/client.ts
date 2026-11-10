@@ -11,6 +11,7 @@ import {
   CompanyOut,
   CompanySummaryOut,
   DecisionOut,
+  DocumentOut,
   Me,
   MeetingNoteOut,
   MemberOut,
@@ -18,6 +19,7 @@ import {
   ScopeItemOut,
   CriterionOut,
   ScopeOut,
+  SearchHitOut,
   SignOffOut,
   StageChecklistOut,
   StageConflictBody,
@@ -129,6 +131,8 @@ export const SAFE_TEXT: Record<string, string> = {
   invalid_decided_at: "Use a date like 2026-11-30.",
   invalid_held_on: "Pick the day the meeting was held.",
   invalid_body: "The note is plain text, 1 to 20,000 characters.",
+  invalid_query: "Search for 1 to 500 characters on one line.",
+  invalid_limit: "Ask for 1 to 50 results.",
   invalid_stakeholders: "One of those people is no longer a stakeholder at this company.",
   invalid_attendees: "Each person who attended must work on this project or company.",
   rejected_blocker_required: "Say what is blocking it.",
@@ -147,10 +151,23 @@ function refusal(status: number, body: unknown) {
   return new ApiError(status, code, (parsed.success && parsed.data.message) || SAFE_TEXT[code])
 }
 
+/** A file on its way to the API: sent as it is, with its progress reported as the bytes leave. */
+export type UploadRequest = {
+  url: string
+  headers: Record<string, string>
+  /** The chosen file, never read here: the browser streams it. */
+  body: Blob
+  signal?: AbortSignal
+  /** Bytes sent so far, of `total`. */
+  onProgress: (sent: number, total: number) => void
+}
+
 /** What answers the app's requests. Answers are untrusted until `api` parses them. */
 export type Transport = {
   /** Answers one request to this app's origin. */
   fetch: (request: Request) => Promise<Response>
+  /** Sends a file with POST and answers like `fetch`. `fetch` cannot report how much of a body has gone. */
+  upload: (request: UploadRequest) => Promise<Response>
   /** Starts sign-in, to come back to `returnTo`, a path `safeReturnTo` has checked. */
   signIn: (returnTo: string) => Promise<void>
 }
@@ -158,6 +175,29 @@ export type Transport = {
 /** The real API, through the Worker, and AuthKit's hosted sign-in through the API. */
 export const network: Transport = {
   fetch: (request) => fetch(request),
+  // XMLHttpRequest is the only way a browser reports an upload's progress. Same origin, cookies and all.
+  upload: ({ url, headers, body, signal, onProgress }) =>
+    new Promise<Response>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      const aborted = () => new DOMException("The upload was cancelled.", "AbortError")
+      if (signal?.aborted) return reject(aborted())
+      xhr.open("POST", url)
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
+      xhr.responseType = "text"
+      xhr.upload.onprogress = (event) =>
+        event.lengthComputable && onProgress(event.loaded, event.total)
+      xhr.onload = () =>
+        resolve(
+          new Response(xhr.responseText, {
+            status: xhr.status,
+            headers: { "content-type": xhr.getResponseHeader("content-type") ?? "" },
+          }),
+        )
+      xhr.onerror = () => reject(new TypeError("The upload could not be sent."))
+      xhr.onabort = () => reject(aborted())
+      signal?.addEventListener("abort", () => xhr.abort(), { once: true })
+      xhr.send(body)
+    }),
   signIn(returnTo) {
     window.location.assign(signInUrl(returnTo))
     // The page is leaving for AuthKit, so this never settles.
@@ -181,6 +221,9 @@ function selected(): Promise<Transport> {
 /** CSRF: the API refuses a write without it, and the Worker refuses one from another origin. */
 const HEADERS = { "X-Oryxa-Request": "1" }
 
+/** The most passages one search asks for (the API's cap is 50, its default 10). */
+export const SEARCH_LIMIT = 20
+
 /** This app's origin, which every call goes to. Calls only run in the browser. */
 const origin = () => globalThis.location.origin
 
@@ -200,6 +243,22 @@ function connect(transport: Transport) {
     const { data, error, response } = await call
     if (!response.ok) throw refusal(response.status, error)
     return schema.parse(data)
+  }
+
+  /** An upload the API refused, in words: its answers for a file are about the file, not a note's body. */
+  async function uploadRefusal(response: Response) {
+    if (response.status === 413)
+      return new ApiError(413, "payload_too_large", "That file is over the 20 MB limit.")
+    if (response.status === 415)
+      return new ApiError(
+        415,
+        "unsupported_media_type",
+        "Only text, Markdown, PDF and Word (.docx) files are accepted.",
+      )
+    const body: unknown = await response.json().catch(() => null)
+    if (response.status === 400 && (body as { error?: unknown } | null)?.error === "invalid_body")
+      return new ApiError(400, "invalid_body", "That file is empty.")
+    return refusal(response.status, body)
   }
 
   const company = (id: CompanyId) => ({ params: { path: { company: id } } })
@@ -520,6 +579,44 @@ function connect(transport: Transport) {
         }),
       ),
 
+    /** A company's documents, newest first, each with where its ingestion stands. */
+    documents: (id: CompanyId) =>
+      read(z.array(DocumentOut), client.GET("/v1/companies/{company}/documents", company(id))),
+
+    /**
+     * Uploads one file: the bytes as the request body, its type as the Content-Type and its name in the
+     * query, through this app's own origin. `onProgress` says how much has left the browser; the
+     * answer is the stored document, `pending` until a worker has read it.
+     */
+    async uploadDocument(
+      id: CompanyId,
+      file: { file: Blob; contentType: string; name: string },
+      onProgress: (sent: number, total: number) => void,
+      signal?: AbortSignal,
+    ) {
+      const url = new URL(`${origin()}/api/v1/companies/${encodeURIComponent(id)}/documents`)
+      url.searchParams.set("name", file.name)
+      const response = await transport.upload({
+        url: url.toString(),
+        headers: { ...HEADERS, "Content-Type": file.contentType },
+        body: file.file,
+        signal,
+        onProgress,
+      })
+      if (!response.ok) throw await uploadRefusal(response)
+      return DocumentOut.parse(await response.json())
+    },
+
+    /** The passages of a company's documents that match `q`, best first. Only documents already read can be found. */
+    search: (id: CompanyId, q: string, signal?: AbortSignal) =>
+      read(
+        z.array(SearchHitOut),
+        client.GET("/v1/companies/{company}/search", {
+          params: { path: { company: id }, query: { q, limit: SEARCH_LIMIT } },
+          signal,
+        }),
+      ),
+
     /** A company's or a project's meeting notes, latest meeting first. */
     notes(place: NotePlace) {
       const scope = noteScope(place)
@@ -784,6 +881,10 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     threads: async (scope) => (await use()).threads(scope),
     addAccess: async (scope, body) => (await use()).addAccess(scope, body),
     addDecision: async (scope, body) => (await use()).addDecision(scope, body),
+    documents: async (id) => (await use()).documents(id),
+    uploadDocument: async (id, file, onProgress, signal) =>
+      (await use()).uploadDocument(id, file, onProgress, signal),
+    search: async (id, q, signal) => (await use()).search(id, q, signal),
     notes: async (place) => (await use()).notes(place),
     addNote: async (place, body) => (await use()).addNote(place, body),
     updateNote: async (place, note, body) => (await use()).updateNote(place, note, body),
@@ -883,6 +984,24 @@ export const queries = {
       queryFn: () => api.threads(scope),
       ...read,
       staleTime: 60_000,
+    }),
+  /** A company's documents, with their ingest status. The card polls it while one is being read. */
+  documents: (id: CompanyId) =>
+    queryOptions({
+      queryKey: ["companies", id, "documents"],
+      queryFn: () => api.documents(id),
+      ...read,
+    }),
+  /**
+   * What a search finds. `ready` is how many documents could be found: it is in the key so a document
+   * that finishes being read makes the same words search again.
+   */
+  search: (id: CompanyId, q: string, ready: number) =>
+    queryOptions({
+      queryKey: ["companies", id, "search", q, ready],
+      queryFn: ({ signal }) => api.search(id, q, signal),
+      ...read,
+      staleTime: 30_000,
     }),
   /** A company's or a project's meeting notes. A project's sit under the project's own key. */
   notes: (place: NotePlace) =>
