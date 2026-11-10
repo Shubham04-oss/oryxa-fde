@@ -431,8 +431,9 @@ data "aws_iam_policy_document" "api" {
   # "Has this company a key?" is a DescribeKey by alias (context/src/keys.rs). KMS authorises it against the key the
   # alias points to, so for a company that has a key the permission is the key policy's (every company key names this
   # role, ServingRolesCheckTheKeyExists), and an alias ARN in an IAM Resource names the alias, never a key
-  # (AWS KMS developer guide, "Use aliases to control access to KMS keys"). This statement therefore reaches no key: it only
-  # covers the lookup of an alias that does not exist yet, which KMS has no key to authorise (README, Company keys).
+  # (AWS KMS developer guide, "Use aliases to control access to KMS keys"). This statement therefore reaches no key. It is
+  # for the lookup of an alias that does not exist yet, but AWS lists no alias resource for DescribeKey, so by the
+  # documentation it grants nothing; kept as harmless until a deployed check shows what KMS answers (README, Company keys).
   statement {
     sid       = "LookUpCompanyKeyAliases"
     actions   = ["kms:DescribeKey"]

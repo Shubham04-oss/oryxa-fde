@@ -298,7 +298,7 @@ What the API's task role may do, from what the code calls:
 | `kms:Decrypt`, `kms:GenerateDataKey` on the environment key, only through S3 | the bucket's default encryption; files written before a company has a key | granted; `GenerateDataKey` removed with `require_company_keys` |
 | `kms:Decrypt`, `kms:GenerateDataKey` on each company's key | named in the **key's** policy, not in this role's IAM policy (Company keys): only through S3, only under that company's prefix | granted by the key policy |
 | `kms:DescribeKey` on each company's key | "has this company a key?": `DescribeKey` on the company's alias (`context/src/keys.rs:178`, `describe`). KMS authorises it against the key, so for a company that has a key it is the **key's** policy that allows it (`ServingRolesCheckTheKeyExists`, the API's role only), with no IAM grant on any key | granted by the key policy |
-| `kms:DescribeKey` on `alias/oryxa-fde-<env>/companies/*` | the same call for a company that has no key: no key exists to authorise against, so KMS has only the alias to evaluate. An alias ARN in an IAM `Resource` names the alias and never a key, so this reaches no key at all (Company keys, How the API's key check is authorised) | granted (`LookUpCompanyKeyAliases`) |
+| `kms:DescribeKey` on `alias/oryxa-fde-<env>/companies/*` | the same call for a company that has no key. An alias ARN in an IAM `Resource` names the alias and never a key, so this reaches no key at all; AWS's permissions reference lists only "KMS key" as `DescribeKey`'s resource, so by the documentation it grants nothing and is kept as harmless (Company keys, How the API's key check is authorised) | granted (`LookUpCompanyKeyAliases`) |
 | `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
 | `secretsmanager:CreateSecret`, `TagResource`, `PutSecretValue`, `GetSecretValue`, `DeleteSecret` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt`, `kms:GenerateDataKey` only through Secrets Manager | Slack bot tokens (`integrations/src/secrets.rs:87`, `:99`, `:117`, `:134`) | only with `slack_client_id` |
 | Bedrock for `AGENT_MODEL`, `EVAL_JUDGE_MODEL` | not the API: the judge is a `curl` run inside the sandbox (`agent/src/evals.rs:243`), signed by the gateway's outbound handler | not granted; the gateway's AWS identity is the agent stream's follow-up |
@@ -865,8 +865,8 @@ prefix on the API's and the ingest worker's tasks, and the lookup grant (How the
 ### How the API's key check is authorised
 
 The check is `kms:DescribeKey` with the company's alias ARN as the key id (`context/src/keys.rs`, `describe`). What IAM and KMS
-do with that, from the AWS KMS developer guide (read 10 November 2026: "Use aliases to control access to KMS keys", and the
-`DescribeKey` reference, "Required permissions: kms:DescribeKey (key policy)"):
+do with that, from the AWS KMS developer guide (read 10 November 2026: "Use aliases to control access to KMS keys", "KMS key access
+and permissions", the permissions reference, and the `DescribeKey` reference, "Required permissions: kms:DescribeKey (key policy)"):
 
 - **The permission is evaluated against the key the alias points to**, by the key's policy, not against the alias. An alias ARN
   as an IAM `Resource` "applies to the alias resource, not to any KMS key that might be associated with it": no IAM statement can
@@ -881,12 +881,15 @@ do with that, from the AWS KMS developer guide (read 10 November 2026: "Use alia
   of the environment, by alias or key ARN: key state, spec, dates, no policy, no tags and no use. It cannot describe any other key in the
   account, because no IAM statement of its role grants `DescribeKey` on a key and no other key's policy names it (the account root's
   `kms:Describe*` on a company key lets IAM grant, and the API's role has no such grant).
-- **For a company that has no key** the alias does not exist and KMS has no key to authorise against. The grant added by #183,
-  `kms:DescribeKey` on `arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/*` (statement `LookUpCompanyKeyAliases`), is for
-  that case only: with it KMS can answer `NotFoundException` (read as "no key", quietly); without it the answer is `AccessDenied`,
-  also read as "no key", with a warning in the API's log on every check (the cache keeps a no for 5 seconds). It reaches no key. It is
-  the same form the provisioner's policy already uses for the same lookup; **whether KMS answers `NotFoundException` for an alias
-  the caller may look up is not stated in AWS's documentation and is the first thing the deployed checks confirm** (Verify before apply).
+- **For a company that has no key** the alias does not exist and KMS has no key to authorise against. #183 adds
+  `kms:DescribeKey` on `arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/*` (statement `LookUpCompanyKeyAliases`) for that
+  case, the same form as the provisioner's `LookUpTheCompanyAliases`. **By AWS's documentation it grants nothing:** the KMS developer
+  guide's permissions reference lists `DescribeKey` with the resource "KMS key" only, and the alias resource only for `CreateAlias`,
+  `DeleteAlias` and `UpdateAlias`. It is kept because it is harmless (an alias resource, one action, this environment's company aliases
+  only: it reaches no key and allows no other call) and because what KMS answers for an absent alias is not documented either way. If KMS
+  answers `NotFoundException`, the check reads "no key" quietly; if `AccessDenied`, it also reads "no key", with a warning in the API's
+  log on every check (the cache keeps a no for 5 seconds). Step 3 of Before `require_company_keys` is switched on shows which; neither is
+  unsafe, and an `AccessDenied` there is not fixed by any IAM grant (see Verify before apply).
 - **Why not `key/*` with a tag condition for the API**, the narrowest IAM form that reaches keys: it would repeat what the key
   policy grants, and add a second place where the list of describable keys lives. It is also not narrower than the key policy's
   statement, which names the API's role on keys this script made and on nothing else. **A tighter form exists and is not used:** a
@@ -916,18 +919,22 @@ The order differs from the issue's list in one place: provisioning comes first, 
        jq -r --arg c "${f%%:*}" '.taskDefinition.containerDefinitions[] | select(.name == $c) | .environment[] | select(.name == "COMPANY_KEY_ALIAS_ARN_PREFIX") | .value'
    done
    tofu -chdir=infra/envs/dev output -raw company_key_alias_arn_prefix
+   aws ecs describe-services --region <region> --cluster "$(tofu -chdir=infra/envs/dev output -raw cluster)" --services oryxa-fde-api oryxa-fde-ingest \
+     --query 'services[].[serviceName, length(deployments), deployments[0].status, deployments[0].rolloutState, deployments[0].taskDefinition, runningCount]'
    ```
-   Pass: three identical lines ending `:alias/oryxa-fde-dev/companies/`, and `infra/scripts/smoke-test.sh a` passes (the API answers: it parsed
-   the prefix; a malformed one, or one in another Region than `AWS_REGION`, stops startup). If not: the log group `/ecs/oryxa-fde-dev-api` names
-   `COMPANY_KEY_ALIAS_ARN_PREFIX`; the ingest worker stops the same way.
+   Pass: three identical lines ending `:alias/oryxa-fde-dev/companies/`; each service has one deployment, `PRIMARY` and `COMPLETED`, on the
+   latest revision of `oryxa-fde-dev-api` or `oryxa-fde-dev-ingest` (the one the first command read), with tasks running; and `infra/scripts/smoke-test.sh a` passes. The deployment check matters: a
+   malformed prefix, or one in another Region than `AWS_REGION`, stops the new tasks at start while the old ones keep serving, so the smoke test alone
+   would pass. If not: the log group `/ecs/oryxa-fde-dev-api` (or `-ingest`) names `COMPANY_KEY_ALIAS_ARN_PREFIX`.
 2. **Keys that already exist have the current policy.** For every company that already has a key, as an administrator:
    `infra/scripts/company-key.sh sync <cfg> <tenant> <company>`. Pass: `... already has the current policy`. (None in dev until step 4. #183 changes no key
    policy, so this is only for a key made before the ingest worker's role was added, #171.)
 3. **A company with no key reads as no key, quietly.** Pick a company that has none (the smoke test's, `C`):
    `GET /api/v1/companies/C/key` through the app. Pass: `{"has_key":false}`, and none of
    `aws logs filter-log-events --region <region> --log-group-name /ecs/oryxa-fde-dev-api --filter-pattern '"company key check failed"' --start-time $(( ($(date +%s) - 600) * 1000 ))`
-   names `C`. If not: the log line's `code` is `AccessDenied`: KMS answered a lookup of an absent alias with a denial, so the alias grant does not do what
-   it is documented to do (Verify before apply); the API still reads it as no key, so nothing is unsafe, only noisy.
+   names `C`. If not: the log line's `code` is `AccessDenied`: KMS answers a lookup of an absent alias with a denial, which no IAM grant changes (AWS
+   documents no alias resource for `DescribeKey`). The API still reads it as no key, so nothing is unsafe, only noisy; but expect `provision` in step 4 to
+   stop at its lookup for the same reason, and apply the fallback in Verify before apply (The API's key check) first.
 4. **Provision a key for the sample company, and the API sees it.** As the provisioning role: `infra/scripts/company-key.sh provision <cfg> T C`;
    then `GET /api/v1/companies/C/key` within about ten seconds. Pass: `provision` ends `... is provisioned`, `status` exits 0, and the check answers `{"has_key":true}`.
    If not and it stays false: the log line's `code` says why (`AccessDenied` on a key that exists means the key's policy does not
@@ -955,6 +962,10 @@ The order differs from the issue's list in one place: provisioning comes first, 
    has the current policy (`provision` compares it); and step 5 shows the precondition the condition relies on, that S3 sends the object's ARN as the context.
    Together they say a write under B naming A's key is refused whenever S3 behaves as documented. **It is not exercised end to end, and only a real
    refusal would show it**: the first time an API build writes under the wrong alias, or a test role added to one key's policy by an administrator for the purpose.
+   Follow-up, not a gate for step 7: an operator can run the negative test without widening any trust, as a one-off task in the private subnets with
+   an image that has the AWS CLI (pinned by digest) and `taskRoleArn` overridden to the API's task role (ECS may assume it; the operator needs `iam:PassRole`
+   on it). Its one call, a sample `put-object` to `T/B/documents/...` naming A's alias with `--bucket-key-enabled false`, must fail with `AccessDenied`
+   from KMS; if it succeeds it writes one sample object and shows the hole. That is a new `run-task.sh` command and task definition, an infra issue.
 7. **Switch on, then check the refusals** (still sample data). Set `require_company_keys = true`, plan (the bucket policy gains `DenyWriteWithoutCompanyKey` and
    `DenyWriteNotUsingKms`; the API role loses `kms:GenerateDataKey` on the environment key), apply. Then:
    - a company with no key is refused by the API: `SMOKE_KEYS_REQUIRED=1 SMOKE_COMPANY_KEYS=1 SMOKE_WORKERS=1 infra/scripts/smoke-test.sh k` passes
@@ -1409,15 +1420,23 @@ These could not be checked without an account. Each one is flagged at the place 
     in the KMS developer guide's condition key list (read 10 November). The first `provision` shows whether `CreateKey`
     with its tags and `TagResource` pass the provisioner's conditions (AWS needs `kms:TagResource` as well as
     `kms:CreateKey` when tags go on at creation).
-  - **The API's key check (#183).** AWS's documentation says `DescribeKey` is authorised against the key an alias points to (the key
-    policy's `ServingRolesCheckTheKeyExists` allows the API's role) and that an alias ARN in an IAM `Resource` names the alias, not a key. Not
-    stated, so confirmed only on the account: (1) a lookup of an alias that does not exist answers `NotFoundException`, not `AccessDenied`, for a role with
-    `kms:DescribeKey` on `alias/oryxa-fde-<env>/companies/*` (the provisioner's policy relies on the same behaviour; if the API logs `company key
-    check failed` with `AccessDenied` for a company with no key, this is where it is wrong; the answer is still "no key"); (2) a lookup of an alias that
-    exists, by alias ARN and with no IAM grant on any key, succeeds from the key policy alone (step 4 of Before `require_company_keys` is
-    switched on shows it); (3) `DescribeKey` is evaluated as the eventually consistent API AWS says it is, so a key provisioned seconds ago may read as absent for a
-    moment (the cache keeps a no for 5 s). If (2) fails, the API role needs an IAM `DescribeKey` on `key/*` with `aws:ResourceTag/purpose` `company-data` and
-    `aws:ResourceTag/env`: the form the provisioner uses.
+  - **The API's key check (#183).** Documented (KMS developer guide, read 10 November 2026): `DescribeKey` is authorised against the key an
+    alias points to, by the key policy ("Required permissions: kms:DescribeKey (key policy)"); "You can use the key policy alone to control
+    access if the key and the IAM principal are in the same AWS account" ("KMS key access and permissions"), and `ServingRolesCheckTheKeyExists`
+    names the API's role directly, not through the account root; an alias ARN as an IAM `Resource` "applies to the alias resource, not to any
+    KMS key that might be associated with it" ("Use aliases to control access to KMS keys"); and the permissions reference lists only "KMS key"
+    as `DescribeKey`'s resource (the alias resource is for `CreateAlias`, `DeleteAlias`, `UpdateAlias`), so `LookUpCompanyKeyAliases`, like the
+    provisioner's `LookUpTheCompanyAliases`, is documented to grant nothing. Not documented, so confirmed only on the account: (1) what a lookup
+    of an alias that does not exist answers, `NotFoundException` or `AccessDenied` (step 3 of Before `require_company_keys` is switched on shows
+    it: a `company key check failed` warning with `AccessDenied` for a company with no key). If `AccessDenied`: the API still answers "no key",
+    only noisily, and no IAM grant changes it, so accept the warning (do not quieten `AccessDenied` in the code, which is also how a key whose
+    policy misses the API's role shows); but `company-key.sh`'s `lookup` stops on anything but `NotFoundException`, so `provision` would stop
+    for every new company at step 4, and the provisioner then needs `kms:ListAliases` (resource `*`) and the script a `list-aliases` check
+    for the alias before it describes, in an infra PR. (2) A lookup of an alias that exists, by alias ARN with no IAM grant on any key, succeeds
+    (documented as above; step 4 shows it). If it fails, the API role needs an IAM `DescribeKey` on `key/*` with `aws:ResourceTag/purpose`
+    `company-data` and `aws:ResourceTag/env`: the form the provisioner uses (the account root's `kms:Describe*` in each key policy lets IAM grant
+    it). (3) `DescribeKey` is evaluated as the eventually consistent API AWS says it is, so a key provisioned seconds ago may read as absent for a
+    moment (the cache keeps a no for 5 s).
   - **A multipart upload** names its key only in `CreateMultipartUpload`, so a `UploadPart` would meet
     `DenyWriteWithoutCompanyKey`. The API uses single `PutObject` calls; test `UploadPart` before anything else uploads in parts.
 - **Secrets Manager with the environment key.** `CreateSecret` with `KmsKeyId` needs `kms:GenerateDataKey` and
