@@ -12,6 +12,10 @@ export const RULE_NAMES: Readonly<Record<string, string>> = {
   grep: "Grep",
   shell: "Bash",
 };
+/** The rule name for an OpenCode tool. Own keys only: a model-chosen name such as `constructor` stays itself. */
+export function ruleName(name: string): string {
+  return Object.hasOwn(RULE_NAMES, name) ? (RULE_NAMES[name] as string) : name;
+}
 const KINDS = new Set<string>(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"]);
 const PLAN_STATUSES = new Set<string>(["pending", "in_progress", "completed"]);
 
@@ -109,7 +113,7 @@ export function turnUsage(usage: unknown): Usage {
 // The same titles as the Claude backend's, from the rule name and OpenCode's input (`path` where the SDK has `file_path`).
 function title(call: Call): string {
   const path = call.input["path"] ?? call.input["filePath"];
-  return describeTool(RULE_NAMES[call.name] ?? call.name, { ...call.input, file_path: path }).title;
+  return describeTool(ruleName(call.name), { ...call.input, file_path: path }).title;
 }
 
 function plan(entries: readonly { content: string; status: string }[]): HarnessEvent {

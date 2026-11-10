@@ -9,7 +9,6 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { StdioApprovals } from "./approvals.js";
 import { EventWriter, type Outcome } from "./events.js";
 import { type BackendDeps, runHarness } from "./harness.js";
-import { runOpenCode, startOpenCode } from "./opencode.js";
 import { type LoadedPack, loadPack } from "./pack.js";
 import { agentSpawner } from "./users.js";
 
@@ -50,8 +49,10 @@ const deps: BackendDeps = {
   emit: (e) => events.emit(e),
   env: process.env,
 };
-const outcome =
-  backend === "opencode"
-    ? await runOpenCode(loaded, { ...deps, start: startOpenCode(agentSpawner(), process.env) })
-    : await runHarness(loaded, { ...deps, query, spawn: agentSpawner() });
+let outcome: Outcome;
+if (backend === "opencode") {
+  // Loaded only here, so a Claude run, the only one enabled, never loads the ACP library as root.
+  const { runOpenCode, startOpenCode } = await import("./opencode.js");
+  outcome = await runOpenCode(loaded, { ...deps, start: startOpenCode(agentSpawner(), process.env) });
+} else outcome = await runHarness(loaded, { ...deps, query, spawn: agentSpawner() });
 process.exit(EXIT_CODES[outcome]);

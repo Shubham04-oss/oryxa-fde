@@ -17,7 +17,7 @@ import { ApprovalGate } from "./approvals.js";
 import type { HarnessEvent, Outcome } from "./events.js";
 import { type BackendDeps, INHERITED_ENV, WORKSPACE } from "./harness.js";
 import policy from "./opencode.json" with { type: "json" };
-import { OpenCodeEvents, RULE_NAMES, turnUsage } from "./opencode-events.js";
+import { OpenCodeEvents, RULE_NAMES, ruleName, turnUsage } from "./opencode-events.js";
 import { type ContextPack, type LoadedPack, systemPrompt } from "./pack.js";
 import { AGENT, type agentSpawner } from "./users.js";
 
@@ -111,10 +111,10 @@ export async function prepareRun(
   await chmod(config, 0o755);
   await writeFile(join(config, "opencode.json"), `${JSON.stringify(openCodeConfig(pack), null, 2)}\n`, { mode: 0o644 });
   const home = await mkdtemp(join(roots.run, "oryxa-opencode-"));
-  for (const dir of ["", ".config", ".local", ".local/share", ".local/state", ".cache", "tmp"]) {
-    await mkdir(join(home, dir), { recursive: true, mode: 0o700 });
-    await owner(join(home, dir));
-  }
+  const dirs = [".config", ".local", ".local/share", ".local/state", ".cache", "tmp"].map((dir) => join(home, dir));
+  for (const dir of dirs) await mkdir(dir, { mode: 0o700 });
+  // Home is handed over last: until then no agent process (one left from an earlier run) can plant a link in it.
+  for (const dir of [...dirs.reverse(), home]) await owner(dir);
   return { config, home };
 }
 
@@ -181,7 +181,7 @@ export async function runOpenCode({ pack, rules }: LoadedPack, deps: OpenCodeDep
       end("rejected", "tool_not_allowed", false);
       return answer("reject_once");
     }
-    const tool = RULE_NAMES[call.name] ?? call.name;
+    const tool = ruleName(call.name);
     const verdict = await gate.decide(tool, call.input, signal, () => ({ toolCallId: id, title }));
     if ((verdict === "unlisted" || verdict === "approved") && !stop.signal.aborted) return answer("allow_once");
     // A rejection ends OpenCode's turn by itself, so it ends the run, as it does on the Claude backend.
@@ -229,7 +229,7 @@ export async function runOpenCode({ pack, rules }: LoadedPack, deps: OpenCodeDep
     sessionId = session.sessionId;
     // A model id OpenCode does not know falls back to another model; run only the one asked for.
     const model = session.configOptions?.find((o) => o.id === "model");
-    if (model?.type === "select" && model.currentValue !== `${PROVIDER}/${pack.config.model}`)
+    if (model?.type !== "select" || model.currentValue !== `${PROVIDER}/${pack.config.model}`)
       return finish(undefined, "model_unavailable");
     if (ended !== undefined) return finish(undefined);
     const response = await until(

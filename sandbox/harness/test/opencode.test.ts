@@ -115,6 +115,43 @@ describe("OpenCode recorded session", () => {
     expect(events.at(-1)).toMatchObject({ type: "result", outcome: "rejected", reason: "tool_not_allowed" });
   });
 
+  it("answers by option kind, never by position or id", async () => {
+    // The same session with the options shuffled and renamed: only the `allow_once` option may be chosen.
+    const frames = recording("healthz").map((f) => structuredClone(f));
+    for (const { msg } of frames)
+      if (msg["method"] === "session/request_permission")
+        msg["params"].options = [
+          { optionId: "once", name: "Always allow", kind: "allow_always" },
+          { optionId: "x", name: "Reject", kind: "reject_once" },
+          { optionId: "y", name: "Allow once", kind: "allow_once" },
+        ];
+    const peer = new RecordedPeer(frames, MODEL);
+    const { outcome } = run(peer);
+    expect(await outcome).toBe("success");
+    expect(answers(peer)).toEqual(Array(9).fill("y"));
+  });
+
+  it("rejects a tool whose name is an object key, with plain titles", async () => {
+    const frames = JSON.parse(
+      JSON.stringify(recording("reject")).replaceAll('"name":"shell"', '"name":"constructor"'),
+    ) as Frame[];
+    const peer = new RecordedPeer(frames, MODEL);
+    const { events, outcome } = run(peer);
+    expect(await outcome).toBe("rejected");
+    expect(answers(peer)).toEqual(["reject"]);
+    for (const e of events) if (e.type === "tool_call") expect(e.title).toBe("constructor");
+  });
+
+  it("ends the run when OpenCode reports no model for the session", async () => {
+    const frames = recording("healthz").map((f) => structuredClone(f));
+    for (const { msg } of frames) if (msg["result"]?.configOptions !== undefined) delete msg["result"].configOptions;
+    const peer = new RecordedPeer(frames);
+    const { events, outcome } = run(peer);
+    expect(await outcome).toBe("error");
+    expect(peer.sent.some((m) => m["method"] === "session/prompt")).toBe(false);
+    expect(events).toEqual([expect.objectContaining({ reason: "model_unavailable" })]);
+  });
+
   it("refuses to run a model other than the one asked for", async () => {
     // The recordings ran a stub model; OpenCode falls back to another model when it does not know the one asked for.
     const peer = new RecordedPeer(recording("healthz"));
@@ -283,6 +320,9 @@ describe("OpenCode run configuration", () => {
     // Only the run directory is handed to the agent, and nothing in it is shared with another run.
     expect(owned).not.toContain(dirs.config);
     expect(owned.every((p) => p.startsWith(dirs.home))).toBe(true);
+    // Home is handed to the agent last, after everything inside it exists.
+    expect(owned).toHaveLength(7);
+    expect(owned.at(-1)).toBe(dirs.home);
     for (const path of owned) expect(await mode(path)).toBe(0o700);
     const second = await prepareRun(samplePack().pack, { config: root, run: root }, async () => {});
     expect(second.home).not.toBe(dirs.home);

@@ -64,7 +64,8 @@ into the system prompt as fenced data, not as instructions.
 ## OpenCode backend
 
 `ORYXA_FDE_HARNESS=opencode` in the harness's environment runs the run on OpenCode instead of the Claude Agent SDK
-(`claude`, the default). Until the pack names the harness, the gateway sets it. ADR 0004 keeps it off until the pinned
+(`claude`, the default; any other value ends the run as `unknown_harness`). Nothing sets it yet: the gateway passes
+only `HOME`, so every run is a Claude run until the pack names the harness. ADR 0004 keeps it off until the pinned
 version passes the gate, and the sandbox image does not carry the binary yet. What it does rests on the spike's
 findings in `OPENCODE.md`:
 
