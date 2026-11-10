@@ -545,6 +545,139 @@ function notesScreens() {
   ]
 }
 
+// Documents and search (#174). Kestrel has five documents (one being read, one that could not be, three
+// ready); Atlas has none. Files are made in the page: nothing is read from disk.
+const documentsCard = (page) => page.getByRole("region", { name: "Documents", exact: true })
+const DOCS = { ready: (page) => documentsCard(page), full: false }
+const searchBox = (page) => documentsCard(page).getByRole("searchbox")
+/** Chooses a file in the upload dialog from bytes made here, as the browser would from disk. */
+async function chooseFile(page, name, mimeType, size = 48_000) {
+  await dialog(page, "Upload a document")
+    .getByLabel("File", { exact: true })
+    .setInputFiles({ name, mimeType, buffer: Buffer.alloc(size, 97) })
+}
+async function openUpload(page) {
+  await listed(page)
+  await documentsCard(page).getByRole("button", { name: "Upload a document", exact: true }).click()
+  await dialog(page, "Upload a document").waitFor()
+}
+const uploadButton = (page) =>
+  dialog(page, "Upload a document").getByRole("button", { name: "Upload", exact: true })
+async function search(page, words) {
+  await listed(page)
+  await searchBox(page).fill(words)
+}
+
+/** Waits for the list to be read (the card gets taller), then scrolls to the card as a person would. */
+async function listed(page) {
+  await documentsCard(page)
+    .getByRole("list", { name: "Documents" })
+    .or(documentsCard(page).getByText(/No documents yet/))
+    .waitFor()
+  await toCard(documentsCard)(page)
+}
+
+function documentsScreens() {
+  return [
+    // The list: a document being read, one that could not be, and ready ones, each said in words.
+    { name: "documents-card", path: KESTREL, ...DOCS, act: listed },
+    { name: "documents-empty", path: `/companies/cmp_atlas`, ...DOCS, act: listed },
+    // The form, with a file chosen: the name starts from the file's.
+    {
+      name: "documents-upload",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await openUpload(page)
+        await chooseFile(page, "Cold-chain handling procedure.pdf", "application/pdf", 3_400_000)
+      },
+    },
+    // On its way: the bytes that have left, then it waits for the API. Nothing is in the list yet.
+    {
+      name: "documents-uploading",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await page.evaluate(() => (globalThis.__fdeMockStallUpload = true))
+        await openUpload(page)
+        await chooseFile(page, "Cold-chain handling procedure.pdf", "application/pdf", 3_400_000)
+        await uploadButton(page).click()
+        await dialog(page, "Upload a document").getByRole("progressbar").waitFor()
+        await page.waitForTimeout(200)
+      },
+    },
+    // The file is too big: said before anything is sent, and tied to the field.
+    {
+      name: "documents-upload-too-big",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await openUpload(page)
+        await chooseFile(page, "Site photos.pdf", "application/pdf", 21 * 1024 * 1024)
+        await uploadButton(page).click()
+        await dialog(page, "Upload a document").getByRole("alert").waitFor()
+      },
+    },
+    // The API cannot take it: the file and the name are still there to send again.
+    {
+      name: "documents-upload-refused",
+      path: KESTREL,
+      ...DOCS,
+      failWrites: true,
+      act: async (page) => {
+        await openUpload(page)
+        await chooseFile(page, "Cold-chain handling procedure.pdf", "application/pdf", 3_400_000)
+        await uploadButton(page).click()
+        await dialog(page, "Upload a document").getByRole("alert").waitFor()
+      },
+    },
+    // Stored, and not searchable yet: the list says so, and what happens next.
+    {
+      name: "documents-uploaded",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await openUpload(page)
+        await chooseFile(page, "Cold-chain handling procedure.pdf", "application/pdf", 3_400_000)
+        await uploadButton(page).click()
+        await dialog(page, "Upload a document").waitFor({ state: "detached" })
+        await page.getByText(/Uploaded “Cold-chain handling procedure.pdf”/).waitFor()
+        await toCard(documentsCard)(page)
+      },
+    },
+    // The search, with the words typed marked in each passage and where in the document it is from.
+    {
+      name: "documents-search",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await search(page, "driver hours")
+        await documentsCard(page).getByRole("list", { name: "Search results" }).waitFor()
+      },
+    },
+    // A long passage is cut around the words found, with a way to read all of it.
+    {
+      name: "documents-search-long",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await search(page, "subprocessor")
+        await documentsCard(page).getByRole("button", { name: "Show the whole passage" }).waitFor()
+      },
+    },
+    // Nothing found, and what the search cannot see yet.
+    {
+      name: "documents-search-none",
+      path: KESTREL,
+      ...DOCS,
+      act: async (page) => {
+        await search(page, "zebra")
+        await documentsCard(page).getByText("No passages match “zebra”.").waitFor()
+      },
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -1051,6 +1184,9 @@ export const screens = [
   // Access requests and decisions on the project page.
   ...accessScreens(),
   ...notesScreens(),
+
+  // A company's documents and search over them.
+  ...documentsScreens(),
 
   // The stage checklist and the move that asks for a reason. The checklist sits under the stage
   // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.

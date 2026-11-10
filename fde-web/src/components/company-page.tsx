@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { CompanyDialog, ProjectDialog } from "./company-forms"
 import { ROLE_LABEL } from "./companies-home"
+import { DocumentsCard } from "./documents-card"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, isNotFound } from "./page"
 import { NotesCard } from "./notes-card"
 import { StakeholdersCard, SystemsCard } from "./records-cards"
@@ -123,6 +124,8 @@ export function CompanyPage({
           </Rows>
         )}
       </Card>
+
+      <DocumentsCard company={c.id} />
 
       <NotesCard place={{ company: c.id }} people={c.stakeholders} />
 

@@ -15,11 +15,21 @@ export type Wire = {
   refuseReads: { ending: string; response: Response } | null
   /** Every write sent, in order. */
   sent: Array<{ method: string; path: string; body: unknown }>
+  /** The path of every read made, in order. */
+  reads: Array<string>
 }
 
-export const wire: Wire = { hold: null, refuse: null, holdReads: null, refuseReads: null, sent: [] }
+export const wire: Wire = {
+  hold: null,
+  refuse: null,
+  holdReads: null,
+  refuseReads: null,
+  sent: [],
+  reads: [],
+}
 
 const answer = mockApi.fetch
+const sendFile = mockApi.upload
 let installed = false
 
 export function resetWire() {
@@ -28,6 +38,7 @@ export function resetWire() {
   wire.holdReads = null
   wire.refuseReads = null
   wire.sent = []
+  wire.reads = []
 }
 
 /** Puts the wrapper in place once. */
@@ -44,6 +55,7 @@ export function installWire() {
         body: text ? (JSON.parse(text) as unknown) : null,
       })
     }
+    if (!write) wire.reads.push(new URL(request.url).pathname.replace("/api/v1", ""))
     if (write && wire.hold) await wire.hold
     if (write && wire.refuse) return wire.refuse.clone()
     if (
@@ -55,5 +67,22 @@ export function installWire() {
     const response = await answer(request)
     if (!write && wire.holdReads) await wire.holdReads
     return response
+  }
+  // A file is a write too, but not JSON: what is recorded is what the API would see of it, never its bytes.
+  mockApi.upload = async (request) => {
+    const url = new URL(request.url)
+    wire.sent.push({
+      method: "POST",
+      path: url.pathname.replace("/api/v1", ""),
+      body: {
+        name: url.searchParams.get("name"),
+        contentType: request.headers["Content-Type"],
+        csrf: request.headers["X-Oryxa-Request"],
+        size: request.body.size,
+      },
+    })
+    if (wire.hold) await wire.hold
+    if (wire.refuse) return wire.refuse.clone()
+    return sendFile(request)
   }
 }
