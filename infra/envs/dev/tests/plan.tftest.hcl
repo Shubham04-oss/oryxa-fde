@@ -271,6 +271,36 @@ run "contract_with_every_feature_off" {
 # (./tests/code reads them as text). Wrong here means: the check runs something the image does not have or the code
 # does not dispatch, ECS would kill the check before it gives up, the grace is a value the API refuses to start with,
 # or the container is killed before the grace is over.
+# The value on each task against crates/oryxa-fde-context/src/keys.rs, read as text: `CompanyKeyPrefix::parse` and
+# `prefix_from` stop the process on a value of another shape or in another Region than AWS_REGION. The shape is built
+# from the parser's own literals, so a change to the parser fails here until the module's output follows it.
+run "the_company_key_prefix_on_each_task_is_what_the_code_parses" {
+  command = plan
+  module {
+    source = "./tests/code"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    task                 = run.api_task_with_every_feature_off.api_task_timing
+    company_key_prefixes = run.api_task_with_every_feature_off.company_key_prefix_by_task
+  }
+
+  assert {
+    condition     = output.company_key_prefix_var == "COMPANY_KEY_ALIAS_ARN_PREFIX" && contains(keys(var.task.environment), output.company_key_prefix_var)
+    error_message = "keys.rs reads another variable than the one the API task sets (PREFIX_VAR)"
+  }
+  assert {
+    condition     = output.company_key_prefix_accepted == { api = true, ingest = true }
+    error_message = "a task's company key prefix is not what CompanyKeyPrefix::parse accepts, or not in the task's AWS_REGION: the process would stop at start (${jsonencode(output.company_key_prefix_accepted)})"
+  }
+  assert {
+    condition     = !anytrue(output.company_key_prefix_rejects_the_wrong_shapes)
+    error_message = "the shape built from keys.rs accepts a value the parser refuses"
+  }
+}
+
 run "the_api_health_check_and_the_stop_sequence_match_the_code" {
   command = plan
   module {
@@ -576,8 +606,9 @@ run "company_keys_reach_the_bucket_policy_and_name_the_api_role" {
     condition = length([
       for s in data.aws_iam_policy_document.api.statement : s
       if anytrue([for a in s.actions : startswith(a, "kms:")]) && !contains(s.resources, aws_kms_key.this.arn)
+      && s.sid != "LookUpCompanyKeyAliases"
     ]) == 0
-    error_message = "the API's IAM policy names the environment key only; company keys name the API in their own policies"
+    error_message = "the API's IAM policy names the environment key only, besides the alias lookup (tested below); company keys name the API in their own policies"
   }
   assert {
     condition = toset([
@@ -592,6 +623,56 @@ run "company_keys_reach_the_bucket_policy_and_name_the_api_role" {
   assert {
     condition     = output.company_keys.rotation == false
     error_message = "company keys do not rotate unless company_key_rotation is set (the lead's decision on cost)"
+  }
+}
+
+# Wiring the company keys into the deployed tasks (#183). The API names a company's key on every write and asks KMS
+# whether a company has one; both parse COMPANY_KEY_ALIAS_ARN_PREFIX at start. The value is the module's output, and
+# tests/code checks it against the parser's shape, read from the Rust source.
+run "the_api_and_the_ingest_worker_carry_the_company_key_alias_prefix" {
+  command = plan
+
+  assert {
+    condition = (
+      local.api_environment.COMPANY_KEY_ALIAS_ARN_PREFIX == output.company_key_alias_arn_prefix
+      && local.ingest_environment.COMPANY_KEY_ALIAS_ARN_PREFIX == output.company_key_alias_arn_prefix
+    )
+    error_message = "the API and the ingest worker are set from the company_key_alias_arn_prefix output"
+  }
+  assert {
+    condition = (
+      !contains(keys(local.mcp_environment), "COMPANY_KEY_ALIAS_ARN_PREFIX")
+      && !contains(keys(local.lifecycle_environment), "COMPANY_KEY_ALIAS_ARN_PREFIX")
+      && !contains(keys(local.worker_environment), "COMPANY_KEY_ALIAS_ARN_PREFIX")
+    )
+    error_message = "the MCP server (no file reads) and the lifecycle worker (no context) do not take the prefix"
+  }
+  # The lookup: DescribeKey on aliases under the prefix, nothing else, and no key ARN (an IAM Resource that is a
+  # key ARN would let the role describe keys outside the company namespace).
+  assert {
+    condition = (
+      length([for s in data.aws_iam_policy_document.api.statement : s if s.sid == "LookUpCompanyKeyAliases"]) == 1
+      && [for s in data.aws_iam_policy_document.api.statement : s if s.sid == "LookUpCompanyKeyAliases"][0].actions == toset(["kms:DescribeKey"])
+      && [for s in data.aws_iam_policy_document.api.statement : s if s.sid == "LookUpCompanyKeyAliases"][0].resources == toset(["arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-dev/companies/*"])
+      && length([for s in data.aws_iam_policy_document.api.statement : s if s.sid == "LookUpCompanyKeyAliases"][0].condition) == 0
+      && coalesce([for s in data.aws_iam_policy_document.api.statement : s if s.sid == "LookUpCompanyKeyAliases"][0].effect, "Allow") == "Allow"
+    )
+    error_message = "the API may DescribeKey on alias/oryxa-fde-<env>/companies/* only"
+  }
+  assert {
+    condition = length([
+      for s in data.aws_iam_policy_document.api.statement : s
+      if contains(s.actions, "kms:DescribeKey") || contains(s.actions, "kms:*") || contains(s.actions, "kms:Describe*")
+    ]) == 1
+    error_message = "DescribeKey is granted in one statement of the API's policy and nowhere else"
+  }
+  # What the ingest worker may do with KMS: decrypt through S3, nothing that describes, writes or names an alias.
+  assert {
+    condition = (
+      flatten([for s in data.aws_iam_policy_document.ingest.statement : s.actions if anytrue([for a in s.actions : startswith(a, "kms:")])]) == ["kms:Decrypt"]
+      && flatten([for s in data.aws_iam_policy_document.ingest.statement : s.resources if contains(s.actions, "kms:Decrypt")]) == [aws_kms_key.this.arn]
+    )
+    error_message = "the ingest worker holds kms:Decrypt on the environment key through S3 (company keys name it in their own policies) and no other KMS action"
   }
 }
 

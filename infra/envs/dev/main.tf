@@ -131,6 +131,9 @@ locals {
       EMBEDDING_MODEL        = var.embedding_model
       WORKOS_CLIENT_ID       = var.workos_client_id
       WEB_ORIGIN             = "https://${module.cloudflare.web_hostname}"
+      # The API names a company's key on every write and asks KMS whether a company has one (keys.rs). It parses
+      # this at start and stops if it is malformed or not in AWS_REGION, which tests/code reads from the Rust source.
+      COMPANY_KEY_ALIAS_ARN_PREFIX = module.company_keys.alias_arn_prefix
     },
     local.agent_on ? {
       SANDBOX_GATEWAY_URL = var.sandbox_gateway_url
@@ -219,6 +222,9 @@ locals {
     EMBEDDING_PROVIDER = "bedrock"
     EMBEDDING_MODEL    = var.embedding_model
     INGEST_QUEUE_URL   = module.queue["context-ingestion"].url
+    # Never used to ask or write (the worker only reads, and S3 knows each object's key), but the worker builds the
+    # API's context and parses it at start, so the two tasks carry one value.
+    COMPANY_KEY_ALIAS_ARN_PREFIX = module.company_keys.alias_arn_prefix
   })
   lifecycle_environment = merge(
     local.worker_environment,
@@ -420,6 +426,17 @@ data "aws_iam_policy_document" "api" {
       variable = "kms:ViaService"
       values   = ["s3.${local.region}.amazonaws.com"]
     }
+  }
+
+  # "Has this company a key?" is a DescribeKey by alias (context/src/keys.rs). KMS authorises it against the key the
+  # alias points to, so for a company that has a key the permission is the key policy's (every company key names this
+  # role, ServingRolesCheckTheKeyExists), and an alias ARN in an IAM Resource names the alias, never a key
+  # (AWS KMS developer guide, "Use aliases to control access to KMS keys"). This statement therefore reaches no key: it only
+  # covers the lookup of an alias that does not exist yet, which KMS has no key to authorise (README, Company keys).
+  statement {
+    sid       = "LookUpCompanyKeyAliases"
+    actions   = ["kms:DescribeKey"]
+    resources = ["${module.company_keys.alias_arn_prefix}*"]
   }
 
   # Slack bot tokens: the API stores, reads and deletes one secret per workspace under the prefix, and

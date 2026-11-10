@@ -7,7 +7,8 @@ CSRF rules (`X-Oryxa-Request: 1` and the app's `Origin` on a write), and logs on
     smoke-stub.py FLAGS LOGFILE        prints `PORT <n>` once it listens on a random loopback port
 
 FLAGS is a comma-separated list, or `-`: today-missing, rotate, ingest-stuck, ingest-fails, no-agent, agent-not-found,
-run-fails, run-waits.
+run-fails, run-waits, already-keyed (the company has a key from the start), key-never (the operator never provisions one),
+keys-required (an upload to a company without a key is refused, as with require_company_keys).
 """
 
 import json
@@ -27,6 +28,7 @@ state = {
     "doc_polls": 0,
     "run_polls": 0,
     "rotated": False,
+    "key_polls": 0,
 }
 MARKER = {"text": ""}
 
@@ -96,6 +98,11 @@ class Handler(BaseHTTPRequestHandler):
         rest = "/".join(parts[3:])
         if rest == "projects" and method == "POST":
             return ok(201, {"id": "prj_1", "company": "cmp_1", "name": body["name"], "stage": "discover"})
+        if rest == "key" and method == "GET":
+            # A key appears at the third look, as if the operator ran `company-key.sh provision` meanwhile.
+            state["key_polls"] += 1
+            has = "already-keyed" in FLAGS or ("key-never" not in FLAGS and state["key_polls"] >= 3)
+            return ok(200, {"has_key": has})
         if not rest.startswith(("documents", "search", "projects/prj_1")):
             return ok(404, {"error": "not_found"})
         sub = rest.removeprefix("projects/prj_1").strip("/")
@@ -114,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
             state["stage"] = body["stage"]
             return ok(200, {"id": "prj_1", "company": "cmp_1", "name": "x", "stage": state["stage"]})
         if rest == "documents" and method == "POST":
+            if "keys-required" in FLAGS and not ("already-keyed" in FLAGS or state["key_polls"] >= 3):
+                return ok(409, {"error": "company_key_missing", "message": "provision a key"})
             MARKER["text"] = data.decode()
             return ok(201, {"id": "doc_1", "name": "x", "status": "pending", "chunks": 0})
         if rest == "documents/doc_1":
