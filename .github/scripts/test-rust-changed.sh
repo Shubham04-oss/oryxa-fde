@@ -36,6 +36,13 @@ expect true "crates file" crates/oryxa-fde-api/src/lib.rs
 expect true "vendor file" vendor/oryxa-platform/crates/oryxa-core/src/lib.rs
 expect true "one Rust path among skippable ones" docs/ci.md fde-web/package.json crates/oryxa-fde-api/openapi.json
 expect true "unknown path hidden by a skippable-looking prefix" docs-extra/x.md
+# The skip list is anchored at the repo root: a skippable name inside crates/ or vendor/ still runs Rust.
+expect true "skippable names nested in crates/" crates/oryxa-fde-api/README.md crates/oryxa-fde-agent/docs/x.md
+expect true "skippable names nested in vendor/" vendor/oryxa-platform/LICENSE vendor/oryxa-platform/docs/x.md
+# File entries match whole names, not prefixes.
+expect true "file named like a skippable file" README.md.bak
+expect true "harness file named like package.json" sandbox/harness/package.json.rs
+expect true "docs as a file, not a directory" docs
 expect true "harness test dir" sandbox/harness/test/session.test.ts
 expect true "empty list (fail closed)"
 
