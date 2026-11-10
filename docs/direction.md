@@ -126,9 +126,9 @@ an option. ADR 0004 will be amended once the embedding study reports.
 No real customer data enters the product before per-company keys exist (ADR 0003). M2 is built and
 tried on sample data; the real engagement starts when the keys are in.
 
-Not yet: approvals that route to the customer's IT admin, the canvas, the runner in customer clouds, versioned config, Teams and Azure DevOps
-connectors, a trust-centre or questionnaire tool, session recording, an ROI calculator, new API
-surface that no screen uses.
+Not yet: approvals that route to the customer's IT admin, the canvas, the runner in customer
+clouds, versioned config, Teams and Azure DevOps connectors, a trust-centre or questionnaire tool,
+session recording, an ROI calculator, new API surface that no screen uses.
 
 ## 8. Evidence, and its limits
 
