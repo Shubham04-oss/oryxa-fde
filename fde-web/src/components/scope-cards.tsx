@@ -1,8 +1,8 @@
-import { useRef, useState } from "react"
-import type { RefObject } from "react"
+import { useImperativeHandle, useRef, useState } from "react"
+import type { Ref, RefObject } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { FormDialog, TextArea, TextField } from "./form-dialog"
-import { Card, Quiet, Rows, Status } from "./page"
+import { Card, Quiet, Rows, Status, reveal } from "./page"
 import { EditRow } from "./records-cards"
 import { FIELD, Labelled } from "./task-move"
 import { Button } from "./ui/button"
@@ -75,15 +75,23 @@ function NeedsSignOff() {
 
 type Open = { kind: "item"; item?: ScopeItemOut; side: ItemKind } | { kind: "signoff" }
 
+/** What the stage checklist does on the scope card: open the dialog that fixes an item. */
+export type ScopeCardHandle = {
+  signOff: () => void
+  add: (side: ItemKind) => void
+}
+
 export function ScopeCard({
   scope,
   project,
   me,
+  handle,
 }: {
   scope: ProjectScope
   project: Project
   /** The signed-in user's id: a sign-off says whether they recorded it. */
   me: string | undefined
+  handle?: Ref<ScopeCardHandle>
 }) {
   const s = project.scope
   const state = signOffState(s)
@@ -93,6 +101,10 @@ export function ScopeCard({
   const sign = useRef<HTMLButtonElement>(null)
   // What a sign-off leaves behind when its button goes: the sentence that says the new state.
   const agreement = useRef<HTMLDivElement>(null)
+  useImperativeHandle(handle, () => ({
+    signOff: () => setOpen({ kind: "signoff" }),
+    add: (side) => setOpen({ kind: "item", side }),
+  }))
   const close = () => {
     if (open?.kind === "signoff") returnFocus(undefined, sign, agreement)
     else if (open) returnFocus(open.item?.id, open.side === "in" ? addIn : addOut)
@@ -321,24 +333,39 @@ function ItemDialog({
   )
 }
 
+/** What the stage checklist does on the criteria card. */
+export type CriteriaCardHandle = {
+  add: () => void
+  /** Scrolls the card into view and focuses it. */
+  show: () => void
+}
+
 export function CriteriaCard({
   scope,
   criteria,
   signedOff,
+  handle,
 }: {
   scope: ProjectScope
   criteria: Array<CriterionOut>
   signedOff: boolean
+  handle?: Ref<CriteriaCardHandle>
 }) {
   // A criterion to edit, "new" for a blank form, or nothing.
   const [open, setOpen] = useState<CriterionOut | "new" | null>(null)
   const add = useRef<HTMLButtonElement>(null)
+  const card = useRef<HTMLElement>(null)
+  useImperativeHandle(handle, () => ({
+    add: () => setOpen("new"),
+    show: () => reveal(card.current),
+  }))
   const close = () => {
     if (open) returnFocus(open === "new" ? undefined : open.id, add)
     setOpen(null)
   }
   return (
     <Card
+      ref={card}
       title="Success criteria"
       aside={
         <Button ref={add} variant="outline" size="sm" onClick={() => setOpen("new")}>
@@ -533,7 +560,19 @@ function SignOffDialog({
           "The scope changed while this was open. Read it again, then record the sign-off.",
         )
       }
-      const signed = await api.signOffScope(scope, who as StakeholderId)
+      let signed
+      try {
+        signed = await api.signOffScope(scope, who as StakeholderId)
+      } catch (error) {
+        // This version was signed a moment ago by someone else: read the scope, so the card says
+        // by whom instead of staying on "Not signed off" until a reload.
+        if (error instanceof ApiError && error.status === 409 && error.code === "conflict")
+          await api
+            .scope(scope)
+            .then((fresh) => commitFreshScope(client, scope, fresh))
+            .catch(() => undefined)
+        throw error
+      }
       await commitSignOff(client, scope, signed)
     }, "project")
 

@@ -1,5 +1,5 @@
 import { useId } from "react"
-import type { ReactNode } from "react"
+import type { ReactNode, Ref } from "react"
 import { Button } from "./ui/button"
 import { ApiError } from "@/lib/api/client"
 import { cn } from "@/lib/utils"
@@ -39,18 +39,24 @@ export function Card({
   aside,
   children,
   className,
+  ref,
 }: {
   title: string
   aside?: ReactNode
   children: ReactNode
   className?: string
+  /** Gives the card a ref and makes it a place focus can be sent to (the checklist does), not a tab stop. */
+  ref?: Ref<HTMLElement>
 }) {
   const heading = useId()
   return (
     <section
+      ref={ref}
+      tabIndex={ref ? -1 : undefined}
       aria-labelledby={heading}
       className={cn(
         "min-w-0 rounded-[14px] border bg-card px-5 py-[18px] max-[800px]:p-4",
+        ref && "outline-none focus-visible:ring-1 focus-visible:ring-ring",
         className,
       )}
     >
@@ -63,6 +69,14 @@ export function Card({
       <div className="mt-2.5">{children}</div>
     </section>
   )
+}
+
+/** Scrolls a card into view and moves focus to it, so the canvas does not jump a second time. */
+export function reveal(card: HTMLElement | null) {
+  if (!card) return
+  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  card.scrollIntoView({ behavior: calm ? "auto" : "smooth", block: "center" })
+  card.focus({ preventScroll: true })
 }
 
 /** Rows in a card, with a quiet line between them. */

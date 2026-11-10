@@ -34,6 +34,8 @@ async function clientBundle(nodeEnv: "production" | "development") {
   }
 }
 
+const SWITCHES = ["__fdeMockFailWrites", "__fdeMockNoCompanies", "__fdeMockStaleChecklist"]
+
 describe("the mock API", () => {
   it("is left out of a production build, even with its flag set", async () => {
     const code = await clientBundle("production")
@@ -42,11 +44,13 @@ describe("the mock API", () => {
     expect(code).toContain("/auth/login?return_to=")
     expect(code).not.toContain(MOCK_MARKER)
     expect(code).not.toContain("mock-api")
-    // The test-only switch that fails writes lives in the mock, so it goes with it.
-    expect(code).not.toContain("__fdeMockFailWrites")
+    // The dev and test switches live in the mock, so they go with it.
+    for (const flag of SWITCHES) expect(code, flag).not.toContain(flag)
   }, 30_000)
 
   it("is in a development build, so the check above can fail", async () => {
-    expect(await clientBundle("development")).toContain(MOCK_MARKER)
+    const code = await clientBundle("development")
+    expect(code).toContain(MOCK_MARKER)
+    for (const flag of SWITCHES) expect(code, flag).toContain(flag)
   }, 30_000)
 })

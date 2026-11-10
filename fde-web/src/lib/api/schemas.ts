@@ -87,6 +87,20 @@ export const ProjectOut = z.object({
 })
 export type ProjectOut = z.infer<typeof ProjectOut>
 
+/** One item of the checklist to leave a stage (`key` is stable, e.g. `scope_signed_off`). */
+export const ChecklistItemOut = z.object({ key: z.string(), label: z.string(), met: z.boolean() })
+export type ChecklistItem = z.infer<typeof ChecklistItemOut>
+
+/** What the project needs to leave its current stage, worked out from its records now. */
+export const StageChecklistOut = z.object({ stage: Stage, items: z.array(ChecklistItemOut) })
+export type StageChecklist = z.infer<typeof StageChecklistOut>
+
+/** A refused stage move (409): `open` lists the items still open when a reason was needed. */
+export const StageConflictBody = z.object({
+  error: z.string(),
+  open: z.array(ChecklistItemOut).nullish(),
+})
+
 export const ProjectSummaryOut = z.object({ id: ProjectId, name: z.string(), stage: Stage })
 export type ProjectSummaryOut = z.infer<typeof ProjectSummaryOut>
 

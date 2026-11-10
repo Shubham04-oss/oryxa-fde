@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest"
-import { ApiError, api, apiOver, mockApiOn, safeReturnTo, signInUrl } from "./client"
+import {
+  ApiError,
+  ChecklistOpenError,
+  api,
+  apiOver,
+  mockApiOn,
+  safeReturnTo,
+  signInUrl,
+} from "./client"
 import type { Transport } from "./client"
 import { CompanyId, ProjectId } from "./schemas"
 import { resetMockApi } from "@/dev/mock-api"
@@ -180,6 +188,71 @@ describe("api over the network", () => {
     })
     const refused = await refusal(unavailable.net.me())
     expect(refused.message).toBe("The workspace is briefly unavailable. Try again in a minute.")
+  })
+
+  it("reads a stage's checklist, and sends a reason with a move only when given one", async () => {
+    const stage = `PUT /api/v1/companies/${company}/projects/${project}/stage`
+    const when = "2026-11-04T10:06:24Z"
+    const moved = {
+      id: project,
+      company,
+      name: "D",
+      stage: "evaluate",
+      created_at: when,
+      updated_at: when,
+    }
+    const { seen, net } = stub({
+      [`GET /api/v1/companies/${company}/projects/${project}/stage-checklist`]: () =>
+        Response.json({
+          stage: "build",
+          items: [{ key: "criteria_have_evals", label: "An eval suite", met: false }],
+        }),
+      [stage]: () => Response.json(moved),
+    })
+    const scope = { company, project }
+    expect(await net.stageChecklist(scope)).toEqual({
+      stage: "build",
+      items: [{ key: "criteria_have_evals", label: "An eval suite", met: false }],
+    })
+    await net.moveStage(scope, "evaluate")
+    await net.moveStage(scope, "evaluate", "Measured by hand")
+    const bodies = await Promise.all(seen.filter((r) => r.method === "PUT").map((r) => r.json()))
+    expect(bodies).toEqual([
+      { stage: "evaluate" },
+      { stage: "evaluate", reason: "Measured by hand" },
+    ])
+  })
+
+  it("turns a 409 with open items into a ChecklistOpenError that carries them", async () => {
+    const open = [{ key: "access_granted", label: "Every access request granted", met: false }]
+    const { net } = stub({
+      [`PUT /api/v1/companies/${company}/projects/${project}/stage`]: () =>
+        Response.json({ error: "rejected_checklist_open", open }, { status: 409 }),
+    })
+    const error = await net.moveStage({ company, project }, "build").catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ChecklistOpenError)
+    expect((error as ChecklistOpenError).open).toEqual(open)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).message).toBe(
+      "Some of this stage's checklist is still open. Give a reason to move on anyway.",
+    )
+  })
+
+  it("keeps a refusal of the stage move that is not about the checklist as it is", async () => {
+    const stage = `PUT /api/v1/companies/${company}/projects/${project}/stage`
+    for (const [status, code, said] of [
+      [
+        409,
+        "rejected_stage_transition",
+        "A project moves one stage forward, or back to an earlier one.",
+      ],
+      [400, "invalid_reason", "The reason is plain text, 1 to 500 characters."],
+    ] as const) {
+      const { net } = stub({ [stage]: () => Response.json({ error: code }, { status }) })
+      const error = await refusal(net.moveStage({ company, project }, "build", "x"))
+      expect(error).not.toBeInstanceOf(ChecklistOpenError)
+      expect([error.status, error.code, error.message]).toEqual([status, code, said])
+    }
   })
 
   it("fails loudly on an answer that drifts from the spec", async () => {

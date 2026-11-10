@@ -18,6 +18,8 @@ import {
   CriterionOut,
   ScopeOut,
   SignOffOut,
+  StageChecklistOut,
+  StageConflictBody,
   StakeholderOut,
   SystemOut,
   TaskOut,
@@ -36,6 +38,7 @@ import type { CriterionBody, ScopeItemBody } from "../scope"
 import type { AccessBody } from "../today"
 import type {
   AccessRequestId,
+  ChecklistItem,
   Company,
   CompanyId,
   CriterionId,
@@ -69,6 +72,18 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The API refused to move a project forward because items of its stage checklist are open and no
+ * reason came with the move. `open` is what the API found open when it answered, which may be more
+ * than the page knew.
+ */
+export class ChecklistOpenError extends ApiError {
+  constructor(readonly open: Array<ChecklistItem>) {
+    super(409, "rejected_checklist_open", SAFE_TEXT.rejected_checklist_open)
+    this.name = "ChecklistOpenError"
+  }
+}
+
 /** Words for refusals the API answers with a code only. Anything else shows generic copy. */
 export const SAFE_TEXT: Record<string, string> = {
   forbidden: "You are not allowed to do that here. Ask a lead, or an organisation admin.",
@@ -88,6 +103,9 @@ export const SAFE_TEXT: Record<string, string> = {
   rejected_empty_scope:
     "Write at least one scope item or success criterion before it is signed off.",
   rejected_stage_transition: "A project moves one stage forward, or back to an earlier one.",
+  rejected_checklist_open:
+    "Some of this stage's checklist is still open. Give a reason to move on anyway.",
+  invalid_reason: "The reason is plain text, 1 to 500 characters.",
   // The API could not reach a service it needs (WorkOS, SpiceDB). Nothing is wrong on this end.
   unavailable: "The workspace is briefly unavailable. Try again in a minute.",
   invalid_task: "Describe the task in plain text, up to 64 KiB.",
@@ -393,15 +411,31 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
-    /** Moves a project to `to`; the API refuses a move `canMove` would refuse. */
-    moveStage: (scope: ProjectScope, to: Stage) =>
+    /** The checklist to leave the project's current stage, worked out from its records now. */
+    stageChecklist: (scope: ProjectScope) =>
       read(
-        ProjectOut,
-        client.PUT("/v1/companies/{company}/projects/{project}/stage", {
-          ...project(scope),
-          body: { stage: to },
-        }),
+        StageChecklistOut,
+        client.GET("/v1/companies/{company}/projects/{project}/stage-checklist", project(scope)),
       ),
+
+    /**
+     * Moves a project to `to`; the API refuses a move `canMove` would refuse. A forward move with
+     * checklist items open needs a `reason`; without one it throws a `ChecklistOpenError`. Moving
+     * back never takes one, and none is sent with it.
+     */
+    async moveStage(scope: ProjectScope, to: Stage, reason?: string) {
+      const { data, error, response } = await client.PUT(
+        "/v1/companies/{company}/projects/{project}/stage",
+        { ...project(scope), body: reason === undefined ? { stage: to } : { stage: to, reason } },
+      )
+      if (response.status === 409) {
+        const conflict = StageConflictBody.safeParse(error)
+        if (conflict.success && conflict.data.error === "rejected_checklist_open")
+          throw new ChecklistOpenError(conflict.data.open ?? [])
+      }
+      if (!response.ok) throw refusal(response.status, error)
+      return ProjectOut.parse(data)
+    },
 
     /** Adds a task; the API answers with it as saved. */
     addTask: (scope: ProjectScope, body: TaskBody) =>
@@ -634,7 +668,8 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     assignees: async (scope) => (await use()).assignees(scope),
     assign: async (scope, user) => (await use()).assign(scope, user),
     unassign: async (scope, user) => (await use()).unassign(scope, user),
-    moveStage: async (scope, to) => (await use()).moveStage(scope, to),
+    stageChecklist: async (scope) => (await use()).stageChecklist(scope),
+    moveStage: async (scope, to, reason) => (await use()).moveStage(scope, to, reason),
     addTask: async (scope, body) => (await use()).addTask(scope, body),
     updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
     updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
@@ -702,6 +737,13 @@ export const queries = {
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project],
       queryFn: () => api.project(scope),
+      ...read,
+    }),
+  /** Under the project's key, so a read of the project that is cancelled or invalidated takes this with it. */
+  stageChecklist: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "stage-checklist"],
+      queryFn: () => api.stageChecklist(scope),
       ...read,
     }),
   today: () => queryOptions({ queryKey: ["today"], queryFn: api.today, ...read }),

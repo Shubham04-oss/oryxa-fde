@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils"
 
 // shadcn's base-nova button on Base UI, on the tokens in styles.css. Written by hand: the shadcn
 // registry is not reachable from every build environment.
-const buttonVariants = cva(
+export const buttonVariants = cva(
   "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-45 [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
     variants: {

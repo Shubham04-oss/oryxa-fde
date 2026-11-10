@@ -25,6 +25,9 @@ describe("schemas", () => {
     expectTypeOf<z.input<typeof S.TaskOut>>().toEqualTypeOf<Spec["TaskOut"]>()
     expectTypeOf<z.input<typeof S.DecisionOut>>().toEqualTypeOf<Spec["DecisionOut"]>()
     expectTypeOf<z.input<typeof S.Stage>>().toEqualTypeOf<Spec["ProjectStage"]>()
+    expectTypeOf<z.input<typeof S.ChecklistItemOut>>().toEqualTypeOf<Spec["ChecklistItemOut"]>()
+    expectTypeOf<z.input<typeof S.StageChecklistOut>>().toEqualTypeOf<Spec["StageChecklistOut"]>()
+    expectTypeOf<z.input<typeof S.StageConflictBody>>().toEqualTypeOf<Spec["StageConflictBody"]>()
     expectTypeOf<z.input<typeof S.Me>>().toEqualTypeOf<Spec["MeOut"]>()
     expectTypeOf<z.input<typeof S.ProjectSummaryOut>>().toEqualTypeOf<Spec["ProjectSummaryOut"]>()
     expectTypeOf<z.input<typeof S.CompanySummaryOut>>().toEqualTypeOf<
