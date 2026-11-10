@@ -66,6 +66,7 @@ check() {
 }
 has() { grep -qF -- "$1" <<<"$out"; }
 logged() { grep -qF -- "$1" <<<"$log"; }
+not_logged() { ! logged "$1"; }
 no_calls() { [[ -z "$log" ]]; }
 no_writes() { ! grep -Eq '^kms (create-key|create-alias|enable-key-rotation|put-key-policy|schedule-key-deletion)' <<<"$log"; }
 exits() { [[ $code == "$1" ]]; }
@@ -156,7 +157,7 @@ check "the key is created with the tenant and company tags" logged "TagKey=tenan
 check "the key carries the company tag" logged "TagKey=company,TagValue=cmp_1"
 check "the key is symmetric, single-Region, KMS-made" logged "--key-usage ENCRYPT_DECRYPT --key-spec SYMMETRIC_DEFAULT --origin AWS_KMS --no-multi-region"
 check "the alias is the fixed prefix and the company" logged "create-alias --alias-name alias/oryxa-fde-dev/companies/cmp_1"
-check "rotation stays off, as configured" bash -c '! grep -qF enable-key-rotation <<<"$1"' _ "$log"
+check "rotation stays off, as configured" not_logged "enable-key-rotation"
 check "the stored policy has this company's prefix" grep -qF "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_1/*" <<<"$(stored_policy)"
 check "the stored policy has no placeholder left" no_placeholder
 run "$prov" provision "$config" org_1 cmp_1
