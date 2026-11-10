@@ -177,7 +177,7 @@ describe("recorded ACP sessions", () => {
 });
 
 describe("recorded findings", () => {
-  it("the intended settings reach no host but the model", () => {
+  it("the intended settings reach no host but the model once rg is on PATH", () => {
     const egress = json("egress.json");
     expect(egress["intended"]).toEqual([]);
     expect(egress["s-healthz"]).toEqual([]);
@@ -264,6 +264,12 @@ describe("fixture hygiene", () => {
     // Addresses: only the lab network and loopback.
     for (const found of body.matchAll(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g)) {
       expect(found[0]).toMatch(/^(10\.123\.0\.\d+|127\.\d+\.\d+\.\d+|0\.0\.0\.0)$/);
+    }
+    // The lab is IPv4 only, so no hardware address and no IPv6 address but loopback.
+    expect(body).not.toMatch(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/i);
+    for (const found of body.matchAll(/[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}/gi)) {
+      const v6 = found[0].includes("::") || /[a-f]/i.test(found[0]);
+      expect(v6 && !["::", "::1"].includes(found[0]), `unexpected address ${found[0]}`).toBe(false);
     }
     for (const value of own) expect(body.toLowerCase()).not.toContain(value.toLowerCase());
     // Ids are the numbered samples, and nothing is key-shaped (including AWS access key ids, however bounded).

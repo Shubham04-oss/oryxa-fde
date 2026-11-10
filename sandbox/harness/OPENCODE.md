@@ -14,11 +14,11 @@ is in `opencode-spike/`. Everything below was run in the lab unless it says "sou
   done in the lab. Making the binary execute-only (`chmod 0711`, so the process is not dumpable) stopped the path tried, on this
   machine's kernel; it rests on a kernel setting the sandbox runtime has not been checked for. The pipes themselves could not be
   forged in the lab (see Forged answers).
-- Under the intended settings, in sessions of under a minute against a stub model, the run reached **no host except the model's**,
-  with one exception: `grep` and `glob` download ripgrep from `github.com` when there is no `rg` on `PATH`, and fail without it, so the
-  image must carry `rg` (with Bedrock: `bedrock-runtime.<region>.amazonaws.com`, seen only as far as the TLS handshake), and a hostile repository and home
-  changed nothing, provided the run gets a fresh home and a root-owned config directory. The settings were shown as a set; only
-  the model catalogue switch was shown to be needed on its own.
+- Under the intended settings, in sessions of under a minute against a stub model, the run reached **no host except the model's**
+  (with Bedrock: `bedrock-runtime.<region>.amazonaws.com`, seen only as far as the TLS handshake), with one exception: `grep` and
+  `glob` download ripgrep from `github.com` when there is no `rg` on `PATH`, and fail without it, so the image must carry `rg`. A
+  hostile repository and home changed nothing, provided the run gets a fresh home and a root-owned config directory. The settings
+  were shown as a set; only the model catalogue switch was shown to be needed on its own.
 - ACP gives **no plan updates** (the todo list is a `todowrite` tool call behind a flag) and **token usage only once per turn**, so the
   harness's mid-run `usage` events and plan events cannot be copied over one-to-one.
 
@@ -43,8 +43,8 @@ leaves nothing running.
 - `acp-client.mjs` stands in for the adapter: it starts `opencode acp` with pipes only it holds, runs one prompt, answers permission
   requests by a fixed policy and records every frame in both directions.
 
-Fixtures hold invented sample content only, scrubbed of session and message ids, trace ids, signatures, dates, timings and the host's
-search domains. `test/opencode-fixtures.test.ts` pins their shape and fails on anything machine-specific or secret-shaped.
+Fixtures hold invented sample content only, scrubbed of session and message ids, trace ids, signatures, dates and timings; the lab
+container has no DNS search domains. `test/opencode-fixtures.test.ts` pins their shape and fails on anything machine-specific or secret-shaped.
 
 ## 1. Version, binary, checksum, licence
 
@@ -153,7 +153,8 @@ or the run has to be bounded by the adapter's own time and cancel. If ACP usage 
 ## 5. Hosts, and the settings that stop them
 
 With the intended settings the sink saw **nothing** in the healthz session and the packet capture showed traffic only to the stub
-(`egress.json`, case `intended`). The one exception is below: `grep` and `glob` with no `rg` installed (case `s-readonly`). The cases that follow switch each unwanted thing on to see what it reaches (`net-matrix.sh`, `egress.json`):
+(`egress.json`, case `intended`). The one exception is below: `grep` and `glob` with no `rg` installed (case `s-readonly`). The cases
+that follow switch each unwanted thing on to see what it reaches (`net-matrix.sh`, `egress.json`):
 
 | Host                                                                                                                     | Trigger                                                                                                                                                                                                                                                                                                                                   | Stopped by (verified unless noted)                                                                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -193,8 +194,8 @@ Base policy `"*": "ask"` (v1-shaped config, verified):
 
 - **Every tool call raises a permission request**, read-only ones included, and so does `todowrite`
   (`session-readonly.acp.jsonl`: `read`, `glob`, `grep`). The adapter sees every call, and the fixture test checks that every tool
-  call that completed had a request for it earlier in the file (the one exception is a call covered by an earlier `always`). The request comes after the call's
-  `in_progress` update, so the tool has not run.
+  call that completed had a request for it earlier in the file (the one exception is a call covered by an earlier `always`). The
+  request comes after the call's `in_progress` update, so the tool has not run.
 - **An answer of `once` does not persist**: three identical `shell` calls raised three requests (`session-once.acp.jsonl`).
 - **An answer of `always` persists for the rest of the session, and is broader than the call**: after `always` on `echo sample-one`,
   `echo sample-two` ran without a request (1 request for 3 calls, `session-always.acp.jsonl`; the pattern the tool suggests was
@@ -373,7 +374,8 @@ b3, traceparent
 7. **Bedrock:** a placeholder `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (or `AWS_BEARER_TOKEN_BEDROCK`) is required or no request is
    sent; the outbound handler replaces `authorization` and removes `x-amz-date` and `x-amz-security-token` before signing; model ids
    come from OpenCode's own catalogue.
-8. **Image:** install `ripgrep` so `rg` is on `PATH` (`grep` and `glob` otherwise download it from github.com and fail without it); download the tarball at build time and check the hash written in the Dockerfile; bring both x64 variants into the egress test
+8. **Image:** install `ripgrep` so `rg` is on `PATH` (`grep` and `glob` otherwise download it from github.com and fail without it);
+   download the tarball at build time and check the hash written in the Dockerfile; bring both x64 variants into the egress test
    (`-baseline` runs on CPUs without AVX2); no `opencode` CLI call may run inside the sandbox (it starts a background daemon).
 9. **Tests to re-run on each upgrade:** `record.sh` (about ten minutes on this machine) regenerates the fixtures; read the diff before
    committing, as with the SDK recording.
