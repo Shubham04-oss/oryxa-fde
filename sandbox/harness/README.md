@@ -37,16 +37,30 @@ into the system prompt as fenced data, not as instructions.
 ## What the run may do
 
 - **No credentials.** The SDK runs with `CLAUDE_CODE_USE_BEDROCK=1` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`, and
-  its environment is built from an explicit list (`PATH`, locale, the CA variables, and `HOME=/home/agent`).
+  its environment is built from an explicit list (`PATH`, locale and the CA variables), with the run's own home.
   Nothing else from the sandbox is inherited. The gateway's outbound handler authenticates requests to the
   allowed `bedrock-runtime.<region>.amazonaws.com` host: it signs them with short-lived IAM credentials (SigV4,
   see `sandbox/gateway/README.md`), or adds a Bedrock API key as a bearer token. There is no claude.ai login.
 - **No repository settings.** The run passes `settingSources: []`. The SDK otherwise loads `.claude/` settings
   and hooks from the repository, and their allow rules would skip approvals.
+- **A clean start.** Before the agent starts, root kills every process of `agent` left from an earlier run (one
+  `kill(-1)` run as `agent`, which no fork slips past, always run once), confirms in `/proc` that none is left and
+  otherwise ends the run as `unclean_sandbox`. A zombie counts as gone only with one thread: a leader whose main
+  thread exited alone is a zombie whose other threads still run. Only then does it remove every earlier run's
+  directories (`/tmp/oryxa-claude-*`, `/tmp/oryxa-opencode-*`, `/etc/oryxa/opencode-*`), listing their parents and
+  never following a link, and make this run's (`src/clean.ts`). So nothing an earlier run left running can race the
+  cleanup, with one exception: pid 1, the image's `sleep infinity`, runs as `agent`, cannot be killed and is
+  skipped; if the runtime lets the agent trace it, code injected there would survive (#156 moves it off `agent`).
+  Each run, on either backend, gets a fresh home with its own XDG and temp directories. With
+  `settingSources: []` the CLI ignored user settings, hooks, MCP servers, `CLAUDE.md`, skills, agents and commands
+  planted in its home, but its shell tool sources `~/.bashrc`, so a shared home would let one run change the
+  next one's commands. Today the API also gives every run a new container; this does not rely on it.
 - **A coding tool set.** Read, Write, Edit, NotebookEdit, Glob, Grep, Bash, WebFetch and the task tools. The
   SDK's default set also schedules, messages and spawns agents.
 - **Approvals.** A tool call that matches a rule on the approval list (tool name, and a regular expression over
-  the command or the JSON input) emits `approval_request` and waits. The request carries the tool and its full
+  the command for `Bash`, or else over each string value in the input, never its key names) emits
+  `approval_request` and waits. Key names differ between harnesses (`file_path` here, `path` on OpenCode), values
+  do not, so one rule matches the same call on both. The request carries the tool and its full
   input, so an engineer approves exactly what will run. An input over 256 KiB is refused, never truncated.
   Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. An
   aborted run counts as a rejection. The gateway also holds the hosts behind an approval action
@@ -75,7 +89,7 @@ findings in `OPENCODE.md`:
 - **Policy is a file.** `src/opencode.json` is the spike's verified `intended.json` (every tool asks, the rest denied,
   project config, plugins, MCP, sharing and updates off). Root writes it per run into a fresh directory under
   `/etc/oryxa` with only the model, region and turn limit filled in, and the environment is built from a list:
-  OpenCode's disable switches, a fresh home and XDG and temp directories under `/tmp`, and placeholder Bedrock keys
+  OpenCode's disable switches, the run's fresh home and XDG and temp directories, and placeholder Bedrock keys
   (`placeholder-access-key-id`), which the outbound handler drops before it signs again.
 - **Approvals.** Every tool call asks, reads included. A call the company's list does not cover is approved at once;
   one it covers waits for an engineer, as on the Claude backend. Rules name the SDK's tools, so OpenCode's are mapped

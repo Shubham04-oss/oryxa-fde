@@ -3,7 +3,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
 /** The image's users (`sandbox/image/Dockerfile`): the agent's tools run as `agent`, the harness as `harness`. */
-export const AGENT = { uid: 1001, gid: 1001, home: "/home/agent" } as const;
+export const AGENT = { uid: 1001, gid: 1001 } as const;
 export const HARNESS = { uid: 1002, gid: 1002 } as const;
 
 export interface Privileges {

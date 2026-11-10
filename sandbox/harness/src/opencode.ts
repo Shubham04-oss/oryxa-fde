@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, chown, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 
@@ -14,6 +14,7 @@ import {
 
 import { RUN_ERROR } from "./adapter.js";
 import { ApprovalGate } from "./approvals.js";
+import { CONFIG_PREFIX, freshHome, HOME_PREFIXES, homeEnv, RUN_ROOTS } from "./clean.js";
 import type { HarnessEvent, Outcome } from "./events.js";
 import { type BackendDeps, INHERITED_ENV, WORKSPACE } from "./harness.js";
 import policy from "./opencode.json" with { type: "json" };
@@ -79,12 +80,7 @@ export function openCodeEnv(base: BackendDeps["env"], pack: ContextPack, dirs: R
   }
   return {
     ...env,
-    HOME: dirs.home,
-    XDG_CONFIG_HOME: join(dirs.home, ".config"),
-    XDG_DATA_HOME: join(dirs.home, ".local/share"),
-    XDG_STATE_HOME: join(dirs.home, ".local/state"),
-    XDG_CACHE_HOME: join(dirs.home, ".cache"),
-    TMPDIR: join(dirs.home, "tmp"),
+    ...homeEnv(dirs.home),
     OPENCODE_CONFIG_DIR: dirs.config,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1",
@@ -101,21 +97,19 @@ export function openCodeEnv(base: BackendDeps["env"], pack: ContextPack, dirs: R
   };
 }
 
-/** Writes the run's config where only root can change it and makes the agent's fresh directories. Runs as root. */
+/**
+ * Writes the run's config where only root can change it and makes the agent's fresh home. Runs as root, after
+ * `startClean` has removed earlier runs' directories.
+ */
 export async function prepareRun(
   pack: ContextPack,
-  roots = { config: "/etc/oryxa", run: "/tmp" },
+  roots: { config: string; run: string } = RUN_ROOTS,
   owner: (path: string) => Promise<void> = (path) => chown(path, AGENT.uid, AGENT.gid),
 ): Promise<RunDirs> {
-  const config = await mkdtemp(join(roots.config, "opencode-"));
+  const config = await mkdtemp(join(roots.config, CONFIG_PREFIX));
   await chmod(config, 0o755);
   await writeFile(join(config, "opencode.json"), `${JSON.stringify(openCodeConfig(pack), null, 2)}\n`, { mode: 0o644 });
-  const home = await mkdtemp(join(roots.run, "oryxa-opencode-"));
-  const dirs = [".config", ".local", ".local/share", ".local/state", ".cache", "tmp"].map((dir) => join(home, dir));
-  for (const dir of dirs) await mkdir(dir, { mode: 0o700 });
-  // Home is handed over last: until then no agent process (one left from an earlier run) can plant a link in it.
-  for (const dir of [...dirs.reverse(), home]) await owner(dir);
-  return { config, home };
+  return { config, home: await freshHome(HOME_PREFIXES.opencode, roots.run, owner) };
 }
 
 /** Starts the pinned `opencode acp` as `agent` with a fresh run directory; the spawner then drops the harness's root. */

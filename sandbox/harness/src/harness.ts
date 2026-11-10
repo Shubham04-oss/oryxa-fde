@@ -10,9 +10,9 @@ import type {
 
 import { Adapter, describeTool, RUN_ERROR } from "./adapter.js";
 import { type ApprovalChannel, ApprovalGate } from "./approvals.js";
+import { homeEnv } from "./clean.js";
 import type { HarnessEvent, Outcome } from "./events.js";
 import { type LoadedPack, systemPrompt } from "./pack.js";
-import { AGENT } from "./users.js";
 
 export const WORKSPACE = "/workspace";
 
@@ -59,15 +59,18 @@ export interface BackendDeps {
 /** The Claude Agent SDK backend's own dependencies. */
 export interface HarnessDeps extends BackendDeps {
   query: typeof sdkQuery;
+  /** The run's fresh home (`freshHome`): the CLI's state and the shell startup files it reads stay with one run. */
+  home: string;
   /** Starts the SDK's agent process; in the sandbox, as another user than the harness (`agentSpawner`). */
   spawn?: Options["spawnClaudeCodeProcess"];
 }
 
 /**
  * The environment for the SDK's process. Bedrock through AWS, never a claude.ai login, and no credential at all:
- * the gateway's outbound handler adds the Bedrock credential to the allowed request.
+ * the gateway's outbound handler adds the Bedrock credential to the allowed request. Home, XDG and temp are the
+ * run's own: `settingSources: []` keeps the CLI's settings out, but not `~/.bashrc`, which its shell tool sources.
  */
-export function harnessEnv(base: HarnessDeps["env"], pack: LoadedPack["pack"]): Record<string, string> {
+export function harnessEnv(base: HarnessDeps["env"], pack: LoadedPack["pack"], home: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of INHERITED_ENV) {
     const value = base[name];
@@ -75,8 +78,7 @@ export function harnessEnv(base: HarnessDeps["env"], pack: LoadedPack["pack"]): 
   }
   return {
     ...env,
-    // The agent's own home, whatever user started the harness.
-    HOME: AGENT.home,
+    ...homeEnv(home),
     // SDK settings, internal only; the product never shows these names.
     CLAUDE_CODE_USE_BEDROCK: "1",
     CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
@@ -132,7 +134,7 @@ export async function runHarness({ pack, rules }: LoadedPack, deps: HarnessDeps)
     persistSession: false,
     // Stream events carry each response's final usage, for the `usage` events the budget is enforced on.
     includePartialMessages: true,
-    env: harnessEnv(deps.env, pack),
+    env: harnessEnv(deps.env, pack, deps.home),
     // Diagnostics stay on stderr; stdout carries only events.
     stderr: (data) => process.stderr.write(data),
     ...(deps.spawn === undefined ? {} : { spawnClaudeCodeProcess: deps.spawn }),
