@@ -14,7 +14,14 @@ import { canManage } from "@/lib/records"
 import { STAGE_LABEL } from "@/lib/stage"
 
 /** A company (DESIGN.md §3): its profile, stakeholders, systems, projects and team. */
-export function CompanyPage({ companyId }: { companyId: CompanyId }) {
+export function CompanyPage({
+  companyId,
+  addStakeholder = false,
+}: {
+  companyId: CompanyId
+  /** Opens Add stakeholder as the page loads: a project's checklist sent the FDE here to name someone. */
+  addStakeholder?: boolean
+}) {
   const company = useQuery(queries.company(companyId))
   const me = useQuery(queries.me())
   const [dialog, setDialog] = useState<"edit" | "project" | null>(null)
@@ -73,7 +80,7 @@ export function CompanyPage({ companyId }: { companyId: CompanyId }) {
       </Card>
 
       <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-        <StakeholdersCard company={c.id} people={c.stakeholders} />
+        <StakeholdersCard company={c.id} people={c.stakeholders} startOpen={addStakeholder} />
         <SystemsCard company={c.id} systems={c.systems} />
       </div>
 

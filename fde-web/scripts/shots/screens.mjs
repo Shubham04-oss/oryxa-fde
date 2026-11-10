@@ -11,6 +11,8 @@
 //             default the app's own scroll container is grown so the whole page is captured.
 //   sizes, themes  names to take instead of all of `SIZES` and `THEMES`
 //   emptyWorkspace  true: a workspace with no company yet (the mock's `__fdeMockNoCompanies`, set before the app loads)
+//   staleChecklist true: reads of a project's stage checklist say everything is met (the mock's
+//             `__fdeMockStaleChecklist`, set before the app loads), so the stale-view refusal can be shown
 //   signedOut true: no sign-in first (the sign-in screen itself)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
@@ -63,8 +65,8 @@ const newCompany = async (page) => {
 const BW_REFERRALS = "/companies/cmp_brightwater/projects/prj_bw_referrals"
 const ATLAS_FNOL = "/companies/cmp_atlas/projects/prj_atlas_fnol"
 const KESTREL_CLAIMS = `${KESTREL}/projects/prj_kestrel_claims`
-const scopeCard = (page) => page.getByRole("region", { name: "Scope" })
-const criteriaCard = (page) => page.getByRole("region", { name: "Success criteria" })
+const scopeCard = (page) => page.getByRole("region", { name: "Scope", exact: true })
+const criteriaCard = (page) => page.getByRole("region", { name: "Success criteria", exact: true })
 const scopeReady = (page) => scopeCard(page)
 const toScope = (page) =>
   scopeCard(page).evaluate((el) => {
@@ -73,6 +75,109 @@ const toScope = (page) =>
     document.querySelector(".app-canvas")?.scrollBy(0, -16)
   })
 const SCOPE = { ready: scopeReady, full: false }
+
+// The stage checklist (DESIGN.md §3). Kestrel's claims project starts in Discover with no scope written.
+const COBALT_FIELD = "/companies/cmp_cobalt/projects/prj_cobalt_field"
+const checklistRegion = (page, stage) => page.getByRole("region", { name: `To leave ${stage}` })
+const confirmation = (page) => page.getByRole("group", { name: "Confirm the move" })
+const TOP = { full: false }
+/** Moves a project forward with a reason, so the next stage's checklist (all open) can be seen. */
+async function moveOn(page, to, reason) {
+  await button(page, `Move to ${to}`).click()
+  await confirmation(page)
+    .getByLabel(/Why are you moving on/)
+    .fill(reason)
+  await confirmation(page).getByRole("button", { name: "Move with items open" }).click()
+  await confirmation(page).waitFor({ state: "detached" })
+}
+const askToMove = async (page) => {
+  await button(page, "Move to Access").click()
+  await confirmation(page)
+    .getByLabel(/Why are you moving on/)
+    .waitFor()
+}
+
+function checklistScreens() {
+  return [
+    // One item open, two met: the common case.
+    {
+      name: "checklist-open",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+    },
+    // Nothing done yet at Scope: every item open, each with the button to where it is fixed.
+    {
+      name: "checklist-open-all",
+      path: KESTREL_CLAIMS,
+      ready: (page) => checklistRegion(page, "Discover"),
+      ...TOP,
+      act: async (page) => {
+        await moveOn(page, "Scope", "The customer has no notes yet; we start from the kickoff call")
+        await checklistRegion(page, "Scope").waitFor()
+      },
+    },
+    // Every item met: one quiet line.
+    {
+      name: "checklist-met",
+      path: DISPATCH,
+      ready: (page) => page.getByText(/Ready to leave Build/),
+      ...TOP,
+    },
+    // Deploy has nothing to check yet: the page shows nothing.
+    {
+      name: "checklist-none",
+      path: COBALT_FIELD,
+      ready: (page) => button(page, "Move back to Evaluate"),
+      ...TOP,
+    },
+    {
+      name: "move-confirm-open",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: askToMove,
+    },
+    {
+      name: "move-reason-typed",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: async (page) => {
+        await askToMove(page)
+        await confirmation(page)
+          .getByLabel(/Why are you moving on/)
+          .fill("Daniel Osei will sign off on Monday; the scope will not change before then.")
+      },
+    },
+    {
+      name: "move-reason-invalid",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: async (page) => {
+        await askToMove(page)
+        await confirmation(page).getByRole("button", { name: "Move with items open" }).click()
+        await confirmation(page).getByRole("alert").waitFor()
+      },
+    },
+    // The page thought nothing was open; the API found one, so the reason is asked for then.
+    {
+      name: "move-stale-409",
+      path: ATLAS_FNOL,
+      ready: (page) => page.getByText(/Ready to leave Scope/),
+      staleChecklist: true,
+      ...TOP,
+      act: async (page) => {
+        await button(page, "Move to Access").click()
+        await confirmation(page).getByRole("button", { name: "Move", exact: true }).click()
+        await confirmation(page)
+          .getByLabel(/Why are you moving on/)
+          .waitFor()
+      },
+    },
+  ]
+}
 
 const FINE = ["1440", "1024"]
 const ONE = { sizes: ["1440", "390"], themes: ["light"] }
@@ -534,7 +639,7 @@ export const screens = [
     ...SCOPE,
     act: async (page) => {
       await toScope(page)
-      await button(page, "Record sign-off").click()
+      await scopeCard(page).getByRole("button", { name: "Record sign-off", exact: true }).click()
       await dialog(page, "Record sign-off").waitFor()
     },
   },
@@ -556,7 +661,7 @@ export const screens = [
     ...ONE,
     act: async (page) => {
       await toScope(page)
-      await button(page, "Record sign-off").click()
+      await scopeCard(page).getByRole("button", { name: "Record sign-off", exact: true }).click()
       const box = dialog(page, "Record sign-off")
       await box.getByLabel("Signed off by").selectOption({ label: "Daniel Osei, Champion" })
       await box.getByRole("button", { name: "Record sign-off", exact: true }).click()
@@ -579,6 +684,10 @@ export const screens = [
       await box.getByRole("alert").waitFor()
     },
   },
+
+  // The stage checklist and the move that asks for a reason. The checklist sits under the stage
+  // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.
+  ...checklistScreens(),
 
   { name: "run-review", path: `${DISPATCH}/runs/run_k2`, ready: (page) => page.getByRole("main") },
   {

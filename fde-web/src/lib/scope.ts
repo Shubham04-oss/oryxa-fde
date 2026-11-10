@@ -218,4 +218,6 @@ export async function commitSignOff(client: QueryClient, scope: ProjectScope, si
 export async function commitFreshScope(client: QueryClient, scope: ProjectScope, fresh: ScopeOut) {
   await client.cancelQueries({ queryKey: projectKey(scope) })
   client.setQueryData(projectKey(scope), (old) => old && { ...old, scope: fresh })
+  // The checklist judges the scope too: a sign-off found there changes what is open.
+  void client.invalidateQueries({ queryKey: queries.stageChecklist(scope).queryKey })
 }

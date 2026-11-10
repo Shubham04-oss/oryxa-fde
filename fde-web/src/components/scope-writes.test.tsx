@@ -428,7 +428,9 @@ describe("editing a signed-off scope", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^Edit: Motor claims/ })).toHaveFocus(),
     )
-    await userEvent.click(screen.getByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
     await click(box, "Record sign-off")
@@ -448,7 +450,9 @@ describe("editing a signed-off scope", () => {
 describe("recording a sign-off", () => {
   it("asks who, offering sponsors first, and shows it once the API has recorded it", async () => {
     renderWithRouter(<ProjectPage scope={FNOL} />)
-    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     expect(box).toHaveTextContent("2 in scope, 2 out of scope, 2 success criteria")
     // Nobody at Atlas is the sponsor, so no one is chosen for them.
@@ -498,6 +502,7 @@ describe("recording a sign-off", () => {
     await api.addScopeItem(CLAIMS, { kind: "in", description: "Sort claims by cause" })
     // The page was read before; read it again as a teammate's addition would show.
     renderWithRouter(<ProjectPage scope={CLAIMS} />, { keep: true })
+    // Two pages are mounted: this waits for the one that has the item.
     await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
     const box = await dialog("Record sign-off")
     expect(box).toHaveTextContent("Nothing is listed as out of scope.")
@@ -510,6 +515,7 @@ describe("recording a sign-off", () => {
     await api.addScopeItem(CLAIMS, { kind: "in", description: "Sort claims by cause" })
     renderWithRouter(<ProjectPage scope={CLAIMS} />, { keep: true })
     wire.sent = []
+    // Two pages are mounted: this waits for the one that has the item.
     await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
     const box = await dialog("Record sign-off")
     // Mara Lindqvist is Kestrel's only sponsor.
@@ -523,7 +529,9 @@ describe("recording a sign-off", () => {
 
   it("refuses, and signs nothing, when the scope cannot be read again first", async () => {
     renderWithRouter(<ProjectPage scope={FNOL} />)
-    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
     const reread = vi.spyOn(api, "scope").mockRejectedValueOnce(new TypeError("Failed to fetch"))
@@ -541,7 +549,9 @@ describe("recording a sign-off", () => {
 
   it("refuses a scope that changed while the dialog was open, and signs nothing", async () => {
     renderWithRouter(<ProjectPage scope={FNOL} />)
-    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
     // A teammate adds something the person has not read.
@@ -561,24 +571,32 @@ describe("recording a sign-off", () => {
     ).toBeInTheDocument()
   })
 
-  it("says so when this version was signed off a moment ago by someone else", async () => {
+  it("says so when this version was signed off a moment ago by someone else, and reads the scope to show by whom", async () => {
     renderWithRouter(<ProjectPage scope={FNOL} />)
-    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
-    wire.refuse = Response.json({ error: "conflict" }, { status: 409 })
+    // A teammate signs this version while the dialog is open: the version does not move.
+    await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"))
     await click(box, "Record sign-off")
     expect(await within(box).findByRole("alert")).toHaveTextContent(
       "This version of the scope has already been signed off",
     )
+    // The card behind the dialog was read again, so it names who signed instead of "Not signed off".
     expect(
-      within(await scopeCard(true)).getByText("Not signed off", { selector: "span" }),
+      await within(await scopeCard(true)).findByText(/Signed off by Grace Holm/, {
+        selector: "span",
+      }),
     ).toBeInTheDocument()
   })
 
   it("shows the API's refusal, and keeps the choice", async () => {
     renderWithRouter(<ProjectPage scope={FNOL} />)
-    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    await userEvent.click(
+      within(await scopeCard()).getByRole("button", { name: "Record sign-off" }),
+    )
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a1")
     wire.refuse = forbidden()

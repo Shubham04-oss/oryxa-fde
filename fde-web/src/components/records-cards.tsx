@@ -55,12 +55,15 @@ export function EditRow({
 export function StakeholdersCard({
   company,
   people,
+  startOpen = false,
 }: {
   company: CompanyId
   people: Array<StakeholderOut>
+  /** Starts with the blank form open. */
+  startOpen?: boolean
 }) {
   // A person to edit, "new" for a blank form, or nothing.
-  const [open, setOpen] = useState<StakeholderOut | "new" | null>(null)
+  const [open, setOpen] = useState<StakeholderOut | "new" | null>(startOpen ? "new" : null)
   return (
     <Card
       title="Stakeholders"
