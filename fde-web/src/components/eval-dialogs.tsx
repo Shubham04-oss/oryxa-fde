@@ -354,6 +354,8 @@ export function ImportDialog({
   const [reading, setReading] = useState<CsvReading | ResultsReading | null | "busy">(null)
   const [progress, setProgress] = useState<Progress | null>(null)
   const sending = useRef<AbortController | null>(null)
+  // The file chosen last: a slower reading of one chosen before it must not stand for it.
+  const latest = useRef<File | null>(null)
   const results = kind === "results"
 
   // Leaving stops a send in flight; the API may already have it, so what it holds is read again.
@@ -365,6 +367,7 @@ export function ImportDialog({
   )
 
   async function choose(chosen: File | null) {
+    latest.current = chosen
     setFile(chosen)
     setReading(null)
     if (!chosen) return
@@ -378,8 +381,10 @@ export function ImportDialog({
     setReading("busy")
     try {
       const text = await readText(chosen)
+      if (latest.current !== chosen) return
       setReading(results ? readResults(text, suite) : readCases(text, suite))
     } catch {
+      if (latest.current !== chosen) return
       setReading({
         rows: 0,
         columns: [],

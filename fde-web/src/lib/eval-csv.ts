@@ -33,8 +33,11 @@ export type CsvReading = {
 const utf8 = new TextEncoder()
 const bytes = (s: string) => utf8.encode(s).length
 
-/** RFC 4180: quoted values, `""` for a quote, any line ending, blank lines skipped. `null` when a quote never closes. */
-export function parseCsv(text: string): Array<Array<string>> | null {
+/**
+ * RFC 4180: quoted values, `""` for a quote, any line ending, blank lines skipped. `null` when a quote never closes.
+ * It stops once it has more than `limit` records, so a file of millions of tiny rows is not all held at once.
+ */
+export function parseCsv(text: string, limit = Infinity): Array<Array<string>> | null {
   const source = text.startsWith("﻿") ? text.slice(1) : text
   const rows: Array<Array<string>> = []
   let row: Array<string> = []
@@ -53,6 +56,7 @@ export function parseCsv(text: string): Array<Array<string>> | null {
     touched = false
   }
   for (let i = 0; i < source.length; i++) {
+    if (rows.length > limit) return rows
     const c = source[i]!
     if (quoted) {
       if (c === '"') {
@@ -91,7 +95,8 @@ function readTable(
     problems.push({ row: null, text: "The file is over the 8 MB limit." })
     return null
   }
-  const parsed = parseCsv(text)
+  // The header and one row past the limit are enough to refuse a file that has too many.
+  const parsed = parseCsv(text, MAX_ROWS + 1)
   if (parsed === null) {
     problems.push({ row: null, text: "The file ends inside a quoted value." })
     return null

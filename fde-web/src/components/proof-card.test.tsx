@@ -82,6 +82,8 @@ describe("proof for each criterion", () => {
     expect(within(row).getByText("No result yet")).toBeInTheDocument()
     expect(row).toHaveTextContent("“Time to a first draft” has 10 cases and has not been run.")
     expect(row).toHaveTextContent("Run it, or import results from elsewhere.")
+    // At most 2 min, measured by a share from 0 to 1: a Met there would prove nothing, and the row says so (#193).
+    expect(row).toHaveTextContent("so every eval result meets this target, whatever it is.")
     expect(
       within(row).getByRole("button", { name: "Run Time to a first draft" }),
     ).toBeInTheDocument()
@@ -143,8 +145,9 @@ describe("proof for each criterion", () => {
     const row = await criterion("Forecasts a buyer can rely on")
     expect(within(row).getByText("Not met")).toBeInTheDocument()
     expect(row).toHaveTextContent(
-      "so at least 85 can never be met. Write the target as 0.85 instead.",
+      "for now it is compared with 85 as written, so no eval result can meet this target.",
     )
+    expect(row).not.toHaveTextContent("Write the target")
   })
 
   it("says it is not read yet when the API's verdict cannot be read, and offers to try again", async () => {

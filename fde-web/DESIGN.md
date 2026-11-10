@@ -537,13 +537,18 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     `at_least` is `>=`, `at_most` is `<=`) and when it was measured. That is the same rule that drives the stage
     checklist's "Every criterion meets its target" (`ProjectTx::criteria_met`) and the "ready to deploy" suggestion.
     The room is the customer's view, and an FDE with `work` reads it too. The heading's "1 of 3 met" is its
-    `criteria_passing`. What the page does find itself is where a value came from: the newest finished run of a suite that
-    measures the criterion (and in which some case measured it) whose rate is the API's value; if none matches, the row says
-    "from an eval run" and claims no suite. The trend is the same runs' own `passed`, `total` and `rate`.
+    `criteria_passing`. What the page does find itself is where a value came from: the API records a value in the same
+    transaction that ends the run, so the source is the run of a suite that measures the criterion whose `ended_at` is the
+    value's `measured_at` and whose rate is the value. Two runs with the same rate are told apart by that time; if no run
+    matches (the runs list is older than the verdict), the row claims no source, no suite and no case count. Inferred until
+    the API returns the run (#193). The trend is the same runs' own `passed`, `total` and `rate`.
   - **What a value is.** The API sets a criterion's value to `passed / total` for the cases that measure it, so it is a
     pass rate from 0 to 1, and compares it with the target **as written**. A target written as a percentage ("at least
-    70%") can never be met. The row says so ("A pass rate runs from 0 to 1, so at least 70 can never be met. Write the target
-    as 0.7 instead.") rather than leave a criterion failing for no reason the page can see. This is an API gap (#182).
+    70%") can never be met, and one in another unit ("at most 2 min") is met by any rate. The row says which ("An eval
+    result is the share of cases that passed, from 0 to 1, and for now it is compared with 70 as written, so no eval result
+    can meet this target." or "..., so every eval result meets this target, whatever it is.") rather than leave a verdict
+    that means nothing unexplained. It does not ask for the target to be rewritten: a criterion is written in the
+    customer's terms, and the API is to compare in the criterion's own unit (#193), when this note goes.
   - **Fresh, and out of date.** The API's `measured_at`, in words and a date. A result is **out of date** (amber, with the
     reason) when the criterion was changed after it was measured, or when it is 14 days old (`STALE_DAYS`); the verdict
     above it is still the API's.

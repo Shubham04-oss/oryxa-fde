@@ -138,7 +138,7 @@ describe("where a result came from and how it moved", () => {
     run("e1", "s1", 14, [["crt_a", 7, 12]]),
   ]
 
-  it("takes the newest finished run as the source when its rate is the API's value", () => {
+  it("takes the run that ended when the value was measured, at the API's value, as the source", () => {
     const [p] = proofs([k], [verdict(k, 0.75, true)], [s], runs, NOW)
     expect(p!.source).toMatchObject({ run: "e3", passed: 9, total: 12, imported: true })
     expect(p!.trend.map((t) => t.run)).toEqual(["e1", "e2", "e3"])
@@ -146,6 +146,21 @@ describe("where a result came from and how it moved", () => {
 
   it("does not claim a source the API's value does not match", () => {
     const [p] = proofs([k], [verdict(k, 0.5, false)], [s], runs, NOW)
+    expect(p!.source).toBeNull()
+  })
+
+  it("tells two runs with the same rate apart by when the value was measured", () => {
+    const same = [run("e5", "s1", 2, [["crt_a", 6, 8]]), ...runs]
+    // 6 of 8 and 9 of 12 are both 0.75; the API measured it when e3 ended, not e5.
+    const [p] = proofs([k], [verdict(k, 0.75, true, 1)], [s], same, NOW)
+    expect(p!.source).toMatchObject({ run: "e3", passed: 9, total: 12 })
+    const [q] = proofs([k], [verdict(k, 0.75, true, 2)], [s], same, NOW)
+    expect(q!.source).toMatchObject({ run: "e5", passed: 6, total: 8 })
+  })
+
+  it("claims no source when no run ended when the value was measured, even at the same rate", () => {
+    // The runs list is older than the verdict: a newer run measured 0.75 too.
+    const [p] = proofs([k], [verdict(k, 0.75, true, 0)], [s], runs, NOW)
     expect(p!.source).toBeNull()
   })
 
@@ -220,20 +235,30 @@ describe("how fresh a result is", () => {
 })
 
 describe("a target a pass rate cannot reach", () => {
-  it("is called out, with what to write instead", () => {
+  // ponytail: until the API compares in the criterion's own unit (#193).
+  it("is called out, without asking for the target to be rewritten", () => {
     expect(scaleNote({ comparator: "at_least", target: 70 })).toBe(
-      "A pass rate runs from 0 to 1, so at least 70 can never be met. Write the target as 0.7 instead.",
+      "An eval result is the share of cases that passed, from 0 to 1, and for now it is compared with 70 as written, so no eval result can meet this target.",
     )
-    expect(scaleNote({ comparator: "at_most", target: -1 })).toMatch(/at most -1 can never be met/)
+    expect(scaleNote({ comparator: "at_most", target: -1 })).toMatch(/so no eval result can meet/)
     expect(scaleNote({ comparator: "at_least", target: 1 })).toBeNull()
-    expect(scaleNote({ comparator: "at_most", target: 2 })).toBeNull()
+    expect(scaleNote({ comparator: "at_least", target: 0.7 })).toBeNull()
+    expect(scaleNote({ comparator: "at_most", target: 0.2 })).toBeNull()
+  })
+
+  it("says so when every pass rate meets the target, so a Met there is not read as proof", () => {
+    // "At most 2 min": a share from 0 to 1 is always at most 2.
+    expect(scaleNote({ comparator: "at_most", target: 2 })).toBe(
+      "An eval result is the share of cases that passed, from 0 to 1, and for now it is compared with 2 as written, so every eval result meets this target, whatever it is.",
+    )
+    expect(scaleNote({ comparator: "at_least", target: 0 })).toMatch(/every eval result meets/)
   })
 
   it("shows on a criterion that has a result or a suite, not on one nothing measures", () => {
     const k = criterion("crt_a", { target: 70, unit: "%" })
     const s = suite("s1", ["crt_a"])
     expect(proofs([k], [verdict(k, 0.9, false)], [s], [], NOW)[0]!.scale).toMatch(
-      /can never be met/,
+      /no eval result can meet this target/,
     )
     expect(proofs([k], [verdict(k, null, null)], [], [], NOW)[0]!.scale).toBeNull()
   })

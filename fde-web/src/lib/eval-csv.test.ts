@@ -28,6 +28,14 @@ describe("parseCsv", () => {
     expect(parseCsv('a\n""\n')).toEqual([["a"], [""]])
   })
 
+  it("stops after one record past its limit, so millions of tiny rows are not all held", () => {
+    const rows = parseCsv("a,\n".repeat(1_000_000), 10)
+    expect(rows).toHaveLength(11)
+    expect(
+      readResults("case,output\n" + "c1,x\n".repeat(1_500_000), { cases: [] }).problems,
+    ).toEqual([{ row: null, text: "The file has more than 10,000 rows." }])
+  })
+
   it("refuses a file that ends inside a quote", () => {
     expect(parseCsv('a,b\n1,"never closed')).toBeNull()
   })

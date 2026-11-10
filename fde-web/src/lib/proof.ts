@@ -63,7 +63,7 @@ export type Proof = {
   measuredAt: string | null
   /** The suites that measure it, newest first. */
   suites: ReadonlyArray<SuiteOut>
-  /** The run the value came from, when the page can tell: the newest finished run, if its rate is the API's value. */
+  /** The run the value came from, when the page can tell: the run that ended when the value was measured, at its rate. */
   source: TrendPoint | null
   /** Recent finished results, oldest first. */
   trend: ReadonlyArray<TrendPoint>
@@ -87,15 +87,17 @@ export function targetText(c: Pick<CriterionOut, "comparator" | "target" | "unit
 }
 
 /**
- * The API compares a criterion's value, a pass rate from 0 to 1, with the target as written. A target a rate can
- * never reach (at least 70, written as a percentage) is never met, so the page says so rather than leave the
- * criterion failing without a reason.
+ * The API compares a criterion's value, the share of cases that passed (0 to 1), with the target as written. A target
+ * that share can never reach ("at least 70" written as a percentage) is never met, and one it always reaches ("at
+ * most 2 min") is always met, so the page says so rather than leave a verdict that means nothing unexplained.
+ * ponytail: a workaround until the API compares in the criterion's own unit (#193); remove it then.
  */
 export function scaleNote(c: Pick<CriterionOut, "comparator" | "target">): string | null {
-  if (c.comparator === "at_least" && c.target > 1)
-    return `A pass rate runs from 0 to 1, so at least ${c.target} can never be met. Write the target as ${valueText(c.target / 100)} instead.`
-  if (c.comparator === "at_most" && c.target < 0)
-    return `A pass rate runs from 0 to 1, so at most ${c.target} can never be met.`
+  const said = `An eval result is the share of cases that passed, from 0 to 1, and for now it is compared with ${c.target} as written`
+  const never = c.comparator === "at_least" ? c.target > 1 : c.target < 0
+  const always = c.comparator === "at_least" ? c.target <= 0 : c.target >= 1
+  if (never) return `${said}, so no eval result can meet this target.`
+  if (always) return `${said}, so every eval result meets this target, whatever it is.`
   return null
 }
 
@@ -149,7 +151,6 @@ export function proofs(
         : mine.length > 0
           ? "no_result"
           : "no_suite"
-    const last = trend.at(-1) ?? null
     const days = measuredAt ? daysBetween(dayOf(measuredAt), localDay(now)) : 0
     return {
       criterion,
@@ -157,7 +158,7 @@ export function proofs(
       value,
       measuredAt,
       suites: mine,
-      source: last && value !== null && Math.abs(last.rate - value) < 1e-9 ? last : null,
+      source: value !== null && measuredAt ? sourceOf(trend, value, measuredAt) : null,
       trend: trend.slice(-TREND_POINTS),
       running: ofMine.find((r) => r.state === "running") ?? null,
       stale:
@@ -171,6 +172,21 @@ export function proofs(
       scale: value !== null || mine.length > 0 ? scaleNote(criterion) : null,
     }
   })
+}
+
+/**
+ * The run a value came from. The API records a criterion's value in the same transaction that ends the run, so its
+ * `measured_at` is that run's `ended_at` (both the transaction's `now()`): a run that ended then with the same rate
+ * is the one. Two runs with the same rate are told apart by the time; if none matches (the runs list is older than
+ * the verdict), no source is claimed. ponytail: inferred until the API returns the run (#193).
+ */
+function sourceOf(trend: ReadonlyArray<TrendPoint>, value: number, measuredAt: string) {
+  const at = Date.parse(measuredAt)
+  return (
+    trend.findLast(
+      (t) => Math.abs(t.rate - value) < 1e-9 && Math.abs(Date.parse(t.at) - at) < 1000,
+    ) ?? null
+  )
 }
 
 /** A short text a screen reader gets for the trend marks: every value, oldest first. */
