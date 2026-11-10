@@ -10,13 +10,55 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
-  # sccache cannot cache incremental builds; debug info off keeps the cache and the disk small.
+  # Incremental artifacts are useless in a restored cache and bloat it; debug info off keeps both small.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  check:
+  changes:
+    # Whether any Rust-relevant file changed. The Rust jobs skip on a job-level `if` (never workflow-level
+    # `paths:`), so a required check still reports. main pushes always run everything.
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # On a PR HEAD is the merge commit, so HEAD^1..HEAD is exactly the PR's changes.
+          rust=true
+          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD); then
+            echo "$files"
+            if ! grep -Eq '^(crates/|vendor/|Cargo\.|rust-toolchain\.toml$|deny\.toml$|schema/|\.github/)' <<<"$files"; then
+              rust=false
+            fi
+          fi
+          # Fails closed: a diff error or any other event leaves rust=true.
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: ./.github/actions/rust-cache
+        with:
+          shared-key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -30,11 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          components: rustfmt, clippy
       - uses: ./.github/actions/rust-cache
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+        with:
+          shared-key: test
       - run: cargo test --workspace
       # A service container cannot take the serve-testing argument, so SpiceDB starts as a step.
       - name: Start SpiceDB
@@ -52,14 +92,31 @@ jobs:
         if: always()
         run: docker rm -f "spicedb-${{ github.run_id }}-${{ github.run_attempt }}" || true
 
+  # The required status check, kept under its old name. It passes when lint and test passed or were
+  # skipped (no Rust changes) and fails if either failed or was cancelled.
+  check:
+    needs: [changes, lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ needs.changes.result }} ${{ needs.lint.result }} ${{ needs.test.result }}
+        run: |
+          echo "changes lint test: $RESULTS"
+          read -r changes lint test <<<"$RESULTS"
+          [ "$changes" = success ] && { [ "$lint" = success ] || [ "$lint" = skipped ]; } && { [ "$test" = success ] || [ "$test" = skipped ]; }
+
   platform-base:
     # The vendored base must still build and pass its own unit tests at the pinned commit.
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - uses: ./.github/actions/rust-cache
         with:
+          shared-key: platform-base
           workspaces: vendor/oryxa-platform -> target
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
@@ -133,6 +190,8 @@ jobs:
           fi
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

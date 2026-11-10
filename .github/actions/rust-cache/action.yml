@@ -1,22 +1,21 @@
 name: rust-cache
 description: >-
-  Compile cache for Rust jobs on GitHub-hosted runners. sccache stores compiled crates in the
-  GitHub Actions cache; rust-cache keeps the cargo registry.
+  Cargo registry and compiled dependency cache for Rust jobs on GitHub-hosted runners. One cache entry
+  per job (shared-key); only main saves it, pull requests restore main's.
 inputs:
+  shared-key:
+    description: Cache key for this job. Give each job its own, so a job has exactly one entry.
+    required: true
   workspaces:
     description: Cargo workspaces to cache, as rust-cache takes them
     default: ". -> target"
 runs:
   using: composite
   steps:
-    - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-    - name: Use sccache for compiles
-      shell: bash
-      run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         workspaces: ${{ inputs.workspaces }}
-        # sccache already caches compiled crates; keep the Actions cache for the registry.
-        cache-targets: "false"
+        shared-key: ${{ inputs.shared-key }}
+        cache-targets: "true"
+        # PRs only restore: a PR run never writes, so the 10 GB repo limit holds main's entries, not PR churn.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
