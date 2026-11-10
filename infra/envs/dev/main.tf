@@ -17,7 +17,16 @@ locals {
   # and its task role may connect as that user only. No database password exists for services.
   # The migrator owns the tables; only the one-off migrate task may connect as it, never the API.
   db_name = "oryxa_fde"
-  db_user = { api = "oryxa_fde_api", migrate = "oryxa_fde_migrator", spicedb = "spicedb" }
+  # The workers each have a login of their own (lead decision on #130: none connects as oryxa_fde_api).
+  # mcp's is created by the bootstrap now; its service comes later.
+  db_user = {
+    api       = "oryxa_fde_api"
+    migrate   = "oryxa_fde_migrator"
+    spicedb   = "spicedb"
+    ingest    = "oryxa_fde_ingest"
+    lifecycle = "oryxa_fde_lifecycle"
+    mcp       = "oryxa_fde_mcp"
+  }
   db_user_arn = {
     for k, u in local.db_user : k => "arn:aws:rds-db:${local.region}:${local.account}:dbuser:${module.db.resource_id}/${u}"
   }
@@ -43,6 +52,11 @@ locals {
   realtime_on  = local.agent_on && var.realtime_url != null
   github_on    = var.github_app != null
   slack_on     = var.slack_client_id != null
+
+  # The lifecycle worker exists only once a drafting model is chosen (variables.tf, update_model); the digest
+  # is on within it while digest_from is set. Ingest has no such switch: document search needs no model of ours.
+  lifecycle_on = var.update_model != null
+  digest_on    = local.lifecycle_on && var.digest_from != null
 
   # Slack bot tokens are created by the API at run time, one secret per workspace, under this prefix
   # (SLACK_SECRET_PREFIX, which the code wants as oryxa-fde/<env>/slack/). Not OpenTofu's, so teardown leaves them.
@@ -114,6 +128,7 @@ locals {
       AGENT_REGION        = local.agent_region
     } : {},
     local.realtime_on ? { REALTIME_URL = var.realtime_url } : {},
+    var.workos_issuer != null ? { WORKOS_ISSUER = var.workos_issuer } : {},
     local.github_on ? {
       GITHUB_APP_ID    = var.github_app.app_id
       GITHUB_APP_SLUG  = var.github_app.slug
@@ -126,7 +141,36 @@ locals {
     } : {},
   )
 
-  # The API service and the one-off migrate task run the same image, at the sha last deployed (deploy.tf).
+  # The workers verify every event with the API's public signing key and read their own queue (infra/README.md,
+  # the contracts of oryxa-fde-ingest and oryxa-fde-lifecycle, read from their binaries). Each connects as its own
+  # database login. No secret: the public key is not one, and the queue url is a name.
+  worker_environment = {
+    AWS_REGION        = local.region
+    DB_HOST           = module.db.address
+    DB_PORT           = tostring(module.db.port)
+    DB_NAME           = local.db_name
+    EVENT_SIGNING_KID = var.event_signing_kid
+    EVENT_PUBLIC_KEY  = var.event_public_key
+  }
+  ingest_environment = merge(local.worker_environment, {
+    DB_USER            = local.db_user["ingest"]
+    DOCUMENTS_BUCKET   = module.data_bucket.name
+    EMBEDDING_PROVIDER = "bedrock"
+    EMBEDDING_MODEL    = var.embedding_model
+    INGEST_QUEUE_URL   = module.queue["context-ingestion"].url
+  })
+  lifecycle_environment = merge(
+    local.worker_environment,
+    {
+      DB_USER             = local.db_user["lifecycle"]
+      UPDATE_MODEL        = var.update_model
+      LIFECYCLE_QUEUE_URL = module.queue["lifecycle"].url
+    },
+    local.digest_on ? { DIGEST_FROM = var.digest_from, WEB_ORIGIN = "https://${module.cloudflare.web_hostname}" } : {},
+    local.slack_on ? { SLACK_SECRET_PREFIX = local.slack_prefix } : {},
+  )
+
+  # The API service, the workers and the one-off migrate task run one image, at the sha last deployed (deploy.tf).
   api_image = "${aws_ecr_repository.api.repository_url}:${data.aws_ssm_parameter.api_image_tag.insecure_value}"
 }
 
@@ -160,13 +204,16 @@ module "network" {
   name                = local.prefix
   cidr                = var.vpc_cidr
   interface_endpoints = var.interface_endpoints
-  nat_https_clients = {
+  nat_https_clients = merge({
     api      = module.api.security_group_id
     spicedb  = module.spicedb.security_group_id
     db_admin = module.db_admin.security_group_id
     migrate  = module.migrate.security_group_id
     zed      = module.zed.security_group_id
-  }
+    ingest   = module.ingest.security_group_id
+    },
+    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
+  )
   # The tunnel connector is the API task's sidecar, so the API's group is the one that dials out.
   nat_tunnel_clients = { api = module.api.security_group_id }
 }
@@ -226,18 +273,22 @@ module "db" {
   vpc_id              = module.network.vpc_id
   subnet_ids          = local.subnets
   deletion_protection = !var.allow_destroy
-  allowed_security_groups = {
+  allowed_security_groups = merge({
     api      = module.api.security_group_id
     spicedb  = module.spicedb.security_group_id
     db_admin = module.db_admin.security_group_id
     migrate  = module.migrate.security_group_id
-  }
+    ingest   = module.ingest.security_group_id
+    },
+    local.lifecycle_on ? { lifecycle = module.lifecycle[0].security_group_id } : {},
+  )
 }
 
 # ---------------------------------------------------------------- events
 
-# One FIFO queue, DLQ and undelivered queue per consumer. Each consumer's bus subscriber and its
-# receive permission arrive with the consumer (wave 2); nothing reads these queues yet.
+# One FIFO queue, DLQ and undelivered queue per consumer. The context-ingestion and lifecycle workers read
+# theirs (below). A consumer's bus subscriber is not OpenTofu's (no resource for it): infra/scripts/create-subscriber.sh
+# makes it once the queue exists (infra/README.md, Apply order).
 module "queue" {
   source            = "../../modules/sqs_fifo"
   for_each          = var.consumers
@@ -393,6 +444,216 @@ module "api" {
   }
   desired_count      = local.desired
   log_retention_days = var.log_retention_days
+}
+
+# ---------------------------------------------------------------- the queue workers
+
+# Both read one SQS FIFO queue with no inbound network at all, reach AWS and Slack through the NAT, and run the API's
+# image under their own entrypoint. ECS has no health endpoint to ask: a worker's process is its health, so it is
+# an essential container and ECS replaces the task when it exits (a worker that is alive but stuck is not detected;
+# the queue's heartbeat and 15 minute ceiling in oryxa-fde-events inbox.rs bound a stuck message, not a stuck loop).
+# A deploy replaces a task in place (single_task): the queue holds events meanwhile, and two consumers never
+# overlap. stop_timeout 120 is Fargate's longest wait after SIGTERM: on SIGTERM a worker stops receiving and finishes
+# the message in hand (#150, oryxa-fde-events shutdown.rs). Past 120 s it is killed, and the message comes back after
+# its visibility timeout, which the handlers allow (idempotent).
+
+# oryxa-fde-ingest: `fde.document.uploaded.v1` in, text, chunks and embeddings in the database out. Reads the
+# document from S3 under <tenant>/<company>/documents/<id> (oryxa-fde-context blob.rs `document_key`), never writes
+# S3, and embeds with the one model in the region. It runs its own binary as a child to extract text (rlimits, no
+# environment), by its own path, so the root filesystem stays read-only and nothing is written.
+data "aws_iam_policy_document" "ingest" {
+  statement {
+    sid       = "ConnectAsOwnUser"
+    actions   = ["rds-db:connect"]
+    resources = [local.db_user_arn["ingest"]]
+  }
+
+  # oryxa-fde-events inbox.rs: receive (long poll), delete when handled, extend visibility while a handler runs.
+  # Not the dead-letter queue: SQS moves messages there, the worker never touches it.
+  statement {
+    sid       = "ReadItsQueue"
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
+    resources = [module.queue["context-ingestion"].arn]
+  }
+
+  statement {
+    sid       = "ReadCompanyDocuments"
+    actions   = ["s3:GetObject"]
+    resources = ["${module.data_bucket.arn}/*/*/documents/*"]
+  }
+
+  # Reading an object under the bucket's KMS encryption needs Decrypt only, and only through S3.
+  statement {
+    sid       = "DocumentKeyViaS3"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.this.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${local.region}.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "EmbedOnTheConfiguredModel"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${local.region}::foundation-model/${var.embedding_model}"]
+  }
+}
+
+module "ingest" {
+  source              = "../../modules/fargate_service"
+  name                = "${local.prefix}-ingest"
+  service_name        = "oryxa-fde-ingest"
+  cluster_arn         = aws_ecs_cluster.this.arn
+  container_name      = "ingest"
+  image               = local.api_image
+  ecr_repository_arns = [aws_ecr_repository.api.arn]
+  entry_point         = ["/usr/local/bin/oryxa-fde-ingest"]
+  cpu                 = var.ingest_cpu
+  memory              = var.ingest_memory
+  environment         = local.ingest_environment
+  kms_key_arn         = aws_kms_key.this.arn
+  vpc_id              = module.network.vpc_id
+  subnet_ids          = local.subnets
+  egress              = merge(local.https_out, local.db_out)
+  task_policies       = { ingest = data.aws_iam_policy_document.ingest.json }
+  desired_count       = local.desired
+  single_task         = true
+  stop_timeout        = 120
+  log_retention_days  = var.log_retention_days
+}
+
+# oryxa-fde-lifecycle: lifecycle events in, rules applied in the database; every hour it drafts last week's update
+# for each active project that has none, and mails each newly approved update to the customer's sponsors. Calls
+# Bedrock (the drafting model), SES (the digest) and, for approved updates, Slack with a bot token it reads from
+# Secrets Manager. Exists only with update_model.
+data "aws_iam_policy_document" "lifecycle" {
+  count = local.lifecycle_on ? 1 : 0
+
+  statement {
+    sid       = "ConnectAsOwnUser"
+    actions   = ["rds-db:connect"]
+    resources = [local.db_user_arn["lifecycle"]]
+  }
+
+  statement {
+    sid       = "ReadItsQueue"
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
+    resources = [module.queue["lifecycle"].arn]
+  }
+
+  # The three statements AWS documents for a global inference profile (docs.aws.amazon.com/bedrock, "Global
+  # cross-Region inference", IAM policy requirements), for this one profile and the model behind it. An SCP that
+  # denies Regions refuses the unspecified-Region statement's call.
+  statement {
+    sid       = "DraftThroughTheProfile"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${local.region}:${local.account}:inference-profile/${var.update_model}"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [local.region]
+    }
+  }
+
+  statement {
+    sid       = "DraftOnTheModelInRegion"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${local.region}::foundation-model/${trimprefix(var.update_model, "global.")}"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [local.region]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "bedrock:InferenceProfileArn"
+      values   = ["arn:aws:bedrock:${local.region}:${local.account}:inference-profile/${var.update_model}"]
+    }
+  }
+
+  statement {
+    sid       = "DraftOnTheGlobalModel"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:::foundation-model/${trimprefix(var.update_model, "global.")}"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = ["unspecified"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "bedrock:InferenceProfileArn"
+      values   = ["arn:aws:bedrock:${local.region}:${local.account}:inference-profile/${var.update_model}"]
+    }
+  }
+
+  # digest.rs sends with SES v2 SendEmail from one address; the identity is that address or its domain.
+  dynamic "statement" {
+    for_each = local.digest_on ? [1] : []
+    content {
+      sid     = "SendTheDigest"
+      actions = ["ses:SendEmail"]
+      resources = [
+        "arn:aws:ses:${local.region}:${local.account}:identity/${var.digest_from}",
+        "arn:aws:ses:${local.region}:${local.account}:identity/${split("@", var.digest_from)[1]}",
+      ]
+      condition {
+        test     = "StringEquals"
+        variable = "ses:FromAddress"
+        values   = [var.digest_from]
+      }
+    }
+  }
+
+  # Read only (integrations secrets.rs `reader`): the API makes the tokens, this worker posts with them.
+  dynamic "statement" {
+    for_each = local.slack_on ? [1] : []
+    content {
+      sid       = "ReadSlackTokens"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = ["arn:aws:secretsmanager:${local.region}:${local.account}:secret:${local.slack_prefix}*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.slack_on ? [1] : []
+    content {
+      sid       = "SlackTokenKeyViaSecretsManager"
+      actions   = ["kms:Decrypt"]
+      resources = [aws_kms_key.this.arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["secretsmanager.${local.region}.amazonaws.com"]
+      }
+    }
+  }
+}
+
+module "lifecycle" {
+  count               = local.lifecycle_on ? 1 : 0
+  source              = "../../modules/fargate_service"
+  name                = "${local.prefix}-lifecycle"
+  service_name        = "oryxa-fde-lifecycle"
+  cluster_arn         = aws_ecs_cluster.this.arn
+  container_name      = "lifecycle"
+  image               = local.api_image
+  ecr_repository_arns = [aws_ecr_repository.api.arn]
+  entry_point         = ["/usr/local/bin/oryxa-fde-lifecycle"]
+  cpu                 = var.lifecycle_cpu
+  memory              = var.lifecycle_memory
+  environment         = local.lifecycle_environment
+  kms_key_arn         = aws_kms_key.this.arn
+  vpc_id              = module.network.vpc_id
+  subnet_ids          = local.subnets
+  egress              = merge(local.https_out, local.db_out)
+  task_policies       = { lifecycle = data.aws_iam_policy_document.lifecycle[0].json }
+  desired_count       = local.desired
+  single_task         = true
+  stop_timeout        = 120
+  log_retention_days  = var.log_retention_days
 }
 
 data "aws_iam_policy_document" "spicedb" {

@@ -82,6 +82,7 @@ variables {
   data_bucket_name       = "oryxa-fde-dev-data-mock"
   cloudtrail_bucket_name = "oryxa-fde-dev-trail-mock"
   api_image_tag          = "mock"
+  event_public_key       = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAeD7ALX9Ai3wKqTW5j3PPVxO+N1jj78yHWjpmf7FnHOQ=\n-----END PUBLIC KEY-----\n"
 
   company_key_operator_arns = ["arn:aws:iam::000000000000:user/operator"]
 }
@@ -957,4 +958,385 @@ run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
     condition     = cloudflare_zero_trust_access_application.admin.domain == "admin.fde-dev.example.com"
     error_message = "Access sits in front of the admin hostname"
   }
+}
+
+# ---------------------------------------------------------------- the queue workers (#130)
+
+# oryxa-fde-ingest and oryxa-fde-lifecycle: each its own database login, its own queue, only the calls its binary
+# makes (read from the code, infra/README.md), no inbound network. The ingest worker has no model of ours to wait
+# for, so it exists by default; the lifecycle worker waits for update_model.
+run "workers_with_the_defaults" {
+  command = apply
+
+  # Every login the workers use is made by the bootstrap and listed with its use in the README.
+  assert {
+    condition = alltrue([
+      for u in values(local.db_user) :
+      strcontains(file("${path.module}/../../sql/01-bootstrap.sql"), u) && strcontains(file("${path.module}/../../README.md"), "| `${u}` |")
+    ])
+    error_message = "every database login in local.db_user is created by infra/sql/01-bootstrap.sql and in the README's Database logins table"
+  }
+
+  # ---- ingest: who it signs in as, what it reads, what it may call
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.ingest.statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_ingest"] && local.ingest_environment.DB_USER == "oryxa_fde_ingest"
+    error_message = "the ingest worker connects as oryxa_fde_ingest only: no worker takes the API's login"
+  }
+  assert {
+    condition = toset(flatten([for s in data.aws_iam_policy_document.ingest.statement : s.actions])) == toset([
+      "rds-db:connect", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility",
+      "s3:GetObject", "kms:Decrypt", "bedrock:InvokeModel",
+    ])
+    error_message = "ingest: receive, delete and extend messages of its queue, read documents, decrypt through S3, embed: nothing else (no S3 write, no SQS send, no generate-data-key)"
+  }
+  assert {
+    condition = (
+      flatten([for s in data.aws_iam_policy_document.ingest.statement : s.resources if s.sid == "ReadItsQueue"]) == [module.queue["context-ingestion"].arn]
+      && flatten([for s in data.aws_iam_policy_document.ingest.statement : s.resources if s.sid == "ReadCompanyDocuments"]) == ["${module.data_bucket.arn}/*/*/documents/*"]
+      && flatten([for s in data.aws_iam_policy_document.ingest.statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"]) == ["arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0"]
+    )
+    error_message = "ingest reads its own queue, <tenant>/<company>/documents/ keys (blob.rs) and the one embedding model in the region"
+  }
+  assert {
+    condition = (
+      jsonencode([for s in data.aws_iam_policy_document.ingest.statement : [for c in s.condition : c.values] if s.sid == "DocumentKeyViaS3"]) == jsonencode([[["s3.ap-south-1.amazonaws.com"]]])
+      && alltrue([for s in data.aws_iam_policy_document.ingest.statement : !contains(s.resources, "*")])
+    )
+    error_message = "the document key is usable only through S3, and no statement takes a bare wildcard resource"
+  }
+
+  # ---- ingest: network, container and rollout
+  assert {
+    condition = (
+      length(module.ingest.ingress_sources) == 0
+      && module.ingest.egress_names == toset(["https", "postgres"])
+      && alltrue([for c in module.ingest.containers : length(try(c.portMappings, [])) == 0])
+    )
+    error_message = "no security group admits anything to a worker, it publishes no port, and it dials out only to HTTPS (through the NAT) and the database"
+  }
+  assert {
+    condition = (
+      [for c in module.ingest.containers : c.name] == ["ingest"]
+      && module.ingest.containers[0].entryPoint == ["/usr/local/bin/oryxa-fde-ingest"]
+      && startswith(module.ingest.containers[0].image, "${aws_ecr_repository.api.repository_url}:")
+      && module.ingest.containers[0].essential && module.ingest.containers[0].readonlyRootFilesystem
+    )
+    error_message = "one essential container, from the backend image under its own entrypoint, with a read-only root"
+  }
+  assert {
+    condition = (
+      try(module.ingest.containers[0].healthCheck, null) == null
+      && module.ingest.containers[0].stopTimeout == 120
+      && module.ingest.containers[0].logConfiguration.options["awslogs-group"] == "/ecs/oryxa-fde-dev-ingest"
+    )
+    error_message = "a worker's health is its process (no health endpoint), it gets Fargate's longest stop timeout, and it logs to its own group"
+  }
+  assert {
+    condition     = module.ingest.deployment.minimum_healthy_percent == 0 && module.ingest.deployment.maximum_percent == 100 && local.desired == 0
+    error_message = "a deploy replaces the worker in place (two consumers never overlap), and it runs 0 tasks until start_services"
+  }
+  assert {
+    condition = (
+      !contains(module.ingest.env_names, "DATABASE_URL") && length(module.ingest.secret_env_names) == 0
+      && local.ingest_environment.INGEST_QUEUE_URL == module.queue["context-ingestion"].url
+      && local.ingest_environment.EVENT_SIGNING_KID == "k1"
+      && startswith(local.ingest_environment.EVENT_PUBLIC_KEY, "-----BEGIN PUBLIC KEY-----")
+    )
+    error_message = "IAM database auth (never DATABASE_URL), no secret, its own queue, and the public half of the signing key (public, so plain config)"
+  }
+
+  # ---- no model chosen: no lifecycle worker, and nothing that could call Bedrock for it
+  assert {
+    condition = (
+      length(module.lifecycle) == 0 && length(data.aws_iam_policy_document.lifecycle) == 0
+      && output.lifecycle_env_names == null
+    )
+    error_message = "without update_model the lifecycle worker, its role and its Bedrock permission do not exist"
+  }
+  assert {
+    condition     = output.event_subscribers.consumers == { context-ingestion = module.queue["context-ingestion"].url, lifecycle = module.queue["lifecycle"].url }
+    error_message = "create-subscriber.sh's two consumers have their queues"
+  }
+}
+
+run "contract_ingest" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    binary           = "oryxa-fde-ingest"
+    min_rows         = 10
+    plain_env_names  = run.workers_with_the_defaults.ingest_env_names.plain
+    secret_env_names = run.workers_with_the_defaults.ingest_env_names.secret
+    features         = []
+  }
+
+  assert {
+    condition     = output.table_read
+    error_message = "the ingest table in infra/README.md was not read (its heading or row format changed?)"
+  }
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "the ingest task definition and its README table disagree: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0 && length(output.injected_non_secrets) == 0
+    error_message = "no secret reaches the ingest worker; the public key is plain config"
+  }
+}
+
+# A drafting model, the digest and Slack: the lifecycle worker's permissions are what its code calls, and no more.
+run "lifecycle_worker_with_a_model_a_digest_and_slack" {
+  command = apply
+  variables {
+    update_model    = "global.anthropic.claude-opus-5-5"
+    digest_from     = "updates@example.com"
+    slack_client_id = "1234.5678"
+  }
+
+  assert {
+    condition = [
+      for r in flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if contains(s.actions, "rds-db:connect")]) :
+      regex("[^/]+$", r)
+    ] == ["oryxa_fde_lifecycle"] && local.lifecycle_environment.DB_USER == "oryxa_fde_lifecycle"
+    error_message = "the lifecycle worker connects as oryxa_fde_lifecycle only"
+  }
+  assert {
+    condition = toset([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.sid]) == toset([
+      "ConnectAsOwnUser", "ReadItsQueue", "DraftThroughTheProfile", "DraftOnTheModelInRegion", "DraftOnTheGlobalModel",
+      "SendTheDigest", "ReadSlackTokens", "SlackTokenKeyViaSecretsManager",
+    ])
+    error_message = "the lifecycle worker's statements are these eight"
+  }
+  assert {
+    condition = toset(flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.actions])) == toset([
+      "rds-db:connect", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility",
+      "bedrock:InvokeModel", "ses:SendEmail", "secretsmanager:GetSecretValue", "kms:Decrypt",
+    ])
+    error_message = "lifecycle: its queue, one model, one SES address, Slack tokens read-only: no S3, no secret write, no generate-data-key"
+  }
+  # AWS's three statements for a global inference profile, each for this one profile and its model.
+  assert {
+    condition = (
+      flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "DraftThroughTheProfile"])
+      == ["arn:aws:bedrock:ap-south-1:000000000000:inference-profile/global.anthropic.claude-opus-5-5"]
+      && flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "DraftOnTheModelInRegion"])
+      == ["arn:aws:bedrock:ap-south-1::foundation-model/anthropic.claude-opus-5-5"]
+      && flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "DraftOnTheGlobalModel"])
+      == ["arn:aws:bedrock:::foundation-model/anthropic.claude-opus-5-5"]
+    )
+    error_message = "the profile in the calling Region, the model in that Region, and the Region-less global model: the three ARNs AWS documents"
+  }
+  assert {
+    condition = (
+      jsonencode({ for s in data.aws_iam_policy_document.lifecycle[0].statement : s.sid => { for c in s.condition : c.variable => c.values } if startswith(s.sid, "Draft") }) == jsonencode({
+        DraftThroughTheProfile  = { "aws:RequestedRegion" = ["ap-south-1"] }
+        DraftOnTheModelInRegion = { "aws:RequestedRegion" = ["ap-south-1"], "bedrock:InferenceProfileArn" = ["arn:aws:bedrock:ap-south-1:000000000000:inference-profile/global.anthropic.claude-opus-5-5"] }
+        DraftOnTheGlobalModel   = { "aws:RequestedRegion" = ["unspecified"], "bedrock:InferenceProfileArn" = ["arn:aws:bedrock:ap-south-1:000000000000:inference-profile/global.anthropic.claude-opus-5-5"] }
+      })
+    )
+    error_message = "the model is reachable only through the profile, and the global statement only with an unspecified Region"
+  }
+  assert {
+    condition = (
+      jsonencode(flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "SendTheDigest"]))
+      == jsonencode(["arn:aws:ses:ap-south-1:000000000000:identity/example.com", "arn:aws:ses:ap-south-1:000000000000:identity/updates@example.com"])
+      && jsonencode([for s in data.aws_iam_policy_document.lifecycle[0].statement : [for c in s.condition : [c.variable, c.values]] if s.sid == "SendTheDigest"]) == jsonencode([[["ses:FromAddress", ["updates@example.com"]]]])
+    )
+    error_message = "mail goes out from the one configured address, through its identity or its domain's"
+  }
+  assert {
+    condition = (
+      flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.actions if s.sid == "ReadSlackTokens"]) == ["secretsmanager:GetSecretValue"]
+      && flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "ReadSlackTokens"]) == ["arn:aws:secretsmanager:ap-south-1:000000000000:secret:oryxa-fde/dev/slack/*"]
+      && flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.actions if s.sid == "SlackTokenKeyViaSecretsManager"]) == ["kms:Decrypt"]
+      && flatten([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.resources if s.sid == "ReadItsQueue"]) == [module.queue["lifecycle"].arn]
+    )
+    error_message = "Slack tokens are read, never written, under the prefix only; the queue is its own"
+  }
+  assert {
+    condition = alltrue([
+      for s in data.aws_iam_policy_document.lifecycle[0].statement : !contains(s.resources, "*") && !anytrue([for r in s.resources : endswith(r, "/*") && !strcontains(r, "slack/")])
+    ])
+    error_message = "no statement of the lifecycle role takes a bare wildcard resource"
+  }
+  assert {
+    condition = (
+      module.lifecycle[0].egress_names == toset(["https", "postgres"]) && length(module.lifecycle[0].ingress_sources) == 0
+      && module.lifecycle[0].containers[0].entryPoint == ["/usr/local/bin/oryxa-fde-lifecycle"]
+      && module.lifecycle[0].containers[0].stopTimeout == 120 && try(module.lifecycle[0].containers[0].healthCheck, null) == null
+      && module.lifecycle[0].containers[0].logConfiguration.options["awslogs-group"] == "/ecs/oryxa-fde-dev-lifecycle"
+      && module.lifecycle[0].deployment.minimum_healthy_percent == 0
+    )
+    error_message = "the lifecycle worker is shaped like the ingest worker: no inbound, its own log group, replaced in place"
+  }
+  assert {
+    condition     = local.lifecycle_environment.UPDATE_MODEL == "global.anthropic.claude-opus-5-5" && local.lifecycle_environment.SLACK_SECRET_PREFIX == "oryxa-fde/dev/slack/" && local.lifecycle_environment.WEB_ORIGIN == "https://app.fde-dev.example.com"
+    error_message = "the model, the Slack prefix the API writes under, and the web origin of the unsubscribe page"
+  }
+}
+
+run "contract_lifecycle_with_the_digest_and_slack" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    binary           = "oryxa-fde-lifecycle"
+    min_rows         = 10
+    plain_env_names  = run.lifecycle_worker_with_a_model_a_digest_and_slack.lifecycle_env_names.plain
+    secret_env_names = run.lifecycle_worker_with_a_model_a_digest_and_slack.lifecycle_env_names.secret
+    features         = ["digest", "slack"]
+  }
+
+  assert {
+    condition     = output.table_read
+    error_message = "the lifecycle table in infra/README.md was not read"
+  }
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "the lifecycle task definition and its README table disagree: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0 && length(output.injected_non_secrets) == 0
+    error_message = "no secret reaches the lifecycle worker"
+  }
+}
+
+# A model alone: no digest, no Slack, so no SES permission, no mail variable and no Slack read.
+run "lifecycle_worker_with_only_a_model" {
+  command = apply
+  variables {
+    update_model = "global.anthropic.claude-sonnet-5-5"
+  }
+
+  assert {
+    condition = toset([for s in data.aws_iam_policy_document.lifecycle[0].statement : s.sid]) == toset([
+      "ConnectAsOwnUser", "ReadItsQueue", "DraftThroughTheProfile", "DraftOnTheModelInRegion", "DraftOnTheGlobalModel",
+    ])
+    error_message = "without digest_from or Slack the lifecycle role has no SES and no Secrets Manager statement"
+  }
+  assert {
+    condition     = !contains(keys(local.lifecycle_environment), "DIGEST_FROM") && !contains(keys(local.lifecycle_environment), "WEB_ORIGIN") && !contains(keys(local.lifecycle_environment), "SLACK_SECRET_PREFIX")
+    error_message = "the digest's and Slack's variables are set only while those are on"
+  }
+}
+
+run "contract_lifecycle_with_only_a_model" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    binary           = "oryxa-fde-lifecycle"
+    min_rows         = 10
+    plain_env_names  = run.lifecycle_worker_with_only_a_model.lifecycle_env_names.plain
+    secret_env_names = run.lifecycle_worker_with_only_a_model.lifecycle_env_names.secret
+    features         = []
+  }
+
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+}
+
+# The small things #128's review left for this issue.
+run "an_inference_profile_is_not_an_embedding_model" {
+  command = plan
+  variables {
+    embedding_model = "us.amazon.titan-embed-text-v2:0"
+  }
+  expect_failures = [var.embedding_model]
+}
+
+run "workos_issuer_is_set_only_for_a_custom_auth_domain" {
+  command = plan
+  variables {
+    workos_issuer = "https://auth.example.com/"
+  }
+
+  assert {
+    condition     = local.api_environment.WORKOS_ISSUER == "https://auth.example.com/" && !contains(keys(local.ingest_environment), "WORKOS_ISSUER")
+    error_message = "the API pins the issuer; no worker verifies WorkOS tokens"
+  }
+}
+
+run "workos_issuer_is_unset_by_default" {
+  command = plan
+
+  assert {
+    condition     = !contains(keys(local.api_environment), "WORKOS_ISSUER")
+    error_message = "the API's default issuer applies unless one is set"
+  }
+}
+
+run "rejects_a_workos_issuer_that_is_not_https" {
+  command = plan
+  variables {
+    workos_issuer = "http://auth.example.com/"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "a_drafting_model_must_be_a_global_profile" {
+  command = plan
+  variables {
+    update_model = "anthropic.claude-opus-5-5"
+  }
+  expect_failures = [var.update_model]
+}
+
+run "a_geography_profile_needs_its_own_policy_first" {
+  command = plan
+  variables {
+    update_model = "eu.anthropic.claude-opus-5-5"
+  }
+  expect_failures = [var.update_model]
+}
+
+run "the_digest_needs_the_lifecycle_worker" {
+  command = plan
+  variables {
+    digest_from = "updates@example.com"
+  }
+  expect_failures = [var.digest_from]
+}
+
+run "rejects_a_digest_sender_that_is_not_an_address" {
+  command = plan
+  variables {
+    update_model = "global.anthropic.claude-opus-5-5"
+    digest_from  = "Oryxa <updates@example.com>"
+  }
+  expect_failures = [var.digest_from]
+}
+
+run "rejects_an_event_public_key_that_is_not_a_pem_public_key" {
+  command = plan
+  variables {
+    event_public_key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n"
+  }
+  expect_failures = [var.event_public_key]
+}
+
+run "the_workers_need_their_queues" {
+  command = plan
+  variables {
+    consumers = ["lifecycle"]
+  }
+  expect_failures = [var.consumers]
 }

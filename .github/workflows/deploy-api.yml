@@ -1,5 +1,5 @@
 name: deploy-api
-# Builds oryxa-fde-api and oryxa-fde-ops for linux/arm64 into one image, pushes it to ECR, runs the
+# Builds oryxa-fde-api, oryxa-fde-ops and the two workers (ingest, lifecycle) for linux/arm64 into one image, pushes it to ECR, runs the
 # store's migrations as the one-off migrate task (oryxa-fde-ops migrate), then rolls the ECS service
 # onto the new image. Manual and dev only; AWS access is a
 # short-lived OIDC session for the deploy role (infra/envs/dev/deploy.tf). Setup: infra/README.md, Deploys.
@@ -35,16 +35,20 @@ jobs:
           sudo apt-get install -yq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-      # The service and the one-off operations (migrations) ship in one image.
+      # The service, the one-off operations (migrations) and the workers ship in one image (infra/README.md, The image).
       - name: Build
         env:
           CARGO_HOME: ${{ runner.temp }}/cargo # fresh: every crate comes from the registry for this build
           RUSTC_WRAPPER: "" # no sccache
-        run: cargo build --release --locked -p oryxa-fde-api --bin oryxa-fde-api --bin oryxa-fde-ops --target "$TARGET"
+        run: |
+          cargo build --release --locked --target "$TARGET" \
+            -p oryxa-fde-api --bin oryxa-fde-api --bin oryxa-fde-ops \
+            -p oryxa-fde-context --bin oryxa-fde-ingest \
+            -p oryxa-fde-lifecycle --bin oryxa-fde-lifecycle
       # The image's base is Debian 13 (glibc 2.41): refuse a binary that would not start on it.
       - name: Check the glibc the binaries need
         run: |
-          for bin in oryxa-fde-api oryxa-fde-ops; do
+          for bin in oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle; do
             need=$(readelf --version-info "target/$TARGET/release/$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
             echo "$bin needs glibc $need"
             [ "$(printf '%s\n2.41\n' "$need" | sort -V | tail -1)" = "2.41" ]
@@ -55,6 +59,8 @@ jobs:
           path: |
             target/${{ env.TARGET }}/release/oryxa-fde-api
             target/${{ env.TARGET }}/release/oryxa-fde-ops
+            target/${{ env.TARGET }}/release/oryxa-fde-ingest
+            target/${{ env.TARGET }}/release/oryxa-fde-lifecycle
           if-no-files-found: error
           retention-days: 1
 

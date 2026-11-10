@@ -22,6 +22,14 @@ company_key_operator_arns = ["arn:aws:iam::000000000000:user/<you>"]
 # Printed by `infra/scripts/create-event-bus.sh dev <account id> ap-south-1` (apply order step 2).
 event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/<id>"
 
+# The public half of the API's event signing key (apply order step 4): the workers verify every event with it.
+# Make the pair first: openssl genpkey -algorithm ed25519 -out event-key.pem; openssl pkey -in event-key.pem -pubout
+event_public_key = <<-EOT
+  -----BEGIN PUBLIC KEY-----
+  <the key's base64 lines>
+  -----END PUBLIC KEY-----
+EOT
+
 # The git sha of an image pushed to the ECR repository (output ecr_repository_url).
 api_image_tag = "<git sha>"
 
@@ -33,3 +41,9 @@ start_services = false
 # infra/README.md before choosing. agent_region is where the calls start from; null means aws_region.
 # agent_model  = "global.anthropic.claude-opus-5-5"
 # agent_region = null
+
+# The lifecycle worker (weekly drafts and the digest) is deployed only once a drafting model is chosen. From Mumbai
+# the current Claude models need a global. inference profile, which lets Bedrock process prompts outside India:
+# read "Where prompts are processed" in infra/README.md, and ADR 0003, before setting it. No default.
+# update_model = "global.anthropic.claude-opus-5-5"
+# digest_from  = "updates@example.com" # a verified SES identity in aws_region, out of the SES sandbox

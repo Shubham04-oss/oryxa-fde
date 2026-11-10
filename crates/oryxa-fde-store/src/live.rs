@@ -1798,7 +1798,18 @@ async fn the_bootstrap_makes_every_role_and_the_migrator_needs_no_other() {
     let made = roles_like(&mut master, &ours).await;
     assert_eq!(
         made,
-        ["api", "app", "grants", "migrator", "relay", "runtime"].map(role),
+        [
+            "api",
+            "app",
+            "grants",
+            "ingest",
+            "lifecycle",
+            "mcp",
+            "migrator",
+            "relay",
+            "runtime"
+        ]
+        .map(role),
         "the bootstrap makes every role"
     );
 
