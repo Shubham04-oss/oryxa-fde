@@ -159,6 +159,15 @@ describe("approvals", () => {
     expect(huge.permissions).toEqual([expect.objectContaining({ behavior: "deny" })]);
   });
 
+  it("refuse an input too large to match, even when the rule's pattern would not match it", async () => {
+    // `deploy` is nowhere in it: under the size bound it would be unlisted and run.
+    const fake = new FakeQuery([{ ask: "Bash", input: { command: `echo ${"x".repeat(300_000)}` } }, success]);
+    const { events, emit } = collect();
+    await runHarness(samplePack(), { home: HOME, query: fake.query, approvals: new ManualApprovals(), emit, env: {} });
+    expect(events.some((e) => e.type === "approval_request")).toBe(false);
+    expect(fake.permissions).toEqual([expect.objectContaining({ behavior: "deny" })]);
+  });
+
   it("let tools outside the approval list run without asking", async () => {
     const fake = new FakeQuery([{ ask: "Bash", input: { command: "npm test" } }, success]);
     const { events, emit } = collect();

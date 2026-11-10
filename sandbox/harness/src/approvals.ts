@@ -28,7 +28,8 @@ export function compileRules(rules: readonly ApprovalRule[]): CompiledRule[] {
 /**
  * The first rule that covers this tool call: its tool name, and its pattern over the command (`Bash`) or any string
  * value in the input. Never over key names: the harnesses name the same input differently (`file_path` and `path`).
- * An input nested too deep to walk is covered by any rule on its tool, whatever the pattern: it fails closed.
+ * An input too large to show an engineer, or nested too deep to walk, is covered by any rule on its tool, whatever
+ * the pattern, and is never matched: it fails closed.
  */
 // ponytail: matches what the tool call says; an agent can obfuscate a shell command, so a host whose use needs
 // approval should also be held at the outbound handler.
@@ -37,7 +38,12 @@ export function ruleFor(
   tool: string,
   input: Record<string, unknown>,
 ): CompiledRule | undefined {
-  const subjects = tool === "Bash" && typeof input["command"] === "string" ? [input["command"]] : strings(input);
+  const subjects =
+    inputBytes(input) > MAX_APPROVAL_INPUT_BYTES
+      ? undefined
+      : tool === "Bash" && typeof input["command"] === "string"
+        ? [input["command"]]
+        : strings(input);
   return rules.find(
     (rule) =>
       (rule.tool === "*" || rule.tool === tool) &&

@@ -185,6 +185,21 @@ describe("exec", () => {
     expect(fake.execs.map((e) => e.options?.user)).toEqual(["1001:1001", "1001:1001"]);
     expect((await api("/v1/sandboxes/org_a/cmp_1/exec", post({ argv: ["id"], user: "0:0" }))).status).toBe(400);
   });
+
+  it("reads and writes workspace files as agent, never as the image's default user", async () => {
+    await attachFake("org_a", "cmp_1");
+    await api("/v1/sandboxes/org_a/cmp_1/start", post());
+    const read = vi.spyOn(Files.prototype, "readFile").mockImplementation(async () => new Response("x"));
+    const mkdir = vi.spyOn(Files.prototype, "mkdir").mockResolvedValue();
+    const write = vi.spyOn(Files.prototype, "writeFile").mockResolvedValue();
+    expect((await api("/v1/sandboxes/org_a/cmp_1/files?path=/workspace/a.txt")).status).toBe(200);
+    const put = await api("/v1/sandboxes/org_a/cmp_1/files?path=/workspace/d/a.txt", { method: "PUT", body: "x" });
+    expect(put.status).toBe(204);
+    // The image's default user is `init`, which owns nothing: a call that named no user would fail.
+    expect(read).toHaveBeenCalledWith("/workspace/a.txt", { user: "1001:1001" });
+    expect(mkdir).toHaveBeenCalledWith("/workspace/d", { recursive: true, user: "1001:1001" });
+    expect(write).toHaveBeenCalledWith("/workspace/d/a.txt", expect.anything(), { user: "1001:1001" });
+  });
 });
 
 describe("runs", () => {
