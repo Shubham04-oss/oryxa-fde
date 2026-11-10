@@ -112,8 +112,9 @@ modes:
   record no transcript of it. What it produces comes back the way any work does: a pull request as
   a code change, test and eval results as an upload.
 
-The founder's direction is that the embedded agent is mostly OpenCode, with the Claude Agent SDK as
-an option. ADR 0004 will be amended once the embedding study reports.
+The embedded agent is mostly OpenCode, with the Claude Agent SDK as the second harness behind the
+same adapter (ADR 0004). OpenCode is switched on once it passes the recorded-session,
+hostile-repository and egress tests, and becomes the default after an eval comparison.
 
 ## 7. Milestones
 
