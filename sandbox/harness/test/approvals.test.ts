@@ -98,6 +98,14 @@ describe("approval rules on input too deep to walk", () => {
     expect(ruleFor(rules, "Write", deep(100_000))).toBeUndefined();
   });
 
+  it("matches wide input, many values under one key, without throwing", async () => {
+    const wide = { items: [...Array.from({ length: 200_000 }, () => "x"), "deploy"] };
+    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^deploy$" }]), "Write", wide)?.action).toBe(
+      "send",
+    );
+    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^never$" }]), "Write", wide)).toBeUndefined();
+  });
+
   it("is refused, not passed and not thrown, when a rule covers it", async () => {
     const rules = compileRules([{ action: "send", tool: "*", pattern: "^never$" }]);
     const emitted: unknown[] = [];

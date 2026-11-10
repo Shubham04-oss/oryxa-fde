@@ -49,16 +49,12 @@ export function ruleFor(
 const MAX_INPUT_DEPTH = 64;
 
 /** Every string value in `value`, or `undefined` when it is nested deeper than `MAX_INPUT_DEPTH`. */
-function strings(value: unknown, depth = 0): string[] | undefined {
-  if (typeof value === "string") return [value];
-  if (typeof value !== "object" || value === null) return [];
+function strings(value: unknown, found: string[] = [], depth = 0): string[] | undefined {
+  // Pushed one at a time: spreading a wide input's values into `push` overflows the stack.
+  if (typeof value === "string") found.push(value);
+  if (typeof value !== "object" || value === null) return found;
   if (depth === MAX_INPUT_DEPTH) return undefined;
-  const found: string[] = [];
-  for (const item of Object.values(value)) {
-    const inner = strings(item, depth + 1);
-    if (inner === undefined) return undefined;
-    found.push(...inner);
-  }
+  for (const item of Object.values(value)) if (strings(item, found, depth + 1) === undefined) return undefined;
   return found;
 }
 
