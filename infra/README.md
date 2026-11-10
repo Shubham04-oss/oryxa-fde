@@ -17,13 +17,18 @@ Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
        -> SpiceDB on Fargate              (spicedb.oryxa-fde-dev.internal:50051, Cloud Map, private)
        -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company)
        -> EventBridge v2 bus oryxa-fde-dev -> per-consumer SQS FIFO + DLQ + undelivered queue
+Two more Fargate tasks, queue workers with no inbound network at all (they read SQS and call out):
+  oryxa-fde-ingest    <- context-ingestion queue; S3 (read), Bedrock embeddings; RDS as oryxa_fde_ingest
+  oryxa-fde-lifecycle <- lifecycle queue; Bedrock (drafts), SES (digest), Slack tokens (read); RDS as
+                         oryxa_fde_lifecycle. Not deployed until a drafting model is chosen (update_model).
 Everything outbound (AWS APIs, image pulls, WorkOS, the tunnel) leaves through one fck-nat instance.
 CloudTrail logs management events and object access on the data bucket.
 ```
 
 Nothing in AWS accepts traffic from the internet. No security group has a CIDR ingress rule wider
 than the VPC, and the API has no public hostname. Only Workers in this Cloudflare account that
-are bound to the VPC service reach it, through the tunnel. The tunnel's connector is a second
+are bound to the VPC service reach it, through the tunnel. The workers listen on nothing, so no
+security group admits anything to them either. The tunnel's connector is a second
 container in the API's task, so it reaches the API on the task's loopback: the API listens on
 `127.0.0.1` only, and no security group admits anything to it (#145; the path used to go through
 a separate cloudflared service and an internal ALB, and "What the load balancer gave" in Deploys
@@ -33,24 +38,27 @@ says what replaced it).
 | --- | --- |
 | `modules/vpc` | VPC `10.50.0.0/16`, public and private subnets in two AZs, fck-nat instance, S3 gateway endpoint, optional interface endpoints |
 | `modules/postgres` | RDS for PostgreSQL 17, encrypted, IAM auth, `rds.force_ssl`, master password managed by RDS in Secrets Manager |
-| `modules/fargate_service` | One ARM64 main container, with optional health check and sidecars: task definition, log group, execution and task roles, security group, optional ECS service |
+| `modules/fargate_service` | One ARM64 main container, with optional health check, stop timeout and sidecars: task definition, log group, execution and task roles, security group, optional ECS service. The API, both workers, SpiceDB and the one-off tasks are all this module |
 | `modules/internal_alb` | Internal ALB, target group (`ip`), HTTP listener reachable from named security groups only. **Not used by `envs/dev` since #145**; kept, with its test, for a production environment that fronts a service with a load balancer (pair it with `fargate_service`'s `load_balancer`) |
 | `modules/s3` | Private bucket: KMS, versioned, public access blocked, TLS only; `force_destroy` for teardown only |
 | `modules/sqs_fifo` | FIFO queue, FIFO DLQ, optional undelivered queue (names and attributes match the platform's consumer kit) |
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
 | `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the API on the loopback of the tunnel's connector, Access on `admin.` |
-| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the API environment contract below); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
-| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot, plus a static `busybox` that only the container health check runs |
+| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the environment contract tables below, one per binary); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
+| `docker/oryxa-fde-api.Dockerfile` | The backend image, one for every task: the prebuilt ARM64 `oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest` and `oryxa-fde-lifecycle` on distroless Debian 13, nonroot, plus a static `busybox` that only the API's container health check runs (Deploys, The image) |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
+| `scripts/create-subscriber.sh` | Creates (or refreshes the filter of) a worker's EventBridge v2 FIFO subscriber into its queue; `test-create-subscriber.sh` tests it against a fake `aws` and checks each filter against the events the worker's code handles |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
-| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
+| `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api`, `oryxa_fde_ingest`, `oryxa_fde_lifecycle`, `oryxa_fde_mcp` and `spicedb`, the NOLOGIN roles they reach, the `spicedb` database, and a check that nothing the API or a worker reaches has owner powers |
 | `sql/02-api-owns-nothing.sql` | Once, only on a database the first bootstrap let `oryxa_fde_api` own: hands its objects to the migrator and drops its old grants |
 
-Names: the ECS service is `oryxa-fde-api` and its ECR repository is `oryxa-fde-api`. Everything
+Names: the ECS services are `oryxa-fde-api`, `oryxa-fde-ingest` and `oryxa-fde-lifecycle`, and the one
+ECR repository, which holds the backend image all of them run, is `oryxa-fde-api`. Everything
 else is `oryxa-fde-<env>-…`: the cluster `oryxa-fde-dev`, SpiceDB `oryxa-fde-dev-spicedb`, the
-one-off tasks `oryxa-fde-dev-migrate`, `-db-admin` and `-zed`, the bus `oryxa-fde-dev`, and the
-queues `oryxa-fde-dev-<consumer>.fifo`, `-dlq.fifo` and `-undelivered`.
+one-off tasks `oryxa-fde-dev-migrate`, `-db-admin` and `-zed`, the bus `oryxa-fde-dev`, the
+queues `oryxa-fde-dev-<consumer>.fifo`, `-dlq.fifo` and `-undelivered`, and a worker's task definition,
+roles and log group (`/ecs/oryxa-fde-dev-ingest`, `-lifecycle`).
 
 ## Variables
 
@@ -69,13 +77,14 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `workos_client_id` | required | WorkOS client id (public); the API key is a secret |
 | `event_bus_arn` | required | Printed by `scripts/create-event-bus.sh`; must be the `oryxa-fde-<env>` v2 bus in `aws_account_id` and `aws_region` (plan fails otherwise) |
 | `event_signing_kid` | `k1` | Key id of the API's event signing key (`EVENT_SIGNING_KID`); change it when the key rotates |
+| `event_public_key` | required | The public half of that key as a PEM (`-----BEGIN PUBLIC KEY-----`): `EVENT_PUBLIC_KEY` on both workers, which verify every event with it. Not a secret. Make the pair before the first apply (Apply order, step 4); rotate it with `event_signing_kid` |
 | `data_bucket_name` | required | Globally unique name for the customer data bucket |
 | `cloudtrail_bucket_name` | required | Globally unique name for the CloudTrail log bucket |
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
 | `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
-| `start_services` | `false` | `false`: every service (SpiceDB, the API task) runs 0 tasks. Set `true` once the image and every secret value exist |
-| `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue |
+| `start_services` | `false` | `false`: every service (SpiceDB, the API task, the workers) runs 0 tasks. Set `true` once the image and every secret value exist |
+| `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue. Must include those two: the workers read them |
 | `api_port` | `8080` | Port `oryxa-fde-api` listens on, on the task's loopback (`LISTEN_ADDR` is `127.0.0.1:<port>`); the health check and the Workers VPC service use it |
 | `api_health_check_path` | `/healthz` | Path the API container's health check polls; must answer 200 without auth |
 | `api_cpu` | `256` | CPU units of the API task, shared by the API and the cloudflared sidecar (0.25 vCPU) |
@@ -87,7 +96,12 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `vpc_cidr` | `10.50.0.0/16` | Distinct from the platform's `10.40.0.0/16`, so the two can be peered later |
 | `interface_endpoints` | `[]` | PrivateLink endpoints for AWS APIs (about $7.30/month each); empty means the NAT carries that traffic |
 | `log_retention_days` | `14` | CloudWatch retention for every task's logs |
-| `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's role may invoke this model only, in `aws_region` |
+| `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's and the ingest worker's roles may invoke this model only, in `aws_region`. A foundation model id: an inference-profile id (`us.`, `eu.`, `global.`...) is refused, since the permission names the model's ARN |
+| `workos_issuer` | `null` | `WORKOS_ISSUER` on the API: set it only when the WorkOS environment has a custom auth domain, because the API pins every token's `iss` to it. Null: the API's default, `https://api.workos.com/` |
+| `ingest_cpu`, `ingest_memory` | `512`, `2048` | The ingest worker's task. It holds each document in memory and extracts its text in a child limited to 1 GiB of address space (`child.rs`), so memory is the figure to watch |
+| `lifecycle_cpu`, `lifecycle_memory` | `256`, `512` | The lifecycle worker's task |
+| `update_model` | `null` | The Bedrock inference profile that drafts the weekly updates (`UPDATE_MODEL`). **No default, and no model is chosen**: while it is null the lifecycle worker is not deployed (no task definition, role, service or Bedrock permission). Only a `global.` profile is accepted; read Where prompts are processed before setting it |
+| `digest_from` | `null` | The address the weekly digest is sent from (`DIGEST_FROM`); null: no digest. Needs `update_model`, and the address or its domain must be a verified SES identity in `aws_region` (Verify before apply) |
 | `sandbox_gateway_url` | `null` | Gateway Worker's URL (`SANDBOX_GATEWAY_URL`), known after `deploy-workers`. Null: agent and eval routes are not mounted, and the next three are unused |
 | `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url`. In Mumbai the Claude models need an inference profile, and which one decides where prompts are processed (Where prompts are processed) |
 | `agent_region` | `null` | The Region the agent's Bedrock calls start from (`AGENT_REGION`); null means `aws_region`. Set it only to call a geography profile from a Region inside that geography |
@@ -131,9 +145,9 @@ Slack bot tokens are not in this list: the API creates one secret per workspace 
 `oryxa-fde/<env>/slack/` (`SLACK_SECRET_PREFIX`), and its role may touch that prefix only. Teardown
 leaves them behind; delete them by hand.
 
-No service has a database password: the API, the migrate task and SpiceDB connect with IAM
-database auth, as `oryxa_fde_api`, `oryxa_fde_migrator` and `spicedb`, and each task role may
-`rds-db:connect` as its own user only.
+No service has a database password: the API, the workers, the migrate task and SpiceDB connect with IAM
+database auth, as `oryxa_fde_api`, `oryxa_fde_ingest`, `oryxa_fde_lifecycle`, `oryxa_fde_migrator` and
+`spicedb`, and each task role may `rds-db:connect` as its own user only (no worker connects as the API).
 
 ## Database logins
 
@@ -141,6 +155,9 @@ database auth, as `oryxa_fde_api`, `oryxa_fde_migrator` and `spicedb`, and each 
 | --- | --- | --- |
 | `oryxa_fde_migrator` | the one-off migrate task (`oryxa-fde-ops migrate`) | own and change the FDE tables; grant `oryxa_fde_app`, `oryxa_fde_relay` and `oryxa_fde_grants` onward (admin option), no CREATEROLE; nothing else connects as it |
 | `oryxa_fde_api` | the API service | member of `oryxa_fde_runtime` only: `SET LOCAL ROLE` to `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants` per transaction, inheriting none; `connect` and `usage` only; owns nothing, creates nothing |
+| `oryxa_fde_ingest` | the ingest worker | member of `oryxa_fde_app` only, not inherited: `SET LOCAL ROLE` per transaction; `connect` and `usage` only; owns nothing |
+| `oryxa_fde_lifecycle` | the lifecycle worker | member of `oryxa_fde_app` and `oryxa_fde_grants` (its cross-tenant scan, `store/src/engine.rs:443`), neither inherited; otherwise as the ingest login |
+| `oryxa_fde_mcp` | the MCP server (not deployed yet; its login exists so its service needs no bootstrap change) | member of `oryxa_fde_app` only, as the ingest login |
 | `spicedb` | SpiceDB | its own `spicedb` database only |
 | RDS master | the db-admin task | the bootstrap SQL |
 
@@ -148,13 +165,22 @@ The NOLOGIN roles come from the bootstrap, so no login needs CREATEROLE: `oryxa_
 `oryxa_fde_relay` (each transaction's role), `oryxa_fde_grants` (the SpiceDB grant reconciler's) and
 `oryxa_fde_runtime`, which migration 0003 makes a member of the other three without inheritance.
 
-The API can never reach table ownership, CREATEROLE or BYPASSRLS: its login is not a member of the
-migrator or the master, and its task role cannot connect as the migrator (`tests/plan.tftest.hcl`
-pins both IAM sides). The bootstrap ends with a check over the API login and every role it can
-reach by `SET ROLE` or inheritance, and stops if any of them is a superuser, may create roles or
+Every login is `login nosuperuser nocreaterole nocreatedb nobypassrls`, granted `rds_iam`, `connect` on
+`oryxa_fde` and `usage` on `public`. The worker logins take their roles with `inherit false`, as
+`oryxa_fde_runtime` does, and not `oryxa_fde_relay`: only the API's outbox relay publishes. `oryxa-fde-ops
+replay-dead-events` stays on `oryxa_fde_api` (a one-off task).
+
+The API and the workers can never reach table ownership, CREATEROLE or BYPASSRLS: none of their logins is a
+member of the migrator or the master, and no task role can connect as the migrator or as another service's
+login (`tests/plan.tftest.hcl` pins both IAM sides). The bootstrap ends with a check over the API login, each
+worker login and every role any of them can reach by `SET ROLE` or inheritance, and stops if any of them is a superuser, may create roles or
 databases, bypasses row-level security, is the migrator, the master or a predefined role, owns a
 relation, a schema or the database, may create in `public`, or holds an admin option. A query the
 API runs outside a scoped transaction is refused, because it inherits no table rights.
+
+**A database bootstrapped before the workers** (#130) needs the first command only: run
+`infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql` again (Apply order, step 5) before the first
+worker starts. It is safe to re-run and adds the three worker logins; it makes no change to the others.
 
 **A database the first bootstrap set up** (the API owned its tables because it migrated at
 startup) needs this once, before the first deploy of the non-owner API (#39):
@@ -165,22 +191,22 @@ startup) needs this once, before the first deploy of the non-owner API (#39):
    `public` and its direct grants of `oryxa_fde_app` and `oryxa_fde_relay`.
 3. `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql` again: the check passes.
 
-## The API environment contract
+## The environment contract
 
-Read from the code, not from memory (each `Read at` is `file:line` in `crates/`, checked against
-`main` at `039df45`), and compared with what `envs/dev` sets. `tests/plan.tftest.hcl` reads these
-tables: every `always` variable of the API must be on its task definition, every variable the
-task definition sets must be in the table, and a secret must be injected from Secrets Manager, never set as plain
-config. Add or change a variable in the code, and the table and `envs/dev` change in the same PR.
+Read from the code, not from memory (each `Read at` is `file:line` in `crates/`; the API's table was checked
+against `main` at `039df45`, the workers' at `71c13b4`), and compared with what `envs/dev` sets. `tests/plan.tftest.hcl`
+reads the tables of `oryxa-fde-api`, `oryxa-fde-ingest` and `oryxa-fde-lifecycle`: every `always` variable of the
+binary must be on its task definition, every variable the task definition sets must be in the table, and a secret
+must be injected from Secrets Manager, never set as plain config. Add or change a variable in the code, and the table and `envs/dev` change in the same PR.
 
 Columns. **Needed**: `always`; a feature the variable belongs to (`agent`, `realtime`, `github`,
-`slack`: needed when that feature is on, and the first row of each is its switch); `optional` (the code has
+`slack`; for the lifecycle worker `digest`, `slack`: needed when that feature is on, and the first row of each is its switch); `optional` (the code has
 a default); `local only` (tests and laptops). **Kind**: `config` (plain, visible in the task definition),
 `secret` (a value; ECS injects it from Secrets Manager), `reference` (a Secrets Manager name or KMS key
 ARN, not a value). Every task also gets its AWS identity from the task role: the SDK reads
 `AWS_REGION` and the container credentials ECS provides (`aws_config::load_from_env`). The API's
 task is two containers (the API and cloudflared), so the table below describes the `api` container
-only; the sidecar has one variable, `TUNNEL_TOKEN`.
+only; the sidecar has one variable, `TUNNEL_TOKEN`. A worker task is one container.
 
 ### `oryxa-fde-api`
 
@@ -209,7 +235,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:108` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
-| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:55` | not set |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:55` | `workos_issuer`; not set when null |
 | `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:68` | not set; add a secret when rotating |
 | `RUST_LOG` | optional | config | `info` | `main.rs:40` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:301` | never set |
@@ -260,29 +286,104 @@ Entrypoint `/usr/local/bin/oryxa-fde-ops` in the API image.
 | Subcommand | Variables (Read at) | In dev |
 | --- | --- | --- |
 | `migrate` | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` as `oryxa_fde_migrator`, and `AWS_REGION` (`store/src/lib.rs:261`, `iam.rs:82`); `MIGRATION_DATABASE_URL` for local runs only (`lib.rs:267`) | the `oryxa-fde-dev-migrate` task sets all five; its role may connect as the migrator only |
-| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:299`, `ops.rs:30`) | not deployed: no task definition |
+| `replay-dead-events [tenant]` | `DB_*` as `oryxa_fde_api`, and `AWS_REGION` (`store/src/lib.rs:299`, `ops.rs:30`) | not deployed: no task definition. A one-off task, so it keeps the API's login |
+
+### `oryxa-fde-ingest`
+
+The ingest worker, entrypoint `/usr/local/bin/oryxa-fde-ingest` (the same image as the API), container `ingest` of the
+`oryxa-fde-dev-ingest` task, service `oryxa-fde-ingest`. It reads `fde.document.uploaded.v1` events from its queue and,
+for each, extracts the document's text, chunks it and stores embeddings (`context/src/ingest.rs`); only this
+worker does, so until it runs, nothing extracts, chunks or embeds an upload and the document search finds
+nothing for new ones. To extract text it runs its own binary as `extract <content-type>` in a child, by its own path, with
+hard limits and no environment (`child.rs`), so the task's variables never reach a parser of customer files. A variable
+that is missing, or not valid, stops startup.
+
+| Variable | Needed | Kind | Default | Read at | Infra |
+| --- | --- | --- | --- | --- | --- |
+| `DB_HOST` | always | config | none | `oryxa-fde-store/src/iam.rs:82` | RDS address |
+| `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
+| `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
+| `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_ingest`, its own login |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:102` | `aws_region` |
+| `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:103` | the data bucket |
+| `EVENT_SIGNING_KID` | always | config | none | `context/src/bin/ingest.rs:42` | `event_signing_kid` |
+| `EVENT_PUBLIC_KEY` | always | config | none (PEM) | `ingest.rs:44` | `event_public_key`: the public half of the API's signing key, so plain config |
+| `INGEST_QUEUE_URL` | always | config | none | `ingest.rs:46` | the `context-ingestion` queue's url |
+| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
+| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:108` | `embedding_model` |
+| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
+| `RUST_LOG` | optional | config | `info` | `ingest.rs:37` | not set |
+| `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
+
+What the ingest role may do, from what the code calls. It calls AWS only (S3, SQS, Bedrock):
+
+| Permission | Why (`Read at`) | In dev |
+| --- | --- | --- |
+| `rds-db:connect` as `oryxa_fde_ingest` | the store (`iam.rs`) | granted |
+| `sqs:ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on the `context-ingestion` queue | long poll, delete when handled, extend the message's visibility while a handler runs (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); never the dead-letter queue (SQS moves messages there) and never a send | granted |
+| `s3:GetObject` on `*/*/documents/*` | the document at `<tenant>/<company>/documents/<id>` (`context/src/blob.rs:31`, `:81`; `ingest.rs:60`). The worker builds the same blob store as the API but only calls `get`: no put, no canvas, no list, no delete | granted |
+| `kms:Decrypt` only through S3 | reading an object the bucket encrypted; no `GenerateDataKey`, since it never writes | granted |
+| `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
+
+### `oryxa-fde-lifecycle`
+
+The lifecycle worker, entrypoint `/usr/local/bin/oryxa-fde-lifecycle`, container `lifecycle` of the
+`oryxa-fde-dev-lifecycle` task, service `oryxa-fde-lifecycle`. It reads FDE events from its queue and applies the lifecycle
+rules, and every hour drafts last week's update for each active project without one and mails each newly
+approved update to the customer's sponsors (the weekly digest). **It is deployed only while `update_model` is set**:
+`UPDATE_MODEL` has no default in the code, no model is chosen, and without one the process stops at start.
+
+| Variable | Needed | Kind | Default | Read at | Infra |
+| --- | --- | --- | --- | --- | --- |
+| `DB_HOST` | always | config | none | `oryxa-fde-store/src/iam.rs:82` | RDS address |
+| `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
+| `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
+| `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_lifecycle`, its own login |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-lifecycle/src/bin/lifecycle.rs:51` | `aws_region`; the Bedrock client is built from this alone, so the profile must be one this Region can call |
+| `EVENT_SIGNING_KID` | always | config | none | `lifecycle.rs:47` | `event_signing_kid` |
+| `EVENT_PUBLIC_KEY` | always | config | none (PEM) | `lifecycle.rs:49` | `event_public_key` |
+| `UPDATE_MODEL` | always | config | none | `lifecycle.rs:52` | `update_model`: a `global.` profile (Where prompts are processed) |
+| `LIFECYCLE_QUEUE_URL` | always | config | none | `lifecycle.rs:99` | the `lifecycle` queue's url |
+| `DIGEST_FROM` | digest | config | none: no digest | `lifecycle.rs:54` | `digest_from` |
+| `WEB_ORIGIN` | digest | config | none; required with `DIGEST_FROM` | `lifecycle.rs:57` | `https://app.<domain>` |
+| `SLACK_SECRET_PREFIX` | slack | reference | none: no update posted to Slack | `lifecycle.rs:85` | `oryxa-fde/<env>/slack/`, set with `slack_client_id` |
+| `RUST_LOG` | optional | config | `info` | `lifecycle.rs:43` | not set |
+| `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
+
+What the lifecycle role may do, from what the code calls (AWS: SQS, Bedrock, SES, Secrets Manager; and Slack's API, through the integrations' host allowlist, over the NAT):
+
+| Permission | Why (`Read at`) | In dev |
+| --- | --- | --- |
+| `rds-db:connect` as `oryxa_fde_lifecycle` | the store (`iam.rs`) | granted with the worker |
+| SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on the `lifecycle` queue | as the ingest worker (`inbox.rs`) | granted with the worker |
+| `bedrock:InvokeModel` for `update_model`, in AWS's three statements for a `global.` profile: the profile in `aws_region`, the foundation model in `aws_region` only through that profile, and the Region-less foundation model only through it with `aws:RequestedRegion` `unspecified` | the drafter calls `InvokeModel` (`lifecycle/src/drafts.rs:102`); the statements are from [AWS's IAM policy for global inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html) | granted with the worker; none exists without a model |
+| `ses:SendEmail` on the identity of `digest_from` (the address and its domain) with `ses:FromAddress` equal to it | `SendEmail` of SES v2 (`lifecycle/src/digest.rs:90`) | only with `digest_from` |
+| `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt` only through Secrets Manager | reads a workspace's bot token, never writes (`integrations/src/secrets.rs:117`, `reader`) | only with `slack_client_id` |
+
+Nothing else: no S3, no secret written, no SQS send, no other model.
 
 ### Not deployed
 
-These have no image and no task definition yet; the facts for the issue that adds them. Each also needs
-`AWS_REGION` and `RUST_LOG` as above. Each reaches the database as the API does (`Store::from_env`,
-`store/src/lib.rs:299`): IAM tokens when `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are all set
-(they win over `DATABASE_URL`), else `DATABASE_URL` for local runs only; a half-set `DB_*` or a missing
-token stops startup. A task role may `rds-db:connect` as its own user only, so each worker needs its
-own login, which the bootstrap does not have yet: `oryxa_fde_ingest` and `oryxa_fde_mcp` take
-`oryxa_fde_app` only, `oryxa_fde_lifecycle` takes `oryxa_fde_app` and `oryxa_fde_grants` (its
-cross-tenant scan, `store/src/engine.rs:443`), each granted without inheritance (#129).
+`oryxa-fde-mcp` has no task definition yet, and `oryxa-fde-ops replay-dead-events` is a one-off task nobody has
+needed to define. Both reach the database as the API does (`Store::from_env`, `store/src/lib.rs:299`): IAM tokens when
+`DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are all set (they win over `DATABASE_URL`), else `DATABASE_URL` for
+local runs only; a half-set `DB_*` or a missing token stops startup. Each also needs `AWS_REGION` and `RUST_LOG`.
 
 | Binary | Variables (Read at) | Permissions it will need |
 | --- | --- | --- |
-| `oryxa-fde-ingest` | `DB_*` as its own login (`oryxa-fde-context/src/bin/ingest.rs:39`), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:40`, as the API), `EVENT_SIGNING_KID` (`:42`), `EVENT_PUBLIC_KEY` (`:44`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:46`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as `oryxa_fde_ingest`; the queue's bus subscriber |
-| `oryxa-fde-lifecycle` | `DB_*` as its own login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as `oryxa_fde_lifecycle` |
-| `oryxa-fde-mcp` | `DB_*` as its own login (`oryxa-fde-mcp/src/bin/mcp.rs:28`), `SPICEDB_ENDPOINT` (`:30`), `SPICEDB_PRESHARED_KEY` (`:31`), `WORKOS_API_KEY` (`:35`), `WORKOS_CLIENT_ID` (`:36`), `MCP_ALLOWED_HOSTS` (`:41`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:40`); optional `WORKOS_ISSUER` (`:38`), `LISTEN_ADDR` (`:47`, default `0.0.0.0:8081`) | as the API's S3 read and embedding permissions; `rds-db:connect` as `oryxa_fde_mcp`; a route to it (its own load balancer listener or service, or a second tunnel route), which dev does not have |
-| `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
+| `oryxa-fde-mcp` | `DB_*` as `oryxa_fde_mcp` (`oryxa-fde-mcp/src/bin/mcp.rs:28`), `SPICEDB_ENDPOINT` (`:30`), `SPICEDB_PRESHARED_KEY` (`:31`), `WORKOS_API_KEY` (`:35`), `WORKOS_CLIENT_ID` (`:36`), `MCP_ALLOWED_HOSTS` (`:41`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:40`); optional `WORKOS_ISSUER` (`:38`), `LISTEN_ADDR` (`:47`, default `0.0.0.0:8081`) | the API's S3 read and embedding permissions; `rds-db:connect` as `oryxa_fde_mcp` only; a route to it (below) |
+| `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as `oryxa_fde_api` |
 
-Until the ingest worker runs, nothing extracts, chunks or embeds an uploaded document (only that
-worker does: `context/src/ingest.rs:1`, `context/src/lib.rs:124`), so M1's "document search" step
-finds nothing for new uploads.
+**How the MCP server could be reached, the smallest option** (not built: the next part of #130). It cannot ride the API's
+sidecar: that connector reaches the API on the task's loopback, and the MCP server needs its own task role and
+login (no worker connects as `oryxa_fde_api`), so it is its own task, in its own network namespace. The smallest
+route that adds no connector, no load balancer and no public hostname: run it as its own service registered in
+Cloud Map like SpiceDB (`mcp.<namespace>`), admit port 8081 from the API task's security group only (where the
+connector already runs), and add a second Workers VPC service on the same tunnel with that hostname
+(`resolver_network` the tunnel, `http_port` 8081) for the sandbox gateway Worker to bind. The cost is a Cloud Map
+instance ($0.10) and the gateway's binding. Not confirmed: that Workers VPC accepts a hostname resolved through the
+tunnel, the same open question as the loopback address (Verify before apply). The other option, running it as a second
+container in the API task, was rejected: it would share the API's role and database login.
 
 ## Apply order
 
@@ -298,47 +399,94 @@ workflows (Deploys, below), not from the owner's machine.
    set as `aws_region`. It refuses any other account and prints the ARN for `event_bus_arn`.
 3. **The protected `dev` environment, before the deploy role exists.** In GitHub, Settings,
    Environments, New environment `dev`: deployment branches, selected branches, `main` only. Add the
-   `CLOUDFLARE_API_TOKEN` environment secret now or before step 12 (Deploys, below).
+   `CLOUDFLARE_API_TOKEN` environment secret now or before step 13 (Deploys, below).
 4. **First apply, nothing running.** Fill `terraform.tfvars` with `start_services = false` and any
-   `api_image_tag`, then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
+   `api_image_tag`, and `event_public_key`: make the event key pair now (`openssl genpkey -algorithm ed25519 -out event-key.pem`,
+   `openssl pkey -in event-key.pem -pubout`), put the public PEM in `terraform.tfvars` (a heredoc), and keep the private
+   file for step 6. Leave `update_model` and `digest_from` unset (Not deployed: the lifecycle worker waits for a model).
+   Then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
    `tofu -chdir=infra/envs/dev apply dev.tfplan`. This creates the network, keys, the database (about
-   10 minutes), the empty secrets, ECR, the cluster with every service at 0 tasks, queues,
-   CloudTrail, the GitHub deploy role and its two SSM parameters (and the account's GitHub OIDC
+   10 minutes), the empty secrets, ECR, the cluster with every service at 0 tasks (SpiceDB, the API and the
+   ingest worker), the queues, the event bus's delivery role, CloudTrail, the GitHub deploy role and its two SSM parameters (and the account's GitHub OIDC
    provider unless `github_oidc_provider_arn` is set), and on Cloudflare the DNS records, the
    tunnel, the VPC service and Access.
 5. **Database bootstrap.** Run `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql`. It creates
-   pgvector, the IAM logins, the API's roles and the `spicedb` database, and is safe to re-run. It
-   stops with an error if anything the API can reach has owner powers (Database logins).
+   pgvector, the IAM logins (the API's, the workers' and SpiceDB's), their roles and the `spicedb` database, and is safe to
+   re-run: **run it again after #130 on a database it already set up**, for the worker logins. It stops with an error if
+   anything the API or a worker can reach has owner powers (Database logins).
 6. **Secret values**, by hand from files you delete afterwards, never typed on a command line:
    `aws secretsmanager put-secret-value --secret-id oryxa-fde-dev/<name> --secret-string file://<file>`
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
-   WorkOS key comes from the WorkOS dashboard, and the event signing key is an Ed25519 PEM
-   (`openssl genpkey -algorithm ed25519`). Copy the tunnel token from the Cloudflare dashboard
+   WorkOS key comes from the WorkOS dashboard, and the event signing key is the private PEM of the pair
+   made in step 4 (its public half is `event_public_key`, which the workers verify events with). Copy the tunnel token from the Cloudflare dashboard
    (Zero Trust, Networks, Tunnels, `oryxa-fde-dev-api`; output `tunnel_id`).
 7. **SpiceDB datastore.** Run `infra/scripts/run-task.sh spicedb-migrate` (`datastore migrate head`,
    IAM auth).
 8. **`dev` variables.** Add the six variables to the `dev` environment (Deploys, below).
-9. **API image and migrations.** Run the `deploy-api` workflow on `main`. It pushes the image, runs
-   the store's migrations as `oryxa_fde_migrator` in the migrate task, points the service (still at
-   0 tasks) at the image, and records the sha for OpenTofu.
-10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB and the API each start one
-    task, the API's on the sha `deploy-api` recorded. The API task starts the API container first;
-    cloudflared starts once its health check on `/healthz` passes, and only then connects the tunnel.
+9. **Backend image and migrations.** Run the `deploy-api` workflow on `main`. It pushes the one backend image
+   (the API, the ingest and lifecycle workers and the migrations' binary), runs the store's migrations as
+   `oryxa_fde_migrator` in the migrate task, points the API service (still at 0 tasks) at the image, and records the
+   sha for OpenTofu. The workers are not rolled by it (Deploys, The image): they take that sha when OpenTofu applies.
+10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB, the API and the ingest worker each start one
+    task, on the sha `deploy-api` recorded. The API task starts the API container first;
+    cloudflared starts once its health check on `/healthz` passes, and only then connects the tunnel. The ingest
+    worker has no health check: it is healthy while its process runs, and its log (`/ecs/oryxa-fde-dev-ingest`)
+    says `ingesting` once it has its database, its key and its queue. Its queue stays empty until step 12.
 11. **SpiceDB schema.** Run `infra/scripts/run-task.sh spicedb-schema schema/fde.zed`. Until this
     runs, every permission check fails closed.
-12. **Workers.** Run the `deploy-workers` workflow on `main`. Then set the gateway's Worker secrets
+12. **Event subscribers for the workers.** The queues and the delivery role exist since step 4; what routes events into a
+    queue is the bus's FIFO subscriber, which OpenTofu cannot make (How events reach the workers, below). Run
+    `infra/scripts/create-subscriber.sh dev <account id> ap-south-1 context-ingestion` for the ingest worker, before the first
+    upload you want searchable: a subscriber delivers events published after it exists.
+13. **Cloudflare Workers.** Run the `deploy-workers` workflow on `main`. Then set the gateway's Worker secrets
     once, from `sandbox/gateway` (`npx wrangler secret put SERVICE_TOKEN`, and `DEV_SECRETS` per its
     README); until then the gateway refuses every call. Secrets survive later deploys.
-13. **Smoke test.** The `oryxa-fde-api` service has one running task whose `api` container reports
-    `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), the tunnel `oryxa-fde-dev-api`
+14. **Smoke test.** The `oryxa-fde-api` service has one running task whose `api` container reports
+    `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), `oryxa-fde-ingest` has one running task, the tunnel `oryxa-fde-dev-api`
     shows healthy in the Cloudflare dashboard, `https://app.<domain>` reaches the API through the
     binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
-    Then run stage A of the scripted smoke test (next section).
+    Then run stage A of the scripted smoke test (next section), and stage B, document search, with
+    `SMOKE_WORKERS=1` (it skips otherwise, because the script cannot tell a missing worker from a slow one):
+    `SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b`. If stage B times out, look in this order: the subscriber exists
+    (`aws eventsv2 list-subscribers`), the queue receives (`aws sqs get-queue-attributes`), the worker logs, the
+    dead-letter queue.
 
-When a consumer lands (wave 2), create its FIFO subscriber into `oryxa-fde-dev-<consumer>.fifo`,
-with the `-undelivered` queue as its on-failure target and `tofu output eventbus_delivery_role_arn`
-as its role (`aws eventsv2 create-subscriber`, or the platform kit's `provision` with env
-`fde-dev`). Grant its service `ReceiveMessage` on that queue only; nothing reads the queues yet.
+**The lifecycle worker, once a drafting model is chosen.** The founder's choice is recorded in ADR 0003 first
+(Where prompts are processed). Then, in this order: (1) if the digest is wanted, verify the sender's address or domain in
+SES in `aws_region` and request production access there (SES starts in a per-Region sandbox: it mails only verified
+addresses, up to 200 a day); (2) set `update_model` (a `global.` profile) and, with it, `digest_from`, and apply: that creates the
+worker's role, task definition and service, at one task when `start_services` is true; (3) run
+`infra/scripts/create-subscriber.sh dev <account id> ap-south-1 lifecycle --replay`, which also delivers what the bus
+kept of the earlier events (the handlers are idempotent). Create its subscriber only now: until the worker exists
+nothing reads that queue, and a queue forgets a message after 4 days.
+
+### How events reach the workers
+
+```
+API outbox relay -> bus oryxa-fde-dev (EventBridge v2)
+  -> FIFO subscriber oryxa-fde-dev-<consumer>   (filter: the detail types its handlers take; script)
+  -> queue oryxa-fde-dev-<consumer>.fifo        (+ -dlq.fifo after 5 receives; -undelivered if the bus cannot deliver)
+  -> the worker's long poll (inbox.rs), one message at a time, signature verified before anything is read
+```
+
+| Worker | Consumer (queue) | Detail types |
+| --- | --- | --- |
+| `oryxa-fde-ingest` | `context-ingestion` | `fde.document.uploaded.v1` |
+| `oryxa-fde-lifecycle` | `lifecycle` | `fde.access-request.status-changed.v1`, `fde.agent-run.finished.v1`, `fde.eval-run.finished.v1`, `fde.pull-request.merged.v1`, `fde.pull-request.opened.v1`, `fde.update.approved.v1` |
+
+OpenTofu makes the queues (`modules/sqs_fifo`), the delivery role (`sqs:SendMessage` on the queues and their
+`-undelivered` queues) and each worker's receive permission. It cannot make the subscriber: `hashicorp/aws` has no EventBridge v2
+resource, which is also why the bus is made by script. `infra/scripts/create-subscriber.sh` makes it with `aws eventsv2
+create-subscriber`, the way the platform consumer kit's `provision` does and with the same name, so either finds the other's:
+FIFO, a filter on exactly the detail types above, the event's group and deduplication ids, 10 retries over a day, the
+`-undelivered` queue for what still fails. Run on an existing subscriber, it refreshes the filter and nothing else.
+
+Three things to know. A subscriber delivers only what is published after it exists, unless it is created with
+`--replay`; an event published earlier is gone from the queue, though the bus keeps it for its retention (7 days). The
+filter is a copy of what the handlers take, so `test-create-subscriber.sh` reads the code's detail types and fails
+when a handler is added without its subscription. And a message a worker retries five times moves to the `-dlq.fifo`
+queue, kept for 14 days and read by hand (`aws sqs receive-message`); `oryxa-fde-ops replay-dead-events` is the
+API outbox's, not this one.
 
 ## Smoke test
 
@@ -350,7 +498,7 @@ first failure with a plain message and a non-zero exit. Needs `bash`, `curl` and
 export SMOKE_BASE_URL=https://app.<domain>               # exactly the web app's origin (the API's WEB_ORIGIN)
 export SMOKE_SESSION_FILE=~/.oryxa-smoke-session         # the session cookie, see below
 infra/scripts/smoke-test.sh a                            # stage A, the core (the default)
-SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker is deployed
+SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker runs and its subscriber exists (Apply order, steps 10 and 12)
 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh c   # stage C, once the agent routes are on
 SMOKE_WORKERS=1 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh all
 ```
@@ -419,7 +567,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
-| `deploy-api` | Builds `oryxa-fde-api` for `linux/arm64`, pushes it to ECR, runs migrations as the one-off migrate task, rolls the service onto it (the tunnel sidecar included in the new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
+| `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, rolls the API service onto it (the tunnel sidecar included in the new task; its image does not change). It does not roll the workers yet (The image) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
 | `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
@@ -449,11 +597,30 @@ AWS access and cannot assume it. The role may push to the `oryxa-fde-api` reposi
 definitions that run as the API's or the migrate task's roles only, run the migrate task, update the
 `oryxa-fde-api` service, and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it).
 
+**The image: one, with several entrypoints** (#130). The API, `oryxa-fde-ops` and the two queue workers ship in one image,
+in the one ECR repository (still named `oryxa-fde-api`; renaming it would mean a new repository, its state and the deploy
+role's grants for no gain). Each task definition picks its binary with `entryPoint` (the API is the default; the
+migrate task already did this). Why one and not one per binary:
+
+- **One version of the truth.** The API, the workers and the migrations share the store and events crates, and the schema
+  and the event types change together. One commit builds one image, so the migrate task and every service run the same
+  sha and cannot disagree. Four images could drift to four tags, and each drift is a failure that only shows at run time.
+- **One build, one pipeline.** `cargo build` compiles the shared crates once for the four binaries (the release build is
+  clean on a fresh runner every time, `docs/ci.md`), where four builds would compile them four times. One repository, one lifecycle
+  policy, one image tag in SSM, one set of push permissions on the deploy role.
+- **What it costs.** Each task carries binaries it never runs (a few tens of MB), and the workers carry the API's `busybox`.
+  That is no new permission: the task role, its entrypoint and its security group decide what a task can do, and an image holds
+  no credentials. If a worker ever needs a different base or its own release rhythm, it gets its own repository then.
+
+Until #150 and the follow-up to this PR land, **`deploy-api` rolls only the API**. A worker takes the image tag in
+`/oryxa-fde-dev/api-image-tag` when OpenTofu applies, which registers a new revision and replaces its task in place.
+After a deploy, `tofu apply` moves the workers onto the same sha.
+
 **deploy-api, step by step**
 1. `build`, a release build, so never with shared caches (`docs/ci.md`): on a clean
    GitHub-hosted runner, with the toolchain `rust-toolchain.toml` pins, no sccache and a fresh
-   `CARGO_HOME`, it cross-compiles `oryxa-fde-api` and `oryxa-fde-ops` for
-   `aarch64-unknown-linux-gnu`. It fails if either needs a newer glibc than the image's base (2.41).
+   `CARGO_HOME`, it cross-compiles the backend binaries for
+   `aarch64-unknown-linux-gnu`; it builds all four binaries. It fails if any needs a newer glibc than the image's base (2.41).
 2. `deploy`, hosted, in `dev`: reads `/oryxa-fde-dev/deploy` (names, subnets, the migrate task's
    security group; written by OpenTofu) and pushes the image tagged with the commit sha. Tags are
    immutable: a sha already in ECR is reused.
@@ -585,9 +752,10 @@ amendment). This PR changes no model setting: `agent_model` stays null, and the 
 A role that calls a `global.` profile needs the three statements AWS documents
 ([IAM policy for global inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)):
 the profile in the calling Region, the foundation model in that Region only when called through the profile, and
-the foundation model with `aws:RequestedRegion` set to `unspecified`. The API's role has none of it today, because
-the agent's Bedrock calls are signed by the gateway's outbound handler and the lifecycle worker is not deployed; the
-streams that add those identities need this, and an SCP that denies Regions will refuse the call.
+the foundation model with `aws:RequestedRegion` set to `unspecified`. The lifecycle worker's role has exactly these three
+for `update_model`, once one is set (#130). The API's role has none of it, because the agent's Bedrock calls are signed by
+the gateway's outbound handler; the stream that adds that identity needs this too, and an SCP that denies Regions will
+refuse the call.
 
 ## Monthly dev cost estimate
 
@@ -598,6 +766,8 @@ the Checked column names the offer and its publication date). Check against the 
 | Item | Assumption | $/month | Checked |
 | --- | --- | --- | --- |
 | Fargate: oryxa-fde-api (with the cloudflared sidecar), SpiceDB | 2 tasks, each 0.25 vCPU + 0.5 GB ARM64, always on ($0.02383 per vCPU-hour, $0.00261 per GB-hour: $5.30 each) | 10.60 | AmazonECS, 19 Oct |
+| Fargate: oryxa-fde-ingest | 0.5 vCPU + 2 GB ARM64, always on ($8.70 + $3.81) | 12.51 | AmazonECS, 19 Oct (the same prices) |
+| Fargate: oryxa-fde-lifecycle | 0.25 vCPU + 0.5 GB, only once `update_model` is set ($5.30, as SpiceDB's) | 0 now; 5.30 then | AmazonECS, 19 Oct |
 | RDS PostgreSQL | `db.t4g.micro` single-AZ ($0.021 an hour: $15.33), 20 GB gp3 ($0.131 a GB: $2.62), backups inside the free allowance | 18 | AmazonRDS, 29 Oct |
 | NAT instance | fck-nat on `t4g.nano` ($0.0028 an hour: $2.04), its public IPv4 ($0.005 an hour: $3.65), 8 GB gp3 root volume ($0.0912 a GB: $0.73), and an assumed 10 GB or less a month out to the internet at $0.1093 a GB | 6.50 to 8 | AmazonEC2, 7 Nov; AmazonVPC, 5 Nov; AWSDataTransfer, 3 Nov; the root volume's size and the traffic are assumptions |
 | Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 | AWSSecretsManager, 11 Sep |
@@ -606,13 +776,13 @@ the Checked column names the offer and its publication date). Check against the 
 | CloudWatch Logs | 14-day retention, about 2 to 3 GB a month ingested at $0.67 a GB, storage $0.03 a GB-month | 1.50 to 2.50 | AmazonCloudWatch, 4 Nov; the volume is an assumption |
 | CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 | AWSCloudTrail, 2 Nov |
 | S3 (data, trail logs), ECR (under 1 GB) | low volume, S3 $0.025 a GB-month, ECR $0.10 a GB-month | 0.50 to 1 | AmazonS3, 9 Nov; AmazonECR, 11 Sep |
-| SQS, EventBridge v2 | no consumer polls yet; low event volume. SQS FIFO $0.50 per million requests; EventBridge v2 is priced by data: $0.19 a GB in, $0.059 a GB out, $0.087 a GB-month retained | 0 to 1 | AWSQueueService, 11 Sep; AWSEvents, 8 Nov |
+| SQS, EventBridge v2 | two workers long-poll, 20 s each (about 130,000 receives a month each, under $0.15 together); low event volume. SQS FIFO $0.50 per million requests; EventBridge v2 is priced by data: $0.19 a GB in, $0.059 a GB out, $0.087 a GB-month retained | 0 to 1 | AWSQueueService, 11 Sep; AWSEvents, 8 Nov |
 | S3 gateway endpoint, one-off tasks | free; one-off tasks bill seconds | 0 | not rechecked (free) |
 | Cloudflare Workers Paid | needed for Sandboxes and Durable Objects anyway | 5 | not AWS; unchanged |
 | Cloudflare Tunnel, Workers VPC, Access (under 50 users), DNS | free tiers; confirm Workers VPC pricing before apply | 0 | not AWS; unchanged |
-| **Total** | excluding Bedrock tokens and sandbox container time | **about $47 to 52** | |
+| **Total** | excluding Bedrock tokens and sandbox container time, with the ingest worker and without the lifecycle worker (add $5.30 for it) | **about $60 to 65** | |
 
-With `start_services = false` the two tasks cost nothing, so the total is about $37 to 42. If the
+With `start_services = false` the tasks cost nothing, so the total is about $37 to 42. If the
 account already has a CloudTrail trail, this trail's management events add about $2 to 5 (that rate was not
 rechecked). Lines removed by #145: the internal ALB (17.50 to 19.50, `AWSELB`) and the cloudflared task
 ($5.30, now a container in the API's task that adds no Fargate line of its own), $22.80 to 24.80 in all, from
@@ -677,7 +847,25 @@ These could not be checked without an account. Each one is flagged at the place 
 - **Secrets Manager with the environment key.** `CreateSecret` with `KmsKeyId` needs `kms:GenerateDataKey` and
   `kms:Decrypt` for the caller; AWS's reference may also list `kms:DescribeKey`. The Slack statement grants
   the first two, only through Secrets Manager. The first Slack install shows whether a third is needed.
-- **Bedrock.** The API's role may `bedrock:InvokeModel` on `foundation-model/amazon.titan-embed-text-v2:0` in
+- **Event subscribers by CLI.** `create-subscriber.sh` is the platform kit's `provision` re-expressed as
+  `aws eventsv2 create-subscriber`. Its arguments pass the CLI's own client-side validation (checked offline against AWS CLI
+  2.37.12 for both a new and a replayed subscriber, and for `update-subscriber`), and its logic is tested against a fake `aws`,
+  but no call has reached a real bus: the first run answers whether the account accepts the delivery role, the
+  `{% $events.SystemMetadata... %}` group and deduplication expressions, and `--replay`'s `HORIZON`. Then upload a
+  document and watch the message arrive (`aws sqs get-queue-attributes`).
+- **SES, per Region.** The lifecycle worker mails the digest with SES v2 from `digest_from`. A new SES account in a Region
+  is in the sandbox: it sends only to verified addresses and domains, 200 messages a day. Production access is requested
+  per Region (here Mumbai) and granted by AWS, so the digest to real sponsors waits on it; until then SES refuses a
+  message to an unverified address, and the worker logs `digest mail not sent` with SES's error code and tries that mail
+  again on later hourly checks, a bounded number of times (`digest.rs`). The sender must be a verified identity in `aws_region`
+  too, and the role's `ses:SendEmail` names that identity (the address, or its domain): confirm which kind was verified.
+- **The global inference profile's policy.** The lifecycle role has AWS's three statements for a `global.` profile, as
+  AWS's page gives them (read 10 November 2026). Nothing has called Bedrock with them: check the profile's destination
+  Regions (`aws bedrock get-inference-profile`), and confirm the first draft works. An SCP that denies Regions will
+  refuse the call (the third statement's Region is `unspecified`).
+- **Worker sizing.** The ingest worker's 0.5 vCPU and 2 GiB are an estimate from the code (the extraction child may take
+  1 GiB of address space, plus the document and the process). If a large PDF ends a task with exit code 137, raise `ingest_memory`.
+- **Bedrock.** The API's and the ingest worker's roles may `bedrock:InvokeModel` on `foundation-model/amazon.titan-embed-text-v2:0` in
   `aws_region`. AWS lists the model as in-Region in Mumbai (Mumbai (ap-south-1)); confirm it works for the account
   (model access) before the first upload. The Claude models need an inference profile there, and the profile
   chosen decides where prompts are processed (Where prompts are processed).
@@ -685,7 +873,7 @@ These could not be checked without an account. Each one is flagged at the place 
   `describe-orderable-db-instance-options` command in Mumbai (ap-south-1) answers it before the first apply.
 - **`WORKOS_ISSUER`.** The code's default is `https://api.workos.com/`, pinned against the token's `iss`
   (`oryxa-authn/src/workos_jwt.rs:57`). If the WorkOS environment uses a custom auth domain, the issuer is
-  that domain and the API needs `WORKOS_ISSUER` (not set here; add it to the contract when it is known).
+  that domain: set `workos_issuer`, or every sign-in is refused.
 - **Gateway and realtime URLs** are known only after `deploy-workers`, so agent routes are switched on by a
   second apply (`sandbox_gateway_url`, `agent_model`), after the gateway's `SERVICE_TOKEN` and
   `api/sandbox-gateway-token` hold the same value.
@@ -717,6 +905,17 @@ These could not be checked without an account. Each one is flagged at the place 
   It gives code running in the container a shell and network tools it did not have (no new permission:
   nonroot, read-only root). Replace it with a health-check subcommand in `oryxa-fde-ops` (API stream) and drop
   the busybox stage.
+- `ponytail:` a queue worker has no health endpoint, so ECS judges it by its process: an essential container whose exit
+  replaces the task. A worker that is alive but stuck is not detected (the queue's heartbeat and 15 minute ceiling bound one
+  stuck message, not a stuck loop). Add a liveness signal with the graceful-shutdown work (#150) if it ever happens.
+- `ponytail:` workers stop with SIGTERM and Fargate's longest wait (`stopTimeout` 120 s), and a deploy replaces the task
+  in place, so processing pauses for the swap (the queue holds the events) and two consumers never overlap. Neither worker
+  has a graceful shutdown yet (#150): SIGTERM ends it at once, and the message it held returns after its visibility timeout
+  (120 s), which the handlers allow. The 120 s only matters once #150 lands.
+- `ponytail:` until the follow-up to #130, `deploy-api` does not roll the workers: an `apply` does, with the sha it last
+  recorded. The deploy role cannot touch a worker's service or roles.
+- `ponytail:` the workers' tasks carry the API's `busybox` and the API's binary (one image). They have no credentials of
+  the API's: each task role is its own.
 - ECR lives in the dev stack until a second environment needs it.
 
 ## Contracts with other streams
@@ -727,8 +926,11 @@ These could not be checked without an account. Each one is flagged at the place 
     service and the migrate task `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` (`oryxa_fde_api` and
     `oryxa_fde_migrator`), and each task role may `rds-db:connect` as its own login only. The API
     and `oryxa-fde-ops` sign in with IAM tokens when those four are set (`store/src/iam.rs`); local
-    and test runs keep `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). The ingest worker and the MCP
-    server do not yet (the table above).
+    and test runs keep `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). So do the workers and the MCP
+    server since #143, each as a login of its own (Database logins).
+  - **Workers (#130).** The ingest and lifecycle workers are the images' other two entrypoints; each variable they read is in
+    its table above, read from the binary. They need graceful shutdown on SIGTERM (#150) to use their 120 s stop
+    timeout; until then they stop at once and rely on redelivery.
   - **Migrations run as a one-off task, never at startup** (#32, #39). The migrate task runs
     `oryxa-fde-ops migrate` from the API's image (`/usr/local/bin/oryxa-fde-ops`, beside
     `/usr/local/bin/oryxa-fde-api`), connected as `oryxa_fde_migrator`, and exits 0 when done. The
@@ -757,8 +959,9 @@ These could not be checked without an account. Each one is flagged at the place 
 tofu fmt -check -recursive infra
 tofu -chdir=infra/envs/dev init -backend=false
 tofu -chdir=infra/envs/dev validate
-tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API task against the contract table
+tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API and worker tasks against the contract tables
 shellcheck infra/scripts/*.sh
 bash infra/scripts/test-smoke-test.sh # the smoke test against a local stub; no environment needed
+bash infra/scripts/test-create-subscriber.sh # the subscriber script against a fake aws, and its filters against the code
 actionlint                            # the deploy workflows
 ```

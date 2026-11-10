@@ -1,27 +1,39 @@
-# Test helper: checks the API task's environment against the contract table in infra/README.md ("The
-# API environment contract"), so the table cannot drift from `envs/dev` silently. Plans with no
-# provider and no resource.
+# Test helper: checks one task's environment against its contract table in infra/README.md ("The
+# API environment contract": a `### ` heading per binary), so the table cannot drift from `envs/dev`
+# silently. Plans with no provider and no resource.
+
+variable "binary" {
+  description = "The heading of the table to read, as the README writes it after `### `: oryxa-fde-api, oryxa-fde-ingest, oryxa-fde-lifecycle."
+  type        = string
+  default     = "oryxa-fde-api"
+}
+
+variable "min_rows" {
+  description = "Fewer rows than this means the table was not read."
+  type        = number
+  default     = 30
+}
 
 variable "plain_env_names" {
-  description = "Names of the plain config variables on the API task definition."
+  description = "Names of the plain config variables on the task definition."
   type        = set(string)
 }
 
 variable "secret_env_names" {
-  description = "Names of the variables the API task gets from Secrets Manager."
+  description = "Names of the variables the task gets from Secrets Manager."
   type        = set(string)
 }
 
 variable "features" {
-  description = "The optional features switched on: agent, realtime, github, slack."
+  description = "The optional features switched on: agent, realtime, github, slack (API); digest, slack (lifecycle)."
   type        = set(string)
 }
 
 locals {
   readme = file("${path.module}/../../../../README.md")
 
-  # The text under the `oryxa-fde-api` heading, up to the next one.
-  section = one([for s in split("\n### ", local.readme) : s if startswith(s, "`oryxa-fde-api`")])
+  # The text under the binary's heading, up to the next one.
+  section = one([for s in split("\n### ", local.readme) : s if startswith(s, "`${var.binary}`")])
 
   # | `NAME` | needed | kind | ... ; a name listed twice fails the plan.
   rows = {
@@ -41,15 +53,15 @@ locals {
 
 output "table_read" {
   description = "True when the table parsed: rows exist, with the values the README defines."
-  value = length(local.rows) > 30 && alltrue([
+  value = length(local.rows) > var.min_rows && alltrue([
     for name, r in local.rows :
     contains(["config", "secret", "reference"], r.kind) &&
-    alltrue([for w in r.needed : contains(["always", "agent", "realtime", "github", "slack", "optional", "local only"], w)])
+    alltrue([for w in r.needed : contains(["always", "agent", "realtime", "github", "slack", "digest", "optional", "local only"], w)])
   ])
 }
 
 output "missing" {
-  description = "Required by the API, absent from its task definition: the API would not start."
+  description = "Required by the binary, absent from its task definition: it would not start."
   value       = sort(setsubtract(local.required, local.set))
 }
 

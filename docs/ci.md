@@ -22,7 +22,7 @@ a release.
 | Rust build output and registry | `Swatinem/rust-cache` with `cache-targets: true`, one entry per job |
 | pnpm store (`fde-web`) | `actions/setup-node` with `cache: pnpm` |
 | npm (`sandbox/*`) | `actions/setup-node` with `cache: npm` |
-| OpenTofu providers | `actions/cache` on `TF_PLUGIN_CACHE_DIR` |
+| OpenTofu providers | `actions/cache/restore` on `TF_PLUGIN_CACHE_DIR` in every run; only `main` saves it (`actions/cache/save`, after `init`) |
 | Docker images | pulled each run |
 
 Rust jobs get the first row from one step after the toolchain:

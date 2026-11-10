@@ -69,6 +69,15 @@ variable "event_signing_kid" {
   default     = "k1"
 }
 
+variable "event_public_key" {
+  description = "The public half of the API's event signing key, as an Ed25519 PEM (EVENT_PUBLIC_KEY on the workers, which verify every event with it). Not a secret. Make the pair before the first apply (`openssl genpkey -algorithm ed25519 -out key.pem`, then `openssl pkey -in key.pem -pubout`): the private half goes into Secrets Manager (infra/README.md, Apply order). Rotate both and event_signing_kid together."
+  type        = string
+  validation {
+    condition     = can(regex("^-----BEGIN PUBLIC KEY-----\\s[A-Za-z0-9+/=\\s]+-----END PUBLIC KEY-----\\s*$", var.event_public_key))
+    error_message = "event_public_key must be a PEM public key (-----BEGIN PUBLIC KEY-----)."
+  }
+}
+
 variable "data_bucket_name" {
   description = "Globally unique S3 bucket name for customer files (one prefix per company)."
   type        = string
@@ -113,6 +122,10 @@ variable "consumers" {
   validation {
     condition     = alltrue([for c in var.consumers : can(regex("^[a-z0-9-]{1,40}$", c))])
     error_message = "consumer names must be [a-z0-9-]{1,40}, as the consumer kit requires."
+  }
+  validation {
+    condition     = contains(var.consumers, "lifecycle") && contains(var.consumers, "context-ingestion")
+    error_message = "consumers must include lifecycle and context-ingestion: the two workers read those queues."
   }
 }
 
@@ -186,8 +199,11 @@ variable "embedding_model" {
   type        = string
   default     = "amazon.titan-embed-text-v2:0"
   validation {
-    condition     = can(regex("^[a-z0-9-]+\\.[a-z0-9.:-]+$", var.embedding_model))
-    error_message = "embedding_model must be a foundation model id such as amazon.titan-embed-text-v2:0 (not an inference profile)."
+    condition = (
+      can(regex("^[a-z0-9-]+\\.[a-z0-9.:-]+$", var.embedding_model))
+      && !can(regex("^(us|eu|apac|global|au|jp|in|ca|us-gov)\\.", var.embedding_model))
+    )
+    error_message = "embedding_model must be a foundation model id such as amazon.titan-embed-text-v2:0, not an inference profile (us., eu., apac., global., au., jp., in., ca.): the role's permission names the foundation model's ARN, which a profile id does not make."
   }
 }
 
@@ -245,4 +261,62 @@ variable "slack_client_id" {
   description = "The Slack app's client id (public). Null: Slack routes answer 503. Its client secret and signing secret are Secrets Manager entries."
   type        = string
   default     = null
+}
+
+variable "workos_issuer" {
+  description = "The WorkOS token issuer (WORKOS_ISSUER), only for an environment with a custom auth domain: the API pins every token's `iss` to it. Null: the API's default, https://api.workos.com/."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.workos_issuer == null || can(regex("^https://[a-z0-9.-]+/?$", var.workos_issuer))
+    error_message = "workos_issuer must be an https origin, such as https://auth.example.com/."
+  }
+}
+
+# ---- the queue workers (infra/README.md, The workers)
+
+variable "ingest_cpu" {
+  description = "CPU units of the ingest worker. It reads each document into memory and extracts its text in a child process limited to 1 GiB of address space (oryxa-fde-context child.rs), so memory is what it needs."
+  type        = number
+  default     = 512
+}
+
+variable "ingest_memory" {
+  description = "Memory of the ingest worker in MiB: the document, its chunks and the 1 GiB child. Fargate allows 1024 to 4096 with 512 CPU units."
+  type        = number
+  default     = 2048
+}
+
+variable "lifecycle_cpu" {
+  type    = number
+  default = 256
+}
+
+variable "lifecycle_memory" {
+  type    = number
+  default = 512
+}
+
+variable "update_model" {
+  description = "The Bedrock inference profile that drafts the weekly updates (UPDATE_MODEL on the lifecycle worker). No default and no model is chosen yet (ADR 0003 records the choice before real customer data reaches a model): while it is null the lifecycle worker is not deployed at all, so nothing runs and no Bedrock permission exists for it. From Mumbai the current Claude models are reached only through a `global.` profile, for example `global.anthropic.claude-opus-5-5`, which lets Bedrock process prompts outside India (infra/README.md, Where prompts are processed). Only that form is accepted here: the role's three-statement policy for it is AWS's own, and a geography profile (eu., au., jp., in.) is called from another Region and needs its own statements, which come with that decision."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.update_model == null || can(regex("^global\\.[a-z0-9-]+\\.[a-z0-9.:-]+$", var.update_model))
+    error_message = "update_model must be a global. inference profile id, such as global.anthropic.claude-opus-5-5; a geography profile needs its own IAM statements."
+  }
+}
+
+variable "digest_from" {
+  description = "The email address the weekly digest is sent from (DIGEST_FROM). Null: no digest is sent. The address, or its domain, must be a verified SES identity in aws_region, and SES must be out of the sandbox there before it can mail anyone but verified addresses (infra/README.md, Verify before apply). Needs update_model: the digest runs in the lifecycle worker."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.digest_from == null || can(regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$", var.digest_from))
+    error_message = "digest_from must be a plain email address, such as updates@example.com."
+  }
+  validation {
+    condition     = var.digest_from == null || var.update_model != null
+    error_message = "digest_from needs update_model: the digest is sent by the lifecycle worker, which is deployed only with a model."
+  }
 }
