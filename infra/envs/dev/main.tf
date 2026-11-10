@@ -30,14 +30,94 @@ locals {
   https_out = { https = { port = 443, cidr = "0.0.0.0/0" } }
   db_out    = { postgres = { port = 5432, security_group_id = module.db.security_group_id } }
 
-  # Secrets Manager, one secret per value, created empty; the owner sets values by hand.
-  secrets = {
+  # Optional API features, on while their variable is set (variables.tf). Off, the API starts without
+  # them and no secret or permission for them exists.
+  agent_on    = var.sandbox_gateway_url != null
+  realtime_on = local.agent_on && var.realtime_url != null
+  github_on   = var.github_app != null
+  slack_on    = var.slack_client_id != null
+
+  # Slack bot tokens are created by the API at run time, one secret per workspace, under this prefix
+  # (SLACK_SECRET_PREFIX, which the code wants as oryxa-fde/<env>/slack/). Not OpenTofu's, so teardown leaves them.
+  slack_prefix = "oryxa-fde/${var.env}/slack/"
+
+  # Secrets Manager, one secret per value, created empty; the owner sets values by hand. The catalog
+  # holds every secret there can be; `secrets` is the ones a switched-on feature uses.
+  secret_catalog = {
     "api/workos-api-key"           = "WorkOS API key: oryxa-fde-api sign-in"
     "api/event-signing-key"        = "Event signing private key (PEM): oryxa-fde-api outbox relay"
+    "api/session-password"         = "64 hex characters that seal the session cookie: oryxa-fde-api"
+    "api/install-state-key"        = "32+ random bytes that sign GitHub and Slack install states: oryxa-fde-api"
+    "api/sandbox-gateway-token"    = "Bearer token the sandbox gateway Worker expects (its SERVICE_TOKEN): oryxa-fde-api agent runs"
+    "api/realtime-token"           = "Bearer token the realtime Worker expects: oryxa-fde-api live agent output"
+    "api/github-app-private-key"   = "GitHub App private key (PEM): oryxa-fde-api"
+    "api/github-client-secret"     = "GitHub App OAuth client secret: oryxa-fde-api"
+    "api/github-webhook-secret"    = "GitHub App webhook secret (32+ bytes): oryxa-fde-api"
+    "api/slack-client-secret"      = "Slack app client secret: oryxa-fde-api"
+    "api/slack-signing-secret"     = "Slack app signing secret (16+ bytes): oryxa-fde-api"
     "shared/spicedb-preshared-key" = "SpiceDB preshared key: SpiceDB and oryxa-fde-api"
     "cloudflared/tunnel-token"     = "Cloudflare Tunnel token: cloudflared"
   }
+
+  # Env name => secret the API task gets it from (the API contract, infra/README.md).
+  api_secrets = merge(
+    {
+      WORKOS_API_KEY        = "api/workos-api-key"
+      EVENT_SIGNING_KEY     = "api/event-signing-key"
+      SESSION_PASSWORD      = "api/session-password"
+      SPICEDB_PRESHARED_KEY = "shared/spicedb-preshared-key"
+    },
+    local.agent_on ? { SANDBOX_GATEWAY_TOKEN = "api/sandbox-gateway-token" } : {},
+    local.realtime_on ? { REALTIME_TOKEN = "api/realtime-token" } : {},
+    local.github_on ? {
+      GITHUB_APP_PRIVATE_KEY = "api/github-app-private-key"
+      GITHUB_CLIENT_SECRET   = "api/github-client-secret"
+      GITHUB_WEBHOOK_SECRET  = "api/github-webhook-secret"
+    } : {},
+    local.slack_on ? {
+      SLACK_CLIENT_SECRET  = "api/slack-client-secret"
+      SLACK_SIGNING_SECRET = "api/slack-signing-secret"
+    } : {},
+    local.github_on || local.slack_on ? { INSTALL_STATE_KEY = "api/install-state-key" } : {},
+  )
+  secrets    = { for k, d in local.secret_catalog : k => d if contains(concat(values(local.api_secrets), ["cloudflared/tunnel-token"]), k) }
   secret_arn = { for k, s in aws_secretsmanager_secret.this : k => s.arn }
+
+  # Plain configuration the API reads (the contract). Anything optional is set only when its feature is on.
+  api_environment = merge(
+    {
+      AWS_REGION         = local.region
+      LISTEN_ADDR        = "0.0.0.0:${var.api_port}"
+      DB_HOST            = module.db.address
+      DB_PORT            = tostring(module.db.port)
+      DB_NAME            = local.db_name
+      DB_USER            = local.db_user["api"]
+      SPICEDB_ENDPOINT   = local.spicedb_endpoint
+      EVENT_BUS_ARN      = var.event_bus_arn
+      EVENT_SIGNING_KID  = var.event_signing_kid
+      DOCUMENTS_BUCKET   = module.data_bucket.name
+      EMBEDDING_PROVIDER = "bedrock"
+      EMBEDDING_MODEL    = var.embedding_model
+      WORKOS_CLIENT_ID   = var.workos_client_id
+      WEB_ORIGIN         = "https://${module.cloudflare.web_hostname}"
+    },
+    local.agent_on ? {
+      SANDBOX_GATEWAY_URL = var.sandbox_gateway_url
+      AGENT_MODEL         = var.agent_model
+      AGENT_REGION        = coalesce(var.agent_region, local.region)
+    } : {},
+    local.realtime_on ? { REALTIME_URL = var.realtime_url } : {},
+    local.github_on ? {
+      GITHUB_APP_ID    = var.github_app.app_id
+      GITHUB_APP_SLUG  = var.github_app.slug
+      GITHUB_CLIENT_ID = var.github_app.client_id
+    } : {},
+    local.slack_on ? {
+      SLACK_CLIENT_ID     = var.slack_client_id
+      SLACK_SECRET_PREFIX = local.slack_prefix
+      SLACK_KMS_KEY_ID    = aws_kms_key.this.arn
+    } : {},
+  )
 
   # The API service and the one-off migrate task run the same image, at the sha last deployed (deploy.tf).
   api_image = "${aws_ecr_repository.api.repository_url}:${data.aws_ssm_parameter.api_image_tag.insecure_value}"
@@ -204,21 +284,18 @@ data "aws_iam_policy_document" "api" {
     resources = [local.db_user_arn["api"]]
   }
 
+  # What the code does with files is put and get (oryxa-fde-context blob.rs): no delete, no listing.
   statement {
     sid       = "CompanyFiles"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    actions   = ["s3:GetObject", "s3:PutObject"]
     resources = ["${module.data_bucket.arn}/tenants/*/companies/*"]
   }
 
+  # Document search embeds its query, and ingestion its text, on this one model.
   statement {
-    sid       = "ListCompanyFiles"
-    actions   = ["s3:ListBucket"]
-    resources = [module.data_bucket.arn]
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["tenants/*/companies/*"]
-    }
+    sid       = "EmbedOnTheConfiguredModel"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${local.region}::foundation-model/${var.embedding_model}"]
   }
 
   statement {
@@ -231,11 +308,39 @@ data "aws_iam_policy_document" "api" {
       values   = ["s3.${local.region}.amazonaws.com"]
     }
   }
+
+  # Slack bot tokens: the API stores, reads and deletes one secret per workspace under the prefix, and
+  # no other secret (integrations secrets.rs). The secrets use the environment key.
+  dynamic "statement" {
+    for_each = local.slack_on ? [1] : []
+    content {
+      sid = "SlackTokenSecrets"
+      actions = [
+        "secretsmanager:CreateSecret", "secretsmanager:TagResource", "secretsmanager:PutSecretValue",
+        "secretsmanager:GetSecretValue", "secretsmanager:DeleteSecret",
+      ]
+      resources = ["arn:aws:secretsmanager:${local.region}:${local.account}:secret:${local.slack_prefix}*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.slack_on ? [1] : []
+    content {
+      sid       = "SlackTokenKeyViaSecretsManager"
+      actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+      resources = [aws_kms_key.this.arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["secretsmanager.${local.region}.amazonaws.com"]
+      }
+    }
+  }
 }
 
-# Reached only through the internal ALB. Env names match crates/oryxa-fde-api/src/main.rs, except
-# the database: IAM database auth (lead decision on #37), so DB_* replace the DATABASE_URL that local
-# and test runs use; the API stream adds the token support (README).
+# Reached only through the internal ALB. The environment is the API contract in infra/README.md (read
+# from the code; tests/plan.tftest.hcl checks this task against that table), except the database: IAM
+# database auth (lead decision on #37), so DB_* replace the DATABASE_URL that local and test runs use.
 module "api" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-api"
@@ -254,26 +359,8 @@ module "api" {
   egress = merge(local.https_out, local.db_out, {
     spicedb = { port = 50051, security_group_id = module.spicedb.security_group_id }
   })
-  environment = {
-    ORYXA_ENV         = var.env
-    AWS_REGION        = local.region
-    LISTEN_ADDR       = "0.0.0.0:${var.api_port}"
-    DB_HOST           = module.db.address
-    DB_PORT           = tostring(module.db.port)
-    DB_NAME           = local.db_name
-    DB_USER           = local.db_user["api"]
-    SPICEDB_ENDPOINT  = local.spicedb_endpoint
-    EVENT_BUS_ARN     = var.event_bus_arn
-    EVENT_SIGNING_KID = var.event_signing_kid
-    DATA_BUCKET       = module.data_bucket.name
-    WORKOS_CLIENT_ID  = var.workos_client_id
-    WEB_ORIGIN        = "https://${module.cloudflare.web_hostname}"
-  }
-  secrets = {
-    WORKOS_API_KEY        = { arn = local.secret_arn["api/workos-api-key"] }
-    EVENT_SIGNING_KEY     = { arn = local.secret_arn["api/event-signing-key"] }
-    SPICEDB_PRESHARED_KEY = { arn = local.secret_arn["shared/spicedb-preshared-key"] }
-  }
+  environment        = local.api_environment
+  secrets            = { for env, k in local.api_secrets : env => { arn = local.secret_arn[k] } }
   task_policies      = { api = data.aws_iam_policy_document.api.json }
   load_balancer      = { target_group_arn = module.alb.target_group_arn }
   desired_count      = local.desired
@@ -404,7 +491,6 @@ module "migrate" {
   entry_point         = ["/usr/local/bin/oryxa-fde-ops"]
   command             = ["migrate"]
   environment = {
-    ORYXA_ENV  = var.env
     AWS_REGION = local.region
     DB_HOST    = module.db.address
     DB_PORT    = tostring(module.db.port)

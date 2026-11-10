@@ -74,3 +74,11 @@ output "data_bucket" {
 output "cloudtrail_bucket" {
   value = module.cloudtrail.bucket
 }
+
+output "api_env_names" {
+  description = "Names, never values, of the variables the API task gets: plain config and injected secrets. The contract test compares them with infra/README.md."
+  value = {
+    plain  = module.api.plain_env_names
+    secret = module.api.secret_env_names
+  }
+}
