@@ -55,6 +55,12 @@ variable "require_company_keys" {
   default     = false
 }
 
+variable "key_rotation" {
+  description = "Rotate each company key yearly. Off by default: each rotation adds a billed key version and adds little for S3 object data; switch it on per environment."
+  type        = bool
+  default     = false
+}
+
 data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
@@ -234,8 +240,8 @@ locals {
   )
 
   # ---------------------------------------------------------------- the provisioning identity
-  # May create a key, tag it, give it an alias under the fixed prefix, switch on rotation and read it
-  # back. May not use a key, change its policy, repoint or delete an alias, disable it or schedule its
+  # May create a key, tag it, give it an alias under the fixed prefix, switch on rotation (only when
+  # key_rotation is on) and read it back. May not use a key, change its policy, repoint or delete an alias, disable it or schedule its
   # deletion: it can fill the alias namespace with keys of this shape and nothing else.
   tagged_at_creation = {
     StringEquals = {
@@ -277,7 +283,7 @@ locals {
       {
         Sid       = "AndOnlyKeysTaggedAsCompanyKeys"
         Effect    = "Allow"
-        Action    = ["kms:CreateAlias", "kms:EnableKeyRotation", "kms:GetKeyRotationStatus", "kms:GetKeyPolicy", "kms:ListResourceTags", "kms:DescribeKey"]
+        Action    = concat(["kms:CreateAlias", "kms:GetKeyRotationStatus", "kms:GetKeyPolicy", "kms:ListResourceTags", "kms:DescribeKey"], var.key_rotation ? ["kms:EnableKeyRotation"] : [])
         Resource  = local.key_arns
         Condition = { StringEquals = local.company_key_tags }
       },
@@ -377,6 +383,7 @@ output "config" {
     alias_prefix         = local.alias_prefix
     tags                 = local.static_tags
     deletion_window_days = local.deletion_window_days
+    rotation             = var.key_rotation
     provisioner_role     = local.provisioner_name
     offboarder_role      = local.offboarder_name
     key_policy           = local.key_policy

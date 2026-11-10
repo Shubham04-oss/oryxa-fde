@@ -7,7 +7,7 @@
 #
 #   provision  creates the key if the company has none, and checks one that exists; safe to re-run.
 #              Run it as the provisioning role (output provisioner_role_arn); it can create, tag, name and
-#              read keys and nothing else.
+#              read keys and nothing else. Rotation is switched on only when the config's `rotation` is true.
 #   status     prints the key's state as JSON; exit 0 only for an enabled key of this company, 3 when there
 #              is none, 4 for anything else.
 #   sync       puts the current policy on an existing key (after a serving role was added or replaced).
@@ -77,6 +77,8 @@ account="$(cfg .account_id)"
 region="$(cfg .region)"
 alias_prefix="$(cfg .alias_prefix)"
 window="$(cfg .deletion_window_days)"
+# A boolean, not a truthy value: a missing or misspelt setting stops the script.
+rotation="$(cfg '.rotation | if type == "boolean" then tostring else empty end')"
 provisioner_role="$(cfg .provisioner_role)"
 offboarder_role="$(cfg .offboarder_role)"
 static_tags="$(cfg '.tags | tojson')"
@@ -166,7 +168,8 @@ do_provision() {
     [[ "$state" == Enabled ]] || die "the key of $alias is $state; an enabled key is needed (a key pending deletion can be cancelled by the offboarding role)"
     require_ours
     policy_current || die "the key of $alias has a different policy from the current one: an administrator runs 'sync' (a serving role changed?)"
-    if ! rotation_on; then
+    # Only switched on, never off: turning rotation off is an administrator's choice per key.
+    if [[ "$rotation" == true ]] && ! rotation_on; then
       say "key rotation was off; switching it on"
       write enable-key-rotation --key-id "$(key_id)"
     fi
@@ -177,7 +180,7 @@ do_provision() {
   local tag_args=() k
   while IFS= read -r k; do tag_args+=("TagKey=$k,TagValue=$(wanted_tags | jq -r --arg k "$k" '.[$k]')"); done < <(wanted_tags | jq -r 'keys[]')
   if ((dry)); then
-    say "dry run: $alias does not exist. Would create a key tagged ${tag_args[*]}, name it $alias, switch on rotation. Its policy:"
+    say "dry run: $alias does not exist. Would create a key tagged ${tag_args[*]}, name it $alias, rotation $([[ "$rotation" == true ]] && echo on || echo off). Its policy:"
     jq . <<<"$policy"
     return 0
   fi
@@ -190,11 +193,11 @@ do_provision() {
   if ! kms create-alias --alias-name "$alias" --target-key-id "$id" >/dev/null; then
     die "key $id was created but could not be named. Do not re-run (that would make a second key). Name it: aws kms create-alias --region $region --alias-name $alias --target-key-id $id"
   fi
-  kms enable-key-rotation --key-id "$id" >/dev/null
+  if [[ "$rotation" == true ]]; then kms enable-key-rotation --key-id "$id" >/dev/null; fi
   lookup || die "$alias was created but cannot be found"
   require_ours
   policy_current || die "the new key's policy differs from the current one"
-  rotation_on || die "key rotation is not on for $id"
+  if [[ "$rotation" == true ]]; then rotation_on || die "key rotation is not on for $id"; fi
   say "$alias is provisioned: key $id"
 }
 

@@ -476,6 +476,10 @@ run "company_keys_reach_the_bucket_policy_and_name_the_api_role" {
     condition     = output.company_key_alias_arn_prefix == "arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-dev/companies/"
     error_message = "the alias prefix the API stream names on write"
   }
+  assert {
+    condition     = output.company_keys.rotation == false
+    error_message = "company keys do not rotate unless company_key_rotation is set (the lead's decision on cost)"
+  }
 }
 
 run "required_company_keys_refuse_writes_that_name_no_company_key_and_stop_environment_key_writes" {

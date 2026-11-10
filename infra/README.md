@@ -73,8 +73,9 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `event_signing_kid` | `k1` | Key id of the API's event signing key (`EVENT_SIGNING_KID`); change it when the key rotates |
 | `data_bucket_name` | required | Globally unique name for the customer data bucket |
 | `cloudtrail_bucket_name` | required | Globally unique name for the CloudTrail log bucket |
-| `company_key_operator_arns` | required | IAM users or roles of the account that may assume the company-key provisioning and offboarding roles (Company keys); at least one |
+| `company_key_operator_arns` | required | IAM users or roles of the account that may assume the company-key provisioning and offboarding roles (Company keys); at least one. To start, the founder's admin role only; no MFA condition for now |
 | `company_key_reader_role_arns` | `[]` | Roles that only read company files (the ingest worker, the MCP server) once they run; each is named in every company key's policy, so adding one means `company-key.sh sync` per company with a key |
+| `company_key_rotation` | `false` | Yearly automatic rotation of each company key. Off for now (Company keys, Cost): each rotation adds a billed key version, for little gain on S3 object data. Switch it on per environment; `provision` then switches it on for each key it checks |
 | `require_company_keys` | `false` | `false`: a company file written without naming a key lands under the environment key (sample data only). `true`: S3 refuses any write that does not name a company key, and the API's role loses `kms:GenerateDataKey` on the environment key. Set it before the first real customer data and after the API names company keys on write |
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
@@ -465,7 +466,8 @@ What the script guarantees, and `test-company-key.sh` proves against a fake `aws
   refuses to run as the wrong role: `provision` as the provisioning role, `offboard` as the offboarding role.
 - **Idempotent.** An existing alias is checked, never changed: the key must be a single-Region symmetric
   customer managed key, tagged for this environment, this tenant and this company (an alias that points at another
-  company's key is refused), enabled, with the current policy. Only rotation switched off is switched back on.
+  company's key is refused), enabled, with the current policy. With `company_key_rotation` on, rotation switched off
+  is switched back on; with it off (the default), rotation is left as it is.
   A changed policy is reported, and `sync` (an administrator, not the provisioner) puts it.
 - `--dry-run` makes the reads and prints what it would write. It writes nothing.
 - A key created and not yet named (the alias call failed) is reported with the command that finishes the job.
@@ -496,21 +498,27 @@ Every company key gets this policy, with the tenant and company filled in (`modu
 - **Deletion belongs to the offboarding role.** Only it may schedule deletion, cancel it or disable the key (an
   explicit Deny for everyone else), and a wait under 30 days, the longest KMS allows, is denied for all.
 - Tags: `project=oryxa-fde`, `env`, `purpose=company-data`, `tenant`, `company`. Alias:
-  `alias/oryxa-fde-<env>/companies/<company>`. Rotation on. Waiting period 30 days.
+  `alias/oryxa-fde-<env>/companies/<company>`. Rotation off unless `company_key_rotation` is on. Waiting period 30 days.
 
 The serving roles are named in each key's policy when the key is made, so a role has to exist first, and a role
 that is replaced (a new role with the same name has a new id) or added (the ingest worker) needs `company-key.sh sync`
 for each company that has a key.
 
-**The two identities**, both assumed by the operators in `company_key_operator_arns`, for an hour:
+**The two identities**, both assumed by the operators in `company_key_operator_arns`, for an hour. That list is
+the founder's admin role only, to start (the lead's decision, 10 November 2026; no MFA condition for now): whoever
+is in it can make and retire company keys, so add a person only as you would give them account administration.
 
 | Role | May | May not |
 | --- | --- | --- |
-| `oryxa-fde-<env>-company-key-provisioner` | `kms:CreateKey` and `kms:TagResource` with exactly the five tags and `tenant` and `company` present, symmetric and single-Region only; `kms:CreateAlias` on `alias/oryxa-fde-<env>/companies/*` and only for a key tagged as this environment's company key; rotation and reads of those keys | use a key, `PutKeyPolicy`, update or delete an alias, disable, schedule deletion, create a grant, `kms:*` |
+| `oryxa-fde-<env>-company-key-provisioner` | `kms:CreateKey` and `kms:TagResource` with exactly the five tags and `tenant` and `company` present, symmetric and single-Region only; `kms:CreateAlias` on `alias/oryxa-fde-<env>/companies/*` and only for a key tagged as this environment's company key; reads of those keys, and `kms:EnableKeyRotation` only when `company_key_rotation` is on | use a key, `PutKeyPolicy`, update or delete an alias, disable, schedule deletion, create a grant, `kms:*` |
 | `oryxa-fde-<env>-company-key-offboarder` | `kms:ScheduleKeyDeletion` (30 days or more) and `kms:CancelKeyDeletion` on company keys of this environment; reads | create, tag, use |
 
 The provisioner can fill the company alias namespace with company keys and nothing else, which is what lets the
-bucket policy trust that namespace.
+bucket policy trust that namespace. Two limits on that: `CreateKey` takes its key policy from the caller and KMS has
+no condition key on a policy's content, so the provisioner chooses the policy a new key starts with (`provision`
+puts the one from the config and checks it, and `provision` and `sync` refuse or replace any other); and an account
+administrator can also create aliases there. The namespace is as trustworthy as the operators and the
+administrators.
 
 ### The bucket policy, in words, and what it cannot do
 
@@ -520,8 +528,9 @@ So the rules are split:
 
 - **The bucket policy** (`modules/company_keys`, `bucket_policy_statements`, added to `modules/s3`) refuses a
   `PutObject` that names a key outside `arn:aws:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/*`: the
-  environment key (by ARN, id or alias), another account's key and `aws/s3` are all refused, because the only
-  string that passes is an alias in the namespace the provisioner fills. It also refuses SSE-S3. With
+  environment key (by ARN, id or alias), another account's key and `aws/s3` are all refused when named, because the only
+  string that passes is an alias in the namespace the provisioner fills. (While `require_company_keys` is false, a
+  write that sends `aws:kms` with no key id gets `aws/s3` from S3: sample data only, and refused once keys are required.) It also refuses SSE-S3. With
   `require_company_keys = true` it refuses a write that names no key at all, which means the environment key by
   default, and any value but `aws:kms`.
 - **The key's own policy** is what ties a company's key to its prefix (above): a write under company B's prefix
@@ -554,7 +563,8 @@ for a company only when that check passes.
 
 ### For the API stream (and the ingest worker)
 
-Not done here (no crate changes). To be taken as its own issue; the same text is on #109.
+Not done here (no crate changes). It is issue #166; the same text is on #109. `require_company_keys` is switched on
+by the lead only after #166 merges and the deployed checks in Verify before apply pass.
 
 1. **Name the company's key on write** (`oryxa-fde-context/src/blob.rs`, `S3Blobs::put`):
    `put_object().server_side_encryption(ServerSideEncryption::AwsKms).ssekms_key_id(<alias ARN>).bucket_key_enabled(false)`,
@@ -592,7 +602,7 @@ Mumbai list prices, read on 10 November 2026 from the public price list (AWSKMS 
 requests a month free for the account. Automatic rotation adds a key version a year, and AWS charges the first and
 second rotation of a key, then no more ("Key rotation and pricing", the KMS developer guide, read the same day).
 
-| Companies with a key | Key storage, first year | After the first rotation | From the second rotation on (rotation on) | Requests at 5,000 a company a month |
+| Companies with a key | Keys a month, rotation off (the default) | With rotation on: after the first rotation | With rotation on: from the second rotation | Requests at 5,000 a company a month |
 | --- | --- | --- | --- | --- |
 | 10 | $10 | $20 | $30 | $0.09 |
 | 100 | $100 | $200 | $300 | $1.44 |
@@ -601,8 +611,9 @@ second rotation of a key, then no more ("Key rotation and pricing", the KMS deve
 The request volume is an assumption, one KMS call per object write or read, because company objects use no S3 Bucket
 Key (so the key policy can bind a key to its prefix); at 100,000 requests a company a month, 1,000 companies would be
 $300. KMS requests also show up in CloudTrail's management events, one per object access, naming the company's key and
-the object: the per-company audit trail the keys are for. Rotation off keeps $1 a key; whether to rotate is a decision
-for the lead (the rule is annual rotation; the benefit for S3 data under per-company keys is small). A key
+the object: the per-company audit trail the keys are for. Rotation is off (`company_key_rotation`, the lead's decision,
+10 November 2026), which keeps $1 a key a month: rotating triples key cost at scale for little gain on S3 object data.
+It can be switched on per environment later. A key
 pending deletion is not documented as free in the price list, so **assume it is billed until it is deleted**
 (not rechecked). KMS allows 100,000 keys a Region by default (adjustable). Nothing is billed until the first key
 exists.
@@ -892,8 +903,16 @@ These could not be checked without an account. Each one is flagged at the place 
   check is a test with sample data before `require_company_keys` is turned on:
   - **S3 compares the key header as written.** The bucket policy lets a write name only `.../alias/oryxa-fde-<env>/companies/*`,
     which works only if S3 evaluates `s3:x-amz-server-side-encryption-aws-kms-key-id` against the string in the request
-    and accepts an alias ARN in that header (the PutObject reference lists "Key ID, Key ARN, or Key Alias"; the SSE-KMS
-    guide shows the condition with a key ARN and does not say what an alias does). Test: a `PutObject` naming a company
+    and accepts an alias ARN in that header. AWS documents only the key ARN form for this condition: the SSE-KMS guide
+    ("Requiring server-side encryption", read 10 November 2026) says "To specify the KMS key, you must use a key Amazon
+    Resource Name (ARN) that is in the `arn:aws:kms:region:acct-id:key/key-id` format" and "AWS Identity and Access
+    Management does not validate if the string ... exists", which reads as a string comparison, but also "the AWS KMS
+    key ID that Amazon S3 uses for object encryption must match the AWS KMS key ID in the policy", which could mean the
+    resolved key. The PutObject reference lists "Key ID, Key ARN, or Key Alias" for the header. If S3 compares the
+    resolved key ARN, every company write is refused (closed, and the bucket half needs the fallback below before
+    `require_company_keys`). First, right after the first apply with this policy: an upload through the API with no key
+    header (today's code) still succeeds; if it is `AccessDenied`, S3 fills the condition key from the bucket default,
+    and `extra_policy_statements` comes out until the design is changed. Then: a `PutObject` naming a company
     alias ARN succeeds under a company prefix; one naming the environment key's ARN, its id or `alias/oryxa-fde-<env>` is
     `AccessDenied`. If the alias is refused, the API names the key ARN (it resolves it with `DescribeKey`) and
     the bucket policy keeps only its negative rules (refuse the environment key's ARN, no key header, other
@@ -905,6 +924,12 @@ These could not be checked without an account. Each one is flagged at the place 
     both succeed; a write under company B's prefix naming company A's alias is `AccessDenied` from KMS.
     If a Bucket Key cannot be turned off per request, the key policy's context pattern must also allow the bucket's
     ARN (`arn:aws:s3:::<bucket>`), which gives up the per-prefix binding.
+  - **A caller cannot choose `aws:s3:arn`.** S3 "appends the default encryption context of `aws:s3:arn`" to any
+    context the caller sends in `x-amz-server-side-encryption-context` (the SSE-KMS guide, Encryption context); what
+    it does when the caller's own context names `aws:s3:arn` is not documented. This one would fail open, not
+    closed, and only a serving role (which may already use every company's key) could try it. Test: a write under
+    company B's prefix naming company A's alias, with that header set to `{"aws:s3:arn": "<an object ARN under A>"}`,
+    must be refused.
   - **`DescribeKey` on an alias that does not exist** answers `NotFoundException` for the provisioning role, which
     the script reads as "no key". Its policy grants `DescribeKey` on the alias ARNs for this; if the first run
     answers `AccessDenied` instead, the script stops and says so rather than creating a key.
@@ -981,7 +1006,7 @@ These could not be checked without an account. Each one is flagged at the place 
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - **Company keys** (#109): write each company's files under its own key, and check that the company has one before
-    storing customer content (ADR 0006). The exact changes are in Company keys, "For the API stream".
+    storing customer content (ADR 0006). The exact changes are in Company keys, "For the API stream", and on issue #166.
   - It serves `GET /healthz` without auth (it does; the container health check and the deploy rely on
     it), listens where `LISTEN_ADDR` says (`127.0.0.1:<api_port>` in dev; the tunnel sidecar is its only
     client), keeps files under

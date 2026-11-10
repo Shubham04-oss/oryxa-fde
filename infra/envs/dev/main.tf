@@ -213,6 +213,7 @@ module "company_keys" {
   writer_role_arns     = [module.api.task_role_arn]
   reader_role_arns     = var.company_key_reader_role_arns
   require_company_keys = var.require_company_keys
+  key_rotation         = var.company_key_rotation
 }
 
 # Private subnets. 5432 only from the API, SpiceDB and the one-off db-admin and migrate tasks.

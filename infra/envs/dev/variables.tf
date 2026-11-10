@@ -89,6 +89,12 @@ variable "company_key_reader_role_arns" {
   default     = []
 }
 
+variable "company_key_rotation" {
+  description = "Rotate each company key yearly. Off for now: a rotation adds a billed key version (up to $3 a key a month after two) for little gain on S3 object data. Takes effect for keys made or re-provisioned after the change."
+  type        = bool
+  default     = false
+}
+
 variable "require_company_keys" {
   description = "false: a company file written without naming a key lands under the environment key, which is right for sample data only. true: S3 refuses any write that does not name a company key. Set it true before the first real customer data, and only after the API names company keys on write."
   type        = bool

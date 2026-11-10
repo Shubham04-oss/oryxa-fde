@@ -163,6 +163,23 @@ run "the_template_has_one_place_for_each_id_and_fills_in_to_one_company_prefix" 
     ) && !strcontains(replace(replace(jsonencode(output.config.key_policy), "{tenant}", "org_01H-x"), "{company}", "cmp_9"), "{tenant}") && !strcontains(replace(replace(jsonencode(output.config.key_policy), "{tenant}", "org_01H-x"), "{company}", "cmp_9"), "{company}")
     error_message = "filled in, the pattern is the prefix <tenant>/<company>/ of the bucket and nothing is left over"
   }
+  # The attack the key policy stops: a write under company B's prefix (or the same company id in another tenant)
+  # naming company A's key. A's pattern, a prefix with one trailing *, must not cover B's object ARNs.
+  assert {
+    condition = jsonencode([
+      for arn in [
+        "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_a/documents/d1",
+        "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_b/documents/d1",
+        "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_ab/documents/d1",
+        "arn:aws:s3:::oryxa-fde-dev-data/org_2/cmp_a/documents/d1",
+        "arn:aws:s3:::oryxa-fde-dev-data",
+        "arn:aws:s3:::other-bucket/org_1/cmp_a/documents/d1",
+        ] : startswith(arn, trimsuffix(replace(replace([
+          for s in output.config.key_policy.Statement : s.Condition.StringLike["kms:EncryptionContext:aws:s3:arn"][0] if s.Sid == "ServingRolesUseTheKeyThroughS3"
+      ][0], "{tenant}", "org_1"), "{company}", "cmp_a"), "*"))
+    ]) == jsonencode([true, false, false, false, false, false])
+    error_message = "company A's key covers only A's own objects: not B's, not a longer id, not another tenant, not the bucket ARN a Bucket Key would send"
+  }
 }
 
 # ---------------------------------------------------------------- alias, tags, waiting period
@@ -191,6 +208,10 @@ run "a_company_key_has_the_fixed_alias_prefix_tags_and_the_longest_waiting_perio
   assert {
     condition     = jsonencode(output.config.deletion_window_days) == jsonencode(30)
     error_message = "KMS's longest waiting period"
+  }
+  assert {
+    condition     = output.config.rotation == false
+    error_message = "rotation is off unless key_rotation says otherwise (the lead's decision on cost)"
   }
   assert {
     condition     = output.config.account_id == "111122223333" && output.config.region == "ap-south-1" && output.config.bucket_name == "oryxa-fde-dev-data"
@@ -305,10 +326,10 @@ run "the_provisioner_creates_tagged_company_keys_and_aliases_under_the_prefix_an
   # Everything it may do. A new action is a decision, so it fails here until it is listed.
   assert {
     condition = toset(flatten([for s in jsondecode(aws_iam_role_policy.provisioner.policy).Statement : s.Action])) == toset([
-      "kms:CreateKey", "kms:TagResource", "kms:CreateAlias", "kms:EnableKeyRotation", "kms:GetKeyRotationStatus",
+      "kms:CreateKey", "kms:TagResource", "kms:CreateAlias", "kms:GetKeyRotationStatus",
       "kms:GetKeyPolicy", "kms:ListResourceTags", "kms:DescribeKey",
     ])
-    error_message = "the provisioner may create, tag, name, rotate and read back a key"
+    error_message = "the provisioner may create, tag, name and read back a key; with rotation off it may not switch rotation on"
   }
   # Never: use a key, change its policy, repoint or delete an alias, disable it, schedule deletion, grant, or kms:*.
   assert {
@@ -356,6 +377,32 @@ run "the_provisioner_creates_tagged_company_keys_and_aliases_under_the_prefix_an
   assert {
     condition     = jsondecode(aws_iam_role.provisioner.assume_role_policy).Statement[0].Principal == { AWS = ["arn:aws:iam::111122223333:user/operator"] } && aws_iam_role.provisioner.max_session_duration == 3600
     error_message = "the trust names the operators and nobody else; one hour"
+  }
+}
+
+run "with_rotation_on_the_provisioner_may_switch_it_on_and_the_script_is_told" {
+  command = plan
+  module {
+    source = "../../modules/company_keys"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    key_rotation = true
+  }
+
+  assert {
+    condition     = output.config.rotation == true
+    error_message = "the script reads the setting from the config"
+  }
+  assert {
+    condition = toset([
+      for s in jsondecode(aws_iam_role_policy.provisioner.policy).Statement : s.Action if s.Sid == "AndOnlyKeysTaggedAsCompanyKeys"
+      ][0]) == toset([
+      "kms:CreateAlias", "kms:GetKeyRotationStatus", "kms:GetKeyPolicy", "kms:ListResourceTags", "kms:DescribeKey", "kms:EnableKeyRotation",
+    ])
+    error_message = "rotation can be switched on, only on this environment's company keys, and never off"
   }
 }
 

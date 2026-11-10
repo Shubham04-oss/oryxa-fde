@@ -234,6 +234,8 @@ jobs:
       - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
       # The smoke test against a stub on a loopback port (bash, curl, jq and python3, all on the runner).
       - run: bash infra/scripts/test-smoke-test.sh
+      # The company-key script against a fake aws (bash, jq and python3, all on the runner).
+      - run: bash infra/scripts/test-company-key.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
       # The skip list against the Rust sources: a path Rust reads from outside crates/ and vendor/ must run the Rust

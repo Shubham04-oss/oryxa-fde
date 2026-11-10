@@ -24,7 +24,7 @@ config="$tmp/config.json"
 cat >"$config" <<'JSON'
 {
   "env": "dev", "account_id": "111122223333", "region": "ap-south-1", "bucket_name": "oryxa-fde-dev-data",
-  "alias_prefix": "alias/oryxa-fde-dev/companies/", "deletion_window_days": 30,
+  "alias_prefix": "alias/oryxa-fde-dev/companies/", "deletion_window_days": 30, "rotation": false,
   "tags": {"project": "oryxa-fde", "env": "dev", "purpose": "company-data"},
   "provisioner_role": "oryxa-fde-dev-company-key-provisioner", "offboarder_role": "oryxa-fde-dev-company-key-offboarder",
   "key_policy": {"Version": "2012-10-17", "Statement": [
@@ -115,6 +115,12 @@ check "a waiting period under 30 days is refused" exits 2
 jq '.account_id = "1234"' "$config" >"$tmp/bad3.json"
 run "$prov" provision "$tmp/bad3.json" org_1 cmp_1
 check "an account id that is not 12 digits is refused" exits 2
+jq 'del(.rotation)' "$config" >"$tmp/bad4.json"
+run "$prov" provision "$tmp/bad4.json" org_1 cmp_1
+check "a config without the rotation setting is refused" exits 2
+jq '.rotation = "yes"' "$config" >"$tmp/bad5.json"
+run "$prov" provision "$tmp/bad5.json" org_1 cmp_1
+check "a rotation setting that is not a boolean is refused" exits 2
 check "...none of them made an AWS call" no_calls
 
 # --- the account and identity guards ---------------------------------------------------------------------------------
@@ -137,6 +143,7 @@ check "dry run of a new company succeeds" exits 0
 check "dry run says it would create the key" has "alias/oryxa-fde-dev/companies/cmp_1 does not exist. Would create a key tagged"
 check "dry run shows both tags" has "TagKey=tenant,TagValue=org_1"
 check "dry run shows the filled-in policy" has "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_1/*"
+check "dry run says rotation stays off" has "rotation off"
 check "dry run writes nothing" no_writes
 check "dry run made no key" count_is 0
 
@@ -149,7 +156,7 @@ check "the key is created with the tenant and company tags" logged "TagKey=tenan
 check "the key carries the company tag" logged "TagKey=company,TagValue=cmp_1"
 check "the key is symmetric, single-Region, KMS-made" logged "--key-usage ENCRYPT_DECRYPT --key-spec SYMMETRIC_DEFAULT --origin AWS_KMS --no-multi-region"
 check "the alias is the fixed prefix and the company" logged "create-alias --alias-name alias/oryxa-fde-dev/companies/cmp_1"
-check "rotation is switched on" logged "enable-key-rotation"
+check "rotation stays off, as configured" bash -c '! grep -qF enable-key-rotation <<<"$1"' _ "$log"
 check "the stored policy has this company's prefix" grep -qF "arn:aws:s3:::oryxa-fde-dev-data/org_1/cmp_1/*" <<<"$(stored_policy)"
 check "the stored policy has no placeholder left" no_placeholder
 run "$prov" provision "$config" org_1 cmp_1
@@ -167,13 +174,20 @@ run "$prov" provision "$tmp/changed.json" org_1 cmp_1
 check "a changed policy fails the check" exits 1
 check "...says how to fix it" has "'sync'"
 check "...and writes nothing" no_writes
-# Rotation switched off by hand is switched back on (the one thing provision may repair).
+# With rotation on in the config: a new key gets it, and a key with it switched off by hand gets it back
+# (the one thing provision may repair).
+jq '.rotation = true' "$config" >"$tmp/rotating.json"
+run "$prov" provision "$tmp/rotating.json" org_1 cmp_3
+check "with rotation on, a new key has rotation switched on" logged "enable-key-rotation"
 jq '(.keys[] | select(.rotation) ) |= (.rotation = false)' "$FAKE_AWS_STATE" >"$tmp/s.json" && cp "$tmp/s.json" "$FAKE_AWS_STATE"
-run "$prov" provision "$config" org_1 cmp_1 --dry-run
+run "$prov" provision "$tmp/rotating.json" org_1 cmp_3 --dry-run
 check "dry run notices rotation off but writes nothing" no_writes
 check "...and says what it would do" has "dry run: would run: aws kms enable-key-rotation"
-run "$prov" provision "$config" org_1 cmp_1
+run "$prov" provision "$tmp/rotating.json" org_1 cmp_3
 check "rotation is switched back on" logged "enable-key-rotation"
+run "$prov" provision "$config" org_1 cmp_3
+check "with rotation off, a key that rotates is left as it is" exits 0
+check "...and nothing is written" no_writes
 
 # An alias that points at another company's key is never touched.
 run "$prov" provision "$config" org_9 cmp_1
