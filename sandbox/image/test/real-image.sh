@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The gate's real-image checks for pid 1, the clean start and setuid files (ADR 0004, "The gate's tests"; #156, #160),
-# on Docker. The CI job that runs them on the product image (linux/amd64) comes in a lead-reviewed PR:
+# on Docker. The `sandbox-image` job in .github/workflows/ci.yml runs them on the product image (linux/amd64):
 #   docker build --platform linux/amd64 -t oryxa-sandbox -f sandbox/image/Dockerfile sandbox
 #   sandbox/image/test/real-image.sh oryxa-sandbox
 # Each container has no network, no mounts and no credentials, and is removed on exit, pass or fail. Docker is a

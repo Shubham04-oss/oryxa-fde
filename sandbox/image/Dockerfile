@@ -26,8 +26,18 @@ COPY --from=harness /build/dist /opt/oryxa-harness/dist
 COPY image/egress-check.mjs /usr/local/bin/oryxa-egress-check
 COPY image/isolation-check.py /usr/local/bin/oryxa-isolation-check
 # tini reaps what the clean start kills; Debian's build, pinned exactly, and apt checks it against the signed archive.
+# apt reads the same snapshot.debian.org timestamp the base image was built from (the comment in its debian.sources),
+# not the live archive, which drops a superseded version and would fail this build. Release files in a snapshot have
+# expired, hence Check-Valid-Until; the signature is still checked. To update, change the timestamp when the base's
+# digest changes (docker run --rm <node image> cat /etc/apt/sources.list.d/debian.sources) and the tini version to
+# one that snapshot has.
 # Then no setuid or setgid file is left (su, mount, passwd, ssh-keysign and the rest): nothing here needs one.
-RUN apt-get update \
+ARG DEBIAN_SNAPSHOT=20261027T000000Z
+RUN sed -i -E "s#http://deb.debian.org/(debian(-security)?)#https://snapshot.debian.org/archive/\1/${DEBIAN_SNAPSHOT}#" \
+    /etc/apt/sources.list.d/debian.sources \
+  && grep -q "archive/debian/${DEBIAN_SNAPSHOT}" /etc/apt/sources.list.d/debian.sources \
+  && grep -q "archive/debian-security/${DEBIAN_SNAPSHOT}" /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
   && apt-get install -y --no-install-recommends tini=0.19.0-3+b8 \
   && rm -rf /var/lib/apt/lists/* \
   && find / -xdev -perm /6000 -type f -exec chmod ug-s {} +
