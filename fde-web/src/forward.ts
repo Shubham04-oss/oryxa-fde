@@ -22,6 +22,43 @@ export function sameOriginWrite(request: Request): boolean {
 }
 
 /**
+ * The most a write may carry through the Worker: the API's own limit for a document (20 MiB,
+ * `MAX_DOCUMENT_BYTES` in `oryxa-fde-context`). No other route takes more, and the API still applies
+ * each route's own limit; this only keeps a huge body from being buffered here first.
+ */
+export const MAX_BODY_BYTES = 20 * 1024 * 1024
+
+/**
+ * The request's body, or null when it is larger than `max`. It is read in pieces, so a body that
+ * declares no length (chunked) cannot fill the Worker's memory before it is refused.
+ */
+async function bounded(request: Request, max: number): Promise<ArrayBuffer | null> {
+  const declared = Number(request.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > max) return null
+  const reader = request.body?.getReader()
+  if (!reader) return new ArrayBuffer(0)
+  const pieces: Array<Uint8Array> = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > max) {
+      await reader.cancel()
+      return null
+    }
+    pieces.push(value)
+  }
+  const whole = new Uint8Array(size)
+  let at = 0
+  for (const piece of pieces) {
+    whole.set(piece, at)
+    at += piece.byteLength
+  }
+  return whole.buffer
+}
+
+/**
  * Forwards `request` to `path` on the API, cookies and all, and hands back its answer as it is.
  * Redirects are not followed: an AuthKit 302 belongs to the browser, never to this server.
  */
@@ -39,7 +76,10 @@ export async function forward(request: Request, path: string, api: Upstream): Pr
   for (const name of ["x-forwarded-for", "x-real-ip", "forwarded"]) headers.delete(name)
   if (client) headers.set("x-forwarded-for", client)
   const body =
-    request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+    request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : await bounded(request, MAX_BODY_BYTES)
+  if (body === null) return Response.json({ error: "payload_too_large" }, { status: 413 })
   return api.fetch(
     new Request(target, { method: request.method, headers, body, redirect: "manual" }),
   )

@@ -131,7 +131,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     come from `actionsOf` (`src/lib/today.ts`), and `TodayRow` draws any of them.
 - **Company.** Profile (summary, industry, region and the FDE's part, with **Edit company**), then
   Stakeholders (with their part) and Systems (with their kind) side by side (stacked below 960px),
-  then Projects (with **New project**), then **Notes** (the company's own, see **Meeting notes**), then the Team. Each list has its add button in the card's
+  then Projects (with **New project**), then **Documents** (see **Documents and search**), then **Notes** (the company's own, see **Meeting notes**), then the Team. Each list has its add button in the card's
   heading, and a row opens its form. An empty card says what to add and why, so a new company reads
   as a list of next steps: "Add the people you work with at the customer: the sponsor who signs off,
   a champion, someone in IT."
@@ -373,6 +373,88 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   - **Focus.** When a dialog closes, focus goes back to what opened it: the row's **Edit**, the card's **Write a
     note**, or the checklist's button; if that has gone (a removed note, a checklist item now met), to **Write a
     note**.
+- **Documents and search.** The customer's files, and finding what is in them. The **Documents** card is on the
+  company page, between Projects and Notes. Everything here needs `work` on the company, which anyone who can open
+  the page has, so an engineer sees every control; the API still decides, and a refusal is shown. The API has no
+  project scope for documents (a document belongs to the company, and the project search route searches the same
+  company), so there is no per-project list; the card is the company's alone.
+  - **The list** is newest first, as the API sends it: the name, the kind and size ("PDF · 1.2 MB"), how many
+    passages it was read into once it is ready, who added it and when ("Added 3 Nov 2026 by You"; the API names
+    people by id only, so anyone else is "A teammate" with the end of their id, as on the Team card), and its status
+    at the right, a dot and words.
+  - **Status says only what the API says.** `pending` is **Being read** (neutral dot, with "It can be searched once
+    it has been read."), `ingested` is **Ready** (green), `failed` is **Could not be read** (amber, as a failing
+    thing is), followed by the reason in words from the API's code (`unreadable`, `empty`, `too_large`, `too_slow`,
+    `checksum`; a code the page does not know says "It could not be read." and the code is never shown). The API cannot tell a document that
+    is waiting in the queue from one a worker has open, so "Being read" is the one word for both. Nothing is
+    called Ready until the API says `ingested`, and an upload is not in the list until the API has stored it.
+  - **No delete, no re-read, no download.** The API has none of them, so none is offered. A failed document stays; the
+    card says so under the list ("A document cannot be removed or read again from here yet. Upload a corrected copy as
+    a new document."). There is no link to a file's bytes either (the API returns none), so a name is text and a
+    passage is text; nothing opens a document.
+  - **Polling is gentle.** While any document is being read, the list is read again after 2 seconds, then every 5
+    (after 20 seconds), 15 (after a minute) and 30 (after five minutes), and it stops at fifteen minutes with "Some
+    documents are taking longer than usual to be read. **Check again**", because something is then slow or stuck and
+    asking for ever helps no one. It stops as soon as nothing is being read, when the page is left, and while the tab is
+    hidden (it reads once when the tab is shown again). When a document finishes the card says so ("“x” is ready to
+    search." or "“x” could not be read.").
+  - **Upload** is a dialog, `FormDialog` and the shared saving rules: **Upload a document** opens **File**, **Name**
+    and one quiet line, "Sample data only for now. Files are kept under the shared environment key until each company
+    has its own." (written unconditionally: the API does not yet say whether a company has its own key, #166).
+    One file at a time, because the API takes one. The chooser takes text, Markdown, PDF and Word (`.docx`), up to 20 MB;
+    a file dropped on it is chosen as well (the browser does that for a file input). The type is the browser's, or the
+    file name's extension when the browser has none (`.md`); nothing inside the file is read. The name starts from the
+    file's and is the person's once they have typed in it (one line, 1 to 200 characters). The page checks what the API
+    checks before it sends, in words about the file: nothing chosen, empty ("That file is empty."), over 20 MB, a kind
+    the API does not read, a bad name; each is tied to its field and moves focus to it.
+  - **How an upload travels.** The browser sends one `POST /api/v1/companies/{company}/documents?name=...` to this
+    app's own origin: the file as the raw body (not multipart, not a presigned URL), its type as the `Content-Type`, the
+    name as a query value encoded as one value, and the `X-Oryxa-Request: 1` header every write carries. It goes
+    through `XMLHttpRequest` (`Transport.upload` in `client.ts`), because a browser reports an upload's progress that way
+    only, with the same cookies and origin as `fetch`. The Worker checks the `Origin`, refuses a body over 20 MiB with
+    `413 payload_too_large` (by its declared length, and by counting a body that declares none), and forwards the rest
+    to the API with its type and bytes untouched. The API refuses a type it does not read (415), an empty body (400
+    `invalid_body`) and a name that breaks the rule (400 `invalid_name`), checks `work`, puts the file in S3 under the
+    company's prefix and records a `pending` document whose `document.uploaded` event wakes the worker that reads it.
+    The browser never talks to S3. The limit end to end is **20 MiB** (20,971,520 bytes), which is the API's, and
+    Cloudflare's own limit for a request body (100 MB on the smallest plans) is above it.
+  - **Progress is honest.** A bar for the bytes that have left the browser ("Sending 1.2 MB of 3.4 MB"), and when all
+    have gone, "Sent. Waiting for the workspace to store it…" with the bar full, because the Worker and the API then
+    still take the body, check it and store it. A screen reader hears the phase, not every percent. Save reads
+    "Saving…" and is off until the API answers.
+  - **A file that did not go stays chosen.** A refusal (too large, wrong kind, empty, a bad name, not allowed, the
+    API unavailable) or a connection that failed keeps the dialog open with the file chosen and the name typed, says
+    why in words, and marks the field it is about; Upload sends it again. The API's refusals of a file are said about
+    the file ("That file is over the 20 MB limit.", not the note's words for `invalid_body`). Cancel, Escape or leaving
+    the page stops an upload in flight and reads the list again, because the API may already have the document.
+  - **Search** is a field at the top of the card. It sends after a quarter second without typing (and on Enter, even for
+    one character; on its own it waits for two, because each search costs the API a model call), keeps the last answer on
+    the screen, a little dimmer, until the next arrives, and drops a read that is no longer wanted, so it feels instant.
+    Escape clears it. The words go to the API as one query value, 1 to 500 characters, with its operators (words,
+    "quoted phrases" and -exclusions). While there are words, the results take the list's place; clearing them brings the
+    list back.
+  - **A result** is the passage in context: the document's name, its kind, and where in it ("Passage 4 of 12": the
+    API's `chunk` from 0, and the document's `chunks` from the list), then the text. The API returns only the passage and
+    an order (its `score` means nothing but order, and is not shown), so there is no page, no character position and no
+    link into the file. The words typed (not the exclusions, and not `or`) are marked, as text, in bold on a quiet
+    ground, wherever they occur in the passage, also inside a longer word. That is all the page knows: the API also
+    finds by meaning and by word stem, so a good passage may hold none of them, and is then shown without marks. A passage
+    longer than about 320 characters shows a window around the first mark, cut at spaces, with ellipses and **Show the
+    whole passage**. The line above says how many were found and for what ("3 passages for “driver hours”, best first.").
+  - **Empty and partial.** "No passages match “zebra”." with a hint to try other words; "No document has been read yet,
+    so there is nothing to search." when none is ready; and always, under the count, what a search cannot see: "1
+    document is still being read and cannot be searched yet. 1 document could not be read and cannot be searched." A
+    search is read again, with the same words, when a document finishes being read.
+  - **Customer content is text.** A file name, a passage and a query are rendered as text nodes and in `aria-label`s only:
+    never as HTML or Markdown, never in a URL path, never in an attribute that runs (a name in the upload URL is one
+    encoded query value). A name or passage that holds `<img onerror>` or `**bold**` shows those characters. The marks
+    are made by cutting the text into pieces and wrapping some in `<mark>` elements; the pieces are never parsed.
+    The page reads nothing of a file: the browser streams it, as chosen. The page puts no text from a document in the
+    address bar or in storage.
+  - **Not here yet.** Documents in Jump to: Jump to switches between companies and projects, and searching inside one
+    needs the company chosen first, which is not a small step; the card's search is the way. Documents on the project
+    page: the API does not scope them to a project. A document's key, its download or view link, a delete and a re-read
+    are not in the API.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -464,8 +546,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   `schemas.test.ts` fails the typecheck when a schema stops matching its spec type.
 - The browser only calls its own origin. The Worker (`src/server.ts`, `src/forward.ts`) forwards
   `/api/*` without the prefix and `/auth/*` as it is to the API: the `API` VPC binding in a
-  deploy, `API_URL` in a dev build only. It refuses a write from another origin (`403 csrf`), and
-  answers `503` when it has no way to the API.
+  deploy, `API_URL` in a dev build only. It refuses a write from another origin (`403 csrf`), refuses a
+  body over 20 MiB (`413 payload_too_large`: it buffers a body to forward it, so a bound is kept, by
+  the declared length and by counting a body that declares none), and answers `503` when it has no way
+  to the API.
 - The session is the API's HttpOnly cookie, set after AuthKit. No token is ever in JavaScript or
   browser storage. A 401 on any read or write sends the FDE to sign-in, coming back to the address
   they were at when it happened (`src/lib/session.ts`); `safeReturnTo` keeps that address a path
@@ -475,6 +559,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
+- Documents are `api.documents`, `uploadDocument` (the one call written by hand around the generated client's
+  `XMLHttpRequest` transport: the generated client sends no progress, and a raw file body is not JSON, but the answer
+  is parsed with zod like every other) and `search`, with `queries.documents` and `queries.search`. A document's id,
+  name and passages are never used as a path or markup; ids are parsed branded ids.
 - Notes are `api.notes`, `addNote`, `updateNote` and `removeNote`, each taking a place (`{ company }` or
   `{ company, project }`) and choosing the company's or the project's routes (`queries.notes`, under the
   project's own key). A note's body is never rendered as markup anywhere.
@@ -512,6 +600,14 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   characters is a 400 `invalid_reason` whenever it is sent, and moving back ignores it. Setting
   `globalThis.__fdeMockStaleChecklist = true` makes the checklist read every item as met until the
   first move that the API refuses for open items, so the stale-view refusal can be seen.
+  The mock answers a company's documents and search (`src/dev/mock-documents.ts`) with the API's rules: a raw
+  body of text, Markdown, PDF or DOCX with its `Content-Type`, up to 20 MiB, not empty (413, 415 and 400 as the API
+  answers); a document is `pending` after an upload and becomes `ingested` or `failed` after a moment (4 seconds in a
+  dev build, set with `globalThis.__fdeMockIngestMs`), worked out when it is read so no timer runs; a name that holds
+  `unreadable` fails as `unreadable`, and a text file with nothing in it as `empty`; a search finds whole words (and
+  their stems), "phrases" and -exclusions in the passages of ingested documents only, with the API's checks on `q` and
+  `limit`. `globalThis.__fdeMockStallUpload = true` sends 60% of a file and waits, so the progress bar can be seen. The
+  mock cannot take an upload through `fetch` in a jsdom test, so `Transport.upload` hands it the file.
   `resetMockApi({ engineer: true })` signs in as an engineer, `{ empty: true }` leaves no company,
   and `globalThis.__fdeMockNoCompanies = true` before the app loads does the same in the browser. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the

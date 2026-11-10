@@ -8,12 +8,13 @@
 // Sample data only: every company, person and system here is invented.
 
 import type { z } from "zod"
-import type { Transport } from "../lib/api/client"
+import type { Transport, UploadRequest } from "../lib/api/client"
 import type { components } from "../lib/api/fde-api.gen"
 import { STAGES } from "../lib/api/schemas"
 import type { Me, Stage } from "../lib/api/schemas"
 import { canMove } from "../lib/stage"
 import { localDay } from "../lib/time"
+import { documentReads, documentSearch, documentUpload, seedDocuments } from "./mock-documents"
 import { runRoutes, seedRuns } from "./mock-runs"
 
 type S = components["schemas"]
@@ -917,7 +918,7 @@ function seed() {
     companies.length = 0
     projects.length = 0
   }
-  return { me, companies, projects, runs: seedRuns(), assignees }
+  return { me, companies, projects, runs: seedRuns(), assignees, documents: seedDocuments() }
 }
 
 let state = seed()
@@ -1789,6 +1790,12 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     return memberRoutes(method, projectId, found, request)
   if (collection === "meeting-notes")
     return noteRoutes(method, projectId, found, found.notes, request)
+  // A company's documents: `projectId` is the document's id here. Uploading is a body that is a file, so the
+  // mock's `upload` answers it; a `POST` that gets this far is not one.
+  const documents = (state.documents[companyId] ??= [])
+  if (collection === "documents" && method === "GET") return documentReads(documents, projectId)
+  if (collection === "search" && method === "GET")
+    return documentSearch(documents, new URL(request.url))
   if (collection === "projects" && method === "POST" && projectId === undefined)
     return projectWrites(method, undefined, found, request)
   if (collection === "projects" && method === "PATCH" && record === undefined)
@@ -1860,8 +1867,54 @@ async function answer(request: Request): Promise<Response> {
   return answered ?? refuse(404, "not_found")
 }
 
+/** The path of an upload, `/api/v1/companies/{id}/documents`, or null for anything else. */
+const uploadTarget = (url: URL) =>
+  /^\/api\/v1\/companies\/([^/]+)\/documents$/.exec(url.pathname)?.[1] ?? null
+
+/** How the mock answers an upload: the API's checks, in its order, on a file it has been handed. */
+async function uploadAnswer({ url, headers, body }: UploadRequest): Promise<Response> {
+  if (LATENCY_MS) await new Promise((resolve) => setTimeout(resolve, LATENCY_MS))
+  const target = new URL(url)
+  const id = uploadTarget(target)
+  if (id === null) return refuse(404, "not_found")
+  if (!hasSession()) return refuse(401, "unauthorized")
+  if ((globalThis as Record<string, unknown>).__fdeMockFailWrites === true)
+    return refuse(503, "unavailable")
+  const found = state.companies.find((c) => c.company.id === decodeURIComponent(id))
+  if (!found || !mayWork(found)) return refuse(403, "forbidden")
+  const documents = (state.documents[found.company.id] ??= [])
+  const contentType = new Headers(headers).get("content-type") ?? ""
+  return documentUpload(documents, target, contentType, body, state.me.user.id)
+}
+
 export const mockApi: Transport = {
   fetch: answer,
+  /**
+   * Sends in steps with a pause between, so the progress bar can be seen; a test gets it in one go. A
+   * file cannot go through `fetch`, which has no body a jsdom test can build, so it is handed over as it is.
+   */
+  async upload(request) {
+    // Dev and test only: `globalThis.__fdeMockStallUpload = true` sends 60% of the file and then waits,
+    // so the progress bar can be looked at. Cancelling the upload ends it.
+    if ((globalThis as Record<string, unknown>).__fdeMockStallUpload === true) {
+      request.onProgress(Math.round(request.body.size * 0.6), request.body.size)
+      return new Promise<Response>((_, reject) =>
+        request.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("The upload was cancelled.", "AbortError")),
+          { once: true },
+        ),
+      )
+    }
+    const steps = import.meta.env.MODE === "test" ? 1 : 6
+    for (let sent = 1; sent <= steps; sent++) {
+      if (request.signal?.aborted) throw new DOMException("The upload was cancelled.", "AbortError")
+      if (steps > 1) await new Promise((resolve) => setTimeout(resolve, 140))
+      request.onProgress(Math.round((request.body.size * sent) / steps), request.body.size)
+    }
+    if (request.signal?.aborted) throw new DOMException("The upload was cancelled.", "AbortError")
+    return uploadAnswer(request)
+  },
   async signIn() {
     setSession(true)
   },

@@ -35,6 +35,8 @@ export type AccessRequestId = z.infer<typeof AccessRequestId>
 export const TaskId = id<"TaskId">()
 export type TaskId = z.infer<typeof TaskId>
 export const DecisionId = id<"DecisionId">()
+export const DocumentId = id<"DocumentId">()
+export type DocumentId = z.infer<typeof DocumentId>
 export const MeetingNoteId = id<"MeetingNoteId">()
 export type MeetingNoteId = z.infer<typeof MeetingNoteId>
 
@@ -273,6 +275,41 @@ export const MeetingNoteOut = z.object({
   updated_at: instant,
 })
 export type MeetingNoteOut = z.infer<typeof MeetingNoteOut>
+
+/** Where ingestion stands: `pending` until a worker has read it, then `ingested` (searchable) or `failed`. */
+export const IngestState = z.enum(["pending", "ingested", "failed"])
+export type IngestState = z.infer<typeof IngestState>
+
+/**
+ * A document of a company (`GET .../documents`, and the answer to an upload). Its name is the
+ * uploader's and its bytes are the customer's: the name is shown as text and nothing else of the file
+ * is ever read here. `failure` is a short code, not words.
+ */
+export const DocumentOut = z.object({
+  id: DocumentId,
+  name: z.string(),
+  content_type: z.string(),
+  size_bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+  status: IngestState,
+  failure: optionalText,
+  chunks: z.number().int().nonnegative(),
+  uploaded_by: UserId,
+  created_at: instant,
+  ingested_at: optionalText,
+})
+export type DocumentOut = z.infer<typeof DocumentOut>
+
+/** One passage found by a search: customer text, shown as plain text. `score` only orders the list. */
+export const SearchHitOut = z.object({
+  document: DocumentId,
+  document_name: z.string(),
+  /** The passage's place in the document, from 0. */
+  chunk: z.number().int().nonnegative(),
+  text: z.string(),
+  score: z.number(),
+})
+export type SearchHitOut = z.infer<typeof SearchHitOut>
 
 /** Where notes are kept: a company, or one of its projects. */
 export type NotePlace = { company: CompanyId; project?: ProjectId }

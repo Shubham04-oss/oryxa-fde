@@ -8,7 +8,7 @@ import {
   safeReturnTo,
   signInUrl,
 } from "./client"
-import type { Transport } from "./client"
+import type { Transport, UploadRequest } from "./client"
 import { CompanyId, ProjectId } from "./schemas"
 import { resetMockApi } from "@/dev/mock-api"
 
@@ -98,7 +98,15 @@ describe("api over the network", () => {
   /** A transport that records each request and answers from `routes`, or 404. */
   function stub(routes: Record<string, () => Response>) {
     const seen: Array<Request> = []
+    const uploads: Array<UploadRequest> = []
     const transport: Transport = {
+      async upload(request) {
+        uploads.push(request)
+        const { pathname } = new URL(request.url)
+        return (
+          routes[`POST ${pathname}`]?.() ?? Response.json({ error: "not_found" }, { status: 404 })
+        )
+      },
       async fetch(request) {
         seen.push(request)
         const { pathname } = new URL(request.url)
@@ -109,7 +117,7 @@ describe("api over the network", () => {
       },
       signIn: async () => {},
     }
-    return { seen, net: apiOver(async () => transport) }
+    return { seen, uploads, net: apiOver(async () => transport) }
   }
 
   const at = "2026-11-04T10:06:24.123456789Z"
@@ -167,6 +175,94 @@ describe("api over the network", () => {
       expect(request.headers.get("X-Oryxa-Request")).toBe("1")
       expect(request.headers.get("Authorization")).toBeNull()
     }
+  })
+
+  describe("documents", () => {
+    const doc = {
+      id: "doc_1",
+      name: "a.pdf",
+      content_type: "application/pdf",
+      size_bytes: 3,
+      sha256: "0".repeat(64),
+      status: "pending",
+      chunks: 0,
+      uploaded_by: "user_01",
+      created_at: at,
+    }
+    const cmp1 = CompanyId.parse("cmp_1")
+    const file = new File(["abc"], "a.pdf", { type: "application/pdf" })
+    const send = (net: ReturnType<typeof stub>["net"], name: string) =>
+      net.uploadDocument(cmp1, { file, contentType: "application/pdf", name }, () => {})
+
+    it("sends the file as the body, its type as the Content-Type and its name in the query, on this origin", async () => {
+      const { uploads, net } = stub({
+        "POST /api/v1/companies/cmp_1/documents": () => Response.json(doc, { status: 201 }),
+      })
+      const saved = await send(net, "a&b=c/../d?.pdf #1")
+      expect(saved.status).toBe("pending")
+      const [sent] = uploads
+      const url = new URL(sent!.url)
+      expect(url.origin).toBe(window.location.origin)
+      expect(url.pathname).toBe("/api/v1/companies/cmp_1/documents")
+      // Whatever the name holds is one value of one parameter, never part of the path or another parameter.
+      expect([...url.searchParams.keys()]).toEqual(["name"])
+      expect(url.searchParams.get("name")).toBe("a&b=c/../d?.pdf #1")
+      expect(sent!.body).toBe(file)
+      expect(sent!.headers["Content-Type"]).toBe("application/pdf")
+      expect(sent!.headers["X-Oryxa-Request"]).toBe("1")
+    })
+
+    it("says why in the file's own terms when the API refuses a file", async () => {
+      const refused = (status: number, body?: unknown) =>
+        stub({
+          "POST /api/v1/companies/cmp_1/documents": () =>
+            body === undefined ? new Response("", { status }) : Response.json(body, { status }),
+        }).net
+      const big = await refusal(send(refused(413), "a.pdf"))
+      expect([big.status, big.code, big.message]).toEqual([
+        413,
+        "payload_too_large",
+        "That file is over the 20 MB limit.",
+      ])
+      const kind = await refusal(send(refused(415, { error: "unsupported_media_type" }), "a.pdf"))
+      expect([kind.status, kind.message]).toEqual([
+        415,
+        "Only text, Markdown, PDF and Word (.docx) files are accepted.",
+      ])
+      // `invalid_body` is the note's code too; for a file it means nothing was in it.
+      const empty = await refusal(send(refused(400, { error: "invalid_body" }), "a.pdf"))
+      expect(empty.message).toBe("That file is empty.")
+      const name = await refusal(send(refused(400, { error: "invalid_name" }), "a.pdf"))
+      expect([name.code, name.message]).toEqual([
+        "invalid_name",
+        "A name is one line, 1 to 200 characters.",
+      ])
+    })
+
+    it("fails loudly on a document that drifts from the contract", async () => {
+      const { net } = stub({
+        "POST /api/v1/companies/cmp_1/documents": () =>
+          Response.json({ ...doc, status: "reading" }, { status: 201 }),
+      })
+      await expect(send(net, "a.pdf")).rejects.toThrow()
+    })
+
+    it("reads the list and a search, a search's words going in the query as one value", async () => {
+      const { seen, net } = stub({
+        "GET /api/v1/companies/cmp_1/documents": () => Response.json([doc]),
+        "GET /api/v1/companies/cmp_1/search": () =>
+          Response.json([
+            { document: "doc_1", document_name: "a.pdf", chunk: 0, text: "hello", score: 0.03 },
+          ]),
+      })
+      expect((await net.documents(cmp1))[0]?.id).toBe("doc_1")
+      const hits = await net.search(cmp1, 'drivers -"rest hours" & more=1')
+      expect(hits[0]?.text).toBe("hello")
+      const url = new URL(seen[1]!.url)
+      expect(url.searchParams.get("q")).toBe('drivers -"rest hours" & more=1')
+      expect(url.searchParams.get("limit")).toBe("20")
+      expect([...url.searchParams.keys()].sort()).toEqual(["limit", "q"])
+    })
   })
 
   it("turns a refusal into an ApiError with the API's code, whatever its body", async () => {
