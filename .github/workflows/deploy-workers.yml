@@ -70,7 +70,7 @@ jobs:
       - run: pnpm build
       # fde-web's wrangler.jsonc is for local development. The build writes the config Wrangler
       # deploys (dist/server/wrangler.json); dev's route and the private link to the API are added to
-      # it here: only app.<domain> serves the app (no workers.dev or preview URLs), and the API
+      # it here: only <web_hostname> serves the app (no workers.dev or preview URLs), and the API
       # binding is the Workers VPC service (infra/modules/cloudflare).
       - name: Add the dev route and the API binding
         env:
