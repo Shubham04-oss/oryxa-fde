@@ -58,6 +58,8 @@ jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rus
 oryxa-fde-mcp = { path = "../oryxa-fde-mcp" }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 oryxa-spicedb-proto.workspace = true
+# Paused time for the people cache's tests.
+tokio = { workspace = true, features = ["test-util"] }
 rsa = "0.9"
 sqlx.workspace = true
 tower = { version = "0.5.3", features = ["util"] }

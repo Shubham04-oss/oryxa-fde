@@ -16,6 +16,7 @@ use utoipa::ToSchema;
 
 use crate::authz::{company, project, rel, user};
 use crate::companies::{merge, patch};
+use crate::people::Names;
 use crate::records::{name, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
@@ -113,12 +114,16 @@ pub struct ProjectPatch {
 pub struct AssigneeOut {
     /// WorkOS user id.
     pub user: String,
+    /// Their first and last name in WorkOS; `null` when it has neither, they have left the
+    /// organisation, or WorkOS cannot be reached.
+    pub name: Option<String>,
     pub added_at: String,
 }
 
-impl From<Assignee> for AssigneeOut {
-    fn from(a: Assignee) -> Self {
+impl AssigneeOut {
+    fn new(a: Assignee, names: &Names) -> Self {
         Self {
+            name: names.of(a.user.as_str()),
             user: a.user.to_string(),
             added_at: ts(a.added_at),
         }
@@ -215,7 +220,7 @@ pub(crate) async fn update(
     Ok(Json(updated.into()))
 }
 
-/// Users assigned to the project.
+/// Users assigned to the project, with their names.
 #[utoipa::path(get, operation_id = "list_assignees", path = "/v1/companies/{company}/projects/{project}/assignees", tag = "projects",
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
     responses((status = 200, body = [AssigneeOut]), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
@@ -230,7 +235,8 @@ pub(crate) async fn assignees(
     tx.get().await?.ok_or(ApiError::NotFound)?;
     let list = tx.assignees().await?;
     tx.commit().await?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    let names = app.names(&who).await;
+    Ok(Json(list.into_iter().map(|a| AssigneeOut::new(a, &names)).collect()))
 }
 
 /// Assign an engineer to the project.

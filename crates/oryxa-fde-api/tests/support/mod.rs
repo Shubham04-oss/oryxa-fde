@@ -86,6 +86,12 @@ pub struct FakeAuthKit {
     /// The next revokes fail (WorkOS down).
     pub revoke_fails: std::sync::atomic::AtomicBool,
     pub revoked: std::sync::Mutex<Vec<String>>,
+    /// Each organisation's people, as WorkOS lists its memberships.
+    pub people: std::sync::Mutex<std::collections::HashMap<String, Vec<oryxa_fde_api::Person>>>,
+    /// The next people lookups fail (WorkOS down).
+    pub people_fail: std::sync::atomic::AtomicBool,
+    /// People lookups asked for, whatever their outcome.
+    pub people_lookups: std::sync::atomic::AtomicUsize,
     challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
@@ -166,5 +172,21 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
 
     fn organisation_name<'a>(&'a self, organisation: &'a str) -> Fut<'a, Result<String, String>> {
         Box::pin(async move { Ok(format!("Org {organisation}")) })
+    }
+
+    fn people<'a>(&'a self, organisation: &'a str) -> Fut<'a, Result<Vec<oryxa_fde_api::Person>, String>> {
+        Box::pin(async move {
+            self.people_lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.people_fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("workos is down".into());
+            }
+            Ok(self
+                .people
+                .lock()
+                .unwrap()
+                .get(organisation)
+                .cloned()
+                .unwrap_or_default())
+        })
     }
 }

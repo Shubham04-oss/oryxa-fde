@@ -555,6 +555,192 @@ async fn companies_projects_and_members_end_to_end() {
     );
 }
 
+/// WorkOS's membership of `id` in an organisation, as the fake lists it.
+fn person(id: &str, name: Option<&str>, role: &str) -> oryxa_fde_api::Person {
+    oryxa_fde_api::Person {
+        id: id.to_owned(),
+        name: name.map(str::to_owned),
+        role: role.to_owned(),
+    }
+}
+
+/// `(user, name)` for each row of a member or assignee list.
+fn named(list: &Value) -> BTreeSet<(String, Option<String>)> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["user"].as_str().unwrap().to_owned(),
+                m["name"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn people_are_named_only_to_those_who_may_see_them() {
+    let w = world().await;
+    let (org, other_org, down_org) = (new_id("org"), new_id("org"), new_id("org"));
+    let (alice, bob, carol, dana, gina) = (
+        user(&org, "alice", "member"),
+        user(&org, "bob", "member"),
+        user(&org, "carol", "member"),
+        user(&org, "dana", "admin"),
+        user(&org, "gina", "guest"),
+    );
+    let eve = user(&other_org, "eve", "member");
+    w.authkit.people.lock().unwrap().extend([
+        (
+            org.clone(),
+            vec![
+                person(&alice.id, Some("alice Archer"), "member"),
+                person(&bob.id, None, "member"),
+                person(&carol.id, Some("Carol Chen"), "member"),
+                person(&dana.id, Some("Dana Doe"), "admin"),
+                person(&gina.id, Some("Gina Guest"), "guest"),
+            ],
+        ),
+        (other_org.clone(), vec![person(&eve.id, Some("Eve Other"), "member")]),
+    ]);
+
+    // The organisation's own admins and members, by name with the unnamed last; never a guest, never
+    // another organisation's people, and no email.
+    let people = w.ok(&alice, "GET", "/v1/people", None, StatusCode::OK).await;
+    assert_eq!(
+        people,
+        json!([
+            {"id": alice.id, "name": "alice Archer"},
+            {"id": carol.id, "name": "Carol Chen"},
+            {"id": dana.id, "name": "Dana Doe"},
+            {"id": bob.id, "name": null},
+        ])
+    );
+    assert_eq!(w.ok(&dana, "GET", "/v1/people", None, StatusCode::OK).await, people);
+    // A guest (and so, later, any customer role) has no `access` to the workspace.
+    assert_eq!(w.status(&gina, "GET", "/v1/people", None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        w.ok(&eve, "GET", "/v1/people", None, StatusCode::OK).await,
+        json!([{"id": eve.id, "name": "Eve Other"}])
+    );
+
+    // A company's members and a project's assignees carry their names to those who work on them.
+    let c = w
+        .ok(
+            &alice,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Acme"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let company = format!("/v1/companies/{}", c["id"].as_str().unwrap());
+    for member in [&bob.id, &eve.id] {
+        w.ok(
+            &alice,
+            "PUT",
+            &format!("{company}/members/{member}"),
+            Some(json!({"role": "engineer"})),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+    }
+    let members = w
+        .ok(&bob, "GET", &format!("{company}/members"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        named(&members),
+        BTreeSet::from([
+            (alice.id.clone(), Some("alice Archer".into())),
+            (bob.id.clone(), None),
+            // Another organisation's user is never named here.
+            (eve.id.clone(), None),
+        ])
+    );
+    let p = w
+        .ok(
+            &alice,
+            "POST",
+            &format!("{company}/projects"),
+            Some(json!({"name": "RAG"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let project = format!("{company}/projects/{}", p["id"].as_str().unwrap());
+    w.ok(
+        &alice,
+        "PUT",
+        &format!("{project}/assignees/{}", carol.id),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let assignees = w
+        .ok(&carol, "GET", &format!("{project}/assignees"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        named(&assignees),
+        BTreeSet::from([(carol.id.clone(), Some("Carol Chen".into()))])
+    );
+    assert_eq!(
+        w.status(&gina, "GET", &format!("{company}/members"), None).await,
+        StatusCode::FORBIDDEN
+    );
+    let everything = format!("{people}{members}{assignees}");
+    assert!(!everything.contains('@'), "no email in any answer: {everything}");
+    assert!(!everything.contains("Gina"), "no guest named: {everything}");
+    // One WorkOS lookup per organisation, shared by every route.
+    assert_eq!(w.authkit.people_lookups.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // WorkOS down: the list is unavailable rather than partial, and names drop out of the rest.
+    let (lead, member) = (user(&down_org, "lead", "member"), user(&down_org, "member", "member"));
+    w.authkit.people_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = w.call(Some(&lead.token), "GET", "/v1/people", None).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable"))
+    );
+    let c = w
+        .ok(
+            &lead,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Down"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let company = format!("/v1/companies/{}", c["id"].as_str().unwrap());
+    w.ok(
+        &lead,
+        "PUT",
+        &format!("{company}/members/{}", member.id),
+        Some(json!({"role": "engineer"})),
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let members = w
+        .ok(&lead, "GET", &format!("{company}/members"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        named(&members),
+        BTreeSet::from([(lead.id.clone(), None), (member.id.clone(), None)])
+    );
+    w.authkit.people_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Names never reach the events.
+    let owner = testing::admin().await;
+    let payloads: Vec<String> = sqlx::query_scalar("select detail from outbox where tenant_id = $1")
+        .bind(&org)
+        .fetch_all(&owner)
+        .await
+        .unwrap();
+    assert!(!payloads.is_empty());
+    for p in payloads {
+        assert!(!p.contains("Archer") && !p.contains("Carol Chen"), "{p}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn bad_tokens_and_bad_input_are_refused() {
@@ -625,6 +811,8 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/security-answers"),
     ("POST", "/v1/security-answers"),
     ("GET", "/v1/me"),
+    // The caller's own organisation's people, under `access` to its workspace.
+    ("GET", "/v1/people"),
     // Names nothing: the token is the permission, and only in the caller's own tenant.
     ("POST", "/v1/share-links/redeem"),
     // No sign-in: the token in a digest's link names its one delivery, in its own tenant.

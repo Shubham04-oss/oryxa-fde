@@ -287,7 +287,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The company's leads and engineers. */
+        /** The company's leads and engineers, with their names. */
         get: operations["list_members"];
         put?: never;
         post?: never;
@@ -411,7 +411,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Users assigned to the project. */
+        /** Users assigned to the project, with their names. */
         get: operations["list_assignees"];
         put?: never;
         post?: never;
@@ -1375,6 +1375,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The organisation's own people (its admins and members in WorkOS), by name: whom a lead can add
+         *     to a company, and the names behind the user ids in any answer. Needs `access` to the
+         *     organisation's workspace; guests and customer people are neither listed nor allowed to list.
+         *     No emails. 503 when WorkOS cannot answer, never a partial list.
+         */
+        get: operations["list_people"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/room/companies/{company}/projects/{project}": {
         parameters: {
             query?: never;
@@ -1628,6 +1650,11 @@ export interface components {
         };
         AssigneeOut: {
             added_at: string;
+            /**
+             * @description Their first and last name in WorkOS; `null` when it has neither, they have left the
+             *     organisation, or WorkOS cannot be reached.
+             */
+            name?: string | null;
             /** @description WorkOS user id. */
             user: string;
         };
@@ -1898,6 +1925,11 @@ export interface components {
         };
         MemberOut: {
             added_at: string;
+            /**
+             * @description Their first and last name in WorkOS; `null` when it has neither, they have left the
+             *     organisation, or WorkOS cannot be reached.
+             */
+            name?: string | null;
             role: components["schemas"]["MemberRole"];
             /** @description WorkOS user id. */
             user: string;
@@ -1915,6 +1947,12 @@ export interface components {
         };
         /** @enum {string} */
         OrgRole: "admin" | "member";
+        PersonOut: {
+            /** @description WorkOS user id. */
+            id: string;
+            /** @description First and last name, or `null` when WorkOS has neither. */
+            name?: string | null;
+        };
         ProjectBody: {
             /** @description 1 to 200 characters, no control characters. */
             name: string;
@@ -7993,6 +8031,53 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_people: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonOut"][];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

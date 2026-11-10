@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
 
+use crate::people::{People, Person, display_name};
 use crate::{ApiError, App, BoxFuture, ErrorBody, Principal};
 
 pub const SESSION_COOKIE: &str = "__Host-fde_session";
@@ -103,7 +104,15 @@ pub trait AuthKit: Send + Sync + 'static {
     fn revoke<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<(), String>>;
     fn user_name<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<String, String>>;
     fn organisation_name<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<String, String>>;
+    /// Everyone with an active membership of the organisation, whatever their role.
+    fn people<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>>;
 }
+
+/// WorkOS's largest page of memberships.
+const PEOPLE_PAGE: i64 = 100;
+/// ponytail: an organisation of more than 10,000 people fails the lookup (no names, a 503 for the list)
+/// rather than paging on; raise it, or search WorkOS by name, if one ever gets that big.
+const MAX_PEOPLE_PAGES: usize = 100;
 
 /// AuthKit through the pinned WorkOS SDK.
 pub struct WorkOsAuthKit(pub workos::Client);
@@ -224,6 +233,38 @@ impl AuthKit for WorkOsAuthKit {
             Ok(o.name)
         })
     }
+
+    fn people<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
+        Box::pin(async move {
+            let mut people = Vec::new();
+            let mut after = None;
+            for _ in 0..MAX_PEOPLE_PAGES {
+                let p = workos::organization_membership::ListOrganizationMembershipsParams {
+                    organization_id: Some(organisation.to_owned()),
+                    statuses: Some(vec![workos::UserManagementOrganizationMembershipStatuses::Active]),
+                    limit: Some(PEOPLE_PAGE),
+                    after,
+                    ..Default::default()
+                };
+                let page = self
+                    .0
+                    .organization_membership()
+                    .list_organization_memberships(p)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                people.extend(page.data.into_iter().map(|m| Person {
+                    name: display_name(m.user.first_name.as_deref(), m.user.last_name.as_deref()),
+                    id: m.user_id,
+                    role: m.role.slug,
+                }));
+                match page.list_metadata.after {
+                    Some(next) => after = Some(next),
+                    None => return Ok(people),
+                }
+            }
+            Err("the organisation has too many people to list".into())
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -268,6 +309,8 @@ pub struct SignIn {
     previous: Option<String>,
     authkit: Arc<dyn AuthKit>,
     names: Mutex<HashMap<String, (String, Instant)>>,
+    /// The organisations' people, cached.
+    people: People,
     /// Sessions whose refresh WorkOS could not answer, by hash of refresh token: not asked again
     /// before then.
     waits: Mutex<HashMap<String, Instant>>,
@@ -302,6 +345,7 @@ impl SignIn {
             previous: None,
             authkit,
             names: Mutex::new(HashMap::new()),
+            people: People::default(),
             waits: Mutex::new(HashMap::new()),
         })
     }
@@ -360,6 +404,11 @@ impl SignIn {
 
     fn refreshed(&self, key: &str) {
         self.waits.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    /// Everyone in `organisation`, by user id, cached for a few minutes.
+    pub(crate) async fn people(&self, organisation: &str) -> Result<Arc<HashMap<String, Person>>, ApiError> {
+        self.people.of(self.authkit.as_ref(), organisation).await
     }
 
     /// A display name, cached for a few minutes.
@@ -772,6 +821,9 @@ mod tests {
             Box::pin(async { Err("unused".into()) })
         }
         fn organisation_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn people<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
             Box::pin(async { Err("unused".into()) })
         }
     }
