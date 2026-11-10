@@ -80,8 +80,11 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const columns = useRef(new Map<TaskState, HTMLElement>())
 
   const key = queries.project(scope).queryKey
-  const change = (edit: (tasks: Array<TaskOut>) => Array<TaskOut>) =>
+  async function change(edit: (tasks: Array<TaskOut>) => Array<TaskOut>) {
+    // A read of the board sent before the write would land after it with the old task: drop it.
+    await queryClient.cancelQueries({ queryKey: key })
     queryClient.setQueryData(key, (old) => old && { ...old, tasks: edit(old.tasks) })
+  }
   // Today lists the same tasks.
   const refreshToday = () =>
     void queryClient.invalidateQueries({ queryKey: queries.today().queryKey })
@@ -89,8 +92,8 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const save = useMutation({
     mutationFn: ({ task, fields }: { task: TaskOut | null; fields: Fields }) =>
       task ? api.updateTask(scope, task.id, toBody(fields)) : api.addTask(scope, toBody(fields)),
-    onSuccess(saved) {
-      change((tasks) =>
+    async onSuccess(saved) {
+      await change((tasks) =>
         tasks.some((t) => t.id === saved.id)
           ? tasks.map((t) => (t.id === saved.id ? saved : t))
           : [...tasks, saved],
@@ -100,8 +103,8 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   })
   const remove = useMutation({
     mutationFn: (task: TaskOut) => api.removeTask(scope, task.id),
-    onSuccess(_, task) {
-      change((tasks) => tasks.filter((t) => t.id !== task.id))
+    async onSuccess(_, task) {
+      await change((tasks) => tasks.filter((t) => t.id !== task.id))
       refreshToday()
     },
   })

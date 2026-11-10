@@ -49,7 +49,7 @@ export const fieldsOf = (task: TaskOut): Fields => ({
   blockedBy: task.blocked_by ?? null,
 })
 
-/** The request body for `fields`, dropping what the status does not use (the API refuses it). */
+/** The request body for `fields`, clearing what the status does not use (the API refuses a stray `blocked_by`). */
 export function toBody(fields: Fields): TaskBody {
   const blocked = fields.status === "blocked"
   return {

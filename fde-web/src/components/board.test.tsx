@@ -11,16 +11,24 @@ import { renderWithRouter } from "@/test/render"
 // Lets a test hold a write on the wire, or have it refused, before the mock answers. The client
 // reads `mockApi.fetch` when it first connects, so this wrapper is in place before any call.
 const answer = mockApi.fetch
-const wire: { hold: Promise<void> | null; refuse: Response | null } = { hold: null, refuse: null }
+const wire: {
+  hold: Promise<void> | null
+  refuse: Response | null
+  /** Holds a read's answer, already taken, so it arrives late with what was true when it was asked. */
+  holdReads: Promise<void> | null
+} = { hold: null, refuse: null, holdReads: null }
 mockApi.fetch = async (request) => {
   const write = request.method !== "GET"
   if (write && wire.hold) await wire.hold
   if (write && wire.refuse) return wire.refuse.clone()
-  return answer(request)
+  const response = await answer(request)
+  if (!write && wire.holdReads) await wire.holdReads
+  return response
 }
 afterEach(() => {
   wire.hold = null
   wire.refuse = null
+  wire.holdReads = null
 })
 
 const scope = {
@@ -100,6 +108,28 @@ describe("Board", () => {
     expect((await api.project(scope)).tasks.find((t) => t.title === REPLAY)?.status).toBe(
       "in_progress",
     )
+  })
+
+  it("keeps a confirmed move when a read of the board taken before it arrives after it", async () => {
+    const { queryClient } = renderWithRouter(<ProjectPage scope={scope} />)
+    await screen.findAllByText("Assigned to you")
+    let answered = () => {}
+    wire.hold = new Promise((resolve) => (answered = resolve))
+    await pick(REPLAY, "In progress")
+    await screen.findByText("Moving to In progress…")
+
+    // A refetch (window focus, another tab) reads the board while the move is still on the wire.
+    let read = () => {}
+    wire.holdReads = new Promise((resolve) => (read = resolve))
+    void queryClient.invalidateQueries({ queryKey: ["companies", scope.company] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    answered()
+    await waitFor(() => expect(titles("In progress")).toContain(REPLAY))
+    read()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(titles("In progress")).toContain(REPLAY)
+    expect(titles("To do")).not.toContain(REPLAY)
   })
 
   it("moves a card to Done and drops its blocker", async () => {
@@ -349,6 +379,32 @@ describe("Board", () => {
 
     await waitFor(() => expect(titles("Blocked")).toEqual(["Agree the GPS alternative"]))
     expect(within(column("Blocked")).getByText(/Telematics export refused/)).toBeInTheDocument()
+  })
+
+  it("keeps the access request a task is blocked on, and a teammate's assignment, on edit", async () => {
+    const { queryClient } = renderWithRouter(<ProjectPage scope={scope} />)
+    await screen.findAllByText("Assigned to you")
+    const blocked = (await api.project(scope)).tasks.find((t) => t.title === TELEMATICS)!
+    await api.updateTask(scope, blocked.id, {
+      title: TELEMATICS,
+      status: "blocked",
+      blocker: blocked.blocker,
+      assignee: "usr_jonah",
+      blocked_by: "acc_k1",
+    })
+    await queryClient.invalidateQueries()
+    await within(column("Blocked")).findByText("Assigned to a teammate")
+
+    await userEvent.click(screen.getByRole("button", { name: `Edit ${TELEMATICS}` }))
+    const dialog = await screen.findByRole("dialog", { name: "Edit task" })
+    await userEvent.type(within(dialog).getByLabelText("Title"), " now")
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(titles("Blocked")).toEqual([`${TELEMATICS} now`]))
+    expect((await api.project(scope)).tasks.find((t) => t.id === blocked.id)).toMatchObject({
+      assignee: "usr_jonah",
+      blocked_by: "acc_k1",
+    })
   })
 
   it("asks for the blocker when an edit makes a task blocked, and shows the API's refusal", async () => {
