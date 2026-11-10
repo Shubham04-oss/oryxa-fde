@@ -7,10 +7,12 @@ import { ApprovalOut, EventsOut, RunOut, isActive, parseEvents } from "./runs"
 import type { AgentRunId, ApprovalId, CreateRun, RunEvent } from "./runs"
 import {
   AccessRequestOut,
+  AssigneeOut,
   CompanyOut,
   CompanySummaryOut,
   DecisionOut,
   Me,
+  MemberOut,
   ProjectOut,
   ScopeOut,
   StakeholderOut,
@@ -19,16 +21,28 @@ import {
   TodayOut,
 } from "./schemas"
 import type { TaskBody } from "../board"
+import type {
+  CompanyBody,
+  CompanyPatch,
+  ProjectBody,
+  ProjectPatch,
+  StakeholderBody,
+  SystemBody,
+} from "../records"
 import type { AccessBody } from "../today"
 import type {
   AccessRequestId,
   Company,
   CompanyId,
+  MemberRole,
   Project,
   ProjectId,
   ProjectScope,
   Stage,
+  StakeholderId,
+  SystemId,
   TaskId,
+  UserId,
 } from "./schemas"
 
 // The app's only way to the FDE API. Screens use `api` and `queries` and never see where the
@@ -50,7 +64,16 @@ export class ApiError extends Error {
 }
 
 /** Words for refusals the API answers with a code only. Anything else shows generic copy. */
-const SAFE_TEXT: Record<string, string> = {
+export const SAFE_TEXT: Record<string, string> = {
+  forbidden: "You are not allowed to do that here. Ask a lead, or an organisation admin.",
+  conflict: "That clashes with a change made a moment ago. Reload the page and try again.",
+  invalid_name: "A name is one line, 1 to 200 characters.",
+  invalid_industry: "Industry is one line, up to 200 characters.",
+  invalid_region: "Region is one line, up to 200 characters.",
+  invalid_kind: "The kind is one line, up to 200 characters.",
+  invalid_summary: "The summary is plain text, up to 4000 characters.",
+  invalid_description: "The description is plain text, up to 4000 characters.",
+  invalid_email: "Use an address like name@example.com.",
   rejected_stage_transition: "A project moves one stage forward, or back to an earlier one.",
   // The API could not reach a service it needs (WorkOS, SpiceDB). Nothing is wrong on this end.
   unavailable: "The workspace is briefly unavailable. Try again in a minute.",
@@ -244,6 +267,116 @@ function connect(transport: Transport) {
 
     today: () => read(TodayOut, client.GET("/v1/today")),
 
+    /** Creates a company; the caller becomes its lead. */
+    createCompany: (body: CompanyBody) => read(CompanyOut, client.POST("/v1/companies", { body })),
+
+    /** Changes the fields in `patch`; a field left out stays, `null` clears it. */
+    updateCompany: (id: CompanyId, patch: CompanyPatch) =>
+      read(CompanyOut, client.PATCH("/v1/companies/{company}", { ...company(id), body: patch })),
+
+    /** Creates a project in the Discover stage. */
+    createProject: (id: CompanyId, body: ProjectBody) =>
+      read(ProjectOut, client.POST("/v1/companies/{company}/projects", { ...company(id), body })),
+
+    updateProject: (scope: ProjectScope, patch: ProjectPatch) =>
+      read(
+        ProjectOut,
+        client.PATCH("/v1/companies/{company}/projects/{project}", {
+          ...project(scope),
+          body: patch,
+        }),
+      ),
+
+    addStakeholder: (id: CompanyId, body: StakeholderBody) =>
+      read(
+        StakeholderOut,
+        client.POST("/v1/companies/{company}/stakeholders", { ...company(id), body }),
+      ),
+
+    /** Replaces a stakeholder: every field, so a change to one sends them all. */
+    updateStakeholder: (id: CompanyId, stakeholder: StakeholderId, body: StakeholderBody) =>
+      read(
+        StakeholderOut,
+        client.PUT("/v1/companies/{company}/stakeholders/{stakeholder}", {
+          params: { path: { company: id, stakeholder } },
+          body,
+        }),
+      ),
+
+    async removeStakeholder(id: CompanyId, stakeholder: StakeholderId) {
+      const { error, response } = await client.DELETE(
+        "/v1/companies/{company}/stakeholders/{stakeholder}",
+        { params: { path: { company: id, stakeholder } } },
+      )
+      if (response.status === 409)
+        throw new ApiError(
+          409,
+          "conflict",
+          "They signed off a scope, so they cannot be removed from the record.",
+        )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    addSystem: (id: CompanyId, body: SystemBody) =>
+      read(SystemOut, client.POST("/v1/companies/{company}/systems", { ...company(id), body })),
+
+    /** Replaces a system: every field. */
+    updateSystem: (id: CompanyId, system: SystemId, body: SystemBody) =>
+      read(
+        SystemOut,
+        client.PUT("/v1/companies/{company}/systems/{system}", {
+          params: { path: { company: id, system } },
+          body,
+        }),
+      ),
+
+    async removeSystem(id: CompanyId, system: SystemId) {
+      const { error, response } = await client.DELETE("/v1/companies/{company}/systems/{system}", {
+        params: { path: { company: id, system } },
+      })
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    members: (id: CompanyId) =>
+      read(z.array(MemberOut), client.GET("/v1/companies/{company}/members", company(id))),
+
+    async setMember(id: CompanyId, user: UserId, role: MemberRole) {
+      const { error, response } = await client.PUT("/v1/companies/{company}/members/{user}", {
+        params: { path: { company: id, user } },
+        body: { role },
+      })
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    async removeMember(id: CompanyId, user: UserId) {
+      const { error, response } = await client.DELETE("/v1/companies/{company}/members/{user}", {
+        params: { path: { company: id, user } },
+      })
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    assignees: (scope: ProjectScope) =>
+      read(
+        z.array(AssigneeOut),
+        client.GET("/v1/companies/{company}/projects/{project}/assignees", project(scope)),
+      ),
+
+    async assign(scope: ProjectScope, user: UserId) {
+      const { error, response } = await client.PUT(
+        "/v1/companies/{company}/projects/{project}/assignees/{user}",
+        { params: { path: { ...scope, user } } },
+      )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
+    async unassign(scope: ProjectScope, user: UserId) {
+      const { error, response } = await client.DELETE(
+        "/v1/companies/{company}/projects/{project}/assignees/{user}",
+        { params: { path: { ...scope, user } } },
+      )
+      if (!response.ok) throw refusal(response.status, error)
+    },
+
     /** Moves a project to `to`; the API refuses a move `canMove` would refuse. */
     moveStage: (scope: ProjectScope, to: Stage) =>
       read(
@@ -393,6 +526,23 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     company: async (id) => (await use()).company(id),
     project: async (scope) => (await use()).project(scope),
     today: async () => (await use()).today(),
+    createCompany: async (body) => (await use()).createCompany(body),
+    updateCompany: async (id, patch) => (await use()).updateCompany(id, patch),
+    createProject: async (id, body) => (await use()).createProject(id, body),
+    updateProject: async (scope, patch) => (await use()).updateProject(scope, patch),
+    addStakeholder: async (id, body) => (await use()).addStakeholder(id, body),
+    updateStakeholder: async (id, stakeholder, body) =>
+      (await use()).updateStakeholder(id, stakeholder, body),
+    removeStakeholder: async (id, stakeholder) => (await use()).removeStakeholder(id, stakeholder),
+    addSystem: async (id, body) => (await use()).addSystem(id, body),
+    updateSystem: async (id, system, body) => (await use()).updateSystem(id, system, body),
+    removeSystem: async (id, system) => (await use()).removeSystem(id, system),
+    members: async (id) => (await use()).members(id),
+    setMember: async (id, user, role) => (await use()).setMember(id, user, role),
+    removeMember: async (id, user) => (await use()).removeMember(id, user),
+    assignees: async (scope) => (await use()).assignees(scope),
+    assign: async (scope, user) => (await use()).assign(scope, user),
+    unassign: async (scope, user) => (await use()).unassign(scope, user),
     moveStage: async (scope, to) => (await use()).moveStage(scope, to),
     addTask: async (scope, body) => (await use()).addTask(scope, body),
     updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
@@ -481,6 +631,20 @@ export const queries = {
     }),
   activeRuns: () =>
     queryOptions({ queryKey: ["runs", "active"], queryFn: api.activeRuns, ...read }),
+  /** A company's leads and engineers, by id: the API has no names for them yet. */
+  members: (id: CompanyId) =>
+    queryOptions({
+      queryKey: ["companies", id, "members"],
+      queryFn: () => api.members(id),
+      ...read,
+    }),
+  /** The engineers assigned to a project, by id. */
+  assignees: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "assignees"],
+      queryFn: () => api.assignees(scope),
+      ...read,
+    }),
 }
 
 const RUN_POLL_MS = 5_000

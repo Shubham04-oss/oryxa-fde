@@ -10,6 +10,7 @@
 //   full      false for a screen with an overlay open: the shot is then the viewport only. By
 //             default the app's own scroll container is grown so the whole page is captured.
 //   sizes, themes  names to take instead of all of `SIZES` and `THEMES`
+//   emptyWorkspace  true: a workspace with no company yet (the mock's `__fdeMockNoCompanies`, set before the app loads)
 //   signedOut true: no sign-in first (the sign-in screen itself)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
@@ -44,6 +45,17 @@ const todayReady = (page) => page.getByRole("region", { name: "Blocked" })
 async function openRowMenu(page, title) {
   await page.getByRole("button", { name: `Actions for ${title}` }).click()
   await page.getByRole("menu").waitFor()
+}
+
+// The company and project forms. `open` names the dialog; `fill` types into a field.
+const button = (page, name) => page.getByRole("button", { name, exact: true })
+async function fill(page, dialogName, label, text) {
+  await dialog(page, dialogName).getByLabel(label, { exact: true }).fill(text)
+}
+const company = (page) => page.getByRole("heading", { name: "Projects" })
+const newCompany = async (page) => {
+  await button(page, "New company").click()
+  await dialog(page, "New company").waitFor()
 }
 
 const FINE = ["1440", "1024"]
@@ -239,6 +251,168 @@ export const screens = [
       const edit = dialog(page, "Edit task")
       await edit.getByRole("button", { name: "Save" }).click()
       await edit.getByRole("alert").waitFor()
+    },
+  },
+
+  // Starting an engagement: the first company, then what to do on its page, then the project.
+  {
+    name: "companies-empty",
+    path: "/",
+    emptyWorkspace: true,
+    ready: (page) => page.getByText("Add your first company"),
+  },
+  {
+    name: "company-new",
+    path: "/",
+    ready: heading("Companies"),
+    full: false,
+    act: newCompany,
+  },
+  {
+    name: "company-new-invalid",
+    path: "/",
+    ready: heading("Companies"),
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await newCompany(page)
+      await dialog(page, "New company").getByRole("button", { name: "Create company" }).click()
+      await dialog(page, "New company").getByRole("alert").waitFor()
+    },
+  },
+  // Made through the form, from an empty workspace: it opens on its page, with what to do next.
+  {
+    name: "company-created",
+    path: "/",
+    emptyWorkspace: true,
+    ready: (page) => page.getByText("Add your first company"),
+    act: async (page) => {
+      await newCompany(page)
+      await fill(page, "New company", "Name", "Orion Rail")
+      await fill(page, "New company", "Industry", "Transport")
+      await fill(page, "New company", "Region", "UK")
+      await dialog(page, "New company").getByRole("button", { name: "Create company" }).click()
+      await page.getByText(/No stakeholders yet/).waitFor()
+    },
+  },
+  {
+    name: "company-edit",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit company").click()
+      await dialog(page, "Edit company").waitFor()
+    },
+  },
+  {
+    name: "company-edit-refused",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    failWrites: true,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit company").click()
+      await fill(page, "Edit company", "Industry", "Freight")
+      await dialog(page, "Edit company").getByRole("button", { name: "Save" }).click()
+      await dialog(page, "Edit company").getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "project-new",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "New project").click()
+      await dialog(page, "New project").waitFor()
+    },
+  },
+  {
+    name: "project-created",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    act: async (page) => {
+      await button(page, "New project").click()
+      await fill(page, "New project", "Name", "Depot rules audit")
+      await dialog(page, "New project").getByRole("button", { name: "Create project" }).click()
+      await page.getByText("A new project. Start here.").waitFor()
+    },
+  },
+  {
+    name: "project-edit",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit project").click()
+      await dialog(page, "Edit project").waitFor()
+    },
+  },
+  {
+    name: "stakeholder-add",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Add stakeholder").click()
+      await dialog(page, "Add stakeholder").waitFor()
+    },
+  },
+  {
+    name: "stakeholder-edit",
+    path: KESTREL,
+    ready: company,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit Ines Moreau").click()
+      await dialog(page, "Edit stakeholder").waitFor()
+    },
+  },
+  {
+    name: "stakeholder-remove-ask",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit Ines Moreau").click()
+      await button(page, "Remove stakeholder").click()
+      await page.getByRole("group", { name: "Confirm the removal" }).waitFor()
+    },
+  },
+  {
+    name: "system-edit",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit Planning database").click()
+      await dialog(page, "Edit system").waitFor()
+    },
+  },
+  // Signed off by the sponsor, so the API refuses: the reason stays in the dialog.
+  {
+    name: "stakeholder-remove-refused",
+    path: KESTREL,
+    ready: company,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await button(page, "Edit Mara Lindqvist").click()
+      await button(page, "Remove stakeholder").click()
+      await page
+        .getByRole("group", { name: "Confirm the removal" })
+        .getByRole("button", { name: "Remove", exact: true })
+        .click()
+      await dialog(page, "Edit stakeholder").getByRole("alert").waitFor()
     },
   },
 

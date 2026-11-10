@@ -1,6 +1,10 @@
+import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
+import { CompanyDialog } from "./company-forms"
 import { Failed, Loading, Page, Quiet, Status } from "./page"
+import { Button } from "./ui/button"
+import { Dialog } from "./ui/dialog"
 import { queries } from "@/lib/api/client"
 import type { CompanyRole } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
@@ -34,6 +38,7 @@ export function CompaniesHome() {
   const companies = useQuery(queries.companies())
   // Optional: the cards still show if Today cannot be read.
   const today = useQuery(queries.today())
+  const [creating, setCreating] = useState(false)
 
   if (companies.isPending)
     return (
@@ -51,13 +56,25 @@ export function CompaniesHome() {
         />
       </Page>
     )
+  const newCompany = (
+    <Dialog open={creating} onOpenChange={setCreating}>
+      {creating && <CompanyDialog onClose={() => setCreating(false)} />}
+    </Dialog>
+  )
+  // The first minute of an engagement: say what a company is, and what to do first.
   if (companies.data.companies.length === 0)
     return (
       <Page>
-        <div className="rounded-[15px] border border-dashed border-strong p-5">
-          <strong className="text-[13px] font-semibold">You are not on any company yet.</strong>
-          <Quiet className="mt-1">When your organisation adds you to one, it shows here.</Quiet>
+        <div className="grid justify-items-start gap-3 rounded-[15px] border border-dashed border-strong p-5">
+          <strong className="text-[13px] font-semibold">Add your first company</strong>
+          <Quiet>
+            A company is a customer you work with. Add it, then the people you work with there and
+            the systems the work touches, then start a project. If your organisation adds you to a
+            company, it shows here too.
+          </Quiet>
+          <Button onClick={() => setCreating(true)}>New company</Button>
         </div>
+        {newCompany}
       </Page>
     )
 
@@ -73,6 +90,11 @@ export function CompaniesHome() {
 
   return (
     <Page wide>
+      <div className="flex justify-end">
+        <Button variant="outline" onClick={() => setCreating(true)}>
+          New company
+        </Button>
+      </div>
       <ul aria-label="Your companies" className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
         {companies.data.companies.map((company) => {
           const needs = today.isSuccess ? attention(counts.get(company.id)) : null
@@ -116,6 +138,7 @@ export function CompaniesHome() {
           )
         })}
       </ul>
+      {newCompany}
     </Page>
   )
 }

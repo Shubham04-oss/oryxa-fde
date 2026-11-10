@@ -222,7 +222,8 @@ function project(
   }
 }
 
-const NO_RECORDS: Records = { scope: scope([], []), access: [], tasks: [], decisions: [] }
+/** A project with nothing written in it yet. A function, so no two projects share an array. */
+const emptyRecords = (): Records => ({ scope: scope([], []), access: [], tasks: [], decisions: [] })
 
 function seed() {
   const companies: Array<CompanySeed> = [
@@ -448,7 +449,7 @@ function seed() {
         "Sort incoming damage claims by likely cause and route them to the right team.",
       ),
       records: {
-        ...NO_RECORDS,
+        ...emptyRecords(),
         tasks: [
           task("tsk_kc1", "Interview the claims team lead", "waiting_on_customer", 1, {
             due: 2,
@@ -764,14 +765,35 @@ function seed() {
     organisation: { id: "org_northlight", name: "Northlight FDE" },
     role: "admin",
   }
-  return { me, companies, projects, runs: seedRuns() }
+  // Who is assigned to a project is read from the company's team until someone changes it.
+  const assignees: Record<string, Array<S["AssigneeOut"]>> = {}
+  // A workspace with no company yet, to see the first minute: `globalThis.__fdeMockNoCompanies = true`
+  // before the app loads (`pnpm shots` does), or `resetMockApi({ empty: true })`.
+  if ((globalThis as Record<string, unknown>).__fdeMockNoCompanies === true) {
+    companies.length = 0
+    projects.length = 0
+  }
+  return { me, companies, projects, runs: seedRuns(), assignees }
 }
 
 let state = seed()
 
-/** Tests only: fresh sample data, signed in or out. */
-export function resetMockApi({ signedIn = true }: { signedIn?: boolean } = {}) {
+/**
+ * Tests only: fresh sample data, signed in or out. `engineer: true` signs in as an engineer, not an
+ * organisation admin: only the companies they are on, and only what a lead or engineer may change.
+ * `empty: true` leaves no company.
+ */
+export function resetMockApi({
+  signedIn = true,
+  engineer = false,
+  empty = false,
+}: { signedIn?: boolean; engineer?: boolean; empty?: boolean } = {}) {
   state = seed()
+  if (empty) {
+    state.companies.length = 0
+    state.projects.length = 0
+  }
+  if (engineer) state.me = { ...state.me, role: "member" }
   setSession(signedIn)
 }
 
@@ -807,44 +829,52 @@ function roleAt(c: CompanySeed): S["CallerRole"] | null {
   return own ?? (state.me.role === "admin" ? "admin" : null)
 }
 
+/** The API's `manage` (a company's lead, or an organisation admin) and `work` (any member, or an admin). */
+const mayManage = (c: CompanySeed) => roleAt(c) === "admin" || roleAt(c) === "lead"
+const mayWork = (c: CompanySeed) => roleAt(c) !== null
+
 /** `GET /v1/companies`: each company with the caller's role and its project summaries. */
 function companyList(): Array<S["CompanySummaryOut"]> {
-  return state.companies.map((c) => ({
-    ...c.company,
-    role: roleAt(c),
-    projects: projectsOf(c.company.id).map(({ project: p }) => ({
-      id: p.id,
-      name: p.name,
-      stage: p.stage,
-    })),
-  }))
+  return state.companies
+    .filter((c) => roleAt(c) !== null)
+    .map((c) => ({
+      ...c.company,
+      role: roleAt(c),
+      projects: projectsOf(c.company.id).map(({ project: p }) => ({
+        id: p.id,
+        name: p.name,
+        stage: p.stage,
+      })),
+    }))
 }
 
 /** `GET /v1/today`: tasks not done and access not granted, with names to show them by. */
 function today(): S["TodayOut"] {
-  const items = state.companies.flatMap((c) =>
-    projectsOf(c.company.id).flatMap(({ project: p, records }) => {
-      const where = {
-        company: { id: c.company.id, name: c.company.name },
-        project: { id: p.id, name: p.name },
-      }
-      const name = (id: string | null | undefined) =>
-        c.stakeholders.find((s) => s.id === id)?.name ?? null
-      return [
-        ...records.tasks
-          .filter((t) => t.status !== "done")
-          .map((t): S["TodayItemOut"] => ({ kind: "task", task: t, ...where })),
-        ...records.access
-          .filter((a) => a.status !== "granted")
-          .map((a): S["TodayItemOut"] => ({
-            kind: "access_request",
-            access: a,
-            owner: name(a.owner),
-            ...where,
-          })),
-      ]
-    }),
-  )
+  const items = state.companies
+    .filter((c) => roleAt(c) !== null)
+    .flatMap((c) =>
+      projectsOf(c.company.id).flatMap(({ project: p, records }) => {
+        const where = {
+          company: { id: c.company.id, name: c.company.name },
+          project: { id: p.id, name: p.name },
+        }
+        const name = (id: string | null | undefined) =>
+          c.stakeholders.find((s) => s.id === id)?.name ?? null
+        return [
+          ...records.tasks
+            .filter((t) => t.status !== "done")
+            .map((t): S["TodayItemOut"] => ({ kind: "task", task: t, ...where })),
+          ...records.access
+            .filter((a) => a.status !== "granted")
+            .map((a): S["TodayItemOut"] => ({
+              kind: "access_request",
+              access: a,
+              owner: name(a.owner),
+              ...where,
+            })),
+        ]
+      }),
+    )
   return { items }
 }
 
@@ -982,14 +1012,292 @@ async function accessRoutes(
   return json(saved)
 }
 
+const noContent = () => new Response(null, { status: 204 })
+const readBody = async (request: Request) =>
+  (await request.json().catch(() => null)) as Record<string, unknown> | null
+/** A field that may be left out or null, but is refused when it is there and wrong. */
+const badOptional = (value: unknown, max: number, lines: boolean) =>
+  value !== undefined && value !== null && !plain(value, max, lines)
+const trimmed = (value: unknown) => (typeof value === "string" ? value.trim() || null : null)
+// The API's address rule in short: one @, a dotted domain, no spaces, 254 characters at most.
+const validEmail = (value: unknown) =>
+  value === undefined ||
+  value === null ||
+  (typeof value === "string" &&
+    value.trim().length <= 254 &&
+    /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/.test(value.trim()))
+const PARTS = ["sponsor", "champion", "user", "it", "security", "other"] as const
+let recordCount = 0
+
+/** `POST /v1/companies`: any member of the organisation may; the caller becomes its lead. */
+async function createCompany(request: Request) {
+  const b = await readBody(request)
+  if (!b) return refuse(400, "invalid")
+  if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
+  if (badOptional(b.industry, 200, false)) return refuse(400, "invalid_industry")
+  if (badOptional(b.region, 200, false)) return refuse(400, "invalid_region")
+  if (badOptional(b.summary, 4000, true)) return refuse(400, "invalid_summary")
+  const now = new Date().toISOString()
+  const created: CompanySeed = {
+    company: {
+      id: `cmp_new${++recordCount}`,
+      name: (b.name as string).trim(),
+      industry: trimmed(b.industry),
+      region: trimmed(b.region),
+      summary: trimmed(b.summary),
+      created_at: now,
+      updated_at: now,
+    },
+    members: [{ user: state.me.user.id, role: "lead", added_at: now }],
+    stakeholders: [],
+    systems: [],
+  }
+  state.companies.push(created)
+  return json(created.company, 201)
+}
+
+/** `PATCH`: a field left out stays, `null` clears it (a name cannot be cleared). */
+async function patchCompany(found: CompanySeed, request: Request) {
+  if (!mayManage(found)) return refuse(403, "forbidden")
+  const b = await readBody(request)
+  if (!b || Object.keys(b).some((k) => !["name", "industry", "region", "summary"].includes(k)))
+    return refuse(400, "invalid")
+  if (b.name !== undefined && b.name !== null && !plain(b.name, 200, false))
+    return refuse(400, "invalid_name")
+  if (badOptional(b.industry, 200, false)) return refuse(400, "invalid_industry")
+  if (badOptional(b.region, 200, false)) return refuse(400, "invalid_region")
+  if (badOptional(b.summary, 4000, true)) return refuse(400, "invalid_summary")
+  const c = found.company
+  if (typeof b.name === "string") c.name = b.name.trim()
+  if (b.industry !== undefined) c.industry = trimmed(b.industry)
+  if (b.region !== undefined) c.region = trimmed(b.region)
+  if (b.summary !== undefined) c.summary = trimmed(b.summary)
+  c.updated_at = new Date().toISOString()
+  return json(c)
+}
+
+/**
+ * `POST` and `PATCH` on a company's projects. A new project starts at Discover. Creating one is the
+ * API's `manage`; changing one is the project's `work` (the caller already has it here).
+ */
+async function projectWrites(
+  method: string,
+  projectId: string | undefined,
+  found: CompanySeed,
+  request: Request,
+) {
+  if (method === "POST" && !mayManage(found)) return refuse(403, "forbidden")
+  const b = await readBody(request)
+  if (!b) return refuse(400, "invalid")
+  const now = new Date().toISOString()
+  if (method === "POST") {
+    if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
+    if (badOptional(b.summary, 4000, true)) return refuse(400, "invalid_summary")
+    if (Object.keys(b).some((k) => !["name", "summary"].includes(k))) return refuse(400, "invalid")
+    const created: S["ProjectOut"] = {
+      id: `prj_new${++recordCount}`,
+      company: found.company.id,
+      name: (b.name as string).trim(),
+      stage: "discover",
+      summary: trimmed(b.summary),
+      created_at: now,
+      updated_at: now,
+    }
+    state.projects.push({ project: created, records: emptyRecords() })
+    // The API assigns no one to a new project; a lead or admin reaches it without.
+    state.assignees[created.id] = []
+    return json(created, 201)
+  }
+  const p = projectsOf(found.company.id).find((x) => x.project.id === projectId)
+  if (!p) return refuse(404, "not_found")
+  if (Object.keys(b).some((k) => !["name", "summary"].includes(k))) return refuse(400, "invalid")
+  if (b.name !== undefined && b.name !== null && !plain(b.name, 200, false))
+    return refuse(400, "invalid_name")
+  if (badOptional(b.summary, 4000, true)) return refuse(400, "invalid_summary")
+  if (typeof b.name === "string") p.project.name = b.name.trim()
+  if (b.summary !== undefined) p.project.summary = trimmed(b.summary)
+  p.project.updated_at = now
+  return json(p.project)
+}
+
+/** `POST`, `PUT` and `DELETE` on a company's stakeholders: the API's `work`, and its checks. */
+async function stakeholderRoutes(
+  method: string,
+  id: string | undefined,
+  found: CompanySeed,
+  request: Request,
+) {
+  if (!mayWork(found)) return refuse(403, "forbidden")
+  const at = id === undefined ? -1 : found.stakeholders.findIndex((x) => x.id === id)
+  if (method === "DELETE" && id !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    // The API refuses once they have signed off a scope.
+    if (projectsOf(found.company.id).some((p) => p.records.scope.sign_off?.stakeholder === id))
+      return refuse(409, "conflict")
+    found.stakeholders.splice(at, 1)
+    // What named them is left naming no one.
+    for (const { records } of projectsOf(found.company.id)) {
+      records.access.forEach((a, i) => {
+        if (a.owner === id) records.access[i] = { ...a, owner: null }
+      })
+      records.tasks.forEach((t, i) => {
+        if (t.waiting_on === id) records.tasks[i] = { ...t, waiting_on: null }
+      })
+    }
+    return noContent()
+  }
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
+  const b = await readBody(request)
+  if (!b) return refuse(400, "invalid")
+  if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
+  if (badOptional(b.title, 200, false)) return refuse(400, "invalid_title")
+  if (!validEmail(b.email)) return refuse(400, "invalid_email")
+  const role = b.role === undefined ? "other" : PARTS.find((one) => one === b.role)
+  if (!role) return refuse(400, "invalid_role")
+  const before = adding ? undefined : found.stakeholders[at]
+  if (!adding && !before) return refuse(404, "not_found")
+  const email = trimmed(b.email)
+  const saved: S["StakeholderOut"] = {
+    id: before?.id ?? `stk_new${++recordCount}`,
+    name: (b.name as string).trim(),
+    role,
+    title: trimmed(b.title),
+    email,
+    // A new address is subscribed again; the same one keeps what its owner chose.
+    digest_unsubscribed_at:
+      email === (before?.email ?? null) ? (before?.digest_unsubscribed_at ?? null) : null,
+    updated_at: new Date().toISOString(),
+  }
+  if (before) found.stakeholders[at] = saved
+  else found.stakeholders.push(saved)
+  return json(saved, adding ? 201 : 200)
+}
+
+/** `POST`, `PUT` and `DELETE` on a company's systems. */
+async function systemRoutes(
+  method: string,
+  id: string | undefined,
+  found: CompanySeed,
+  request: Request,
+) {
+  if (!mayWork(found)) return refuse(403, "forbidden")
+  const at = id === undefined ? -1 : found.systems.findIndex((x) => x.id === id)
+  if (method === "DELETE" && id !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    found.systems.splice(at, 1)
+    for (const { records } of projectsOf(found.company.id))
+      records.access.forEach((a, i) => {
+        if (a.system === id) records.access[i] = { ...a, system: null }
+      })
+    return noContent()
+  }
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
+  const b = await readBody(request)
+  if (!b) return refuse(400, "invalid")
+  if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
+  if (badOptional(b.kind, 200, false)) return refuse(400, "invalid_kind")
+  if (badOptional(b.description, 4000, true)) return refuse(400, "invalid_description")
+  const before = adding ? undefined : found.systems[at]
+  if (!adding && !before) return refuse(404, "not_found")
+  const saved: S["SystemOut"] = {
+    id: before?.id ?? `sys_new${++recordCount}`,
+    name: (b.name as string).trim(),
+    kind: trimmed(b.kind),
+    description: trimmed(b.description),
+    updated_at: new Date().toISOString(),
+  }
+  if (before) found.systems[at] = saved
+  else found.systems.push(saved)
+  return json(saved, adding ? 201 : 200)
+}
+
+/** The people of the organisation, by id: the API only invites someone it knows. */
+const ORG_USERS: ReadonlyArray<string> = [RIYA, JONAH]
+
+/** `PUT` and `DELETE` on a company's members: the API's `manage`. */
+async function memberRoutes(
+  method: string,
+  user: string | undefined,
+  found: CompanySeed,
+  request: Request,
+) {
+  if (user === undefined || (method !== "PUT" && method !== "DELETE")) return null
+  if (!mayManage(found)) return refuse(403, "forbidden")
+  const at = found.members.findIndex((m) => m.user === user)
+  if (method === "DELETE") {
+    if (at < 0) return refuse(404, "not_found")
+    found.members.splice(at, 1)
+    // They no longer work on the company's projects.
+    for (const { project: p } of projectsOf(found.company.id)) {
+      const list = state.assignees[p.id]
+      if (list) state.assignees[p.id] = list.filter((a) => a.user !== user)
+    }
+    return noContent()
+  }
+  const b = await readBody(request)
+  const role = b && (b.role === "lead" || b.role === "engineer" ? b.role : null)
+  if (!role) return refuse(400, "invalid_role")
+  if (!ORG_USERS.includes(user)) return refuse(404, "not_found")
+  if (at >= 0) found.members[at] = { ...found.members[at]!, role }
+  else found.members.push({ user, role, added_at: new Date().toISOString() })
+  return noContent()
+}
+
+/** Who is assigned to a project: its own list once changed, else the company's team. */
+function assigneesOf(found: CompanySeed, projectId: string) {
+  return (state.assignees[projectId] ??= found.members.map((m) => ({
+    user: m.user,
+    added_at: m.added_at,
+  })))
+}
+
+/** `GET`, `PUT` and `DELETE` on a project's assignees. Reading is `work`, changing is `manage`. */
+function assigneeRoutes(
+  method: string,
+  user: string | undefined,
+  found: CompanySeed,
+  projectId: string,
+) {
+  const list = assigneesOf(found, projectId)
+  if (method === "GET" && user === undefined) return json(list)
+  if (user === undefined) return null
+  if (!mayManage(found)) return refuse(403, "forbidden")
+  const at = list.findIndex((a) => a.user === user)
+  if (method === "DELETE") {
+    if (at < 0) return refuse(404, "not_found")
+    list.splice(at, 1)
+    return noContent()
+  }
+  if (method !== "PUT") return null
+  if (!found.members.some((m) => m.user === user)) return refuse(404, "not_found")
+  if (at < 0) list.push({ user, added_at: new Date().toISOString() })
+  return noContent()
+}
+
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
-  if (companyId === undefined) return method === "GET" ? json(companyList()) : null
+  if (companyId === undefined) {
+    if (method === "POST") return createCompany(request)
+    return method === "GET" ? json(companyList()) : null
+  }
   // The API checks permission before it looks: anything not the FDE's is a 403.
   const found = state.companies.find((c) => c.company.id === companyId)
-  if (!found) return refuse(403, "forbidden")
+  if (!found || !mayWork(found)) return refuse(403, "forbidden")
   if (method === "GET" && collection === undefined) return json(found.company)
+  if (method === "PATCH" && collection === undefined) return patchCompany(found, request)
+  if (collection === "stakeholders" && method !== "GET")
+    return stakeholderRoutes(method, projectId, found, request)
+  if (collection === "systems" && method !== "GET")
+    return systemRoutes(method, projectId, found, request)
+  if (collection === "members" && method !== "GET")
+    return memberRoutes(method, projectId, found, request)
+  if (collection === "projects" && method === "POST" && projectId === undefined)
+    return projectWrites(method, undefined, found, request)
+  if (collection === "projects" && method === "PATCH" && record === undefined)
+    return projectWrites(method, projectId, found, request)
   if (method === "GET" && projectId === undefined) {
     if (collection === "members") return json(found.members)
     if (collection === "stakeholders") return json(found.stakeholders)
@@ -1002,6 +1310,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (!p) return refuse(403, "forbidden")
   if (record === "agent-runs")
     return runRoutes((state.runs[projectId] ??= []), method, rest, request, state.me.user.id)
+  if (record === "assignees") return assigneeRoutes(method, rest[0], found, projectId)
   if (method === "GET") {
     if (record === undefined) return json(p.project)
     if (record === "scope") return json(p.records.scope)

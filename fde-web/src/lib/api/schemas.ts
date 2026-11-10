@@ -116,6 +116,18 @@ export const StakeholderOut = z.object({
 })
 export type StakeholderOut = z.infer<typeof StakeholderOut>
 
+/** A company's role for a person who works on it (the spec's `MemberRole`). */
+export const MemberRole = z.enum(["lead", "engineer"])
+export type MemberRole = z.infer<typeof MemberRole>
+
+/** A lead or engineer on a company. The API names them by id only (`user` is a WorkOS user id). */
+export const MemberOut = z.object({ user: UserId, role: MemberRole, added_at: instant })
+export type MemberOut = z.infer<typeof MemberOut>
+
+/** An engineer assigned to a project. */
+export const AssigneeOut = z.object({ user: UserId, added_at: instant })
+export type AssigneeOut = z.infer<typeof AssigneeOut>
+
 export const SystemOut = z.object({
   id: SystemId,
   name: z.string(),

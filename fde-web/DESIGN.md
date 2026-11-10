@@ -63,7 +63,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - The header names what the canvas shows, centered: **Today**, **Companies**, the company's name,
   or the project's name.
 - **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
-  prompt (New task, Edit task, the Blocked and Waiting questions) is centred on the screen: 560px
+  prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder
+  and system forms) is centred on the screen: 560px
   wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
   Both sit on a scrim and close with Escape.
 - **Jump to** is a Base UI dialog: type to filter companies and projects (every word must match the
@@ -75,9 +76,11 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   eight stages beside it, each a little stronger than the last. Continue goes to AuthKit's hosted
   page through the API (`/auth/login`), which brings the FDE back to where they were. On the mock
   it says that no account is checked.
-- **Companies (home).** Two cards per row (one below 960px): name, industry and the FDE's part
-  (Lead, Engineer, or Organisation admin when they reach it as one), each project with its stage,
-  and what needs the FDE there today.
+- **Companies (home).** **New company** above two cards per row (one below 960px): name, industry
+  and the FDE's part (Lead, Engineer, or Organisation admin when they reach it as one), each project
+  with its stage, and what needs the FDE there today. With no company it is the first minute of an
+  engagement: a dashed card, **Add your first company**, that says what a company is and what comes
+  after it (its people and systems, then a project), with **New company** as the one primary button.
 - **Today.** An inbox: three cards in an 880px column, **Blocked** (blocked tasks, denied or revoked
   access), **Due** (open tasks due today or overdue, oldest first) and **Waiting on the customer**
   (tasks waiting on the customer, open access requests, longest wait first). Each item appears
@@ -124,13 +127,51 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   - **Phones.** The button and menu sit beside the text, at 36px, and the key hints are not shown.
   - Signals from other tools (ADR 0006) will be more row kinds: a row is a `TodayItem`, its actions
     come from `actionsOf` (`src/lib/today.ts`), and `TodayRow` draws any of them.
-- **Company.** Profile (summary, industry, region and the FDE's part), then Stakeholders (with
-  their part) and Systems (with their kind) side by side (stacked below 960px), then Projects.
-- **Project.** The company link, the summary, the stage bar, the **Board** (the one card that
-  takes the canvas's full width, up to 1600px; the others stay in the 1040px page column), Scope beside Success
-  criteria (each with its target), then Access and Decisions. Scope says whether it is signed off,
-  changed since sign-off, or not signed off. Access and waiting tasks name people and systems from
-  the company's records.
+- **Company.** Profile (summary, industry, region and the FDE's part, with **Edit company**), then
+  Stakeholders (with their part) and Systems (with their kind) side by side (stacked below 960px),
+  then Projects (with **New project**), then the Team. Each list has its add button in the card's
+  heading, and a row opens its form. An empty card says what to add and why, so a new company reads
+  as a list of next steps: "Add the people you work with at the customer: the sponsor who signs off,
+  a champion, someone in IT."
+- **Project.** The company link, with **Edit project** at its right, the summary, the stage bar, the **Board** (the one card that
+  takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
+  with the others), Scope beside Success
+  criteria (each with its target), then Access, Agent runs and Decisions, then **Assigned**. Scope
+  says whether it is signed off, changed since sign-off, or not signed off. Access and waiting tasks
+  name people and systems from the company's records. A project with nothing written in it yet
+  starts with a dashed note, **A new project. Start here.**, that says to name the people at the
+  customer, agree the scope, and add tasks as the work takes shape.
+- **Writes: companies, projects and what they hold.** One form, `FormDialog` (`form-dialog.tsx`), is
+  every create and edit in the workspace: the board's task form, the company, project, stakeholder
+  and system forms. It checks what the API checks before it sends (`lib/records.ts`, in the API's
+  own words), closes only when the API confirms, and keeps a refusal and what was typed in the
+  dialog. An edit can end in a delete that asks first, in the dialog. Saving goes through
+  `attempt`, and the confirmed record reaches the cached company, list and Today views
+  (`commitCompanyCreated` and the rest of `lib/records.ts`), so the sidebar, Jump to and Home have a
+  new company or project without a reload.
+  - **Who is offered what.** Anyone in the organisation may create a company and becomes its lead.
+    Editing the profile, starting a project, and changing the team or who is assigned need `manage`:
+    the company's lead, or an organisation admin (`canManage`, from the FDE's part in their list and
+    `GET /v1/me`). An engineer sees none of those buttons and a quiet line saying who changes them.
+    Editing a project's name and summary, and stakeholders and systems, need `work`, which everyone
+    who can open the page has. The API still decides: a refusal
+    is shown as it is, in the dialog or the row ("You are not allowed to do that here"), never hidden.
+  - **What is sent.** A company or project edit is a `PATCH` of the fields that changed, a blank
+    field sent as `null` to clear it, nothing sent when nothing changed. A stakeholder or a system
+    is a whole-record `PUT`: the form holds every field the record has (name, part, job title and
+    email; name, kind and description), so what is not changed goes back as it was. A new project
+    starts at Discover; the caller leads a new company.
+  - **Removing** a stakeholder or a system asks first, in the dialog. A stakeholder who has signed
+    off a scope cannot be removed (the API answers 409) and the dialog says so. Access requests and
+    tasks that named a removed person or system are left naming no one.
+  - **Team and Assigned.** The API names people by id only, so a row says **You** or **A teammate**
+    with the end of their id, like the board, until names arrive (#110). A lead or an admin changes
+    a member's role or removes them (the role is a select that shows the saved role until the API
+    answers; removal asks in the row), and assigns or unassigns engineers on a project from the
+    company's team. A refusal stays in the row. The only lead is never offered for removal or a
+    change of role (the API would allow it): their row says "A company always has a lead. Make
+    someone else lead first." A lead who makes themselves an engineer is asked first, in the row. There is no way to add someone to a company yet: the
+    API only takes the id of a user, and has no list of the organisation's people to choose from.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -215,6 +256,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
+- Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
+  `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems, and
+  `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`. The API's refusals carry a
+  code only; `SAFE_TEXT` in `client.ts` turns the ones a person can act on into a sentence.
 - Home, Jump to and Today read whole views from the API (`GET /v1/companies`, `/v1/today`). The
   company and project screens are gathered from a few calls each in `client.ts`; a project's
   people and systems are read through the project, so an assignee may see them.
@@ -227,7 +272,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - `pnpm dev:mock` answers from `src/dev/mock-api.ts`: the spec's routes in the browser, on
   invented sample data only. Setting `globalThis.__fdeMockFailWrites = true` there (in the console,
   or a test) makes every write answer 503, so the failed-save states can be seen; the switch lives
-  in the mock and ships nowhere. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
+  in the mock and ships nowhere. The mock answers every write route of this page with the API's
+  validation and permissions (a lead or admin manages, any member works, anything else is a 403):
+  `resetMockApi({ engineer: true })` signs in as an engineer, `{ empty: true }` leaves no company,
+  and `globalThis.__fdeMockNoCompanies = true` before the app loads does the same in the browser. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
   same mock.
 
@@ -248,7 +296,8 @@ render, and leaves a `-FAILED.png` of it.
 - 390 wide is a touch device, so hover-only controls are as they are on a phone.
 - To add a screen, add an entry to `screens.mjs`: a `name`, a `path`, a `ready` locator that is visible
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
-  `failWrites: true` makes the mock refuse every write, to see the failed-save states. `sizes` and
+  `failWrites: true` makes the mock refuse every write, to see the failed-save states;
+  `emptyWorkspace: true` starts a workspace with no company. `sizes` and
   `themes` narrow an entry. The file's header lists every option.
 - Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you
   checked and what you changed because of it.
