@@ -164,6 +164,18 @@ impl World {
         ))
     }
 
+    /// The same app with another context: another bucket, company keys.
+    fn on_context(&self, context: Context) -> Router {
+        router(App::with_integrations(
+            self.store.clone(),
+            self.authz.clone(),
+            support::verifier(),
+            context,
+            Some(sign_in_config(&self.authkit, &self.password)),
+            integrations(&self.github, &self.slack, &self.secrets),
+        ))
+    }
+
     /// A raw request: the status, the response headers and the JSON body.
     async fn send(&self, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
         let resp = self.router.clone().oneshot(req).await.unwrap();
@@ -653,6 +665,7 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/v1/companies/{company}", None),
     ("PATCH", "/v1/companies/{company}", Some(r#"{"name":"pwned"}"#)),
     ("GET", "/v1/companies/{company}/members", None),
+    ("GET", "/v1/companies/{company}/key", None),
     ("GET", "/v1/companies/{company}/export", None),
     (
         "PUT",
@@ -3114,6 +3127,131 @@ async fn mcp_calls_are_reads_and_do_not_rewrite_the_role_mirror() {
     assert_eq!(w.status(&dana, "PATCH", &company, rename).await, StatusCode::OK);
 }
 
+/// `method path` on `router` as `token`, with `body` of `content_type`: the status and the JSON.
+async fn on(
+    router: &Router,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<(&str, Vec<u8>)>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"));
+    if let Some((content_type, _)) = &body {
+        req = req.header("content-type", *content_type);
+    }
+    let req = req.body(Body::from(body.map(|(_, b)| b).unwrap_or_default())).unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn once_company_keys_are_required_a_company_without_one_stores_nothing() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let scope = CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap());
+    // The bucket as it is with `require_company_keys`: a company without a usable key is refused.
+    let keys = Arc::new(oryxa_fde_context::FakeCompanyKeys::default());
+    let blobs = Arc::new(oryxa_fde_context::MemoryBlobs::requiring_company_keys(keys.clone()));
+    let api = w.on_context(Context {
+        blobs: blobs.clone(),
+        keys: keys.clone(),
+        ..Context::fake()
+    });
+    let base = format!("/v1/companies/{}", t.company);
+    let (upload, canvas) = (format!("{base}/documents?name=notes"), format!("{base}/canvas"));
+    let text = || Some(("text/plain", b"customer notes".to_vec()));
+    let listed = format!("{base}/documents");
+    let documents = async |w: &World| {
+        w.ok(&t.lead, "GET", &listed, None, StatusCode::OK)
+            .await
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let (docs_before, events_before) = (documents(&w).await, w.events(&org).await);
+
+    let (status, body) = on(&api, &t.engineer.token, "GET", &format!("{base}/key"), None).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"has_key": false})));
+
+    // Refused, with a code and a sentence, and nothing stored: no file, no row, no event.
+    let (status, body) = on(&api, &t.lead.token, "POST", &upload, text()).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("company_key_missing"))
+    );
+    assert!(body["message"].as_str().unwrap().contains("provision"), "{body}");
+    assert!(blobs.keys().is_empty());
+    assert_eq!(documents(&w).await, docs_before);
+    assert_eq!(w.events(&org).await, events_before);
+    // A canvas too large for Postgres goes to S3 first: refused the same way, no version saved.
+    let versions = w
+        .ok(&t.lead, "GET", &format!("{canvas}/versions"), None, StatusCode::OK)
+        .await;
+    let head = versions[0]["version"].as_u64().unwrap();
+    let scene = json!({"base_version": head, "content": {"blob": "x".repeat(300 * 1024)}});
+    let (status, body) = on(
+        &api,
+        &t.lead.token,
+        "PUT",
+        &canvas,
+        Some(("application/json", scene.to_string().into_bytes())),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("company_key_missing"))
+    );
+    assert!(blobs.keys().is_empty());
+    assert_eq!(
+        w.ok(&t.lead, "GET", &format!("{canvas}/versions"), None, StatusCode::OK)
+            .await,
+        versions
+    );
+
+    // Its key provisioned: the same upload is stored under its own prefix and queued.
+    keys.give(&scope);
+    let (status, body) = on(&api, &t.engineer.token, "GET", &format!("{base}/key"), None).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"has_key": true})));
+    let (status, body) = on(&api, &t.lead.token, "POST", &upload, text()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let stored = blobs.keys();
+    assert_eq!(
+        stored,
+        [format!(
+            "{org}/{}/documents/{}",
+            t.company,
+            body["id"].as_str().unwrap()
+        )]
+    );
+    assert_eq!(documents(&w).await, docs_before + 1);
+    assert_eq!(w.events(&org).await.len(), events_before.len() + 1);
+
+    // Another company of the tenant gains nothing from this one's key.
+    let other = company(&w, &org, "beta").await;
+    let (status, body) = on(
+        &api,
+        &other.lead.token,
+        "GET",
+        &format!("/v1/companies/{}/key", other.company),
+        None,
+    )
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"has_key": false})));
+    // No check for a company that does not exist.
+    let (status, _) = on(&api, &t.lead.token, "GET", "/v1/companies/cmp_nobody/key", None).await;
+    assert!(
+        matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+        "{status}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
 async fn uploads_take_up_to_20_mib_of_a_known_type_and_other_routes_keep_2_mb() {
@@ -3352,9 +3490,14 @@ async fn a_canvas_saves_on_its_latest_version_and_a_large_one_is_checked_when_re
     );
 
     // An object changed in S3 is refused, never served.
+    let planted = oryxa_fde_context::canvas_key(
+        &CompanyScope::new(TenantId::new(&org).unwrap(), CompanyId::new(&t.company).unwrap()),
+        &oryxa_fde_store::SnapshotId::new(key.rsplit('/').next().unwrap()).unwrap(),
+    );
+    assert_eq!(planted.key(), key);
     w.context
         .blobs
-        .put(&key, br#"{"elements":["planted"]}"#.to_vec(), "application/json")
+        .put(&planted, br#"{"elements":["planted"]}"#.to_vec(), "application/json")
         .await
         .unwrap();
     assert_eq!(

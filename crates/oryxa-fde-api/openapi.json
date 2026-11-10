@@ -888,6 +888,16 @@
               }
             }
           },
+          "409": {
+            "description": "`company_key_missing`: the company has no usable key of its own and the bucket requires one. Nothing was stored; it works once the company's key is provisioned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Over 20 MiB"
           },
@@ -990,6 +1000,58 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExportOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/key": {
+      "get": {
+        "tags": [
+          "companies"
+        ],
+        "summary": "Whether the company has its own encryption key, which real customer data needs (ADR 0003).\nA route of its own rather than a field on the company, so a company list never waits on KMS.",
+        "operationId": "get_company_key",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanyKeyOut"
                 }
               }
             }
@@ -8649,6 +8711,19 @@
         },
         "additionalProperties": false
       },
+      "CompanyKeyOut": {
+        "type": "object",
+        "description": "Whether the company has an encryption key of its own.",
+        "required": [
+          "has_key"
+        ],
+        "properties": {
+          "has_key": {
+            "type": "boolean",
+            "description": "True when the company's own KMS key exists and is enabled: its files are written under it.\nFalse when it has none (or it is disabled, or the check failed): its files are under the\nenvironment's key, which holds sample data only, and once company keys are required its\nuploads are refused with `company_key_missing`. Checked against KMS, at most a minute old."
+          }
+        }
+      },
       "CompanyOut": {
         "type": "object",
         "required": [
@@ -8962,7 +9037,7 @@
               "string",
               "null"
             ],
-            "description": "Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow` or `checksum`."
+            "description": "Why ingestion gave up: `unreadable`, `empty`, `too_large`, `too_slow`, `checksum`, or\n`key_unavailable` (S3 or KMS refused the company's key: upload it again once the key works)."
           },
           "id": {
             "type": "string"
@@ -9000,6 +9075,13 @@
           "error": {
             "type": "string",
             "description": "A short machine-readable code, e.g. `forbidden`."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a person can do about it, for the few codes that need one (`company_key_missing`)."
           }
         }
       },

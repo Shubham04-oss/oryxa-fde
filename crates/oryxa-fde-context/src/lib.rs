@@ -16,10 +16,12 @@ pub mod chunk;
 pub mod embed;
 pub mod extract;
 pub mod ingest;
+pub mod keys;
 pub mod search;
 
-pub use blob::{BlobStore, MemoryBlobs, S3Blobs, canvas_key, document_key};
+pub use blob::{BlobStore, CompanyObject, MemoryBlobs, S3Blobs, canvas_key, document_key};
 pub use embed::{Embedder, FakeEmbedder};
+pub use keys::{CompanyKeyPrefix, CompanyKeys, FakeCompanyKeys, KmsCompanyKeys, NoCompanyKeys};
 pub use search::{Hit, SearchQuery};
 
 /// Largest document accepted for upload.
@@ -33,6 +35,10 @@ pub enum ContextError {
     Store(#[from] StoreError),
     #[error("blob store: {0}")]
     Blob(String),
+    /// S3 or KMS refused the company's key: it has none (and the bucket requires one), or it is
+    /// disabled, scheduled for deletion, or not usable by this role. Permanent: never retried.
+    #[error("the company's key is missing or cannot be used")]
+    KeyUnavailable,
     #[error("embeddings: {0}")]
     Embed(String),
     #[error("configuration: {0}")]
@@ -71,6 +77,8 @@ impl Extractor {
 #[derive(Clone)]
 pub struct Context {
     pub blobs: Arc<dyn BlobStore>,
+    /// Whether a company has its own key: the same answers the blob store's writes use.
+    pub keys: Arc<dyn CompanyKeys>,
     pub embedder: Arc<dyn Embedder>,
     /// Older models whose documents ingestion re-embeds with the embedder's model; a document on
     /// any other model is left as it is.
@@ -84,6 +92,7 @@ impl Context {
     pub fn fake() -> Self {
         Self {
             blobs: Arc::new(MemoryBlobs::default()),
+            keys: Arc::new(NoCompanyKeys),
             embedder: Arc::new(FakeEmbedder),
             replaces: Vec::new(),
             extractor: Extractor::InProcess,
@@ -93,7 +102,8 @@ impl Context {
     /// From the environment: `DOCUMENTS_BUCKET`, `EMBEDDING_PROVIDER` (`bedrock`, the default, or
     /// `fake`) with `EMBEDDING_MODEL`, and `EMBEDDING_REPLACES`, the comma-separated models whose
     /// documents are re-embedded. Name the old model there only once every task runs the new one,
-    /// so a rolling deploy never re-embeds back and forth.
+    /// so a rolling deploy never re-embeds back and forth. `COMPANY_KEY_ALIAS_ARN_PREFIX`, if set,
+    /// switches company keys on (see [`keys`]); a malformed one stops startup.
     // ponytail: one embedding model per deployment from the environment; the layered org, company
     // and project config does not exist yet. A document on a replaced model is re-embedded when its
     // `document.uploaded` is delivered again, but nothing replays those after a change yet; until
@@ -117,8 +127,24 @@ impl Context {
             .filter(|m| !m.is_empty() && *m != model)
             .map(str::to_owned)
             .collect();
+        let raw = match std::env::var(keys::PREFIX_VAR) {
+            Ok(v) => Some(v),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => return Err(ContextError::Config(keys::PREFIX_VAR.into())),
+        };
+        let blobs = S3Blobs::new(aws_sdk_s3::Client::new(&aws), bucket);
+        let region = aws.region().map(|r| r.as_ref().to_owned());
+        let (blobs, keys): (S3Blobs, Arc<dyn CompanyKeys>) = match keys::prefix_from(raw.as_deref(), region.as_deref())?
+        {
+            Some(prefix) => {
+                let keys = Arc::new(KmsCompanyKeys::new(aws_sdk_kms::Client::new(&aws), prefix.clone()));
+                (blobs.with_company_keys(prefix, keys.clone()), keys)
+            }
+            None => (blobs, Arc::new(NoCompanyKeys)),
+        };
         Ok(Self {
-            blobs: Arc::new(S3Blobs::new(aws_sdk_s3::Client::new(&aws), bucket)),
+            blobs: Arc::new(blobs),
+            keys,
             embedder,
             replaces,
             // Only the ingest worker extracts, and it runs extraction in a child of its own binary.

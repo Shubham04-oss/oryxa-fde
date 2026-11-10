@@ -226,7 +226,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
 | `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
 | `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_api` |
-| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:102`, `oryxa-events/src/lib.rs:210` | `aws_region` |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:112`, `oryxa-events/src/lib.rs:210` | `aws_region` |
 | `SPICEDB_ENDPOINT` | always | config | none | `oryxa-fde-api/src/main.rs:45` | Cloud Map name |
 | `SPICEDB_PRESHARED_KEY` | always | secret | none | `main.rs:46` | `shared/spicedb-preshared-key` |
 | `WORKOS_API_KEY` | always | secret | none | `main.rs:50` | `api/workos-api-key` |
@@ -236,11 +236,12 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EVENT_SIGNING_KID` | always | config | none | `main.rs:72` | `event_signing_kid` |
 | `EVENT_SIGNING_KEY` | always | secret | none | `main.rs:72` | `api/event-signing-key` |
 | `EVENT_BUS_ARN` | always | config | none | `main.rs:73` | `event_bus_arn` |
-| `DOCUMENTS_BUCKET` | always | config | none | `oryxa-fde-context/src/lib.rs:103` | the data bucket |
+| `DOCUMENTS_BUCKET` | always | config | none | `oryxa-fde-context/src/lib.rs:113` | the data bucket |
 | `LISTEN_ADDR` | optional | config | `0.0.0.0:8080` | `main.rs:81` | `127.0.0.1:<api_port>`: the tunnel sidecar is the only client |
-| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
-| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:108` | `embedding_model` |
-| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
+| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
+| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:118` | `embedding_model` |
+| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
+| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none: no company key named, every file under the environment key | `context/src/lib.rs:130`, `context/src/keys.rs:40` | not set; output `company_key_alias_arn_prefix` (Company keys). A malformed prefix, or one in another Region than `AWS_REGION`, stops startup |
 | `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:55` | `workos_issuer`; not set when null |
 | `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:68` | not set; add a secret when rotating |
 | `RUST_LOG` | optional | config | `info` | `main.rs:40` | not set |
@@ -311,14 +312,15 @@ that is missing, or not valid, stops startup.
 | `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
 | `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
 | `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_ingest`, its own login |
-| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:102` | `aws_region` |
-| `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:103` | the data bucket |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:112` | `aws_region` |
+| `DOCUMENTS_BUCKET` | always | config | none | `context/src/lib.rs:113` | the data bucket |
 | `EVENT_SIGNING_KID` | always | config | none | `context/src/bin/ingest.rs:42` | `event_signing_kid` |
 | `EVENT_PUBLIC_KEY` | always | config | none (PEM) | `ingest.rs:44` | `event_public_key`: the public half of the API's signing key, so plain config |
 | `INGEST_QUEUE_URL` | always | config | none | `ingest.rs:46` | the `context-ingestion` queue's url |
-| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
-| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:108` | `embedding_model` |
-| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
+| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:114` | `bedrock` |
+| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:118` | `embedding_model` |
+| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
+| `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | not set: the worker only reads, and S3 knows each object's key; it is read because the worker builds the same context as the API |
 | `RUST_LOG` | optional | config | `info` | `ingest.rs:37` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
 
