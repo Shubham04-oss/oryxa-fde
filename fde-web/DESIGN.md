@@ -63,7 +63,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - The header names what the canvas shows, centered: **Today**, **Companies**, the company's name,
   or the project's name.
 - **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
-  prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder
+  prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder,
   system and scope forms) is centred on the screen: 560px
   wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
   Both sit on a scrim and close with Escape.
@@ -202,8 +202,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     the API would still count it as a change. A removal is never refused, even for a criterion that
     has results.
   - **Recording a sign-off** asks who at the customer signed (any stakeholder of the company; sponsors
-    are listed first, and a sponsor, or the person who signed before, is chosen when there is one to
-    choose). It says what is being signed, in numbers, and what is missing without refusing it:
+    are listed first; the person who signed before, or else the company's only sponsor, is chosen in
+    advance, and nothing is recorded until **Record sign-off** is pressed). It says what is being signed, in numbers, and what is missing without refusing it:
     nothing listed as out of scope, no success criteria. The API signs whatever the scope is when the
     request arrives, so the dialog reads the scope again first and, if it moved while the dialog was
     open, refuses and keeps nothing signed. One version is signed once: a second sign-off of it is a

@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { ProjectPage } from "./project-page"
 import { api } from "@/lib/api/client"
 import type { ApiError } from "@/lib/api/client"
@@ -503,6 +503,40 @@ describe("recording a sign-off", () => {
     expect(box).toHaveTextContent("Nothing is listed as out of scope.")
     expect(box).toHaveTextContent("No success criteria are written yet.")
     expect(box).toHaveTextContent("1 in scope, 0 out of scope, 0 success criteria")
+  })
+
+  it("chooses a lone sponsor, but records nothing until the person confirms", async () => {
+    renderWithRouter(<ProjectPage scope={CLAIMS} />)
+    await api.addScopeItem(CLAIMS, { kind: "in", description: "Sort claims by cause" })
+    renderWithRouter(<ProjectPage scope={CLAIMS} />, { keep: true })
+    wire.sent = []
+    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    const box = await dialog("Record sign-off")
+    // Mara Lindqvist is Kestrel's only sponsor.
+    expect(field(box, "Signed off by")).toHaveValue("stk_k1")
+    expect(writes().some((w) => w.includes("sign-offs"))).toBe(false)
+    await userEvent.click(within(box).getByRole("button", { name: "Cancel" }))
+    await closed()
+    expect(writes().some((w) => w.includes("sign-offs"))).toBe(false)
+    expect((await api.scope(CLAIMS)).sign_off).toBeFalsy()
+  })
+
+  it("refuses, and signs nothing, when the scope cannot be read again first", async () => {
+    renderWithRouter(<ProjectPage scope={FNOL} />)
+    await userEvent.click(await screen.findByRole("button", { name: "Record sign-off" }))
+    const box = await dialog("Record sign-off")
+    await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
+    const reread = vi.spyOn(api, "scope").mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    try {
+      await click(box, "Record sign-off")
+      expect(await within(box).findByRole("alert")).toHaveTextContent("Check your connection")
+    } finally {
+      reread.mockRestore()
+    }
+    expect(writes().some((w) => w.includes("sign-offs"))).toBe(false)
+    expect(
+      within(await scopeCard(true)).getByText("Not signed off", { selector: "span" }),
+    ).toBeInTheDocument()
   })
 
   it("refuses a scope that changed while the dialog was open, and signs nothing", async () => {
