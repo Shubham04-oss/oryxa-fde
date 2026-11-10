@@ -23,8 +23,10 @@ import {
   StakeholderOut,
   SystemOut,
   TaskOut,
+  ThreadOut,
   TodayOut,
 } from "./schemas"
+import type { AccessBody, DecisionBody } from "../access"
 import type { TaskBody } from "../board"
 import type {
   CompanyBody,
@@ -35,7 +37,6 @@ import type {
   SystemBody,
 } from "../records"
 import type { CriterionBody, ScopeItemBody } from "../scope"
-import type { AccessBody } from "../today"
 import type {
   AccessRequestId,
   ChecklistItem,
@@ -116,6 +117,12 @@ export const SAFE_TEXT: Record<string, string> = {
   invalid_assignee: "That person is not on this project.",
   invalid_waiting_on: "That person is not a stakeholder at this company.",
   invalid_blocked_by: "That access request is not on this project.",
+  invalid_owner: "That person is not a stakeholder at this company.",
+  invalid_system: "That system is not one of this company's.",
+  rejected_initial_status: "A request starts as requested or in progress.",
+  invalid_rationale: "Why is plain text, up to 4000 characters.",
+  invalid_decided_by: "Who decided is a name on one line, up to 200 characters.",
+  invalid_decided_at: "Use a date like 2026-11-30.",
   rejected_blocker_required: "Say what is blocking it.",
   rejected_blocked_by_needs_blocked: "Only a blocked task can name an access request.",
   rejected_over_budget: "This project's agent budget is used up.",
@@ -233,6 +240,11 @@ function connect(transport: Transport) {
       read(
         z.array(AccessRequestOut),
         client.GET("/v1/companies/{company}/projects/{project}/access-requests", project(s)),
+      ),
+    threads: (s: ProjectScope) =>
+      read(
+        z.array(ThreadOut),
+        client.GET("/v1/companies/{company}/projects/{project}/threads", project(s)),
       ),
     tasks: (s: ProjectScope) =>
       read(
@@ -470,6 +482,32 @@ function connect(transport: Transport) {
     /** The people at a project's company, for a prompt that asks who a task waits on. */
     projectStakeholders: (scope: ProjectScope) => get.projectStakeholders(scope),
 
+    /** The project's access requests, for a prompt that asks what blocks a task. */
+    accessRequests: (scope: ProjectScope) => get.access(scope),
+
+    /** The project's discussions, read to say which decisions came from one. */
+    threads: (scope: ProjectScope) => get.threads(scope),
+
+    /** Asks for access. The API takes a new request as requested or in progress only. */
+    addAccess: (scope: ProjectScope, body: AccessBody) =>
+      read(
+        AccessRequestOut,
+        client.POST("/v1/companies/{company}/projects/{project}/access-requests", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    /** Logs a decision. The log is append-only: there is no way to change or remove one. */
+    addDecision: (scope: ProjectScope, body: DecisionBody) =>
+      read(
+        DecisionOut,
+        client.POST("/v1/companies/{company}/projects/{project}/decisions", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
     async removeTask(scope: ProjectScope, task: TaskId) {
       const { error, response } = await client.DELETE(
         "/v1/companies/{company}/projects/{project}/tasks/{task}",
@@ -674,6 +712,10 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
     updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
     projectStakeholders: async (scope) => (await use()).projectStakeholders(scope),
+    accessRequests: async (scope) => (await use()).accessRequests(scope),
+    threads: async (scope) => (await use()).threads(scope),
+    addAccess: async (scope, body) => (await use()).addAccess(scope, body),
+    addDecision: async (scope, body) => (await use()).addDecision(scope, body),
     removeTask: async (scope, task) => (await use()).removeTask(scope, task),
     addScopeItem: async (scope, body) => (await use()).addScopeItem(scope, body),
     updateScopeItem: async (scope, item, body) => (await use()).updateScopeItem(scope, item, body),
@@ -752,6 +794,21 @@ export const queries = {
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project, "stakeholders"],
       queryFn: () => api.projectStakeholders(scope),
+      ...read,
+      staleTime: 60_000,
+    }),
+  /** The project's access requests, read when a prompt needs them. */
+  projectAccess: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "access-requests"],
+      queryFn: () => api.accessRequests(scope),
+      ...read,
+    }),
+  /** The project's discussions, to say which decisions were promoted from one. */
+  threads: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "threads"],
+      queryFn: () => api.threads(scope),
       ...read,
       staleTime: 60_000,
     }),

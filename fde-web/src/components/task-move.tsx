@@ -4,16 +4,24 @@ import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "./ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
 import { ApiError, api, queries } from "@/lib/api/client"
-import type { ProjectScope, StakeholderOut, TaskOut, TaskState } from "@/lib/api/schemas"
+import type {
+  AccessRequestOut,
+  ProjectScope,
+  StakeholderOut,
+  TaskOut,
+  TaskState,
+} from "@/lib/api/schemas"
+import { blockers, clip } from "@/lib/access"
 import { STATUS_LABEL, asksFirst, fieldsOf, problem, toBody } from "@/lib/board"
 import type { Fields } from "@/lib/board"
 import { commitTask, reason } from "@/lib/task-move"
+import { ACCESS_LABEL } from "@/lib/today"
 
 // What the board and Today share when a task moves (DESIGN.md §3): the two prompts, saving that
 // shows nothing as done until the API confirms it, and a refused move that stays put and says why.
 
 export const FIELD =
-  "w-full rounded-lg border bg-raised px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:border-strong"
+  "w-full rounded-lg border bg-raised px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:border-strong aria-invalid:border-destructive"
 
 /** The question a move into Blocked or Waiting on the customer asks first. */
 export type Ask = { scope: ProjectScope; task: TaskOut; to: "blocked" | "waiting_on_customer" }
@@ -100,11 +108,16 @@ export function MoveAsk({
   mover,
   people,
   peopleNote,
+  requests = [],
+  requestsNote,
 }: {
   mover: TaskMover
   people: Array<StakeholderOut>
   /** Why the list of people is empty, when it is not because there are none. */
   peopleNote?: string
+  /** The project's access requests, for a task that can be blocked on one. */
+  requests?: ReadonlyArray<AccessRequestOut>
+  requestsNote?: string
 }) {
   const { ask } = mover
   return (
@@ -116,6 +129,8 @@ export function MoveAsk({
           to={ask.to}
           people={people}
           peopleNote={peopleNote}
+          requests={requests}
+          requestsNote={requestsNote}
           onSave={(fields) => mover.submit(ask.scope, ask.task, fields)}
           onClose={mover.cancelAsk}
         />
@@ -161,16 +176,63 @@ export function WaitingOn({
   )
 }
 
+/**
+ * The access request a blocked task waits on, chosen from the project's: any not granted yet (granted,
+ * the API puts the task back to do), and the one it names now. Nothing shows when there is nothing to choose.
+ */
+export function BlockedBy({
+  value,
+  requests,
+  note,
+  onChange,
+}: {
+  value: string | null
+  requests: ReadonlyArray<AccessRequestOut>
+  /** Why the list is empty, when it is not because there are none. */
+  note?: string
+  onChange: (id: string | null) => void
+}) {
+  const options = blockers(requests, value)
+  if (options.length === 0 && value === null && !note) return null
+  const listed = value === null || options.some((r) => r.id === value)
+  return (
+    <div className="grid gap-1">
+      <Labelled label="Blocked by an access request">
+        <select
+          className={FIELD}
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value || null)}
+        >
+          <option value="">None, something else</option>
+          {!listed && <option value={value}>An access request no longer listed</option>}
+          {options.map((r) => (
+            <option key={r.id} value={r.id}>
+              {clip(r.description, 60)}
+              {r.status === "requested" ? "" : ` (${ACCESS_LABEL[r.status].toLowerCase()})`}
+            </option>
+          ))}
+        </select>
+      </Labelled>
+      <p className="text-[11px] text-muted-foreground">
+        {note ?? "Once it is granted, the task goes back to To do."}
+      </p>
+    </div>
+  )
+}
+
 /** The dialog's buttons and the API's answer to Save, shared by every form. */
 export function Footer({
   busy,
   error,
+  errorId,
   save,
   onClose,
   extra,
 }: {
   busy: boolean
   error: string | null
+  /** What a field the error is about points to, so a screen reader reads it with the field. */
+  errorId?: string
   save: string
   onClose: () => void
   extra?: ReactNode
@@ -178,7 +240,7 @@ export function Footer({
   return (
     <>
       {error && (
-        <p role="alert" className="text-xs text-destructive">
+        <p id={errorId} role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}
@@ -201,6 +263,8 @@ function AskDialog({
   to,
   people,
   peopleNote,
+  requests,
+  requestsNote,
   onSave,
   onClose,
 }: {
@@ -208,6 +272,8 @@ function AskDialog({
   to: "blocked" | "waiting_on_customer"
   people: Array<StakeholderOut>
   peopleNote?: string
+  requests: ReadonlyArray<AccessRequestOut>
+  requestsNote?: string
   onSave: (fields: Fields) => Promise<string | null>
   onClose: () => void
 }) {
@@ -239,14 +305,22 @@ function AskDialog({
           </DialogDescription>
         </div>
         {blocked ? (
-          <Labelled label="The blocker">
-            <textarea
-              autoFocus
-              className={`${FIELD} min-h-20`}
-              value={fields.blocker}
-              onChange={(e) => setFields({ ...fields, blocker: e.target.value })}
+          <>
+            <Labelled label="The blocker">
+              <textarea
+                autoFocus
+                className={`${FIELD} min-h-20`}
+                value={fields.blocker}
+                onChange={(e) => setFields({ ...fields, blocker: e.target.value })}
+              />
+            </Labelled>
+            <BlockedBy
+              value={fields.blockedBy}
+              requests={requests}
+              note={requestsNote}
+              onChange={(blockedBy) => setFields({ ...fields, blockedBy })}
             />
-          </Labelled>
+          </>
         ) : (
           <div className="grid gap-1">
             <Labelled label="Waiting on">

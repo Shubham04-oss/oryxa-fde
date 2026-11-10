@@ -3,22 +3,12 @@ import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { ChevronLeft } from "lucide-react"
-import {
-  Card,
-  Failed,
-  Loading,
-  NotFound,
-  Page,
-  Quiet,
-  Row,
-  Rows,
-  Status,
-  isNotFound,
-  reveal,
-} from "./page"
-import type { Tone } from "./page"
+import { Failed, Loading, NotFound, Page, Quiet, isNotFound } from "./page"
 import { Board } from "./board"
 import { ProjectDialog } from "./company-forms"
+import { AccessCard } from "./access-card"
+import type { AccessCardHandle } from "./access-card"
+import { DecisionsCard } from "./decisions-card"
 import { ScopeCard, CriteriaCard } from "./scope-cards"
 import type { CriteriaCardHandle, ScopeCardHandle } from "./scope-cards"
 import { AssigneesCard } from "./team"
@@ -29,19 +19,10 @@ import type { MoveRefusal } from "./stage-bar"
 import { StageChecklist } from "./stage-checklist"
 import { RunsCard } from "./runs"
 import { ChecklistOpenError, api, queries } from "@/lib/api/client"
-import type { AccessState, ProjectOut, ProjectScope, Stage } from "@/lib/api/schemas"
+import type { ProjectOut, ProjectScope, Stage } from "@/lib/api/schemas"
 import type { Fix } from "@/lib/checklist"
 import { canManage } from "@/lib/records"
 import { reason as said } from "@/lib/task-move"
-import { dayOf, shortDate } from "@/lib/time"
-
-const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
-  requested: { label: "Requested", tone: "neutral" },
-  in_progress: { label: "In progress", tone: "neutral" },
-  granted: { label: "Granted", tone: "success" },
-  denied: { label: "Denied", tone: "attention" },
-  revoked: { label: "Revoked", tone: "attention" },
-}
 
 /** The page column (1040px) the cards sit in; the board alone breaks out to the canvas. */
 function Column({ children }: { children: ReactNode }) {
@@ -65,6 +46,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const scopeCard = useRef<ScopeCardHandle>(null)
   const criteriaCard = useRef<CriteriaCardHandle>(null)
   const accessCard = useRef<HTMLElement>(null)
+  const accessHandle = useRef<AccessCardHandle>(null)
   const move = useMutation({
     mutationFn: ({ to, reason }: { to: Stage; reason?: string }) =>
       api.moveStage(scope, to, reason),
@@ -102,7 +84,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     else if (to === "add-out-of-scope") scopeCard.current?.add("out")
     else if (to === "add-criterion") criteriaCard.current?.add()
     else if (to === "criteria") criteriaCard.current?.show()
-    else reveal(accessCard.current)
+    else if (to === "request-access") accessHandle.current?.request()
+    else accessHandle.current?.show()
   }
 
   if (project.isPending)
@@ -136,9 +119,6 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     p.access.length === 0 &&
     p.decisions.length === 0
   const current = checklist.data?.stage === p.stage ? checklist.data : undefined
-  const people = new Map(p.stakeholders.map((s) => [s.id as string, s.name]))
-  const systems = new Map(p.systems.map((s) => [s.id as string, s.name]))
-  const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
 
   return (
     <Page full>
@@ -203,55 +183,11 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
           />
         </div>
 
-        <Card ref={accessCard} title="Access">
-          {p.access.length === 0 ? (
-            <Quiet>No access requested yet.</Quiet>
-          ) : (
-            <Rows>
-              {p.access.map((request) => {
-                const open = request.status === "requested" || request.status === "in_progress"
-                const days = request.days_waiting
-                const detail = [
-                  request.system && systems.get(request.system),
-                  request.owner && `Owner: ${person(request.owner)}`,
-                  `Requested ${shortDate(dayOf(request.requested_at))}`,
-                  open && `${days} ${days === 1 ? "day" : "days"} waiting`,
-                ]
-                return (
-                  <Row key={request.id}>
-                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                      <p className="min-w-0 text-xs">{request.description}</p>
-                      <Status tone={ACCESS[request.status].tone}>
-                        {ACCESS[request.status].label}
-                      </Status>
-                    </div>
-                    <Quiet>{detail.filter(Boolean).join(" · ")}</Quiet>
-                  </Row>
-                )
-              })}
-            </Rows>
-          )}
-        </Card>
+        <AccessCard card={accessCard} handle={accessHandle} scope={scope} project={p} />
 
         <RunsCard scope={scope} />
 
-        <Card title="Decisions">
-          {p.decisions.length === 0 ? (
-            <Quiet>No decisions logged yet.</Quiet>
-          ) : (
-            <Rows>
-              {p.decisions.map((decision) => (
-                <Row key={decision.id}>
-                  <p className="text-xs">{decision.title}</p>
-                  <p className="mt-0.5 text-xs text-soft">{decision.rationale}</p>
-                  <Quiet>
-                    {decision.decided_by}, {shortDate(dayOf(decision.decided_at))}
-                  </Quiet>
-                </Row>
-              ))}
-            </Rows>
-          )}
-        </Card>
+        <DecisionsCard scope={scope} project={p} me={me.data?.user.name} />
 
         <AssigneesCard scope={scope} me={me.data?.user.id} manage={manage} />
       </Column>

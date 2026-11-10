@@ -1,7 +1,4 @@
-import type { components } from "./api/fde-api.gen"
 import type { AccessState, TaskState, TodayItem } from "./api/schemas"
-
-export type AccessBody = components["schemas"]["AccessRequestBody"]
 
 export type TodayGroup = "blocked" | "due" | "waiting"
 
@@ -93,6 +90,8 @@ export type RowAction = { label: string } & (
   { kind: "task"; to: TaskState } | { kind: "access"; to: AccessState }
 )
 export type RowActions = { primary: RowAction; rest: Array<RowAction> }
+/** A move of an access request's status: what the project page's rows offer, from the same list. */
+export type AccessAction = Extract<RowAction, { kind: "access" }>
 
 /** How an access request's status reads in a sentence. */
 export const ACCESS_LABEL: Record<AccessState, string> = {
@@ -125,13 +124,25 @@ function taskActions(task: { status: TaskState }, group: TodayGroup): RowActions
   return { primary, rest }
 }
 
-function accessActions(status: AccessState): RowActions {
+/**
+ * The moves for an access request's status. Today never lists a granted one; on the project page it
+ * is revoked (the customer took it back) or asked for again.
+ */
+export function accessActions(status: AccessState): {
+  primary: AccessAction
+  rest: Array<AccessAction>
+} {
+  if (status === "granted")
+    return {
+      primary: { kind: "access", to: "revoked", label: "Mark revoked" },
+      rest: [{ kind: "access", to: "requested", label: "Ask again" }],
+    }
   const asked = status === "requested" || status === "in_progress"
   // Open: the customer has granted it. Refused or revoked: ask again, which puts it back under waiting.
-  const primary: RowAction = asked
+  const primary: AccessAction = asked
     ? { kind: "access", to: "granted", label: "Mark granted" }
     : { kind: "access", to: "requested", label: "Ask again" }
-  const all: Array<RowAction> = [
+  const all: Array<AccessAction> = [
     { kind: "access", to: "in_progress", label: "Mark in progress" },
     { kind: "access", to: "granted", label: "Mark granted" },
     { kind: "access", to: "denied", label: "Mark denied" },

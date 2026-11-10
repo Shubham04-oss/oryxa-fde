@@ -4,7 +4,7 @@ import { useNavigate } from "@tanstack/react-router"
 import { Card, Failed, Loading, Page, Quiet, Rows } from "./page"
 import { ActiveRunsCard } from "./runs"
 import { MoveAsk, useTaskMover } from "./task-move"
-import { useAccessMover } from "./today-access"
+import { useAccessMover } from "./access-move"
 import { Key, TodayRow } from "./today-row"
 import { queries } from "@/lib/api/client"
 import type { ProjectScope, TodayItem } from "@/lib/api/schemas"
@@ -47,6 +47,13 @@ export function TodayView({ today = localDay() }: { today?: string }) {
   const people = useQuery(
     ask?.to === "waiting_on_customer"
       ? queries.projectStakeholders(ask.scope)
+      : { queryKey: ["none"], queryFn: skipToken },
+  )
+
+  // The access requests a blocked task can name, read when that prompt opens.
+  const requests = useQuery(
+    ask?.to === "blocked"
+      ? queries.projectAccess(ask.scope)
       : { queryKey: ["none"], queryFn: skipToken },
   )
 
@@ -282,6 +289,14 @@ export function TodayView({ today = localDay() }: { today?: string }) {
             ? "Loading the people at this company…"
             : people.isError
               ? "The people at this company could not be loaded, so only no one in particular is offered."
+              : undefined
+        }
+        requests={requests.data ?? []}
+        requestsNote={
+          requests.isPending && ask?.to === "blocked"
+            ? "Loading this project's access requests…"
+            : requests.isError
+              ? "This project's access requests could not be loaded, so none can be chosen."
               : undefined
         }
       />

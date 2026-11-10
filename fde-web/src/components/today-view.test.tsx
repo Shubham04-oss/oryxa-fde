@@ -233,6 +233,36 @@ describe("Today as an inbox", () => {
     })
   })
 
+  it("offers the project's access requests as what blocks a task, and sends the one chosen", async () => {
+    await today()
+    await pick(DUE, "Mark blocked…")
+    const blocker = await screen.findByRole("dialog", { name: "What is blocking this?" })
+    // Read from the project when the prompt opens: the granted one is not a blocker.
+    const choice = await within(blocker).findByLabelText("Blocked by an access request")
+    expect(
+      within(choice)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual([
+      "None, something else",
+      "Clinic directory export (in progress)",
+      "Intake form API, staging",
+    ])
+    await userEvent.selectOptions(choice, "acc_b2")
+    await userEvent.type(within(blocker).getByLabelText("The blocker"), "Needs staging access")
+    await userEvent.click(within(blocker).getByRole("button", { name: "Move to Blocked" }))
+    await waitFor(async () => expect(await titles("Blocked")).toContain(DUE))
+    const referrals = {
+      company: CompanyId.parse("cmp_brightwater"),
+      project: ProjectId.parse("prj_bw_referrals"),
+    }
+    expect((await api.project(referrals)).tasks.find((t) => t.title === DUE)).toMatchObject({
+      status: "blocked",
+      blocker: "Needs staging access",
+      blocked_by: "acc_b2",
+    })
+  })
+
   it("asks what blocks a task before marking it blocked, and who it waits on before waiting", async () => {
     await today()
 

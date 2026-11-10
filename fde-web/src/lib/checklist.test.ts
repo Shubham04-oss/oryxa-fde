@@ -76,6 +76,17 @@ describe("hintFor", () => {
     expect(hintFor("access_granted", one)?.missing).toBe("1 access request not granted yet.")
   })
 
+  it("offers to request access when none has been requested, and goes to the card when some has", () => {
+    const none = hintFor("access_granted", project())
+    expect(none?.missing).toBe("No access has been requested yet.")
+    expect(none?.fix).toEqual({ do: "request-access", label: "Request access" })
+    const some = hintFor(
+      "access_granted",
+      project({ access: [{ status: "requested" }] as unknown as Project["access"] }),
+    )
+    expect(some?.fix).toEqual({ do: "access", label: "Go to Access" })
+  })
+
   it("has no words for a key it does not know, so the page shows the API's label alone", () => {
     expect(hintFor("something_new", project())).toBeUndefined()
   })
