@@ -614,7 +614,9 @@ migrate task already did this). Why one and not one per binary:
 
 Until #150 and the follow-up to this PR land, **`deploy-api` rolls only the API**. A worker takes the image tag in
 `/oryxa-fde-dev/api-image-tag` when OpenTofu applies, which registers a new revision and replaces its task in place.
-After a deploy, `tofu apply` moves the workers onto the same sha.
+**Run `tofu apply` after every `deploy-api`**: until then the workers run the sha of the last apply, which can be older
+than the API's. So a migration must keep working for the workers' image too (step 4), and an event may gain a field (the
+decoders ignore unknown fields) but not lose or rename one under the same detail type, or the older worker cannot read it.
 
 **deploy-api, step by step**
 1. `build`, a release build, so never with shared caches (`docs/ci.md`): on a clean

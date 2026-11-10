@@ -4,7 +4,7 @@
 # picks its binary with `entryPoint`; the API is the image's default. The binaries are compiled before this, on
 # the runner (.github/workflows/deploy-api.yml), so the image only adds them to a distroless base: no
 # shell or package manager, runs as nonroot, writes nothing to its read-only root filesystem.
-#   docker build --platform linux/arm64 -f infra/docker/oryxa-fde-api.Dockerfile <dir holding both binaries>
+#   docker build --platform linux/arm64 -f infra/docker/oryxa-fde-api.Dockerfile <dir holding the four binaries>
 # Debian 13 (glibc 2.41): the runners that build the binary link against glibc 2.39, newer than
 # Debian 12 has. The workflow refuses a binary that needs more than 2.41.
 # The one extra file is busybox, copied from distroless's own debug image (same publisher, pinned by digest, static),
