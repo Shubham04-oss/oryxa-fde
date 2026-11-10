@@ -73,7 +73,8 @@ pub struct Task {
 }
 
 impl Task {
-    /// Whether the task already holds these values, so saving them would change nothing.
+    /// Whether the task already holds these fields. Its place is not one: whether a move would change
+    /// it depends on the column it is in (`ProjectTx::at_place`).
     fn holds(&self, v: &TaskIn) -> bool {
         self.title == v.title
             && self.status == v.status
@@ -83,7 +84,6 @@ impl Task {
             && self.waiting_on == v.waiting_on
             && self.blocked_by == v.blocked_by
             && self.criterion == v.criterion
-            && v.place.is_none()
     }
 }
 
@@ -114,7 +114,8 @@ pub enum TaskPlace {
 const STEP: i64 = 1 << 16;
 
 impl TaskIn {
-    fn check(&self) -> Result<(), StoreError> {
+    /// What the save itself must hold, before anything is looked up.
+    pub fn check(&self) -> Result<(), StoreError> {
         if self.status == TaskStatus::Blocked && self.blocker.is_none() {
             Err(StoreError::Rejected("blocker_required"))
         } else if self.blocked_by.is_some() && self.status != TaskStatus::Blocked {
@@ -278,20 +279,10 @@ impl ProjectTx {
         task(row).map(Some)
     }
 
-    /// Replaces the task's fields, unless it has moved on from version `expected` or already holds
-    /// them. Waiting on the customer keeps its start time while the status stays
-    /// `WaitingOnCustomer` and clears when it leaves. `None` if there is no such task.
-    pub async fn update_task(
-        &mut self,
-        id: &TaskId,
-        expected: Option<u32>,
-        v: &TaskIn,
-        by: &Actor,
-    ) -> Result<Option<Saved<Task>>, StoreError> {
-        v.check()?;
-        self.check_waiting_on(v).await?;
-        self.check_blocked_by(v).await?;
-        self.check_criterion(v).await?;
+    /// Takes the order lock and the task's row lock, then checks the version: the task, or `Stale`
+    /// with it if it has moved on from version `expected`. `None` if there is no such task. A save
+    /// runs this before it looks at any id it names, so a stale save answers stale.
+    pub async fn lock_task(&mut self, id: &TaskId, expected: Option<u32>) -> Result<Option<Saved<Task>>, StoreError> {
         let (t, c, p) = self.keys();
         // The order lock before the row lock: a renumbering under the order lock locks every task row.
         self.lock_task_order().await?;
@@ -308,17 +299,43 @@ impl ProjectTx {
         .await?;
         let Some(row) = row else { return Ok(None) };
         let current = task(row)?;
-        if stale(expected, current.version) {
-            return Ok(Some(Saved::Stale(current)));
-        }
-        if current.holds(v) {
+        Ok(Some(if stale(expected, current.version) {
+            Saved::Stale(current)
+        } else {
+            Saved::Current(current)
+        }))
+    }
+
+    /// Replaces the task's fields, unless it has moved on from version `expected` or already holds
+    /// them at the place named. Waiting on the customer keeps its start time while the status stays
+    /// `WaitingOnCustomer` and clears when it leaves. `None` if there is no such task.
+    pub async fn update_task(
+        &mut self,
+        id: &TaskId,
+        expected: Option<u32>,
+        v: &TaskIn,
+        by: &Actor,
+    ) -> Result<Option<Saved<Task>>, StoreError> {
+        v.check()?;
+        let current = match self.lock_task(id, expected).await? {
+            None => return Ok(None),
+            Some(Saved::Stale(current)) => return Ok(Some(Saved::Stale(current))),
+            Some(Saved::Current(current)) => current,
+        };
+        self.check_waiting_on(v).await?;
+        self.check_blocked_by(v).await?;
+        self.check_criterion(v).await?;
+        // The anchor is checked even when nothing else changes.
+        let at_place = self.at_place(&current, v).await?;
+        if at_place && current.holds(v) {
             return Ok(Some(Saved::Current(current)));
         }
-        let position = if v.place.is_some() || current.status != v.status {
+        let position = if !at_place || current.status != v.status {
             Some(self.position(Some(id), v).await?)
         } else {
             None
         };
+        let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
                  waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
@@ -383,14 +400,49 @@ impl ProjectTx {
     }
 
     /// Holds the project's task-order lock until the transaction ends, so two moves never pick the
-    /// same gap. Taking it again in the same transaction is a no-op.
-    async fn lock_task_order(&mut self) -> Result<(), StoreError> {
+    /// same gap. Taking it again in the same transaction is a no-op. Anything that updates task rows
+    /// of the project takes it first, so it cannot deadlock with a renumbering.
+    pub(crate) async fn lock_task_order(&mut self) -> Result<(), StoreError> {
         let (t, _, p) = self.keys();
         sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("oryxa-fde|task-order|{t}|{p}"))
             .execute(&mut *self.tx)
             .await?;
         Ok(())
+    }
+
+    /// Whether `current` already stands where `v` puts it: no place named, or directly after (or
+    /// before) the anchor in the column of the status it keeps. The anchor must be another task of
+    /// this project with that status, or `Missing("before")` / `Missing("after")`.
+    async fn at_place(&mut self, current: &Task, v: &TaskIn) -> Result<bool, StoreError> {
+        let (anchor, after, field) = match &v.place {
+            None => return Ok(true),
+            Some(TaskPlace::Before(a)) => (a, false, "before"),
+            Some(TaskPlace::After(a)) => (a, true, "after"),
+        };
+        let (t, c, p) = self.keys();
+        // Positions are unique in a project, so they alone give the (position, task_id) order.
+        let adjacent: Option<bool> = sqlx::query_scalar(
+            "select case when $7 then a.position < $8 else a.position > $8 end
+                 and not exists (select 1 from tasks n
+                     where n.tenant_id = $1 and n.company_id = $2 and n.project_id = $3 and n.status = $6
+                       and n.position > least(a.position, $8) and n.position < greatest(a.position, $8))
+             from tasks a
+             where a.tenant_id = $1 and a.company_id = $2 and a.project_id = $3 and a.task_id = $4
+               and a.task_id <> $5 and a.status = $6",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(&p)
+        .bind(anchor.as_str())
+        .bind(current.id.as_str())
+        .bind(v.status.as_str())
+        .bind(after)
+        .bind(current.position)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        let adjacent = adjacent.ok_or(StoreError::Missing(field))?;
+        Ok(adjacent && current.status == v.status)
     }
 
     /// Where task `me` (`None` while it is added) goes for `v`: next to its anchor, or after the
@@ -446,13 +498,12 @@ impl ProjectTx {
         Err(StoreError::Corrupt("task order"))
     }
 
-    /// Spaces the project's tasks STEP apart, keeping their order. Runs under the order lock. No
-    /// field a save replaces changes, so the tasks keep their versions (`fde.renumbering`, 0020).
+    /// Spaces the project's tasks STEP apart, keeping their order. Runs under the order lock. Only
+    /// positions change, so the tasks keep their versions (the `tasks_version` trigger, 0020).
+    // ponytail: removing a stakeholder (company-wide, so it takes no project's order lock) can still
+    // deadlock with a renumbering through `waiting_on`'s `on delete set null`; Postgres aborts one.
     async fn renumber_tasks(&mut self) -> Result<(), StoreError> {
         let (t, c, p) = self.keys();
-        sqlx::query("select set_config('fde.renumbering', 'on', true)")
-            .execute(&mut *self.tx)
-            .await?;
         sqlx::query(
             "update tasks t set position = o.n * $4
              from (select task_id, row_number() over (order by position, task_id) as n from tasks
@@ -465,9 +516,6 @@ impl ProjectTx {
         .bind(STEP)
         .execute(&mut *self.tx)
         .await?;
-        sqlx::query("select set_config('fde.renumbering', '', true)")
-            .execute(&mut *self.tx)
-            .await?;
         Ok(())
     }
 
@@ -745,7 +793,13 @@ mod tests {
             stored.holds(&v),
             "the stamps, the version and the position are not the caller's to set"
         );
-        let changes: [fn(&mut TaskIn); 9] = [
+        // A move to where the task already is holds too; whether it is there is the column's to say.
+        let moved = TaskIn {
+            place: Some(TaskPlace::After(TaskId::new("tsk_2").unwrap())),
+            ..v.clone()
+        };
+        assert!(stored.holds(&moved));
+        let changes: [fn(&mut TaskIn); 8] = [
             |v| v.title = Name::new("Get VPN access now").unwrap(),
             |v| v.status = TaskStatus::Todo,
             |v| v.blocker = None,
@@ -754,8 +808,6 @@ mod tests {
             |v| v.waiting_on = None,
             |v| v.blocked_by = None,
             |v| v.criterion = None,
-            // A move is a change even to the place the task already has.
-            |v| v.place = Some(TaskPlace::After(TaskId::new("tsk_2").unwrap())),
         ];
         for (i, change) in changes.into_iter().enumerate() {
             let mut other = v.clone();

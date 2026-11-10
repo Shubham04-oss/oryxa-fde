@@ -5,18 +5,27 @@
 -- Existing tasks keep their creation order. FORCE row-level security applies to the owner too, and no
 -- policy names the migrator: lift it for the backfill only, inside this migration's transaction.
 alter table tasks add column position bigint;
--- A renumbering changes no field a save replaces, so it leaves the tasks' versions (0019) alone.
-create or replace trigger tasks_version before update on tasks for each row
-    when (current_setting('fde.renumbering', true) is distinct from 'on')
-    execute function fde_bump_version();
+-- A task's version (0019) moves with every change except one to its position alone (a renumbering,
+-- or the backfill below): no save sends a position, so nothing an open edit read has changed. Decided
+-- from the rows themselves, whole rows so a later column bumps too; no session setting can skip it.
+create function fde_bump_task_version() returns trigger
+    language plpgsql
+    set search_path = pg_catalog
+as $$
+begin
+    if (to_jsonb(new) - 'position') is distinct from (to_jsonb(old) - 'position') then
+        new.version := old.version + 1;
+    end if;
+    return new;
+end
+$$;
+create or replace trigger tasks_version before update on tasks for each row execute function fde_bump_task_version();
 alter table tasks no force row level security;
-select set_config('fde.renumbering', 'on', true);
 update tasks t set position = o.n * 65536
 from (select tenant_id, task_id,
              row_number() over (partition by tenant_id, company_id, project_id order by created_at, task_id) as n
       from tasks) o
 where t.tenant_id = o.tenant_id and t.task_id = o.task_id;
-select set_config('fde.renumbering', '', true);
 alter table tasks force row level security;
 alter table tasks alter column position set not null;
 -- Checked at commit, so a renumbering can pass through duplicates; moves are serialised per project.

@@ -16,8 +16,8 @@ use oryxa_fde_core::{
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
     AccessRequest, AccessRequestIn, ChecklistItem, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx,
-    Reason, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn, TaskPlace,
-    TaskStatus,
+    Reason, Saved, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn,
+    TaskPlace, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -956,6 +956,11 @@ pub(crate) async fn update_task(
     let mut tx = project_tx(&app, &who, c, p).await?;
     let expected = body.version;
     let v = body.parse()?;
+    v.check()?;
+    // The task and its version before the assignee: a stale save answers stale, whoever it names.
+    if let Saved::Stale(current) = tx.lock_task(&id, expected).await?.ok_or(ApiError::NotFound)? {
+        return Ok(saved(StatusCode::OK, Saved::<TaskOut>::Stale(current.into())));
+    }
     check_assignee(&app, &who, tx.scope(), &v).await?;
     let updated = tx
         .update_task(&id, expected, &v, &who.actor())

@@ -393,6 +393,8 @@ impl ProjectTx {
     }
 
     pub async fn remove_criterion(&mut self, id: &CriterionId, by: &Actor) -> Result<bool, StoreError> {
+        // Unlinking the criterion's tasks updates task rows: the order lock first, as in every task write.
+        self.lock_task_order().await?;
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "delete from criteria where tenant_id = $1 and company_id = $2 and project_id = $3 and criterion_id = $4

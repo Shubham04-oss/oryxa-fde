@@ -4229,6 +4229,192 @@ async fn a_task_links_one_criterion_of_its_own_project() {
     let get = |id: &oryxa_fde_core::TaskId| tasks.iter().find(|t| &t.id == id).unwrap().criterion.clone();
     assert_eq!((get(&one), get(&two)), (None, Some(kept.clone())));
     tx.commit().await.unwrap();
+
+    // A save from before the unlink that still names the criterion is stale, not a bad criterion.
+    let mut tx = store.project(&p).await.unwrap();
+    let saved = tx
+        .update_task(&one, Some(1), &linked("one", k), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&saved, Saved::Stale(t) if t.criterion.is_none() && t.version == 2),
+        "{saved:?}"
+    );
+    // A current save naming it is refused for the criterion.
+    let refused = tx.update_task(&one, Some(2), &linked("one", k), &by).await;
+    assert!(matches!(refused, Err(StoreError::Missing("criterion"))), "{refused:?}");
+}
+
+/// Saves `id` at `status` and `place` with its title, based on version `expected`.
+async fn save_at(
+    store: &Store,
+    p: &ProjectScope,
+    id: &oryxa_fde_core::TaskId,
+    expected: u32,
+    status: TaskStatus,
+    place: Option<TaskPlace>,
+) -> Result<Saved<Task>, StoreError> {
+    let mut tx = store.project(p).await.unwrap();
+    let title = tx
+        .tasks(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| &t.id == id)
+        .unwrap()
+        .title;
+    let v = TaskIn {
+        place,
+        ..task_in(title.as_str(), status)
+    };
+    let saved = tx.update_task(id, Some(expected), &v, &actor("alice")).await?.unwrap();
+    tx.commit().await.unwrap();
+    Ok(saved)
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_move_to_where_the_task_already_is_writes_nothing() {
+    use TaskPlace::{After, Before};
+    let store = store().await;
+    let c = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &c).await;
+    let p = add_project(&store, &c, "Board").await;
+    let a = add_task(&store, &p, &task_in("a", TaskStatus::Todo)).await;
+    let b = add_task(&store, &p, &task_in("b", TaskStatus::Todo)).await;
+    let x = add_task(&store, &p, &task_in("x", TaskStatus::Todo)).await;
+    let d = add_task(&store, &p, &task_in("d", TaskStatus::InProgress)).await;
+    let e = add_task(&store, &p, &task_in("e", TaskStatus::Todo)).await;
+    let position = |tasks: &[Task], id: &oryxa_fde_core::TaskId| tasks.iter().find(|t| &t.id == id).unwrap().position;
+
+    let moved = save_at(&store, &p, &x, 1, TaskStatus::Todo, Some(After(a.clone())))
+        .await
+        .unwrap()
+        .record();
+    assert_eq!(moved.version, 2);
+    assert_eq!(audited("task.updated", x.as_str()).await, 1);
+    // The same move again, and the same place named from the other side: no write, no audit row,
+    // the same version and position.
+    for place in [After(a.clone()), Before(b.clone())] {
+        let again = save_at(&store, &p, &x, 2, TaskStatus::Todo, Some(place.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again, Saved::Current(moved.clone()), "{place:?}");
+    }
+    assert_eq!(audited("task.updated", x.as_str()).await, 1);
+    // Directly after `b` in the to-do column, though a task of another status lies between them.
+    let mut tx = store.project(&p).await.unwrap();
+    let e_at = position(&tx.tasks(None).await.unwrap(), &e);
+    drop(tx);
+    let same = save_at(&store, &p, &e, 1, TaskStatus::Todo, Some(After(b.clone())))
+        .await
+        .unwrap()
+        .record();
+    assert_eq!((same.version, same.position), (1, e_at));
+    assert_eq!(audited("task.updated", e.as_str()).await, 0);
+
+    // The anchor is still checked first: another status, the task itself, unknown.
+    for (place, field) in [
+        (Before(d.clone()), "before"),
+        (After(x.clone()), "after"),
+        (After(oryxa_fde_core::TaskId::new(new_id("tsk")).unwrap()), "after"),
+    ] {
+        let refused = save_at(&store, &p, &x, 2, TaskStatus::Todo, Some(place.clone())).await;
+        assert!(
+            matches!(refused, Err(StoreError::Missing(f)) if f == field),
+            "{place:?}: {refused:?}"
+        );
+    }
+    // Next to the anchor, but in another column: a move. Back again, and then another place.
+    let in_progress = save_at(&store, &p, &x, 2, TaskStatus::InProgress, Some(After(d.clone())))
+        .await
+        .unwrap()
+        .record();
+    assert_eq!(in_progress.version, 3);
+    let back = save_at(&store, &p, &x, 3, TaskStatus::Todo, Some(After(a.clone())))
+        .await
+        .unwrap()
+        .record();
+    assert_eq!(back.version, 4);
+    let elsewhere = save_at(&store, &p, &x, 4, TaskStatus::Todo, Some(After(b.clone())))
+        .await
+        .unwrap()
+        .record();
+    assert_eq!(elsewhere.version, 5);
+    assert_eq!(
+        order(&store, &p).await,
+        [a.clone(), b.clone(), x.clone(), d.clone(), e.clone()]
+    );
+    assert_eq!(audited("task.updated", x.as_str()).await, 4);
+    // A move from an old version is still refused.
+    assert!(matches!(
+        save_at(&store, &p, &x, 4, TaskStatus::Todo, Some(After(b.clone()))).await,
+        Ok(Saved::Stale(t)) if t == elsewhere
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_task_version_moves_with_every_change_but_one_to_its_position_alone() {
+    let store = store().await;
+    let c = scope(&tenant(), &new_id("cmp"));
+    create_company(&store, &c).await;
+    let p = add_project(&store, &c, "Board").await;
+    let id = add_task(&store, &p, &task_in("a", TaskStatus::Todo)).await;
+    let mut tx = store.project(&p).await.unwrap();
+    async fn version(tx: &mut ProjectTx, id: &oryxa_fde_core::TaskId) -> i32 {
+        sqlx::query_scalar("select version from tasks where task_id = $1")
+            .bind(id.as_str())
+            .fetch_one(&mut *tx.tx)
+            .await
+            .unwrap()
+    }
+    async fn run(tx: &mut ProjectTx, sql: &str, id: &oryxa_fde_core::TaskId) {
+        sqlx::query(sql).bind(id.as_str()).execute(&mut *tx.tx).await.unwrap();
+    }
+    // The setting the renumbering once used, or any like it, switches nothing off.
+    for setting in ["fde.renumbering", "fde.skip_version"] {
+        sqlx::query("select set_config($1, 'on', true)")
+            .bind(setting)
+            .execute(&mut *tx.tx)
+            .await
+            .unwrap();
+    }
+    let before = version(&mut tx, &id).await;
+    let saved = tx
+        .update_task(&id, Some(1), &task_in("a renamed", TaskStatus::Todo), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!((before, saved.version), (1, 2));
+    run(&mut tx, "update tasks set title = 'b' where task_id = $1", &id).await;
+    assert_eq!(version(&mut tx, &id).await, 3);
+    // Its position alone keeps the version; the position with anything else, or the version itself, bumps it.
+    run(
+        &mut tx,
+        "update tasks set position = position + 1 where task_id = $1",
+        &id,
+    )
+    .await;
+    assert_eq!(version(&mut tx, &id).await, 3);
+    run(
+        &mut tx,
+        "update tasks set position = position + 1, title = 'c' where task_id = $1",
+        &id,
+    )
+    .await;
+    assert_eq!(version(&mut tx, &id).await, 4);
+    run(
+        &mut tx,
+        "update tasks set position = position + 1, updated_at = now() + interval '1 second' where task_id = $1",
+        &id,
+    )
+    .await;
+    assert_eq!(version(&mut tx, &id).await, 5);
+    run(&mut tx, "update tasks set version = 1 where task_id = $1", &id).await;
+    assert_eq!(version(&mut tx, &id).await, 6, "a version is never set back");
 }
 
 #[tokio::test]

@@ -1002,12 +1002,14 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     (
         "POST",
         "/v1/companies/{company}/projects/{project}/tasks",
-        Some(r#"{"title":"pwned","status":"todo","waiting_on":"{stakeholder}"}"#),
+        Some(r#"{"title":"pwned","status":"todo","waiting_on":"{stakeholder}","criterion":"{criterion}"}"#),
     ),
     (
         "PUT",
         "/v1/companies/{company}/projects/{project}/tasks/{task}",
-        Some(r#"{"title":"pwned","status":"done","waiting_on":"{stakeholder}"}"#),
+        Some(
+            r#"{"title":"pwned","status":"done","waiting_on":"{stakeholder}","criterion":"{criterion}","after":"{task}"}"#,
+        ),
     ),
     (
         "DELETE",
@@ -1759,14 +1761,10 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                 ));
             }
             // Versions start at 1, so 0 is always stale: a version check run before the tenant and
-            // company filter would answer 409 with the victim's record as `current`.
+            // company filter would answer 409 with the victim's record as `current`. The body keeps
+            // every foreign id it names, since a save looks the record up before any id it names.
             if let Some(mut stale) = body.clone().filter(|_| VERSIONED.contains(&(*method, *template))) {
                 stale["version"] = json!(0);
-                // The task save refuses the victim's stakeholder as `waiting_on` (400) before it looks
-                // the task up, so without it the call reaches the lookup and the version check.
-                if let Some(fields) = stale.as_object_mut() {
-                    fields.remove("waiting_on");
-                }
                 let (status, resp) = w.call(Some(&at.who.token), method, &path, Some(stale)).await;
                 calls += 1;
                 let refused =
@@ -5228,14 +5226,28 @@ async fn the_board_orders_tasks_and_links_them_to_criteria() {
 
     // A move sets the place, and the list follows it.
     let b_path = format!("{tasks}/{b}");
-    w.ok(
-        &t.engineer,
-        "PUT",
-        &b_path,
-        body("b", json!({"before": a})),
-        StatusCode::OK,
-    )
-    .await;
+    let moved = w
+        .ok(
+            &t.engineer,
+            "PUT",
+            &b_path,
+            body("b", json!({"before": a})),
+            StatusCode::OK,
+        )
+        .await;
+    let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
+    assert_eq!(ids(&all), [before.clone(), vec![b.clone(), a.clone()]].concat());
+    // The same move again, based on what the first returned, changes nothing, not even the version.
+    let again = w
+        .ok(
+            &t.engineer,
+            "PUT",
+            &b_path,
+            body("b", json!({"before": a, "version": moved["version"]})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(again, moved);
     let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
     assert_eq!(ids(&all), [before, vec![b.clone(), a.clone()]].concat());
 
@@ -5294,4 +5306,107 @@ async fn the_board_orders_tasks_and_links_them_to_criteria() {
     let all = w.ok(&t.lead, "GET", &tasks, None, StatusCode::OK).await;
     let linked = all.as_array().unwrap().iter().find(|x| x["id"] == a.as_str()).unwrap();
     assert!(linked["criterion"].is_null());
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_stale_task_save_answers_stale_whatever_ids_it_names() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let p = format!("/v1/companies/{}/projects/{}", t.company, t.project);
+    let tasks = format!("{p}/tasks");
+    let stale = |resp: (StatusCode, Value)| {
+        assert_eq!(
+            (resp.0, resp.1["error"].as_str()),
+            (StatusCode::CONFLICT, Some("stale_version")),
+            "{}",
+            resp.1
+        );
+        resp.1["current"].clone()
+    };
+
+    // A criterion removed since the save's version: the task moved on with it.
+    let criterion = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{p}/scope/criteria"),
+            Some(json!({"description": "Fast", "metric": "p95", "comparator": "at_most", "target": 2})),
+            StatusCode::CREATED,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let linked = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks,
+            Some(json!({"title": "Tune", "status": "todo", "criterion": criterion})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let path = format!("{tasks}/{}", linked["id"].as_str().unwrap());
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("{p}/scope/criteria/{criterion}"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let old = json!({"title": "Tune", "status": "todo", "criterion": criterion, "version": linked["version"]});
+    let current = stale(w.call(Some(&t.lead.token), "PUT", &path, Some(old.clone())).await);
+    assert!(current["criterion"].is_null(), "{current}");
+    assert_eq!(current["version"], linked["version"].as_u64().unwrap() + 1);
+    // Based on the current version, the criterion itself is refused.
+    let mut fresh = old.clone();
+    fresh["version"] = current["version"].clone();
+    let (status, resp) = w.call(Some(&t.lead.token), "PUT", &path, Some(fresh)).await;
+    assert_eq!(
+        (status, resp["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_criterion"))
+    );
+
+    // An assignee who has left the project since.
+    let asg = t.assignee.id.as_str();
+    let assigned = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks,
+            Some(json!({"title": "Ship", "status": "todo", "assignee": asg})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let path = format!("{tasks}/{}", assigned["id"].as_str().unwrap());
+    let unassigned = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &path,
+            Some(json!({"title": "Ship", "status": "todo", "version": assigned["version"]})),
+            StatusCode::OK,
+        )
+        .await;
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("{p}/assignees/{asg}"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let old = json!({"title": "Ship", "status": "todo", "assignee": asg, "version": assigned["version"]});
+    let current = stale(w.call(Some(&t.lead.token), "PUT", &path, Some(old.clone())).await);
+    assert_eq!(current, unassigned);
+    let mut fresh = old;
+    fresh["version"] = unassigned["version"].clone();
+    let (status, resp) = w.call(Some(&t.lead.token), "PUT", &path, Some(fresh)).await;
+    assert_eq!(
+        (status, resp["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_assignee"))
+    );
 }

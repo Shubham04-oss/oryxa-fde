@@ -232,6 +232,8 @@ impl ProjectTx {
         access: &AccessRequestId,
         by: &Actor,
     ) -> Result<Vec<TaskId>, StoreError> {
+        // Before any row lock, as in every task write, so it cannot deadlock with a renumbering.
+        self.lock_task_order().await?;
         let (t, c, p) = self.keys();
         // The event says it was granted; the store says whether it still is (a late delivery).
         let status: Option<String> = sqlx::query_scalar(
