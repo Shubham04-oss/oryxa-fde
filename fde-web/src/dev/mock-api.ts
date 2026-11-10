@@ -861,9 +861,10 @@ async function taskRoutes(
   method: string,
   taskId: string | undefined,
   found: CompanySeed,
-  tasks: Array<S["TaskOut"]>,
+  records: Records,
   request: Request,
 ) {
+  const tasks = records.tasks
   const at = taskId === undefined ? -1 : tasks.findIndex((t) => t.id === taskId)
   if (method === "DELETE" && taskId !== undefined) {
     if (at < 0) return refuse(404, "not_found")
@@ -891,6 +892,9 @@ async function taskRoutes(
   if (status === "blocked" && blocker === null) return refuse(409, "rejected_blocker_required")
   if (blockedBy !== null && status !== "blocked")
     return refuse(409, "rejected_blocked_by_needs_blocked")
+  // The API takes only an access request of this project; one that is missing or another's is a 400.
+  if (blockedBy !== null && !records.access.some((a) => a.id === blockedBy))
+    return refuse(400, "invalid_blocked_by")
   if (!adding && at < 0) return refuse(404, "not_found")
 
   const now = new Date().toISOString()
@@ -945,7 +949,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "systems") return json(found.systems)
     return null
   }
-  if (record === "tasks") return taskRoutes(method, rest[0], found, p.records.tasks, request)
+  if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
   if (method === "PUT" && record === "stage") {
     const body = (await request.json().catch(() => null)) as Partial<S["StageBody"]> | null
     const to = STAGES.find((stage) => stage === body?.stage)

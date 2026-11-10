@@ -108,9 +108,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     it is the least urgent column and grows without limit. It is still a drop target and a **Move to**
     destination. Opening it (its heading is the toggle) scrolls it into view and lists the five most
     recently finished tasks, with **Show all** for the rest.
-  - **The card's menu button** sits in the card's top right corner and takes no room from the
-    title. With a mouse it appears on hover and on keyboard focus; on touch it is always shown, and
-    the title leaves it room.
+  - **The card's menu button** sits in the card's top right corner. With a mouse it appears on hover
+    and on keyboard focus; on touch it is always shown. Either way the title's first line stops short
+    of it (and on touch every line does), so a long title stays readable under the button. The rest
+    of a title uses the card's full width.
   - **Moving.** Drag a card to another column, or open its menu (the button in the card's corner,
     reachable by Tab and operated with the arrow keys and Enter) and pick **Move to**. The menu is
     the only way on a phone. Dropping on the same column does nothing.
@@ -118,6 +119,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     Into **Waiting on the customer** asks who, from the company's stakeholders, or "No one in
     particular". Moves to the other columns go straight through, and leaving Blocked or Waiting
     clears the blocker or the person.
+  - **A card that is moving cannot be opened.** Its Edit form would show the old status and saving
+    it would undo the move. It opens again once the API has answered.
   - **Nothing is shown as saved until the API confirms it.** A moving card stays in its column,
     dimmed and marked "Moving to ...", and jumps only when the API answers. A refused move leaves
     the card where it was and says why above the board, with Dismiss. A dialog that fails stays
@@ -186,7 +189,29 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
   same mock.
 
-## 5. States and copy
+## 5. Looking at a screen
+
+Every PR that changes a screen is looked at before it goes to review, and lists its screenshots in
+the PR text. `pnpm shots` does it in one command: it renders the screens in `scripts/shots/screens.mjs`
+on `pnpm dev:mock` (it uses one already running at `http://127.0.0.1:3000`, or starts and stops its own)
+at 1440, 1024 and 390 wide, light and dark, and writes PNGs to `<tmpdir>/fde-shots` (`--out DIR` to
+choose; `--only NAME[,NAME]` to take some; `--url` for another address). The browser is Playwright's
+official Docker image, pinned in `scripts/shots/run.mjs`, run on the host network and removed after; nothing
+is installed on the host or added to the app, and the script is not in the production build. It needs
+Docker, and the image (about 3.6 GB) is pulled the first time. It exits non-zero when a screen fails to
+render, and leaves a `-FAILED.png` of it.
+
+- A page is captured whole: the app's own scroll container is grown by what it hides. A screen with an
+  overlay open (`full: false`) is the viewport only, as a person would see it.
+- 390 wide is a touch device, so hover-only controls are as they are on a phone.
+- To add a screen, add an entry to `screens.mjs`: a `name`, a `path`, a `ready` locator that is visible
+  once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
+  `failWrites: true` makes the mock refuse every write, to see the failed-save states. `sizes` and
+  `themes` narrow an entry. The file's header lists every option.
+- Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you
+  checked and what you changed because of it.
+
+## 6. States and copy
 
 - Every read shows loading, empty and error states; errors offer Try again. Today never claims an
   all clear unless the API answered.
