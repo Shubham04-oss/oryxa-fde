@@ -94,6 +94,14 @@ output "api_task_timing" {
   }
 }
 
+output "company_key_prefix_by_task" {
+  description = "The COMPANY_KEY_ALIAS_ARN_PREFIX each task is set to, with the AWS_REGION it runs in, for tests/code, which checks the value against the parser's shape in the Rust source. Not a secret."
+  value = {
+    for t, e in { api = local.api_environment, ingest = local.ingest_environment } :
+    t => { value = e.COMPANY_KEY_ALIAS_ARN_PREFIX, region = e.AWS_REGION }
+  }
+}
+
 output "agent_model_target" {
   description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
   value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null
@@ -147,6 +155,6 @@ output "company_keys" {
 }
 
 output "company_key_alias_arn_prefix" {
-  description = "Append a company id for the alias the API names on write and looks up (the API stream's COMPANY_KEY_ALIAS_ARN_PREFIX, once its code reads it)."
+  description = "Append a company id for the alias the API names on write and looks up (the value of COMPANY_KEY_ALIAS_ARN_PREFIX on the API and ingest tasks)."
   value       = module.company_keys.alias_arn_prefix
 }

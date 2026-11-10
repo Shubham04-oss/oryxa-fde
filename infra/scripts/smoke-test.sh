@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # A scripted pass against a deployed environment's public address, going through the web app the way a
 # browser does (`/api/*` on the web origin, the session cookie, the CSRF header and origin on writes).
-#   SMOKE_BASE_URL=https://<web_hostname> SMOKE_SESSION_FILE=~/.oryxa-smoke-session infra/scripts/smoke-test.sh [a] [b] [c | all]
+#   SMOKE_BASE_URL=https://<web_hostname> SMOKE_SESSION_FILE=~/.oryxa-smoke-session infra/scripts/smoke-test.sh [a] [b] [c | k | all]
 # Stages (default `a`; they run in the order given, and the run stops at the first failure):
 #   a  core: health, /v1/me, company, project, task, Today, stage checklist, stage move with a reason
 #   b  workers: upload a sample document, wait for ingest, find a passage by search   (needs SMOKE_WORKERS=1)
 #   c  agent: a run on a sample repository, events arrive, it finishes                (needs SMOKE_AGENT_REPO)
+#   k  company keys: a new company has no key, an operator gives it one while this waits, then an upload
+#      is ingested under it. Not in `all`: it waits for a person   (needs SMOKE_COMPANY_KEYS=1 and SMOKE_WORKERS=1)
 # The session cookie (`__Host-fde_session`) comes from the person running this: SMOKE_SESSION_FILE (a file only
 # its owner can read) or SMOKE_SESSION (the value). It is never an argument and never printed. infra/README.md
 # ("Smoke test") says how to get it, what it creates and what it cannot remove.
@@ -13,12 +15,13 @@ set -euo pipefail
 # Tracing (`bash -x`, or xtrace in SHELLOPTS) would print the cookie as it is read and written: always off.
 set +x
 
-usage="usage: smoke-test.sh [a] [b] [c] | all   (environment: see infra/README.md, Smoke test)"
+usage="usage: smoke-test.sh [a] [b] [c] [k] | all   (environment: see infra/README.md, Smoke test)"
 
 COOKIE_NAME="__Host-fde_session"
 REQ_TIMEOUT="${SMOKE_REQUEST_TIMEOUT:-30}"
 INGEST_TIMEOUT="${SMOKE_INGEST_TIMEOUT:-180}"
 RUN_TIMEOUT="${SMOKE_RUN_TIMEOUT:-900}"
+KEY_TIMEOUT="${SMOKE_KEY_TIMEOUT:-300}"
 POLL="${SMOKE_POLL_INTERVAL:-3}"
 RUN_ID="$(date -u +%Y%m%d%H%M%S)-$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
 NAME="oryxa-smoke-$RUN_ID"
@@ -27,7 +30,7 @@ STAGE="-"
 STATUS=""
 COOKIE=""
 ROTATED=0
-COMPANY="" PROJECT="" TASK="" TASK_REMOVED=0 DOC="" RUN="" RUN_ENDED=0
+ORG="" COMPANY="" PROJECT="" TASK="" TASK_REMOVED=0 DOC="" RUN="" RUN_ENDED=0
 SUMMARY=()
 SKIPPED=0
 WORK=""
@@ -41,7 +44,7 @@ ok() { say "  ok   $*"; }
 
 # --- configuration -------------------------------------------------------------------------------------------
 
-for v in REQ_TIMEOUT INGEST_TIMEOUT RUN_TIMEOUT; do
+for v in REQ_TIMEOUT INGEST_TIMEOUT RUN_TIMEOUT KEY_TIMEOUT; do
   [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || { say "SMOKE_*TIMEOUT must be whole seconds, not ${!v}" >&2; exit 2; }
 done
 [[ $POLL =~ ^[0-9]+(\.[0-9]+)?$ ]] || { say "SMOKE_POLL_INTERVAL must be a number of seconds" >&2; exit 2; }
@@ -62,7 +65,7 @@ fi
 stages=()
 for a in "$@"; do
   case "$a" in
-    a | b | c) stages+=("$a") ;;
+    a | b | c | k) stages+=("$a") ;;
     all) stages+=(a b c) ;;
     *) say "$usage" >&2; exit 2 ;;
   esac
@@ -211,6 +214,8 @@ preflight() {
   org="$(field .organisation.name)" || fail "who am I: the response has no organisation"
   role="$(field .role)" || fail "who am I: the response has no role"
   org="$(LC_ALL=C tr -d '[:cntrl:]' <<<"$org")" # a name is shown, so no terminal escapes
+  # The tenant id stage k names in the command it asks the operator to run; checked before it is printed.
+  ORG="$(field .organisation.id)" && valid_id "$ORG" || ORG=""
   ok "signed in to organisation '$org' as $role (use a test organisation: the run creates a company in it)"
 }
 
@@ -288,6 +293,11 @@ stage_b() {
     return 0
   fi
   need_company
+  upload_ingest_search
+}
+
+# Uploads a sample document to the run's company, waits for the ingest worker, and finds its passage by search.
+upload_ingest_search() {
   # One alphanumeric word that exists nowhere else, so a hit is this document and nothing else.
   local marker="smokemarker${RUN_ID//-/}"
   local text
@@ -382,6 +392,40 @@ stage_c() {
   field '.events | length > 0' >/dev/null || fail "agent run: it finished without any events"
   [[ "$(field '.events[-1].type')" == result ]] || fail "agent run: its last event is not a result"
   ok "the run finished, with $(field '.events | length') events ending in a result"
+}
+
+# Company keys (infra/README.md, "Before require_company_keys is switched on"). A company made by this run has no key until
+# an operator provisions one, which this cannot do, so it prints the command and waits, a bounded time. Then an upload
+# is written under the company's own key and the ingest worker reads it back under the same key.
+stage_k() {
+  STAGE=k
+  if [[ ${SMOKE_COMPANY_KEYS:-0} != 1 || ${SMOKE_WORKERS:-0} != 1 ]]; then
+    say "SKIP [k] company keys: set SMOKE_COMPANY_KEYS=1 (the API has COMPANY_KEY_ALIAS_ARN_PREFIX) and SMOKE_WORKERS=1 (the ingest worker runs)"
+    SKIPPED=1
+    return 0
+  fi
+  need_company
+  local c="/api/v1/companies/$COMPANY" has
+  api GET "$c/key"
+  expect 200 "company key check"
+  has="$(field '.has_key | tostring')" || fail "company key check: the response has no has_key"
+  [[ $has == false ]] || fail "company key check: a company made a moment ago already has a key (is the check answering for the right company?)"
+  ok "the new company has no key yet"
+  if [[ ${SMOKE_KEYS_REQUIRED:-0} == 1 ]]; then
+    api POST "$c/documents?name=$NAME.md" "# $NAME" text/markdown
+    expect 409 "upload without a key, with keys required"
+    [[ "$(field .error)" == company_key_missing ]] || fail "upload without a key: wanted company_key_missing"
+    ok "an upload without a key is refused (company_key_missing)"
+  fi
+  say "  now, as the provisioning role: infra/scripts/company-key.sh provision <company-keys.json> ${ORG:-<tenant id>} $COMPANY   (waiting up to ${KEY_TIMEOUT}s)"
+  local deadline=$((SECONDS + KEY_TIMEOUT))
+  until api GET "$c/key" && [[ $STATUS == 200 && "$(field '.has_key | tostring' 2>/dev/null)" == true ]]; do
+    [[ $STATUS == 200 ]] || fail "company key check: wanted HTTP 200; $(why)"
+    ((SECONDS < deadline)) || fail "company key: still none after ${KEY_TIMEOUT}s (was it provisioned for this tenant and company? the API believes a no for about 5 s)"
+    sleep "$POLL"
+  done
+  ok "the company has a key"
+  upload_ingest_search
 }
 
 # --- main ----------------------------------------------------------------------------------------------------
