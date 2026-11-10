@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router"
 import { ChevronLeft } from "lucide-react"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
 import type { Tone } from "./page"
+import { Board } from "./board"
 import { StageBar } from "./stage-bar"
 import { RunsCard } from "./runs"
 import { ApiError, api, queries } from "@/lib/api/client"
@@ -13,10 +14,8 @@ import type {
   ProjectOut,
   ProjectScope,
   Stage,
-  TaskOut,
-  TaskState,
 } from "@/lib/api/schemas"
-import { dayOf, daysBetween, dueLabel, localDay, shortDate, waitingLabel } from "@/lib/time"
+import { dayOf, shortDate } from "@/lib/time"
 
 const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   requested: { label: "Requested", tone: "neutral" },
@@ -24,14 +23,6 @@ const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   granted: { label: "Granted", tone: "success" },
   denied: { label: "Denied", tone: "attention" },
   revoked: { label: "Revoked", tone: "attention" },
-}
-
-const TASK: Record<TaskState, { label: string; tone: Tone }> = {
-  todo: { label: "To do", tone: "neutral" },
-  in_progress: { label: "In progress", tone: "neutral" },
-  blocked: { label: "Blocked", tone: "attention" },
-  waiting_on_customer: { label: "Waiting on the customer", tone: "neutral" },
-  done: { label: "Done", tone: "success" },
 }
 
 const COMPARATOR: Record<CriterionOut["comparator"], string> = {
@@ -43,23 +34,6 @@ const COMPARATOR: Record<CriterionOut["comparator"], string> = {
 function target({ metric, comparator, target: value, unit }: CriterionOut) {
   const units = unit ? (unit === "%" ? "%" : ` ${unit}`) : ""
   return `${metric}, ${COMPARATOR[comparator]} ${value}${units}`
-}
-
-/** A task's second line: why it is stuck, who it waits on and since when, or when it is due. */
-// ponytail: the API returns only the assignee's WorkOS user id, so a teammate can't be named yet (tracked on the API).
-function assigneeLabel(assignee: string | null | undefined, me: string | undefined) {
-  if (!assignee) return "Unassigned"
-  return assignee === me ? "Assigned to you" : "Assigned to a teammate"
-}
-
-function taskDetail(task: TaskOut, today: string, person: (id: string) => string) {
-  if (task.status === "blocked" && task.blocker) return task.blocker
-  if (task.status === "waiting_on_customer") {
-    const days = daysBetween(dayOf(task.waiting_since ?? task.updated_at), today)
-    return waitingLabel(days, task.waiting_on ? person(task.waiting_on) : null)
-  }
-  if (task.status !== "done" && task.due_on) return dueLabel(task.due_on, today)
-  return null
 }
 
 /** How scope sign-off stands: signed for this version, signed before a change, or never. */
@@ -82,7 +56,6 @@ function signOffStatus(p: Project, person: (id: string) => string) {
 export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const queryClient = useQueryClient()
   const project = useQuery(queries.project(scope))
-  const me = useQuery(queries.me())
   const move = useMutation({
     mutationFn: (to: Stage) => api.moveStage(scope, to),
     onSuccess: (moved: ProjectOut) => {
@@ -124,7 +97,6 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
   const inScope = p.scope.items.filter((item) => item.kind === "in")
   const outOfScope = p.scope.items.filter((item) => item.kind === "out")
-  const today = localDay()
 
   return (
     <Page wide>
@@ -146,6 +118,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
         error={moveError}
         onMove={(to) => move.mutate(to)}
       />
+
+      <Board scope={scope} project={p} />
 
       <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
         <Card title="Scope" aside={signOffStatus(p, person)}>
@@ -215,35 +189,6 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
                     </Status>
                   </div>
                   <Quiet>{detail.filter(Boolean).join(" · ")}</Quiet>
-                </Row>
-              )
-            })}
-          </Rows>
-        )}
-      </Card>
-
-      <Card title="Tasks">
-        {p.tasks.length === 0 ? (
-          <Quiet>No tasks yet.</Quiet>
-        ) : (
-          <Rows>
-            {p.tasks.map((task) => {
-              const detail = [
-                assigneeLabel(task.assignee, me.data?.user.id),
-                taskDetail(task, today, person),
-              ]
-                .filter(Boolean)
-                .join(" · ")
-              const late = task.status !== "done" && !!task.due_on && task.due_on < today
-              return (
-                <Row key={task.id}>
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                    <p className="min-w-0 text-xs">{task.title}</p>
-                    <Status tone={late ? "attention" : TASK[task.status].tone}>
-                      {TASK[task.status].label}
-                    </Status>
-                  </div>
-                  {detail && <Quiet>{detail}</Quiet>}
                 </Row>
               )
             })}

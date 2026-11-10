@@ -1,0 +1,96 @@
+import type { components } from "./api/fde-api.gen"
+import type { TaskOut, TaskState } from "./api/schemas"
+
+// The project board's rules (DESIGN.md §3): the columns, and what each save sends. The API's
+// `PUT .../tasks/{task}` replaces the whole task, so every save sends every field.
+
+export type TaskBody = components["schemas"]["TaskBody"]
+
+/** One column per status, in the order a task usually travels. */
+export const COLUMNS: ReadonlyArray<{ status: TaskState; label: string }> = [
+  { status: "todo", label: "To do" },
+  { status: "in_progress", label: "In progress" },
+  { status: "waiting_on_customer", label: "Waiting on the customer" },
+  { status: "blocked", label: "Blocked" },
+  { status: "done", label: "Done" },
+]
+
+export const STATUS_LABEL = Object.fromEntries(COLUMNS.map((c) => [c.status, c.label])) as Record<
+  TaskState,
+  string
+>
+
+/** The task's own words and picks, as a form holds them. */
+export type Fields = {
+  title: string
+  status: TaskState
+  /** Why it is blocked; sent only while the status is `blocked`. */
+  blocker: string
+  /** The stakeholder it waits on; sent only while it waits on the customer. */
+  waitingOn: string | null
+  /** `YYYY-MM-DD`, or "" for no date. */
+  due: string
+  /** A WorkOS user id. */
+  assignee: string | null
+  /** The access request it is blocked on; kept, never chosen here. */
+  blockedBy: string | null
+}
+
+export const MAX_TITLE = 200
+export const MAX_BLOCKER = 4000
+
+export const fieldsOf = (task: TaskOut): Fields => ({
+  title: task.title,
+  status: task.status,
+  blocker: task.blocker ?? "",
+  waitingOn: task.waiting_on ?? null,
+  due: task.due_on ?? "",
+  assignee: task.assignee ?? null,
+  blockedBy: task.blocked_by ?? null,
+})
+
+/** The request body for `fields`, dropping what the status does not use (the API refuses it). */
+export function toBody(fields: Fields): TaskBody {
+  const blocked = fields.status === "blocked"
+  return {
+    title: fields.title.trim(),
+    status: fields.status,
+    assignee: fields.assignee,
+    due_on: fields.due || null,
+    blocker: blocked ? fields.blocker.trim() : null,
+    blocked_by: blocked ? fields.blockedBy : null,
+    waiting_on: fields.status === "waiting_on_customer" ? fields.waitingOn : null,
+  }
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/
+// eslint-disable-next-line no-control-regex
+const NO_CONTROL = /[\u0000-\u001f\u007f]/
+
+/** What is wrong with `fields` before it is sent, in words, or null. The API checks again. */
+export function problem(fields: Fields): string | null {
+  const title = fields.title.trim()
+  if (!title) return "Give the task a title."
+  if ([...title].length > MAX_TITLE || NO_CONTROL.test(title))
+    return `The title is one line, up to ${MAX_TITLE} characters.`
+  if (fields.status === "blocked") {
+    const blocker = fields.blocker.trim()
+    if (!blocker) return "Say what is blocking it."
+    if ([...blocker].length > MAX_BLOCKER || CONTROL.test(blocker))
+      return `Keep it to plain text, up to ${MAX_BLOCKER} characters.`
+  }
+  if (fields.due && !/^\d{4}-\d{2}-\d{2}$/.test(fields.due)) return "Use a date like 2026-11-30."
+  return null
+}
+
+/** Whether moving a task into `status` needs an answer first. */
+export const asksFirst = (status: TaskState): status is "blocked" | "waiting_on_customer" =>
+  status === "blocked" || status === "waiting_on_customer"
+
+/** A column's tasks in creation order: the API has no position, so the board does not invent one. */
+export function inColumn(tasks: ReadonlyArray<TaskOut>, status: TaskState): Array<TaskOut> {
+  return tasks
+    .filter((t) => t.status === status)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+}

@@ -80,11 +80,34 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   blocked wins over waiting, waiting over due. Each row says why it is there.
 - **Company.** Profile (summary, industry, region and the FDE's part), then Stakeholders (with
   their part) and Systems (with their kind) side by side (stacked below 960px), then Projects.
-- **Project.** The company link, the summary, the stage bar, Scope beside Success criteria (each
-  with its target), then Access, Tasks and Decisions. Scope says whether it is signed off, changed
-  since sign-off, or not signed off. Access and waiting tasks name people and systems from the
-  company's records; a task says why it is stuck, who it waits on, or when it is due.
-- **Agent runs (project).** A card after Tasks: the project's runs, newest first, each with its
+- **Project.** The company link, the summary, the stage bar, the **Board**, Scope beside Success
+  criteria (each with its target), then Access and Decisions. Scope says whether it is signed off,
+  changed since sign-off, or not signed off. Access and waiting tasks name people and systems from
+  the company's records.
+- **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
+  the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
+  not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
+  click on every visit. A card has the title, who has it, why it is stuck (the blocker, or who it
+  waits on and for how long) and when it is due; overdue and blocked get the amber dot. Under 800px
+  the columns stack, and between that and a full row they scroll sideways.
+  - **Moving.** Drag a card to another column, or open its menu (the round button on the card,
+    reachable by Tab and operated with the arrow keys and Enter) and pick **Move to**. The menu is
+    the only way on a phone. Dropping on the same column does nothing.
+  - **Two moves ask first.** Into **Blocked** asks what is blocking it, and the answer is required.
+    Into **Waiting on the customer** asks who, from the company's stakeholders, or "No one in
+    particular". Moves to the other columns go straight through, and leaving Blocked or Waiting
+    clears the blocker or the person.
+  - **Nothing is shown as saved until the API confirms it.** A moving card stays in its column,
+    dimmed and marked "Moving to ...", and jumps only when the API answers. A refused move leaves
+    the card where it was and says why above the board, with Dismiss. A dialog that fails stays
+    open with its reason and what was typed.
+  - **Order** in a column is creation order. The API has no position field, so the board does not
+    invent one.
+  - **Create, edit, delete.** **New task** opens a form: title, status, the blocker or who it waits
+    on when the status needs one, due date, and who has it (you, or unassigned). Clicking a card
+    opens the same form. **Delete task** asks first. A teammate's name is not known yet, only their
+    id, so a task assigned to one says "Assigned to a teammate" and keeps them on save.
+- **Agent runs (project).** A card after Access: the project's runs, newest first, each with its
   state, and **Start a task**: what the agent should do and the GitHub repository and branch it
   starts from, prefilled from the latest run. The form checks the repository with the API's own
   rules before it sends.
@@ -144,6 +167,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 
 - Every read shows loading, empty and error states; errors offer Try again. Today never claims an
   all clear unless the API answered.
-- Never imply a connection or a finished action before the API confirms it.
+- Never imply a connection or a finished action before the API confirms it. A write is never
+  applied to the screen first and undone on failure: the screen shows it pending, then confirmed.
 - Plain, short sentences in sentence case. No em dashes anywhere: UI copy, docs and comments. No
   exclamation marks.
