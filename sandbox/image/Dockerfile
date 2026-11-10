@@ -25,6 +25,22 @@ COPY --from=harness /build/node_modules /opt/oryxa-harness/node_modules
 COPY --from=harness /build/dist /opt/oryxa-harness/dist
 COPY image/egress-check.mjs /usr/local/bin/oryxa-egress-check
 COPY image/isolation-check.py /usr/local/bin/oryxa-isolation-check
+# tini reaps what the clean start kills; Debian's build, pinned exactly, and apt checks it against the signed archive.
+# apt reads the same snapshot.debian.org timestamp the base image was built from (the comment in its debian.sources),
+# not the live archive, which drops a superseded version and would fail this build. Release files in a snapshot have
+# expired, hence Check-Valid-Until; the signature is still checked. To update, change the timestamp when the base's
+# digest changes (docker run --rm <node image> cat /etc/apt/sources.list.d/debian.sources) and the tini version to
+# one that snapshot has.
+# Then no setuid or setgid file is left (su, mount, passwd, ssh-keysign and the rest): nothing here needs one.
+ARG DEBIAN_SNAPSHOT=20261027T000000Z
+RUN sed -i -E "s#http://deb.debian.org/(debian(-security)?)#https://snapshot.debian.org/archive/\1/${DEBIAN_SNAPSHOT}#" \
+    /etc/apt/sources.list.d/debian.sources \
+  && grep -q "archive/debian/${DEBIAN_SNAPSHOT}" /etc/apt/sources.list.d/debian.sources \
+  && grep -q "archive/debian-security/${DEBIAN_SNAPSHOT}" /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
+  && apt-get install -y --no-install-recommends tini=0.19.0-3+b8 \
+  && rm -rf /var/lib/apt/lists/* \
+  && find / -xdev -perm /6000 -type f -exec chmod ug-s {} +
 # Three users, ids fixed because the gateway and the harness name them (sandbox/harness/src/users.ts):
 # - agent (1001) runs the agent and every command it starts, and owns /workspace;
 # - harness (1002) is what the harness becomes after it starts the agent, so the agent cannot open its stdin;
@@ -39,10 +55,12 @@ RUN chmod +x /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-egress-check /
   && mkdir -p /workspace /etc/oryxa/runs \
   && chown agent:agent /workspace \
   && chmod 700 /etc/oryxa/runs
-# Pid 1 (the CMD; the gateway's compatibility date gives the container its own pid namespace) runs as init, not agent:
+# Pid 1 (tini; the gateway's compatibility date gives the container its own pid namespace) runs as init, not agent:
 # an agent process could otherwise trace it or write /proc/1/mem, and code put there would outlive every run's kill.
-# It is also the user of an exec that names none, which owns nothing; the gateway names the user on every exec.
+# Orphans pass to it, so it reaps what the clean start kills; it needs no capability for that and is no subreaper.
+# init is also the user of an exec that names none, which owns nothing; the gateway names the user on every exec.
 # HTTPS trusts the ephemeral CA that the gateway points every command at.
 USER init
 WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sleep", "infinity"]
