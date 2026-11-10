@@ -27,6 +27,11 @@ use oryxa_fde_store::{
 use serde::Serialize;
 use time::{Duration, OffsetDateTime};
 
+/// A reason to move a project on with its stage checklist open, as these tests do.
+fn skipped() -> oryxa_fde_store::Reason {
+    oryxa_fde_store::Reason::new("test fixture").unwrap()
+}
+
 fn actor() -> Actor {
     Actor {
         user: UserId::new("alice").unwrap(),
@@ -394,7 +399,10 @@ async fn every_criterion_passing_suggests_ready_to_deploy_and_never_moves_the_st
         Stage::Evaluate,
         Stage::Deploy,
     ] {
-        tx.change_stage(stage, &actor()).await.unwrap().unwrap();
+        tx.change_stage(stage, Some(&skipped()), &actor())
+            .await
+            .unwrap()
+            .unwrap();
     }
     tx.commit().await.unwrap();
     let m = message(&signer, &t, &EvalRunFinished::new(&deploying, run, 1, 0));
@@ -673,7 +681,10 @@ async fn model_calls_are_capped_timed_and_made_by_one_drafter_at_a_time() {
         Stage::Handoff,
         Stage::Operate,
     ] {
-        tx.change_stage(stage, &actor()).await.unwrap().unwrap();
+        tx.change_stage(stage, Some(&skipped()), &actor())
+            .await
+            .unwrap()
+            .unwrap();
     }
     tx.commit().await.unwrap();
     let counting = Broken {

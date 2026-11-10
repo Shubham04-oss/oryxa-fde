@@ -4677,6 +4677,7 @@
           "lifecycle"
         ],
         "summary": "Move the project to another stage: one forward, or back to any earlier one.",
+        "description": "Moving forward with items of the stage checklist open needs a `reason`; without one the answer\nis 409 with the open items.",
         "operationId": "change_stage",
         "parameters": [
           {
@@ -4719,6 +4720,16 @@
               }
             }
           },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Forbidden",
             "content": {
@@ -4741,6 +4752,67 @@
           },
           "409": {
             "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageConflictBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companies/{company}/projects/{project}/stage-checklist": {
+      "get": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "The checklist to leave the project's current stage.",
+        "operationId": "get_stage_checklist",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageChecklistOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "application/json": {
                 "schema": {
@@ -8490,6 +8562,27 @@
           }
         }
       },
+      "ChecklistItemOut": {
+        "type": "object",
+        "description": "One item of the checklist to leave a stage.",
+        "required": [
+          "key",
+          "label",
+          "met"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Stable key, e.g. `scope_signed_off`."
+          },
+          "label": {
+            "type": "string"
+          },
+          "met": {
+            "type": "boolean"
+          }
+        }
+      },
       "CommentBody": {
         "type": "object",
         "required": [
@@ -10078,12 +10171,61 @@
           "stage"
         ],
         "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the project moves forward with items of its stage checklist open: 1 to 500 characters.\nNeeded only then, and kept in the audit log with the open items; ignored otherwise."
+          },
           "stage": {
             "$ref": "#/components/schemas/ProjectStage",
             "description": "One stage forward, or back to any earlier stage."
           }
         },
         "additionalProperties": false
+      },
+      "StageChecklistOut": {
+        "type": "object",
+        "description": "What the project needs to leave its current stage, worked out from its records now.",
+        "required": [
+          "stage",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChecklistItemOut"
+            },
+            "description": "Empty for a stage with nothing to check yet."
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ProjectStage",
+            "description": "The project's current stage."
+          }
+        }
+      },
+      "StageConflictBody": {
+        "type": "object",
+        "description": "A refused stage move: `rejected_stage_transition` for a skip or a no-op, or\n`rejected_checklist_open` with the items still `open` when a forward move gave no reason.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "open": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChecklistItemOut"
+            }
+          }
+        }
       },
       "StakeholderBody": {
         "type": "object",

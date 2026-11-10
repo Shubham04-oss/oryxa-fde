@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use oryxa_core::UserId;
 use oryxa_fde_core::{
     AccessRequestId, CompanyId, CriterionId, DecisionId, ProjectId, ProjectScope, ScopeItemId, Stage, StakeholderId,
@@ -14,8 +15,8 @@ use oryxa_fde_core::{
 };
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
-    AccessRequest, AccessRequestIn, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx, ScopeChange,
-    ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, Task, TaskIn, TaskStatus,
+    AccessRequest, AccessRequestIn, ChecklistItem, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx,
+    Reason, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -121,6 +122,46 @@ mirror!(TaskState <=> TaskStatus { Todo, InProgress, WaitingOnCustomer, Blocked,
 pub struct StageBody {
     /// One stage forward, or back to any earlier stage.
     pub stage: ProjectStage,
+    /// Why the project moves forward with items of its stage checklist open: 1 to 500 characters.
+    /// Needed only then, and kept in the audit log with the open items; ignored otherwise.
+    pub reason: Option<String>,
+}
+
+/// One item of the checklist to leave a stage.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChecklistItemOut {
+    /// Stable key, e.g. `scope_signed_off`.
+    pub key: String,
+    pub label: String,
+    pub met: bool,
+}
+
+impl From<ChecklistItem> for ChecklistItemOut {
+    fn from(i: ChecklistItem) -> Self {
+        Self {
+            key: i.check.key().to_owned(),
+            label: i.check.label().to_owned(),
+            met: i.met,
+        }
+    }
+}
+
+/// What the project needs to leave its current stage, worked out from its records now.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StageChecklistOut {
+    /// The project's current stage.
+    pub stage: ProjectStage,
+    /// Empty for a stage with nothing to check yet.
+    pub items: Vec<ChecklistItemOut>,
+}
+
+/// A refused stage move: `rejected_stage_transition` for a skip or a no-op, or
+/// `rejected_checklist_open` with the items still `open` when a forward move gave no reason.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StageConflictBody {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open: Option<Vec<ChecklistItemOut>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -473,24 +514,57 @@ impl DecisionBody {
 }
 
 /// Move the project to another stage: one forward, or back to any earlier one.
+///
+/// Moving forward with items of the stage checklist open needs a `reason`; without one the answer
+/// is 409 with the open items.
 #[utoipa::path(put, operation_id = "change_stage", path = "/v1/companies/{company}/projects/{project}/stage", tag = "lifecycle",
     request_body = StageBody,
     params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
-    responses((status = 200, body = ProjectOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-        (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = ProjectOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody), (status = 409, body = StageConflictBody)))]
 pub(crate) async fn change_stage(
     State(app): State<Arc<App>>,
     who: Principal,
     Path((c, p)): Path<(CompanyId, ProjectId)>,
     Json(body): Json<StageBody>,
-) -> Result<Json<ProjectOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let moved = tx
-        .change_stage(body.stage.into(), &who.actor())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let reason = body
+        .reason
+        .map(|r| Reason::new(r).map_err(|_| ApiError::Invalid("reason")))
+        .transpose()?;
+    let moved = match tx.change_stage(body.stage.into(), reason.as_ref(), &who.actor()).await {
+        Err(StoreError::ChecklistOpen(open)) => {
+            let open = open.into_iter().map(|check| ChecklistItem { check, met: false }.into());
+            let body = StageConflictBody {
+                error: ApiError::Rejected("checklist_open").code(),
+                open: Some(open.collect()),
+            };
+            return Ok((StatusCode::CONFLICT, Json(body)).into_response());
+        }
+        moved => moved?.ok_or(ApiError::NotFound)?,
+    };
     tx.commit().await?;
-    Ok(Json(moved.into()))
+    Ok(Json(ProjectOut::from(moved)).into_response())
+}
+
+/// The checklist to leave the project's current stage.
+#[utoipa::path(get, operation_id = "get_stage_checklist", path = "/v1/companies/{company}/projects/{project}/stage-checklist",
+    tag = "lifecycle",
+    params(("company" = String, Path, description = "Company id"), ("project" = String, Path, description = "Project id")),
+    responses((status = 200, body = StageChecklistOut), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn stage_checklist(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path((c, p)): Path<(CompanyId, ProjectId)>,
+) -> Result<Json<StageChecklistOut>, ApiError> {
+    let mut tx = project_tx(&app, &who, c, p).await?;
+    let (stage, items) = tx.stage_checklist().await?.ok_or(ApiError::NotFound)?;
+    tx.commit().await?;
+    Ok(Json(StageChecklistOut {
+        stage: stage.into(),
+        items: items.into_iter().map(Into::into).collect(),
+    }))
 }
 
 /// The project's scope: items in and out of scope, success criteria and the latest sign-off.

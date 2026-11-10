@@ -144,6 +144,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(records::project_sponsors))
         .routes(routes!(records::add_project_sponsor, records::remove_project_sponsor))
         .routes(routes!(lifecycle::change_stage))
+        .routes(routes!(lifecycle::stage_checklist))
         .routes(routes!(lifecycle::scope))
         .routes(routes!(lifecycle::add_scope_item))
         .routes(routes!(lifecycle::update_scope_item, lifecycle::remove_scope_item))
