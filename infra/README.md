@@ -328,11 +328,83 @@ workflows (Deploys, below), not from the owner's machine.
     `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), the tunnel `oryxa-fde-dev-api`
     shows healthy in the Cloudflare dashboard, `https://app.<domain>` reaches the API through the
     binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
+    Then run stage A of the scripted smoke test (next section).
 
 When a consumer lands (wave 2), create its FIFO subscriber into `oryxa-fde-dev-<consumer>.fifo`,
 with the `-undelivered` queue as its on-failure target and `tofu output eventbus_delivery_role_arn`
 as its role (`aws eventsv2 create-subscriber`, or the platform kit's `provision` with env
 `fde-dev`). Grant its service `ReceiveMessage` on that queue only; nothing reads the queues yet.
+
+## Smoke test
+
+`infra/scripts/smoke-test.sh` is one scripted pass against a deployed environment, so each stage of the first
+deploy ends in a pass or a fail. It goes to the web app's public address the way a browser does and stops at the
+first failure with a plain message and a non-zero exit. Needs `bash`, `curl` and `jq`.
+
+```bash
+export SMOKE_BASE_URL=https://app.<domain>               # exactly the web app's origin (the API's WEB_ORIGIN)
+export SMOKE_SESSION_FILE=~/.oryxa-smoke-session         # the session cookie, see below
+infra/scripts/smoke-test.sh a                            # stage A, the core (the default)
+SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker is deployed
+SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh c   # stage C, once the agent routes are on
+SMOKE_WORKERS=1 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh all
+```
+
+Stages run in the order given. B and C need a company and a project, so run alone they make their own; run
+together they share one. Every run first checks health and `/v1/me`.
+
+| Stage | Checks, in order |
+| --- | --- |
+| **A, core** | `GET /api/healthz` (no session); `GET /v1/me` (the session is accepted; prints the organisation and role); create a company; create a project (starts in `discover`); add a task; the task is on `GET /v1/today`; the stage checklist reads (`discover`); a move to `scope` with items open and no reason is refused (`409 rejected_checklist_open`), then the same move with a reason succeeds and the checklist now reads `scope`; the task is removed and gone from Today |
+| **B, workers** | Upload a small Markdown document with a one-off code word; poll until `status` is `ingested` with chunks (a `failed` status stops it, and so does `SMOKE_INGEST_TIMEOUT`, default 180 s); search for the code word and find that document's passage |
+| **C, agent** | List the project's agent runs (a `404` means the agent routes are off); start a read-only run on the sample repository (`SMOKE_AGENT_BASE`, default `main`); poll until events arrive and the run is `finished` (`SMOKE_RUN_TIMEOUT`, default 900 s) with a `result` as its last event. A run that fails, or waits for an approval (the test never approves), stops it and is cancelled |
+
+**Skips.** B skips unless `SMOKE_WORKERS=1` (the script cannot tell a missing worker from a slow one, so you
+say it is deployed; then a document that never ingests is a failure). C skips without `SMOKE_AGENT_REPO`, and
+when the agent routes answer a bare `404` (one with an error code fails). A skip prints `SKIP [stage] ...` and
+exits 0 for that stage; the last line, `result: a=passed b=skipped ...`, tells passes and skips apart.
+
+**The session.** The test signs in as the person who runs it, with the browser session cookie of a **test user in
+a test organisation**: it creates a company in that organisation, and the user becomes its lead. Never use a
+real customer's organisation or your own login.
+
+1. In a private browser window, open `https://app.<domain>` and sign in as the test user. Do not sign out
+   until the run is over (sign-out ends the WorkOS session, and with it the cookie the script uses).
+2. In the browser's developer tools, Application (Chrome) or Storage (Firefox), Cookies, `https://app.<domain>`:
+   copy the **Value** of `__Host-fde_session` (it is `HttpOnly`, so only the tools show it). Just the value.
+3. Put it in a file only you can read, and paste it into that file in an editor, not on a command line:
+   `install -m 600 /dev/null ~/.oryxa-smoke-session`. The script refuses a file that group or others can read.
+   `SMOKE_SESSION` (the value in the environment) works too, for a secret manager; never an argument.
+4. When the run is over, sign out in the private window, then delete the file. Signing out ends the WorkOS
+   session, so every copy of the cookie stops working: the file, the clipboard, the browser's. Otherwise it stays
+   usable for up to seven days. The handed-over cookie goes stale anyway once the API refreshes the session
+   during a run: WorkOS refresh tokens are single use, so the API reseals the cookie, the run carries on with the
+   new one in memory (the file is never written), and the browser's copy is spent. The script says so at the
+   end. Take a fresh sign-in for each run.
+
+The script puts the cookie in a private temporary file for curl, never in its command line (`ps` shows
+arguments), and removes it on exit, on failure and on an interrupt (only `kill -9` leaves it, in a directory
+only you can read under `$TMPDIR`). It turns tracing off, so `bash -x` cannot print it, ignores `~/.curlrc`, and
+strips it from any error text. It prints identifiers and API error codes, never a header or a response body.
+
+**What a write needs, as the browser sends it** (`fde-web/src/forward.ts`, `oryxa-fde-api/src/session.rs`):
+`Cookie: __Host-fde_session=<value>`; `X-Oryxa-Request: 1`; and an `Origin` header equal to the web app's
+origin on anything but a read. The Worker refuses a write whose `Origin` is not its own, and the API refuses one
+whose `Origin` is not `WEB_ORIGIN` (`403 csrf`); that is why `SMOKE_BASE_URL` must be exactly that origin, with
+`https` (plain `http` is accepted for `localhost` only). `/api/*` goes to the API with the `/api` prefix removed.
+
+**What it makes, and what stays.** Everything is named `oryxa-smoke-<UTC time>-<random>`, with a summary saying
+it is safe to ignore. It removes the task it adds, on success and on failure (and cancels a run it stops on).
+The API has no delete for **companies, projects, documents or agent runs**, so each run leaves behind one company
+and one project (stage `scope`), a document after B and a finished run after C. The script prints their ids at
+the end. They sit in the test organisation; do not point the script at an organisation anyone works in.
+
+`infra/scripts/test-smoke-test.sh` proves the script without a deployed environment: it starts
+`infra/scripts/smoke-stub.py` (answers the routes the script calls with canned responses, on a random loopback
+port, stopped afterwards) and runs every stage against it: full passes, failures in the middle (cleanup), an
+interrupt, the skips, a session that rotates mid-run, and the session hand-over checks, including `bash -x` and
+a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
+`python3` only.
 
 ## Deploys
 
@@ -682,5 +754,6 @@ tofu -chdir=infra/envs/dev init -backend=false
 tofu -chdir=infra/envs/dev validate
 tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API task against the contract table
 shellcheck infra/scripts/*.sh
+bash infra/scripts/test-smoke-test.sh # the smoke test against a local stub; no environment needed
 actionlint                            # the deploy workflows
 ```
