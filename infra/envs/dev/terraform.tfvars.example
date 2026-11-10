@@ -12,6 +12,13 @@ workos_client_id       = "<WorkOS client id (public)>"
 data_bucket_name       = "oryxa-fde-dev-data-<unique suffix>"
 cloudtrail_bucket_name = "oryxa-fde-dev-cloudtrail-<unique suffix>"
 
+# Who may assume the roles that make and retire one KMS key per company (infra/README.md, Company keys).
+company_key_operator_arns = ["arn:aws:iam::000000000000:user/<you>"]
+# Flip to true before the first real customer data, once the API names a company key on every write.
+# require_company_keys = false
+# Yearly rotation of each company key; off for now (cost, infra/README.md, Company keys).
+# company_key_rotation = false
+
 # Printed by `infra/scripts/create-event-bus.sh dev <account id> ap-south-1` (apply order step 2).
 event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/<id>"
 

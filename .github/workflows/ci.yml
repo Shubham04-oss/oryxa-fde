@@ -290,6 +290,8 @@ jobs:
       - run: bash infra/scripts/test-smoke-test.sh
       # The worker subscriber script against a fake aws, and each filter against the events its worker's code handles.
       - run: bash infra/scripts/test-create-subscriber.sh
+      # The company-key script against a fake aws (bash, jq and python3, all on the runner).
+      - run: bash infra/scripts/test-company-key.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
       # The same for the sandbox image job's filter.

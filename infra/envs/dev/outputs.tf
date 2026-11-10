@@ -111,3 +111,13 @@ output "event_subscribers" {
     consumers     = { for c in ["context-ingestion", "lifecycle"] : c => module.queue[c].url }
   }
 }
+
+output "company_keys" {
+  description = "Input of infra/scripts/company-key.sh: `tofu output -json company_keys > <file>`. Holds ARNs and the key policy, no secret."
+  value       = module.company_keys.config
+}
+
+output "company_key_alias_arn_prefix" {
+  description = "Append a company id for the alias the API names on write and looks up (the API stream's COMPANY_KEY_ALIAS_ARN_PREFIX, once its code reads it)."
+  value       = module.company_keys.alias_arn_prefix
+}
