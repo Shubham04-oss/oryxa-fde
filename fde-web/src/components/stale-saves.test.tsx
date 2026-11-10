@@ -468,6 +468,9 @@ describe("a stale sign-off", () => {
       ).toEqual(expect.arrayContaining([expect.stringContaining("confirm it first.")])),
     )
     expect(wire.sent.filter((w) => w.method === "POST")).toEqual([])
+    // The confirmation is the field that problem is about, so it is marked and described by it.
+    expect(within(box).getByRole("checkbox")).toHaveAttribute("aria-invalid", "true")
+    expect(within(box).getByRole("checkbox")).toHaveAccessibleDescription(/confirm it first\./)
 
     // Confirmed, it is signed on the version that was shown.
     await userEvent.click(within(box).getByRole("checkbox"))

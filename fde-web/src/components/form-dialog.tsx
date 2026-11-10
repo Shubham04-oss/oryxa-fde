@@ -127,8 +127,11 @@ export function FormDialog({
       <form ref={form} noValidate onSubmit={submit} className="grid gap-3.5 text-xs">
         <DialogTitle className="text-[13px] font-semibold">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
-        <FormProblem value={{ field: error?.field, id: errorId }}>{children}</FormProblem>
-        {notice}
+        {/* The notice is in the problem's reach too: a sign-off's confirmation is a field in it. */}
+        <FormProblem value={{ field: error?.field, id: errorId }}>
+          {children}
+          {notice}
+        </FormProblem>
         {remove && deleting ? (
           <div
             role="group"

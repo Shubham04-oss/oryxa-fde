@@ -140,15 +140,13 @@ export function accessRefusalNote(
         ? `${name ? `“${name}”` : "This request"} changed since you last read it, so it was not changed. It is now ${ACCESS_LABEL[access.status]}.`
         : `Couldn't change ${it} to ${ACCESS_LABEL[to]}. ${why}`
   // The offer is the move's own words on the request as it now stands: "Mark granted", "Ask again".
+  // A move the request's row would not offer now (marking a granted request denied) is not offered.
   const { primary, rest } = accessActions(access.status)
   const label = [primary, ...rest].find((action) => action.to === to)?.label
   return {
     text,
     held: kind !== "refused",
-    again:
-      kind === "stale"
-        ? { label: label ?? `Change to ${ACCESS_LABEL[to]}`, run: again }
-        : undefined,
+    again: kind === "stale" && label ? { label, run: again } : undefined,
   }
 }
 

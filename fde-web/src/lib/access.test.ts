@@ -7,6 +7,7 @@ import {
   accessEditBody,
   accessFields,
   accessProblem,
+  accessRefusalNote,
   blockedBy,
   blockers,
   blankDecision,
@@ -316,5 +317,31 @@ describe("commitAccess", () => {
     invalidate.mockClear()
     await vi.advanceTimersByTimeAsync(UNBLOCK_REREAD_MS + 1)
     expect(invalidate).not.toHaveBeenCalled()
+  })
+})
+
+describe("a status change held back because the request had changed", () => {
+  const stale = (now: AccessState, to: AccessState) =>
+    accessRefusalNote(
+      {
+        scope: { company: "cmp_1", project: "prj_1" } as never,
+        access: request("acc_1", now, 3),
+        to,
+        why: "",
+        kind: "stale",
+      },
+      null,
+      () => {},
+    )
+
+  it("offers the move again in the row's own words when the request as it is now still has it", () => {
+    expect(stale("denied", "requested").again?.label).toBe("Ask again")
+    expect(stale("in_progress", "granted").again?.label).toBe("Mark granted")
+  })
+
+  it("offers nothing the row would not offer now: a granted request is not marked denied", () => {
+    expect(stale("granted", "denied").again).toBeUndefined()
+    expect(stale("revoked", "denied").again).toBeUndefined()
+    expect(stale("granted", "denied").text).toContain("It is now Granted.")
   })
 })

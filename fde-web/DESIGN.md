@@ -225,6 +225,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     **Record sign-off** will send anything. The re-read before the sign-off stays as a courtesy: a scope that moved
     while the dialog was open is told the same way without a sign-off being attempted. The version is the protection:
     the API checks it under the scope's lock, which a re-read cannot.
+  - **A delete** names no version (the API takes none yet), so it is never held back: it removes the record
+    whatever was changed since. A form still open on that record keeps what was typed, and its Save says
+    "The task is no longer there." in the form's alert; a one-click move on it says the same, and the page reads
+    it again.
   - **An identical save** is answered by the API as it is, with the record's version unchanged, so the form closes and
     nothing moved. The access, scope item and criterion forms still send nothing when nothing changed (as before), which
     saves the round trip; the stakeholder, system and task forms send it and the API says nothing changed.

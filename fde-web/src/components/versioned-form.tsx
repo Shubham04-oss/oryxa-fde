@@ -19,6 +19,8 @@ export type Stale = {
   differs: Array<string>
   /** Of those, the ones the person also changed. */
   both: Array<string>
+  /** Which refusal this is: a second one is a new notice, so a screen reader says it again. */
+  round: number
 }
 
 /**
@@ -66,11 +68,16 @@ export function useVersionedForm<T extends Versioned, TFields extends Values>({
       if (error instanceof StaleSaveError && base) {
         const current = error.current as T
         const found = staleness(snapshot(base), fields, snapshot(current), labels)
-        // The page shows the record as it now stands, and the form keeps what was typed on top of it.
+        // The page shows the record as it now stands, and the form keeps what was typed on top of it,
+        // including anything typed while the save was on its way.
         await adopt(current)
         setBase(current)
-        setFields(found.merged)
-        setStale({ differs: found.differs, both: found.both })
+        setFields((typed) => staleness(snapshot(base), typed, snapshot(current), labels).merged)
+        setStale((was) => ({
+          differs: found.differs,
+          both: found.both,
+          round: (was?.round ?? 0) + 1,
+        }))
         return HELD
       }
       return problemOf(error, what, fieldOf ?? {})
@@ -79,7 +86,7 @@ export function useVersionedForm<T extends Versioned, TFields extends Values>({
 
   return {
     fields,
-    set: (patch: Partial<TFields>) => setFields({ ...fields, ...patch }),
+    set: (patch: Partial<TFields>) => setFields((was) => ({ ...was, ...patch })),
     submit,
     stale,
     /** What Save says: it says more once it is no longer a plain save. */
@@ -90,9 +97,10 @@ export function useVersionedForm<T extends Versioned, TFields extends Values>({
 /** The notice a form shows after a stale save: what happened, what differs and what the next Save does. */
 export function StaleNotice({ stale, noun }: { stale: Stale | null; noun: string }) {
   if (!stale) return null
-  const { differs, both } = stale
+  const { differs, both, round } = stale
   return (
     <div
+      key={round}
       role="alert"
       data-stale
       className="grid gap-1 rounded-xl border bg-raised px-3.5 py-2.5 text-xs"
