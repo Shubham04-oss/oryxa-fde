@@ -42,6 +42,8 @@ async function shoot(screen, size, theme) {
   // Reads of the stage checklist say everything is met, so the stale-view refusal can be shown.
   if (screen.staleChecklist)
     await page.addInitScript(() => (globalThis.__fdeMockStaleChecklist = true))
+  // The API serves no eval routes (no sandbox gateway): they answer 404, so the Proof card says so.
+  if (screen.evalsOff) await page.addInitScript(() => (globalThis.__fdeMockEvalsOff = true))
   try {
     const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"))
     if (response && response.status() >= 400) problems.push(`HTTP ${response.status()}`)

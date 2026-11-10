@@ -12,8 +12,8 @@ export type Fix =
   | "add-out-of-scope"
   | "sign-off"
   | "add-criterion"
-  /** Scroll to the Success criteria card and focus it. */
-  | "criteria"
+  /** Scroll to the Proof card and focus it. */
+  | "proof"
   /** Scroll to the Access card and focus it. */
   | "access"
   /** The Access card's blank request form. */
@@ -100,7 +100,7 @@ export function hintFor(key: string, p: Project): Hint | undefined {
           }
         : {
             missing: "Some success criteria have no eval suite measuring them yet.",
-            fix: { do: "criteria", label: "Go to criteria" },
+            fix: { do: "proof", label: "Go to proof" },
           }
     case "criteria_met":
       return criteria === 0
@@ -110,7 +110,7 @@ export function hintFor(key: string, p: Project): Hint | undefined {
           }
         : {
             missing: "Not every criterion has a result that meets its target yet.",
-            fix: { do: "criteria", label: "Go to criteria" },
+            fix: { do: "proof", label: "Go to proof" },
           }
     default:
       return undefined

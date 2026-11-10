@@ -22,24 +22,24 @@ Every colour is written once, as a token in `src/styles.css`. Screens read token
 utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--token)` in
 `src/shell.css`. Do not write a hex, `rgb()` or `hsl()` anywhere else.
 
-| Token             | Light     | Dark      | Use                                                                                                                                                                                                                                  |
-| ----------------- | --------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                                                                          |
-| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                                                                |
-| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                                                                  |
-| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                                                                           |
-| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                                                                       |
-| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                                                                      |
-| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                                                                      |
-| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                                                                           |
-| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                                                                  |
-| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                                                                     |
-| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                                                                |
-| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                                                                   |
-| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                                                                           |
-| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                                                                          |
-| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items, a save held back because the record changed. Nothing else. |
-| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                                                                        |
+| Token             | Light     | Dark      | Use                                                                                                                                                                                                                                                                                                                       |
+| ----------------- | --------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                                                                                                                                                               |
+| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                                                                                                                                                     |
+| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                                                                                                                                                       |
+| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                                                                                                                                                                |
+| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                                                                                                                                                            |
+| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                                                                                                                                                           |
+| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                                                                                                                                                           |
+| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                                                                                                                                                                |
+| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                                                                                                                                                       |
+| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                                                                                                                                                          |
+| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                                                                                                                                                     |
+| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                                                                                                                                                        |
+| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                                                                                                                                                                |
+| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                                                                                                                                                               |
+| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items, a save held back because the record changed, a criterion that is not met, a result that is out of date, a case that did not pass. Nothing else. |
+| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                                                                                                                                                             |
 
 - Every grey is neutral (R=G=B). No decorative accent.
 - A status is a dot and words, never colour alone.
@@ -140,7 +140,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   checklist** (see **The stage checklist** below), the **Board** (the one card that
   takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
   with the others), Scope beside Success
-  criteria, then Access, Agent runs, **Notes** and Decisions, then **Assigned**. Scope and criteria are written
+  criteria, then **Proof** and **Eval suites** (see **Proof** below), then Access, Agent runs, **Notes** and Decisions, then **Assigned**. Scope and criteria are written
   in place (see **Scope and success criteria** below), Access and Decisions too (see **Access and
   decisions** below), and so are Notes (see **Meeting notes** below). Access and waiting tasks name people and systems from the company's records. A project with nothing written in it yet
   starts with a dashed note, **A new project. Start here.**, that says to name the people at the
@@ -289,8 +289,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     focuses it, or **Request access** (the Access card's form) when no request exists. The API counts
     no request as met ("a project may need no access"), so that button only shows to a view that has
     not caught up. An eval suite on every criterion, and every
-    criterion met: **Go to criteria** (the Success criteria card, focused), or **Add criterion** when
-    there are none. A meeting note on the project: **Write a note**, which opens the Notes card's
+    criterion met: **Go to proof** (the Proof card, focused), or **Add criterion** when
+    there are none. Both items are read again after anything on the Proof cards that the API confirms
+    (a suite created, a run finished), as a scope change reads them. A meeting note on the project: **Write a note**, which opens the Notes card's
     blank note. The line says that a note written on the company does not count: the API meets this item
     only with a note on the project. A key the page does not know shows the API's label and nothing to press.
   - **When all are met** the card collapses to one quiet line with a green check, "Ready to leave
@@ -513,6 +514,96 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     needs the company chosen first, which is not a small step; the card's search is the way. Documents on the project
     page: the API does not scope them to a project. A document's key, its download or view link, a delete and a re-read
     are not in the API.
+- **Proof.** The part of the product the FDE's loop is built around: "is this criterion met, and how do we
+  know?". Two cards on the project page, after Scope and Success criteria: **Proof**, one row per criterion, and **Eval
+  suites**, the depth behind it. Everything here needs `work` on the project, which anyone who can open the page has
+  (the API guards every eval route with it, except `eval-criteria`, which the page does not use). Where the API serves no
+  evals, the cards say so (see **Where the API serves no evals**).
+  - **A row is one glance.** What the criterion says (the customer's sentence), a status (a dot and words), the number
+    against the target ("**0.75** against at least 0.7"), how fresh it is ("Measured 5 Nov 2026, 5 days ago"), how many
+    cases passed, which suite it came from and whether the outputs were imported or run in the sandbox, and a trend: a
+    row of up to eight small bars, one per recent finished result (height is the result's own rate, 0 to 1), the latest
+    darker, neutral in colour, with every value in text for a screen reader and as the bars' title ("Recent results,
+    oldest first: 0.58 (7 of 12), 0.67 (8 of 12), 0.75 (9 of 12)."). The bars need two results to show. The suite's name
+    under the row opens it in the Eval suites card.
+  - **The statuses.** **Met** (green) and **Not met** (amber, because it is failing) are the API's verdict and nothing
+    else; **No result yet** (a suite measures it and no finished run has produced a value), **No eval suite** (nothing
+    measures it) and **Not read yet** (the verdict could not be read) are neutral. A run that is going says "A run
+    started 5 Nov 2026 is being graded." and keeps the last finished value above it. Each status of no result says what
+    to do next, with the button to do it: **New eval suite for this**, **Run in the sandbox** (when the criterion has one
+    suite with a target and cases), **Open the suite**.
+  - **"Met" is the API's, never the page's.** The page works out no verdict and no pass rate. `GET /v1/room/...` returns
+    each criterion with the API's latest value, `passing` (the value against the target on the criterion's side of it:
+    `at_least` is `>=`, `at_most` is `<=`) and when it was measured. That is the same rule that drives the stage
+    checklist's "Every criterion meets its target" (`ProjectTx::criteria_met`) and the "ready to deploy" suggestion.
+    The room is the customer's view, and an FDE with `work` reads it too. The heading's "1 of 3 met" is its
+    `criteria_passing`. What the page does find itself is where a value came from: the newest finished run of a suite that
+    measures the criterion (and in which some case measured it) whose rate is the API's value; if none matches, the row says
+    "from an eval run" and claims no suite. The trend is the same runs' own `passed`, `total` and `rate`.
+  - **What a value is.** The API sets a criterion's value to `passed / total` for the cases that measure it, so it is a
+    pass rate from 0 to 1, and compares it with the target **as written**. A target written as a percentage ("at least
+    70%") can never be met. The row says so ("A pass rate runs from 0 to 1, so at least 70 can never be met. Write the target
+    as 0.7 instead.") rather than leave a criterion failing for no reason the page can see. This is an API gap (#182).
+  - **Fresh, and out of date.** The API's `measured_at`, in words and a date. A result is **out of date** (amber, with the
+    reason) when the criterion was changed after it was measured, or when it is 14 days old (`STALE_DAYS`); the verdict
+    above it is still the API's.
+  - **Errors count as not passed.** A case the target or a grader could not decide is **Could not be graded**, and the API
+    counts it as not passed, so a run that could not grade never shows a better rate than it earned.
+  - **Eval suites** lists the project's suites, newest first: the name, how many cases, where outputs come from
+    (a command run in the company's sandbox, or results imported), the criteria it measures and its last run. A suite opens
+    in place (`aria-expanded`): where outputs come from, its graders (all must pass; five kinds: exact match, regular
+    expression, JSON schema, a script in the sandbox, a model judge) with the pattern, schema, command or rubric as text,
+    its buttons (**Run in the sandbox**, **Import results**, **Add cases**), its runs, newest first, and the one chosen in
+    full: running or finished, who started it and when, imported or run, the counts the API reports ("18 passed, 1 failed, 1
+    could not be graded"), each criterion's "18 of 20 cases passed (0.9)", and the cases. The cases that did not pass come
+    first, each folded to its id and outcome; opening one shows the input, the expected output, the output, and each
+    grader's verdict in the suite's order with its reason. The cases that passed are behind one button. Lists of cases show 20 at a
+    time. **New eval suite** is also here.
+  - **A run starts only where the API allows it.** **Run in the sandbox** is for a suite with a target command and at
+    least one case (the API answers 409 `rejected_no_target` and `rejected_no_cases` otherwise, and the page says why it is
+    off before the API is asked). It runs in the company's sandbox, on sample data only for now (ADR 0004), waiting its turn
+    behind an agent run if one holds it. One quiet line under the Proof heading says so. A suite without a target grades
+    **imported results** instead.
+  - **A run is finished only when the API says so.** The API answers a start with `202` and a run that is `running`; its
+    report arrives when the grading ends. The page shows the run as **Running** and polls that run (not the list) after
+    2 seconds, then every 5 (after 20 seconds), 15 (after a minute) and 30 (after five minutes), as the documents card does
+    (`pollDelay`). It stops when the run finishes, at fifteen minutes with "A run is taking longer than usual to finish.
+    **Check again**" (a run's own limit is an hour, and a run left `running` after its API task stopped is an API gap, #76),
+    when the page is left and while the tab is hidden. When a run ends the card says so ("“Time to a first draft” has
+    finished: 8 of 10 cases passed."), and the room, the checklist and the runs are read again.
+  - **New eval suite** (`FormDialog`) asks the name, the criteria it measures (at least one, the ones the Proof row opened it
+    for ticked), the graders (up to eight, each with its own fields: ignore case; a pattern; a JSON schema; a command, one
+    argument per line, and a time limit; a rubric) and where outputs come from (**Results I bring**, or a command run in the
+    sandbox). Cases come next, from a CSV. The API answers a refused suite with one code, `invalid_suite`, so the page checks
+    each part before it sends and says which, tied to its field.
+  - **Importing a CSV.** **Add cases** takes columns `input` (required) and optionally `expected`, `id` and `criteria` (ids
+    separated by `;`); **Import results** takes `case` and `output`, for the cases of that suite. The file is sent as it is,
+    as the raw body with `Content-Type: text/csv` through the same upload path as a document (`Transport.upload`, with the bytes
+    sent shown), up to 8 MB. **The API takes a whole file or none of it, and says only that it refused it** (`invalid_csv`,
+    `invalid_cases`, `invalid_case`). So the page reads the file in the browser first, with the API's rules (`lib/eval-csv.ts`:
+    the header, a row with the wrong number of values, an id that is not letters, digits, `_` or `-`, an id already in the
+    suite, a criterion the suite does not measure, a case listed twice, a case the suite does not have, a value over 64 KB, more
+    than 10,000 rows) and says "Read 42 rows with the columns case, output", then each row it would refuse by number ("Row 3
+    names “plan-99”, which is not a case of this suite.") and that nothing is imported unless every row is accepted. Save is
+    refused until the file reads clean. For results it also says how many of the suite's cases the file leaves without a row,
+    because the API grades those as could not be graded, which counts as not passed. The API still decides: a file that reads
+    clean can be refused, and then the dialog stays open with the file chosen and says why. **Nothing is shown as imported
+    before the API answers**: cases are "Added 2 cases to “x”. It now has 12." from the suite the API returns; results are a run
+    that is running until it finishes. A script or judge grader grades in the sandbox, which the dialog says.
+  - **Customer content is text.** Case inputs and expected outputs, a model's or script's output, a grader's reason (a judge
+    may quote the output), a suite or case name and an imported file's text are rendered as text nodes only, never as HTML or
+    Markdown, in `<pre>` with the lines kept (`LongText`). One that is long (over about 240 characters or 5 lines) is folded
+    with **Show the whole output (5,000 characters)** and **Fold the output**, and opens in a box that scrolls. A reason or
+    output holding `<b>` or `**` shows those characters.
+  - **Where the API serves no evals.** The API mounts the eval routes only when the sandbox gateway is configured; elsewhere
+    they answer 404 with nothing in it (a mounted list never answers 404). The Proof card then says "Evals are not available
+    in this environment, so a suite cannot be created, run or given results here. What the API already holds is shown." with
+    the room's verdicts, no error and no buttons that cannot work, and the Eval suites card is not shown. A criterion nothing
+    measures says **Not measured** there rather than "No eval suite".
+  - **What it does not do.** No baseline (the API has none yet), no results from OpenTelemetry or JUnit (ADR 0006), no
+    customer view of proof (the customer room), no editing or deleting a suite or a case (the API has neither), and no
+    trend from before the page's runs (the API keeps only each criterion's latest value; the trend is read from the runs
+    list, which carries every run's report and so every case's output: one read of it per visit, no polling of it, #76).
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -617,6 +708,12 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Every project call takes a `ProjectScope` (company and project). The API answers 403 for a
   company or project that is not the FDE's and 404 for a missing record; the UI shows both as "not
   available", so it cannot tell "not yours" from "does not exist".
+- Proof is `api.evalSuites`, `evalRuns`, `evalRun`, `createSuite`, `startEvalRun`, `importCases` and `importResults`
+  (their own spec, `crates/oryxa-fde-agent/openapi.evals.json`, generated into `evals.gen.ts` and checked with the other two
+  by `pnpm api:check`; schemas in `src/lib/api/evals.ts`, checked against it by `evals.test.ts`) and `api.room`, with
+  `queries.evalSuites`, `evalRuns`, `evalRun` and `room`, all under the project's key. `importCases` and `importResults` send
+  the file through `Transport.upload` like a document, and read the answer with zod. A 404 on a list means evals are not served
+  (`evalsOff`).
 - Documents are `api.documents`, `uploadDocument` (the one call written by hand around the generated client's
   `XMLHttpRequest` transport: the generated client sends no progress, and a raw file body is not JSON, but the answer
   is parsed with zod like every other) and `search`, with `queries.documents` and `queries.search`. A document's id,
@@ -662,6 +759,15 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   characters is a 400 `invalid_reason` whenever it is sent, and moving back ignores it. Setting
   `globalThis.__fdeMockStaleChecklist = true` makes the checklist read every item as met until the
   first move that the API refuses for open items, so the stale-view refusal can be seen.
+  The mock answers the eval routes and the room (`src/dev/mock-evals.ts`) with the API's rules: a suite for the project's own
+  criteria with checked graders and commands (400 `invalid_suite`); cases and results from a CSV, all or none (400 `invalid_csv`,
+  `invalid_cases`, `invalid_case`; 409 `rejected_no_target`, `rejected_no_cases`); a run that is `running` until its time has come
+  (5 seconds in a dev build, `globalThis.__fdeMockEvalMs`; worked out when it is read), then graded by each grader with errored
+  cases counting as not passed; a criterion's value `passed / total` over the cases that measure it, left alone by a run in which
+  none does; and the room's `passing` as the API judges it, which the stage checklist's two eval items share.
+  `globalThis.__fdeMockEvalsOff = true` makes every eval route answer 404, as where no sandbox gateway is set. The seeds are
+  invented: Kestrel's dispatch project has a criterion met from imported results, one not met from runs in the sandbox with a case
+  that errored, and one with a suite not yet run; Lumen's forecast is met but three weeks old and has a criterion no suite measures.
   The mock answers a company's documents and search (`src/dev/mock-documents.ts`) with the API's rules: a raw
   body of text, Markdown, PDF or DOCX with its `Content-Type`, up to 20 MiB, not empty (413, 415 and 400 as the API
   answers); a document is `pending` after an upload and becomes `ingested` or `failed` after a moment (4 seconds in a
@@ -699,7 +805,7 @@ render, and leaves a `-FAILED.png` of it.
 - To add a screen, add an entry to `screens.mjs`: a `name`, a `path`, a `ready` locator that is visible
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
   `failWrites: true` makes the mock refuse every write, to see the failed-save states;
-  `emptyWorkspace: true` starts a workspace with no company; `staleChecklist: true` makes the project's
+  `emptyWorkspace: true` starts a workspace with no company; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `staleChecklist: true` makes the project's
   checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). A screen that shows a stale save sets the mock's `__fdeMockSomeoneElse` from its `act`, between opening a form and saving it (`someoneElse` in `screens.mjs`). `sizes` and
   `themes` narrow an entry. The file's header lists every option.
 - Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you

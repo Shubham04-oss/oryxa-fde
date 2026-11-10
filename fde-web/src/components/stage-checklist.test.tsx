@@ -147,12 +147,12 @@ describe("what an open item says and where it goes", () => {
     expect(screen.getByRole("region", { name: "Access" })).toHaveFocus()
   })
 
-  it("goes to the criteria when a result is missing", async () => {
+  it("goes to the Proof card when a result is missing", async () => {
     renderWithRouter(<ProjectPage scope={FORECAST} />)
     const box = await checklist("Evaluate")
     expect(box).toHaveTextContent("Not every criterion has a result that meets its target yet.")
-    await userEvent.click(within(box).getByRole("button", { name: "Go to criteria" }))
-    expect(screen.getByRole("region", { name: "Success criteria" })).toHaveFocus()
+    await userEvent.click(within(box).getByRole("button", { name: "Go to proof" }))
+    expect(screen.getByRole("region", { name: "Proof" })).toHaveFocus()
   })
 
   it("opens the blank note from a missing meeting note, and says a company note does not count", async () => {

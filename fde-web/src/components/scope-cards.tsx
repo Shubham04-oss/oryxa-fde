@@ -385,8 +385,9 @@ export function CriteriaCard({
     >
       {criteria.length === 0 ? (
         <Quiet>
-          Say how done is measured: one target the customer can check, such as plans accepted
-          unchanged, at least 70%.
+          Say how done is measured: one target the customer can check, such as the share of plans
+          accepted unchanged, at least 0.7. An eval suite gives a pass rate from 0 to 1, so write
+          the target the same way.
         </Quiet>
       ) : (
         <Rows>

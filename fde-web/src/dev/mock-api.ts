@@ -15,6 +15,9 @@ import type { Me, Stage } from "../lib/api/schemas"
 import { canMove } from "../lib/stage"
 import { localDay } from "../lib/time"
 import { documentReads, documentSearch, documentUpload, seedDocuments } from "./mock-documents"
+import { readText } from "../lib/eval-csv"
+import { emptyEvals, evalRoutes, seedEvals, settle, valueOf, measured } from "./mock-evals"
+import type { MockEvals } from "./mock-evals"
 import { runRoutes, seedRuns } from "./mock-runs"
 
 type S = components["schemas"]
@@ -246,10 +249,8 @@ type Records = {
   threads?: Array<S["ThreadOut"]>
   /** Meeting notes on the project. */
   notes: Array<S["MeetingNoteOut"]>
-  /** The criteria an eval suite measures. */
-  evaluated: Array<string>
-  /** The latest measured value of each criterion that has one. */
-  results: Record<string, number>
+  /** Eval suites and runs, and the latest value each criterion has (mock-evals.ts). */
+  evals: MockEvals
 }
 
 type CompanySeed = {
@@ -298,8 +299,7 @@ const emptyRecords = (): Records => ({
   tasks: [],
   decisions: [],
   notes: [],
-  evaluated: [],
-  results: {},
+  evals: emptyEvals(),
 })
 
 function seed() {
@@ -429,6 +429,7 @@ function seed() {
         "Drafts load plans for dispatchers from open orders, driver hours and depot rules.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: [
           note(
             "mtg_kd1",
@@ -460,8 +461,6 @@ function seed() {
             { stakeholders: ["stk_k3"] },
           ),
         ],
-        evaluated: ["crt_k1", "crt_k2", "crt_k3"],
-        results: { crt_k1: 74, crt_k2: 0, crt_k3: 1.5 },
         scope: scope(
           [
             inScope("itm_k1", "Draft next-day load plans for the two pilot depots"),
@@ -474,17 +473,17 @@ function seed() {
             criterion(
               "crt_k1",
               "Plans dispatchers accept with no changes",
-              "plans accepted unchanged",
+              "share of sampled plans accepted unchanged",
               "at_least",
-              70,
-              "%",
+              0.7,
+              null,
             ),
             criterion(
               "crt_k2",
-              "Plans that break a driver-hours rule",
-              "rule breaks in 500 sampled plans",
-              "at_most",
-              0,
+              "Plans that keep every driver-hours rule",
+              "share of sampled plans within the rules",
+              "at_least",
+              1,
               null,
             ),
             criterion("crt_k3", "Time to a draft plan", "minutes per depot", "at_most", 2, "min"),
@@ -606,9 +605,8 @@ function seed() {
         "Reads referral letters and fills the intake form for the clinic's coordinators.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: checkIns("mtg_bw", 1, "stk_b1"),
-        evaluated: [],
-        results: {},
         scope: scope(
           [
             inScope("itm_b1", "Extract patient-free fields from synthetic referral letters"),
@@ -676,10 +674,8 @@ function seed() {
         "Daily demand forecasts for fresh produce in forty stores, with reasons a buyer reads.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: checkIns("mtg_lm", 3, "stk_l1"),
-        evaluated: ["crt_l1", "crt_l2"],
-        // One criterion measured and passing, the other not measured yet.
-        results: { crt_l1: 16.2 },
         scope: scope(
           [
             inScope("itm_l1", "Fresh produce in forty pilot stores"),
@@ -688,13 +684,20 @@ function seed() {
             outOfScope("itm_l4", "Promotions planning"),
           ],
           [
-            criterion("crt_l1", "Forecast error on fresh produce", "MAPE", "at_most", 18, "%"),
+            criterion(
+              "crt_l1",
+              "Forecasts a buyer can rely on",
+              "share of forecasts within tolerance",
+              "at_least",
+              0.85,
+              null,
+            ),
             criterion(
               "crt_l2",
               "Buyers who find the reasons useful",
-              "buyers out of five in review",
+              "share of reviewed forecasts with reasons rated useful",
               "at_least",
-              4,
+              0.8,
               null,
             ),
           ],
@@ -747,9 +750,8 @@ function seed() {
         "Helps call handlers capture a claim's first notice in one pass.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: checkIns("mtg_at", 1, "stk_a2"),
-        evaluated: [],
-        results: {},
         scope: scope(
           [
             inScope("itm_a1", "Home claims by phone"),
@@ -802,9 +804,8 @@ function seed() {
         "Summarises overnight outage reports for the morning operations call.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: checkIns("mtg_co", 2, "stk_c1"),
-        evaluated: ["crt_c1", "crt_c2"],
-        results: { crt_c1: 100, crt_c2: 100 },
         scope: scope(
           [
             inScope("itm_c1", "Overnight reports from the outage log"),
@@ -815,18 +816,18 @@ function seed() {
             criterion(
               "crt_c1",
               "Summaries ready by 7am",
-              "weekdays with the summary on time",
+              "share of weekdays with the summary on time",
               "at_least",
-              100,
-              "%",
+              1,
+              null,
             ),
             criterion(
               "crt_c2",
               "Facts that match the log",
-              "spot checks that match the log",
+              "share of spot checks that match the log",
               "at_least",
-              100,
-              "%",
+              1,
+              null,
             ),
           ],
           { by: "stk_c1", daysAgo: 120, current: true },
@@ -862,9 +863,8 @@ function seed() {
         "Lets field crews search safety procedures from a phone, offline-first.",
       ),
       records: {
+        evals: emptyEvals(),
         notes: checkIns("mtg_cf", 2, "stk_c2"),
-        evaluated: ["crt_f1"],
-        results: { crt_f1: 94 },
         scope: scope(
           [
             inScope("itm_f1", "The 2026 safety handbook"),
@@ -876,10 +876,10 @@ function seed() {
             criterion(
               "crt_f1",
               "Right procedure in the top three",
-              "questions answered in the top three",
+              "share of questions answered in the top three",
               "at_least",
-              92,
-              "%",
+              0.92,
+              null,
             ),
           ],
           { by: "stk_c1", daysAgo: 60, current: true },
@@ -922,6 +922,9 @@ function seed() {
     companies.length = 0
     projects.length = 0
   }
+  // Eval suites and runs for the projects that have them; the rest have none.
+  const evals = seedEvals()
+  for (const p of projects) p.records.evals = evals[p.project.id] ?? p.records.evals
   return { me, companies, projects, runs: seedRuns(), assignees, documents: seedDocuments() }
 }
 
@@ -1907,7 +1910,7 @@ const CHECKS: Record<
     stage: "build",
     label: "An eval suite measures every criterion",
     met: (_, r) =>
-      r.scope.criteria.length > 0 && r.scope.criteria.every((k) => r.evaluated.includes(k.id)),
+      r.scope.criteria.length > 0 && r.scope.criteria.every((k) => measured(r.evals, k.id)),
   },
   criteria_met: {
     stage: "evaluate",
@@ -1915,7 +1918,7 @@ const CHECKS: Record<
     met: (_, r) =>
       r.scope.criteria.length > 0 &&
       r.scope.criteria.every((k) => {
-        const value = r.results[k.id]
+        const value = valueOf(r.evals, k.id)?.value
         return (
           value !== undefined &&
           (k.comparator === "at_least" ? value >= k.target : value <= k.target)
@@ -1930,6 +1933,8 @@ function checklist(
   found: CompanySeed,
   records: Records,
 ): Array<S["ChecklistItemOut"]> {
+  // A run that has had its time finishes now, as the API would have recorded it.
+  settle(records.evals)
   return Object.entries(CHECKS)
     .filter(([, check]) => check.stage === stage)
     .map(([key, check]) => ({ key, label: check.label, met: check.met(found, records) }))
@@ -2018,6 +2023,15 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (!p) return refuse(403, "forbidden")
   if (record === "agent-runs")
     return runRoutes((state.runs[projectId] ??= []), method, rest, request, state.me.user.id)
+  if (record === "eval-suites" || record === "eval-runs") {
+    // Where the API has no sandbox gateway it mounts no eval routes, so they answer 404 with nothing in it.
+    if ((globalThis as Record<string, unknown>).__fdeMockEvalsOff === true)
+      return new Response(null, { status: 404 })
+    return evalRoutes(p.records.evals, record, rest, method, request, {
+      criteria: p.records.scope.criteria.map((c) => c.id),
+      user: state.me.user.id,
+    })
+  }
   if (record === "assignees") return assigneeRoutes(method, rest[0], found, projectId)
   if (record === "meeting-notes")
     return noteRoutes(method, rest[0], found, p.records.notes, request)
@@ -2069,8 +2083,46 @@ async function answer(request: Request): Promise<Response> {
   const [root, ...parts] = pathname.slice("/api/v1/".length).split("/")
   if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())
+  if (method === "GET" && root === "room" && parts[0] === "companies" && parts[2] === "projects")
+    return roomRead(parts[1], parts[3])
   const answered = root === "companies" ? await companyRoutes(method, parts, request) : null
   return answered ?? refuse(404, "not_found")
+}
+
+/** An FDE who works on the project reads its room: each criterion with the API's latest value and verdict. */
+function roomRead(companyId: string | undefined, projectId: string | undefined) {
+  const found = state.companies.find((c) => c.company.id === companyId)
+  if (!found || !mayWork(found)) return refuse(403, "forbidden")
+  const p = projectsOf(found.company.id).find((x) => x.project.id === projectId)
+  if (!p) return refuse(404, "not_found")
+  settle(p.records.evals)
+  const { scope: agreed } = p.records
+  const criteria = agreed.criteria.map((c) => {
+    const result = valueOf(p.records.evals, c.id)
+    return {
+      criterion: c,
+      latest: result?.value ?? null,
+      // The API's rule: the value meets the target on the criterion's side of it (`criterion_results`).
+      passing: result
+        ? c.comparator === "at_least"
+          ? result.value >= c.target
+          : result.value <= c.target
+        : null,
+      measured_at: result?.at ?? null,
+    }
+  })
+  return json({
+    project: p.project.id,
+    name: p.project.name,
+    stage: p.project.stage,
+    progress: STAGES.indexOf(p.project.stage) + 1,
+    stages: STAGES.length,
+    criteria,
+    criteria_passing: criteria.filter((c) => c.passing === true).length,
+    scope_awaits_sign_off: agreed.items.length > 0 && agreed.sign_off?.version !== agreed.version,
+    questions: [],
+    latest_update: null,
+  })
 }
 
 /** The path of an upload, `/api/v1/companies/{id}/documents`, or null for anything else. */
@@ -2081,6 +2133,11 @@ const uploadTarget = (url: URL) =>
 async function uploadAnswer({ url, headers, body }: UploadRequest): Promise<Response> {
   if (LATENCY_MS) await new Promise((resolve) => setTimeout(resolve, LATENCY_MS))
   const target = new URL(url)
+  const csv =
+    /^\/api\/v1\/companies\/([^/]+)\/projects\/([^/]+)\/eval-suites\/([^/]+)\/(cases|results)$/.exec(
+      target.pathname,
+    )
+  if (csv) return csvAnswer(csv, body)
   const id = uploadTarget(target)
   if (id === null) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
@@ -2091,6 +2148,37 @@ async function uploadAnswer({ url, headers, body }: UploadRequest): Promise<Resp
   const documents = (state.documents[found.company.id] ??= [])
   const contentType = new Headers(headers).get("content-type") ?? ""
   return documentUpload(documents, target, contentType, body, state.me.user.id)
+}
+
+/** A CSV for an eval suite's cases or results: what the API does with a file it has been handed. */
+async function csvAnswer(parts: RegExpExecArray, body: Blob): Promise<Response> {
+  if (!hasSession()) return refuse(401, "unauthorized")
+  if ((globalThis as Record<string, unknown>).__fdeMockFailWrites === true)
+    return refuse(503, "unavailable")
+  const [, companyId, projectId, suite, to] = parts.map((x) => decodeURIComponent(x))
+  const found = state.companies.find((c) => c.company.id === companyId)
+  if (!found || !mayWork(found)) return refuse(403, "forbidden")
+  const p = projectsOf(found.company.id).find((x) => x.project.id === projectId)
+  if (!p) return refuse(403, "forbidden")
+  if ((globalThis as Record<string, unknown>).__fdeMockEvalsOff === true)
+    return new Response(null, { status: 404 })
+  if (body.size > 8 * 1024 * 1024) return refuse(413, "payload_too_large")
+  const request = new Request("https://mock.invalid/", {
+    method: "POST",
+    body: await readText(body),
+  })
+  const answered = await evalRoutes(
+    p.records.evals,
+    "eval-suites",
+    [suite!, to!],
+    "POST",
+    request,
+    {
+      criteria: p.records.scope.criteria.map((c) => c.id),
+      user: state.me.user.id,
+    },
+  )
+  return answered ?? refuse(404, "not_found")
 }
 
 export const mockApi: Transport = {
