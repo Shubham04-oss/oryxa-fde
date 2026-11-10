@@ -688,8 +688,8 @@ run "rejects_no_company_key_operators" {
   expect_failures = [var.company_key_operator_arns]
 }
 
-# GitHub deploys (#31): only deploy-api.yml on main, in this repository's dev environment, may assume
-# the deploy role, and it may only push the API image, run the migrate task and update the API service.
+# GitHub deploys (#31, #165): only deploy-api.yml on main, in this repository's dev environment, may assume
+# the deploy role, and it may only push the API image, run the migrate task and update the API and the worker services.
 run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
   command = plan
 
@@ -710,7 +710,7 @@ run "only_dev_environment_jobs_of_this_repo_assume_the_deploy_role" {
   }
 }
 
-run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
+run "deploy_role_reaches_only_the_api_image_migrate_task_and_the_deployed_services" {
   command = plan
 
   assert {
@@ -741,8 +741,111 @@ run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
-    ]) == ["arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-api"]
-    error_message = "the only service the deploy role may update is the API"
+    ]) == ["arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-api", "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-ingest"]
+    error_message = "the services the deploy role may update are the API and the ingest worker: not SpiceDB, and no lifecycle worker while none is deployed"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:DescribeServices")
+    ]) == flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")])
+    error_message = "the deploy waits on exactly the services it updates"
+  }
+  assert {
+    condition     = local.deploy_workers == [{ name = "ingest", service = "oryxa-fde-ingest", task_definition = "oryxa-fde-dev-ingest" }]
+    error_message = "one deploy rolls the ingest worker after the API; the lifecycle worker is not deployed without a model, so it is not listed"
+  }
+}
+
+# What the deploy role may hand a task definition revision to run as (iam:PassRole is the only limit on a family:
+# registering takes no resource). The mock gives every role one ARN, so each role below gets its own: a role the deploy
+# must not pass (SpiceDB, db-admin, zed) keeps the mock's, which none of the lists may hold.
+run "the_deploy_role_passes_only_the_roles_of_the_api_the_migrate_task_and_the_workers" {
+  command = apply
+  override_resource {
+    target = module.api.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-task" }
+  }
+  override_resource {
+    target = module.api.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-api-exec" }
+  }
+  override_resource {
+    target = module.migrate.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-migrate-task" }
+  }
+  override_resource {
+    target = module.migrate.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-migrate-exec" }
+  }
+  override_resource {
+    target = module.ingest.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-ingest-task" }
+  }
+  override_resource {
+    target = module.ingest.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-ingest-exec" }
+  }
+
+  assert {
+    condition = toset(flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")
+    ])) == toset([for r in ["api-task", "api-exec", "migrate-task", "migrate-exec", "ingest-task", "ingest-exec"] : "arn:aws:iam::000000000000:role/dev-${r}"])
+    error_message = "the deploy role passes the API's, the migrate task's and the ingest worker's task and execution roles, and no other"
+  }
+  assert {
+    condition = (
+      [for s in data.aws_iam_policy_document.github_deploy.statement : s.sid if contains(s.actions, "iam:PassRole")] == ["PassOnlyDeployedServiceRoles"]
+      && !contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), module.spicedb.task_role_arn)
+      && !contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), module.db_admin.task_role_arn)
+    )
+    error_message = "one PassRole statement, and never SpiceDB's, db-admin's or zed's roles (the mock's shared ARN)"
+  }
+  # The deploy parameter is what the workflow reads: the API's family, then the workers in rolling order.
+  assert {
+    condition = (
+      jsondecode(aws_ssm_parameter.deploy.insecure_value).workers == [{ name = "ingest", service = "oryxa-fde-ingest", task_definition = "oryxa-fde-dev-ingest" }]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).api_task_definition == "oryxa-fde-dev-api"
+    )
+    error_message = "the deploy parameter names the ingest worker's service and task family, after the API"
+  }
+}
+
+# The lifecycle worker joins the deploy with its model, and only then: its service, its roles and its place in the
+# parameter appear together, after the ingest worker.
+run "the_lifecycle_worker_joins_the_deploy_with_its_model" {
+  command = apply
+  variables {
+    update_model = "global.anthropic.claude-sonnet-5-5"
+  }
+  override_resource {
+    target = module.lifecycle.aws_iam_role.task
+    values = { arn = "arn:aws:iam::000000000000:role/dev-lifecycle-task" }
+  }
+  override_resource {
+    target = module.lifecycle.aws_iam_role.execution
+    values = { arn = "arn:aws:iam::000000000000:role/dev-lifecycle-exec" }
+  }
+
+  assert {
+    condition = (
+      [for w in jsondecode(aws_ssm_parameter.deploy.insecure_value).workers : w.name] == ["ingest", "lifecycle"]
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1].service == "oryxa-fde-lifecycle"
+      && jsondecode(aws_ssm_parameter.deploy.insecure_value).workers[1].task_definition == "oryxa-fde-dev-lifecycle"
+    )
+    error_message = "with a model the lifecycle worker is rolled last"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
+    ]) == [for s in ["oryxa-fde-api", "oryxa-fde-ingest", "oryxa-fde-lifecycle"] : "arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/${s}"]
+    error_message = "the deploy role may update the lifecycle worker's service once it exists"
+  }
+  assert {
+    condition = (
+      contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-lifecycle-task")
+      && contains(flatten([for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "iam:PassRole")]), "arn:aws:iam::000000000000:role/dev-lifecycle-exec")
+    )
+    error_message = "and may pass the lifecycle worker's task and execution roles to ECS"
   }
 }
 

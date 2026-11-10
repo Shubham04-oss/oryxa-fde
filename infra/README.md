@@ -440,10 +440,10 @@ workflows (Deploys, below), not from the owner's machine.
 8. **`dev` variables.** Add the six variables to the `dev` environment (Deploys, below).
 9. **Backend image and migrations.** Run the `deploy-api` workflow on `main`. It pushes the one backend image
    (the API, the ingest and lifecycle workers and the migrations' binary), runs the store's migrations as
-   `oryxa_fde_migrator` in the migrate task, points the API service (still at 0 tasks) at the image, and records the
-   sha for OpenTofu. The workers are not rolled by it (Deploys, The image): they take that sha when OpenTofu applies.
+   `oryxa_fde_migrator` in the migrate task, points the API service and the ingest worker's (both still at 0 tasks) at the
+   image, and records the sha for OpenTofu. The same workflow rolls the workers on every later deploy (Deploys).
 10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB, the API and the ingest worker each start one
-    task, on the sha `deploy-api` recorded. The API task starts the API container first;
+    task, on the sha `deploy-api` recorded (an apply after a complete deploy keeps it: Deploys, drift). The API task starts the API container first;
     cloudflared starts once its health check on `/healthz` passes, and only then connects the tunnel. The ingest
     worker has no health check: it is healthy while its process runs, and its log (`/ecs/oryxa-fde-dev-ingest`)
     says `ingesting` once it has its database, its key and its queue. Its queue stays empty until step 12.
@@ -803,7 +803,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
-| `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, rolls the API service onto it (the tunnel sidecar included in the new task; its image does not change). It does not roll the workers yet (The image) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
+| `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, then rolls the API service and then each deployed worker onto it (the tunnel sidecar included in the API's new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
 | `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
@@ -830,8 +830,11 @@ There is no AWS key anywhere. The `deploy` job of `deploy-api` gets a one-hour s
 `<github_repository>/.github/workflows/deploy-api.yml@refs/heads/main`. So no other workflow, branch
 or environment gets in, even before the environment's branch rule exists. `deploy-workers` needs no
 AWS access and cannot assume it. The role may push to the `oryxa-fde-api` repository, register task
-definitions that run as the API's or the migrate task's roles only, run the migrate task, update the
-`oryxa-fde-api` service, and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it).
+definitions that run as the task and execution roles of the API, the migrate task and each deployed worker only
+(`iam:PassRole` names exactly those, to ECS tasks only; registering takes no resource, so that is the limit), run the
+migrate task, update and describe the services of the API and of each deployed worker (the lifecycle worker's once it
+exists), and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it). It cannot touch SpiceDB, the one-off
+db-admin and zed tasks, or any role outside that list.
 
 **The image: one, with several entrypoints** (#130). The API, `oryxa-fde-ops` and the two queue workers ship in one image,
 in the one ECR repository (still named `oryxa-fde-api`; renaming it would mean a new repository, its state and the deploy
@@ -848,11 +851,16 @@ migrate task already did this). Why one and not one per binary:
   That is no new permission: the task role, its entrypoint and its security group decide what a task can do, and an image holds
   no credentials. If a worker ever needs a different base or its own release rhythm, it gets its own repository then.
 
-Until the follow-up to this PR (#165) lands, **`deploy-api` rolls only the API**. A worker takes the image tag in
-`/oryxa-fde-dev/api-image-tag` when OpenTofu applies, which registers a new revision and replaces its task in place.
-**Run `tofu apply` after every `deploy-api`**: until then the workers run the sha of the last apply, which can be older
-than the API's. So a migration must keep working for the workers' image too (step 4), and an event may gain a field (the
-decoders ignore unknown fields) but not lose or rename one under the same detail type, or the older worker cannot read it.
+**One deploy brings the API and the workers to one image** (#165). `deploy-api` registers a new revision of the API's, the
+migrate task's and each worker's task definition, runs the migrations, and rolls the API and then each worker onto the
+sha it built, so they never run different versions for longer than the deploy takes. Order: migrations, the API, then the
+workers (ingest, then the lifecycle worker when it exists). The migrations come first because they run before any
+service changes and must work for the image still running (add first, remove in a later deploy). The API comes before
+the workers because the API writes the events and the workers read them: an event may gain a field (the decoders ignore
+unknown fields) but not lose or rename one under the same detail type, so a worker still on the old image reads what
+the new API writes. The other order, a new worker reading what the old API writes, is no safer: it has to read the events
+already queued from before the deploy either way. A migration must keep working for the workers' old image too, which is
+running while the API rolls.
 
 **deploy-api, step by step**
 1. `build`, a release build, so never with shared caches (`docs/ci.md`): on a clean
@@ -862,17 +870,39 @@ decoders ignore unknown fields) but not lose or rename one under the same detail
 2. `deploy`, hosted, in `dev`: reads `/oryxa-fde-dev/deploy` (names, subnets, the migrate task's
    security group; written by OpenTofu) and pushes the image tagged with the commit sha. Tags are
    immutable: a sha already in ECR is reused.
-3. Registers new revisions of `oryxa-fde-dev-migrate` and `oryxa-fde-dev-api` that differ from the
-   current ones only in the image, so env, secrets and roles stay as OpenTofu set them. The API task
-   also holds the cloudflared sidecar (#145), so it swaps the image of the one container that runs
-   the ECR repository's image and stops if that is not exactly one.
-4. Runs the migrate task and stops on a non-zero exit, before the service changes. Migrations must
+3. Registers new revisions of `oryxa-fde-dev-migrate`, `oryxa-fde-dev-api` and of each worker in the deploy
+   parameter's `workers` list (`oryxa-fde-dev-ingest`, and `-lifecycle` only while `update_model` is set) that differ
+   from the current ones only in the image, so env, secrets and roles stay as OpenTofu set them. The API task
+   also holds the cloudflared sidecar (#145), so for each family it swaps the image of the one container that runs
+   the ECR repository's image and stops if that is not exactly one (zero or several: nothing is guessed). All of them are
+   registered before anything changes, so a family that fails the rule stops the deploy before the migrations run.
+   A worker that is not deployed is not in the list, so it is skipped by configuration, and no error is swallowed.
+4. Runs the migrate task and stops on a non-zero exit, before any service changes. Migrations must
    therefore work with the image still running (add first, remove in a later deploy).
-5. Updates the service, waits for it to settle (the new task's `api` container must pass its health
-   check; "What the load balancer gave", below), and fails if the circuit breaker rolled it back.
-6. Writes the sha to `/oryxa-fde-dev/api-image-tag`. OpenTofu reads that parameter on every plan,
-   so a later apply keeps the deployed image instead of rolling it back. To roll back, revert the
+5. Updates the API service and waits for it to settle (the new task's `api` container must pass its health
+   check; "What the load balancer gave", below), then does the same for each worker in turn, one at a time. Each wait is
+   bounded: the AWS CLI's waiter polls every 15 s and gives up after 40 tries, 10 minutes, and a service that does not
+   settle on its new revision (the circuit breaker rolled it back, which also reads as stable, so the workflow checks the
+   primary deployment) fails the deploy. A worker has no health check, so it settles when its replacement task runs; a worker
+   that starts and crashes is replaced until the breaker gives up. Services already rolled stay on the new image.
+6. Only when the API and every worker settled, writes the sha to `/oryxa-fde-dev/api-image-tag`. OpenTofu reads that
+   parameter on every plan, so a later apply keeps the deployed image instead of rolling anything back. To roll back, revert the
    change on `main` and run `deploy-api` again.
+
+**After a deploy, and `tofu apply` (drift).** An apply is needed only when the infrastructure's configuration changes, not
+after a deploy. The workflow and OpenTofu both register task definitions in the same families: the workflow copies the latest
+revision and changes the image, OpenTofu builds one from the configuration with the image tag in
+`/oryxa-fde-dev/api-image-tag`. Since the workflow records the tag only once everything has settled on it, an apply after a
+complete deploy builds the same image the services run, so it never rolls the API or a worker back to an older one (what
+it does do: it registers a fresh revision of each family that carries the same image and rolls each service onto it once,
+so a plain apply after a deploy replaces each task once more with no change in what runs). After a deploy that stopped
+partway (the API or a worker did not settle, so no tag was recorded) an apply returns the API and the workers together to the
+last complete deploy's sha, which is consistent but not what the failed deploy meant: fix the cause and run `deploy-api`
+again instead. A configuration change applied after a deploy is carried by the next one too, because the workflow copies the
+latest revision, which is OpenTofu's. Do not run an apply while `deploy-api` runs (the workflow's concurrency group stops
+two deploys, not a deploy and an apply). The first apply after this change must come before the first run of the new
+workflow: it grants the deploy role the worker services and roles, and writes the `workers` list into the deploy
+parameter, and the workflow refuses a parameter without it.
 
 **What the load balancer gave, and what replaced it** (#145). The ALB health-checked the API and
 registered it only when healthy, drained connections on a rollout, and never took the old task out
@@ -1103,7 +1133,7 @@ These could not be checked without an account. Each one is flagged at the place 
   pull-through cache fixes it if it bites. SpiceDB and zed are pinned by tag; cloudflared by digest (it
   holds the API's role).
 - **Deploy role.** `ecs:RegisterTaskDefinition` and `ecs:DescribeTaskDefinition` take `*` (not
-  scoped to a family); `iam:PassRole` on four roles is what limits a new revision. If the account
+  scoped to a family); `iam:PassRole` on the roles of the API, the migrate task and each worker (six roles, eight with the lifecycle worker) is what limits a new revision. If the account
   already has a GitHub OIDC provider, set `github_oidc_provider_arn` or the first apply fails on it.
   The trust's `job_workflow_ref` condition relies on STS validating that GitHub claim (supported for
   GitHub since 2025). If the first `deploy-api` run is refused at `AssumeRoleWithWebIdentity`, check
@@ -1220,8 +1250,9 @@ These could not be checked without an account. Each one is flagged at the place 
   in place, so processing pauses for the swap (the queue holds the events) and two consumers never overlap. On SIGTERM a
   worker stops receiving and finishes the message in hand (#150); one still running at 120 s is killed, and its message
   returns after its visibility timeout, which the handlers allow.
-- `ponytail:` until the follow-up to #130, `deploy-api` does not roll the workers: an `apply` does, with the sha it last
-  recorded. The deploy role cannot touch a worker's service or roles.
+- `ponytail:` a deploy rolls the API and the workers one after the other, so for a few minutes the API can be on the new
+  image while a worker is still on the old (and, after a failed deploy, until the next one). A migration must work for the
+  old image, and an event may gain a field but never lose one. Nothing orders a worker's start against the API's beyond that.
 - `ponytail:` the workers' tasks carry the API's binary (one image). They have no credentials of
   the API's: each task role is its own.
 - ECR lives in the dev stack until a second environment needs it.
