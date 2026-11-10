@@ -248,8 +248,9 @@ describe("fixture hygiene", () => {
   ]);
   const NAME =
     /\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|ai|dev|app|cloud|internal|lan|local|example)\b/g;
-  // The recording machine's own identifiers, read at test time so no literal is kept here.
-  const own = [hostname(), userInfo().username].filter((v) => v.length >= 5 && v !== "agent");
+  // The recording machine's own identifiers, read at test time so no literal is kept here. A CI runner is not that
+  // machine, and its user name (`runner`) occurs in ordinary text such as node's `test_runner`.
+  const own = process.env["CI"] ? [] : [hostname(), userInfo().username].filter((v) => v.length >= 5 && v !== "agent");
 
   it.each(files)("%s names nothing of the recording machine and holds no secret-shaped value", (name) => {
     const body = text(name);
