@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
 
+import type { HarnessEvent } from "./events.js";
+
 export type ApprovalOutcome = "approved" | "rejected";
 
 /** Where approval requests go. The run waits on `request` until an FDE decides. */
@@ -33,6 +35,49 @@ export function ruleFor(
 ): CompiledRule | undefined {
   const subject = tool === "Bash" && typeof input["command"] === "string" ? input["command"] : JSON.stringify(input);
   return rules.find((rule) => (rule.tool === "*" || rule.tool === tool) && (rule.regex?.test(subject) ?? true));
+}
+
+/** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */
+const MAX_APPROVAL_INPUT_BYTES = 256 * 1024;
+
+/** `unlisted`: no rule covers the call. `too_large`: a rule does, but the input is too large for an engineer to read. */
+export type Verdict = "unlisted" | "too_large" | ApprovalOutcome;
+
+/**
+ * Asks an engineer about each call the company's approval list covers, one at a time so the run never waits on two.
+ * The engineer approves the exact input; one too large to show is refused, never cut short. Every backend uses it.
+ */
+export class ApprovalGate {
+  #queue: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private readonly rules: readonly CompiledRule[],
+    private readonly approvals: ApprovalChannel,
+    private readonly emit: (event: HarnessEvent) => void,
+    private readonly newApprovalId: () => string,
+    /** Aborts when the run ends: a pending or queued approval is then rejected. */
+    private readonly stopped: AbortSignal,
+  ) {}
+
+  async decide(
+    tool: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    describe: () => { toolCallId: string; title: string },
+  ): Promise<Verdict> {
+    const rule = ruleFor(this.rules, tool, input);
+    if (rule === undefined) return "unlisted";
+    if (Buffer.byteLength(JSON.stringify(input)) > MAX_APPROVAL_INPUT_BYTES) return "too_large";
+    const decision = this.#queue.then(() => {
+      if (this.stopped.aborted) return "rejected" as const;
+      const id = this.newApprovalId();
+      const { toolCallId, title } = describe();
+      this.emit({ type: "approval_request", id, tool_call_id: toolCallId, action: rule.action, title, tool, input });
+      return this.approvals.request(id, AbortSignal.any([signal, this.stopped]));
+    });
+    this.#queue = decision.catch(() => {});
+    return decision.catch(() => "rejected" as const);
+  }
 }
 
 const Input = z.discriminatedUnion("type", [

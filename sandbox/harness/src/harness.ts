@@ -9,7 +9,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import { Adapter, describeTool, RUN_ERROR } from "./adapter.js";
-import { type ApprovalChannel, ruleFor } from "./approvals.js";
+import { type ApprovalChannel, ApprovalGate } from "./approvals.js";
 import type { HarnessEvent, Outcome } from "./events.js";
 import { type LoadedPack, systemPrompt } from "./pack.js";
 import { AGENT } from "./users.js";
@@ -17,7 +17,7 @@ import { AGENT } from "./users.js";
 export const WORKSPACE = "/workspace";
 
 // Only these reach the agent's process; nothing else from the sandbox's environment is inherited.
-const INHERITED_ENV = [
+export const INHERITED_ENV = [
   "PATH",
   "LANG",
   "LC_ALL",
@@ -46,14 +46,19 @@ export const TOOLS = [
   "TaskGet",
 ];
 
-export interface HarnessDeps {
-  query: typeof sdkQuery;
+/** What `main.ts` gives every backend: the approval channel, the event sink, its environment and the cancel. */
+export interface BackendDeps {
   approvals: ApprovalChannel;
   emit(event: HarnessEvent): void;
   env: Readonly<Record<string, string | undefined>>;
   newApprovalId?: () => string;
   /** Aborts when the API cancels the run. */
   cancel?: AbortSignal;
+}
+
+/** The Claude Agent SDK backend's own dependencies. */
+export interface HarnessDeps extends BackendDeps {
+  query: typeof sdkQuery;
   /** Starts the SDK's agent process; in the sandbox, as another user than the harness (`agentSpawner`). */
   spawn?: Options["spawnClaudeCodeProcess"];
 }
@@ -96,33 +101,17 @@ export async function runHarness({ pack, rules }: LoadedPack, deps: HarnessDeps)
   };
   if (deps.cancel?.aborted) cancel();
   else deps.cancel?.addEventListener("abort", cancel, { once: true });
-  // One approval at a time, so the run is never waiting on two.
-  let queue: Promise<unknown> = Promise.resolve();
+  const gate = new ApprovalGate(rules, deps.approvals, deps.emit, newApprovalId, abort.signal);
 
   const canUseTool: CanUseTool = async (tool, input, { signal, toolUseID }): Promise<PermissionResult> => {
-    const rule = ruleFor(rules, tool, input);
-    if (rule === undefined) return { behavior: "allow", updatedInput: input };
-    // The engineer approves the exact input. One too large to show is refused, never cut short.
-    if (Buffer.byteLength(JSON.stringify(input)) > MAX_APPROVAL_INPUT_BYTES)
+    const verdict = await gate.decide(tool, input, signal, () => ({
+      toolCallId: adapter.toolCallId(toolUseID),
+      title: describeTool(tool, input).title,
+    }));
+    if (verdict === "unlisted") return { behavior: "allow", updatedInput: input };
+    if (verdict === "too_large")
       return { behavior: "deny", message: "This action is too large for an engineer to review. Split it up." };
-    const decision = queue.then(() => {
-      if (abort.signal.aborted) return "rejected" as const;
-      const id = newApprovalId();
-      deps.emit({
-        type: "approval_request",
-        id,
-        tool_call_id: adapter.toolCallId(toolUseID),
-        action: rule.action,
-        title: describeTool(tool, input).title,
-        tool,
-        input,
-      });
-      // A cancelled run rejects a pending approval as well.
-      return deps.approvals.request(id, AbortSignal.any([signal, abort.signal]));
-    });
-    queue = decision.catch(() => {});
-    if ((await decision.catch(() => "rejected" as const)) === "approved" && !cancelled)
-      return { behavior: "allow", updatedInput: input };
+    if (verdict === "approved" && !cancelled) return { behavior: "allow", updatedInput: input };
     if (!cancelled) rejected = true;
     abort.abort();
     const message = cancelled ? "The run was cancelled." : "An engineer rejected this action. The run has ended.";
@@ -198,6 +187,3 @@ function errorResult(reason: string, cause: unknown): HarnessEvent {
     usage: { input_tokens: 0, output_tokens: 0 },
   };
 }
-
-/** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */
-const MAX_APPROVAL_INPUT_BYTES = 256 * 1024;
