@@ -720,7 +720,12 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
     (
         "PUT",
         "/v1/companies/{company}/projects/{project}/stage",
-        Some(r#"{"stage":"scope"}"#),
+        Some(r#"{"stage":"scope","reason":"pwned"}"#),
+    ),
+    (
+        "GET",
+        "/v1/companies/{company}/projects/{project}/stage-checklist",
+        None,
     ),
     ("GET", "/v1/companies/{company}/projects/{project}/scope", None),
     (
@@ -1692,12 +1697,100 @@ async fn lifecycle_records_end_to_end() {
         (status, body["error"].as_str()),
         (StatusCode::CONFLICT, Some("rejected_stage_transition"))
     );
+    // The setup named stakeholders and wrote a project note, so discover has nothing open and the
+    // move behaves as it always did.
+    let checklist = w
+        .ok(eng, "GET", &format!("{p}/stage-checklist"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        checklist,
+        json!({"stage": "discover", "items": [
+            {"key": "stakeholders_named", "label": "Stakeholders named", "met": true},
+            {"key": "discovery_notes", "label": "A meeting note on the project", "met": true},
+        ]})
+    );
     let moved = w
         .ok(asg, "PUT", &stage, Some(json!({"stage": "scope"})), StatusCode::OK)
         .await;
     assert_eq!(moved["stage"], "scope");
+    // The scope changed after its sign-off and lists nothing out of scope: moving on needs a
+    // reason, which the audit log keeps with the open items.
+    let signed_open =
+        json!({"key": "scope_signed_off", "label": "Scope signed off, and unchanged since", "met": false});
+    let out_open = json!({"key": "out_of_scope_listed", "label": "What is out of scope is listed", "met": false});
+    let checklist = w
+        .ok(eng, "GET", &format!("{p}/stage-checklist"), None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        checklist,
+        json!({"stage": "scope", "items": [
+            signed_open,
+            out_open,
+            {"key": "criteria_have_targets", "label": "Success criteria set, each with a target", "met": true},
+        ]})
+    );
+    let (status, body) = w
+        .call(Some(&asg.token), "PUT", &stage, Some(json!({"stage": "access"})))
+        .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::CONFLICT,
+            json!({"error": "rejected_checklist_open", "open": [signed_open, out_open]})
+        )
+    );
+    for bad in [String::new(), "  ".into(), "x".repeat(501), "bell\u{7}".into()] {
+        let (status, body) = w
+            .call(
+                Some(&asg.token),
+                "PUT",
+                &stage,
+                Some(json!({"stage": "access", "reason": bad})),
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_reason")),
+            "{bad:?}"
+        );
+    }
+    let why = "Sponsor approved the change by email; out of scope agreed on the call";
+    let moved = w
+        .ok(
+            asg,
+            "PUT",
+            &stage,
+            Some(json!({"stage": "access", "reason": why})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(moved["stage"], "access");
+    // Moving back needs no reason, even to a stage with items open.
     w.ok(eng, "PUT", &stage, Some(json!({"stage": "discover"})), StatusCode::OK)
         .await;
+    type Audited = (String, String, Option<String>, Option<Vec<String>>);
+    let audited: Vec<Audited> = sqlx::query_as(
+        "select actor, target, reason, open_items from audit_log
+         where tenant_id = $1 and project_id = $2 and action = 'project.stage_changed' order by id",
+    )
+    .bind(&org)
+    .bind(&t.project)
+    .fetch_all(&testing::admin().await)
+    .await
+    .unwrap();
+    assert_eq!(
+        audited,
+        [
+            (asg.id.clone(), "scope".into(), None, None),
+            (
+                asg.id.clone(),
+                "access".into(),
+                Some(why.into()),
+                Some(vec!["scope_signed_off".into(), "out_of_scope_listed".into()])
+            ),
+            (eng.id.clone(), "discover".into(), None, None),
+        ]
+    );
 
     // The company setup signed version 2 and changed the scope after; a further change bumps the
     // version again and a new sign-off covers it.
@@ -1912,6 +2005,7 @@ async fn lifecycle_records_end_to_end() {
             "fde.project.created.v1",
             "fde.scope.signed-off.v1",
             "fde.document.uploaded.v1",
+            "fde.project.stage-changed.v1",
             "fde.project.stage-changed.v1",
             "fde.project.stage-changed.v1",
             "fde.scope.signed-off.v1",

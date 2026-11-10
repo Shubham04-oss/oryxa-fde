@@ -835,8 +835,29 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Move the project to another stage: one forward, or back to any earlier one. */
+        /**
+         * Move the project to another stage: one forward, or back to any earlier one.
+         * @description Moving forward with items of the stage checklist open needs a `reason`; without one the answer
+         *     is 409 with the open items.
+         */
         put: operations["change_stage"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/companies/{company}/projects/{project}/stage-checklist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The checklist to leave the project's current stage. */
+        get: operations["get_stage_checklist"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -1631,6 +1652,13 @@ export interface components {
             /** Format: int32 */
             version: number;
         };
+        /** @description One item of the checklist to leave a stage. */
+        ChecklistItemOut: {
+            /** @description Stable key, e.g. `scope_signed_off`. */
+            key: string;
+            label: string;
+            met: boolean;
+        };
         CommentBody: {
             body: string;
         };
@@ -2087,8 +2115,28 @@ export interface components {
             team_id: string;
         };
         StageBody: {
+            /**
+             * @description Why the project moves forward with items of its stage checklist open: 1 to 500 characters.
+             *     Needed only then, and kept in the audit log with the open items; ignored otherwise.
+             */
+            reason?: string | null;
             /** @description One stage forward, or back to any earlier stage. */
             stage: components["schemas"]["ProjectStage"];
+        };
+        /** @description What the project needs to leave its current stage, worked out from its records now. */
+        StageChecklistOut: {
+            /** @description Empty for a stage with nothing to check yet. */
+            items: components["schemas"]["ChecklistItemOut"][];
+            /** @description The project's current stage. */
+            stage: components["schemas"]["ProjectStage"];
+        };
+        /**
+         * @description A refused stage move: `rejected_stage_transition` for a skip or a no-op, or
+         *     `rejected_checklist_open` with the items still `open` when a forward move gave no reason.
+         */
+        StageConflictBody: {
+            error: string;
+            open?: components["schemas"]["ChecklistItemOut"][] | null;
         };
         StakeholderBody: {
             /**
@@ -5593,6 +5641,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectOut"];
                 };
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Forbidden */
             403: {
                 headers: {
@@ -5613,6 +5670,49 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StageConflictBody"];
+                };
+            };
+        };
+    };
+    get_stage_checklist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+                /** @description Project id */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StageChecklistOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

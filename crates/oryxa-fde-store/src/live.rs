@@ -534,8 +534,12 @@ async fn stage_changes_write_their_event_in_the_same_transaction() {
     let changed = "fde.project.stage-changed.v1";
 
     // Rolled back: the stage and the event both stay as they were.
+    let why = Reason::new("discovery happened on a call").unwrap();
     let mut tx = store.project(&p).await.unwrap();
-    tx.change_stage(Stage::Scope, &actor("alice")).await.unwrap().unwrap();
+    tx.change_stage(Stage::Scope, Some(&why), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
     drop(tx);
     let mut tx = store.project(&p).await.unwrap();
     assert_eq!(tx.get().await.unwrap().unwrap().stage, Stage::Discover);
@@ -543,13 +547,17 @@ async fn stage_changes_write_their_event_in_the_same_transaction() {
 
     // Skipping ahead is refused by the stage machine.
     assert!(matches!(
-        tx.change_stage(Stage::Build, &actor("alice")).await,
+        tx.change_stage(Stage::Build, Some(&why), &actor("alice")).await,
         Err(StoreError::Stage(StageError::Skip { .. }))
     ));
     drop(tx);
 
     let mut tx = store.project(&p).await.unwrap();
-    let moved = tx.change_stage(Stage::Scope, &actor("alice")).await.unwrap().unwrap();
+    let moved = tx
+        .change_stage(Stage::Scope, Some(&why), &actor("alice"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(moved.stage, Stage::Scope);
     tx.commit().await.unwrap();
     let events = payloads(&store, &t, changed).await;
@@ -3299,4 +3307,264 @@ async fn github_and_slack_links_stay_in_their_scope_and_routing_reads_only_keys(
             .await,
         Err(StoreError::Missing("slack"))
     ));
+}
+
+/// The open checks of the project's current stage, by key.
+async fn open_checks(store: &Store, p: &ProjectScope) -> (oryxa_fde_core::Stage, Vec<&'static str>) {
+    let mut tx = store.project(p).await.unwrap();
+    let (stage, items) = tx.stage_checklist().await.unwrap().unwrap();
+    (stage, items.iter().filter(|i| !i.met).map(|i| i.check.key()).collect())
+}
+
+/// The project's stage-change audit rows as (to, reason, open items), oldest first.
+async fn stage_audits(p: &ProjectScope) -> Vec<(String, Option<String>, Option<Vec<String>>)> {
+    sqlx::query(
+        "select target, reason, open_items from audit_log
+         where tenant_id = $1 and project_id = $2 and action = 'project.stage_changed' order by id",
+    )
+    .bind(p.company.tenant.as_str())
+    .bind(p.project.as_str())
+    .fetch_all(&admin().await)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.get("target"), r.get("reason"), r.get("open_items")))
+    .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn each_stage_checklist_item_is_worked_out_from_the_records_and_an_open_one_needs_a_reason() {
+    use oryxa_fde_core::{AccessRequestId, Check, CriterionId, Stage};
+    use oryxa_fde_events::AccessStatus;
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let by = actor("alice");
+    let why = Reason::new("Customer confirmed by email").unwrap();
+    let step = async |to: Stage, reason: Option<&Reason>| {
+        let mut tx = store.project(&p).await.unwrap();
+        let moved = tx.change_stage(to, reason, &by).await;
+        if moved.is_ok() {
+            tx.commit().await.unwrap();
+        }
+        moved.map(|m| m.unwrap().stage)
+    };
+
+    // Discover: stakeholders, then a note on this project (one at the company does not count).
+    assert_eq!(
+        open_checks(&store, &p).await,
+        (Stage::Discover, vec!["stakeholders_named", "discovery_notes"])
+    );
+    assert!(matches!(
+        step(Stage::Scope, None).await,
+        Err(StoreError::ChecklistOpen(open)) if open == [Check::StakeholdersNamed, Check::DiscoveryNotes]
+    ));
+    let sam = add_stakeholder(&store, &p.company).await;
+    let mut company = PlanTx::from(store.company(&p.company).await.unwrap());
+    let note = MeetingNoteId::new(new_id("mtg")).unwrap();
+    company
+        .add_meeting_note(&note, &note_in(vec![]), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    company.commit().await.unwrap();
+    assert_eq!(open_checks(&store, &p).await.1, ["discovery_notes"]);
+    let mut project = PlanTx::from(store.project(&p).await.unwrap());
+    let note = MeetingNoteId::new(new_id("mtg")).unwrap();
+    project
+        .add_meeting_note(&note, &note_in(vec![]), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    project.commit().await.unwrap();
+    assert!(open_checks(&store, &p).await.1.is_empty());
+    // Nothing open: the move behaves as before, and a reason given anyway is not kept.
+    assert_eq!(step(Stage::Scope, Some(&why)).await.unwrap(), Stage::Scope);
+
+    // Scope: criteria with targets, an out-of-scope item, and a sign-off of the current version.
+    assert_eq!(
+        open_checks(&store, &p).await.1,
+        ["scope_signed_off", "out_of_scope_listed", "criteria_have_targets"]
+    );
+    let mut tx = store.project(&p).await.unwrap();
+    let crit = CriterionId::new(new_id("crt")).unwrap();
+    let c = CriterionIn {
+        description: Text::new("Answers are correct").unwrap(),
+        metric: Name::new("accuracy").unwrap(),
+        comparator: Comparator::AtLeast,
+        target: 90.0,
+        unit: None,
+    };
+    tx.add_criterion(&crit, &c, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        open_checks(&store, &p).await.1,
+        ["scope_signed_off", "out_of_scope_listed"]
+    );
+    let out = ScopeItemIn {
+        kind: ScopeKind::Out,
+        description: Text::new("Voice support").unwrap(),
+    };
+    let mut tx = store.project(&p).await.unwrap();
+    tx.add_scope_item(&ScopeItemId::new(new_id("itm")).unwrap(), &out, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert!(open_checks(&store, &p).await.1.is_empty());
+    // A change after the sign-off opens it again until the new version is signed.
+    let mut tx = store.project(&p).await.unwrap();
+    let inside = ScopeItemIn {
+        kind: ScopeKind::In,
+        description: Text::new("Tier-1 tickets").unwrap(),
+    };
+    tx.add_scope_item(&ScopeItemId::new(new_id("itm")).unwrap(), &inside, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(open_checks(&store, &p).await.1, ["scope_signed_off"]);
+    let mut tx = store.project(&p).await.unwrap();
+    tx.sign_off(&sam, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(step(Stage::Access, None).await.unwrap(), Stage::Access);
+
+    // Access: met with no requests; open while any is not granted.
+    assert!(open_checks(&store, &p).await.1.is_empty());
+    let mut tx = store.project(&p).await.unwrap();
+    let mut req = AccessRequestIn {
+        description: Text::new("Read-only API token").unwrap(),
+        system: None,
+        owner: None,
+        status: AccessStatus::Requested,
+    };
+    let token = AccessRequestId::new(new_id("acc")).unwrap();
+    tx.add_access_request(&token, &req, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(open_checks(&store, &p).await.1, ["access_granted"]);
+    req.status = AccessStatus::Granted;
+    let mut tx = store.project(&p).await.unwrap();
+    tx.update_access_request(&token, &req, &by).await.unwrap().unwrap();
+    req.status = AccessStatus::InProgress;
+    tx.add_access_request(&AccessRequestId::new(new_id("acc")).unwrap(), &req, &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(open_checks(&store, &p).await.1, ["access_granted"]);
+    // Moving on with it open: refused without a reason, kept in the audit log with one.
+    assert!(matches!(
+        step(Stage::Build, None).await,
+        Err(StoreError::ChecklistOpen(open)) if open == [Check::AccessGranted]
+    ));
+    assert_eq!(open_checks(&store, &p).await.0, Stage::Access);
+    assert_eq!(step(Stage::Build, Some(&why)).await.unwrap(), Stage::Build);
+
+    // Build: every criterion measured by an eval suite.
+    assert_eq!(open_checks(&store, &p).await.1, ["criteria_have_evals"]);
+    let mut tx = store.project(&p).await.unwrap();
+    let suite = EvalSuiteRow {
+        id: new_id("suite"),
+        name: "Accuracy".into(),
+        criteria: vec![crit.clone()],
+        definition: serde_json::json!({ "graders": [] }),
+        created_by: by.user.clone(),
+        created_at: time::OffsetDateTime::now_utc(),
+        cases: vec![],
+    };
+    tx.create_eval_suite(&suite, &by).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(open_checks(&store, &p).await.1.is_empty());
+    assert_eq!(step(Stage::Evaluate, None).await.unwrap(), Stage::Evaluate);
+
+    // Evaluate: the rule behind "ready to deploy".
+    assert_eq!(open_checks(&store, &p).await.1, ["criteria_met"]);
+    let run = oryxa_fde_core::EvalRunId::new(new_id("evr")).unwrap();
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(tx.record_criterion_result(&crit, &run, 80.0).await.unwrap());
+    tx.commit().await.unwrap();
+    assert_eq!(open_checks(&store, &p).await.1, ["criteria_met"]);
+    let mut tx = store.project(&p).await.unwrap();
+    assert!(tx.record_criterion_result(&crit, &run, 95.0).await.unwrap());
+    tx.commit().await.unwrap();
+    assert!(open_checks(&store, &p).await.1.is_empty());
+
+    // Moving back needs no reason, even to a stage whose items are open.
+    let mut tx = store.project(&p).await.unwrap();
+    tx.remove_criterion(&crit, &by).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(step(Stage::Build, None).await.unwrap(), Stage::Build);
+    assert_eq!(open_checks(&store, &p).await.1, ["criteria_have_evals"]);
+    assert_eq!(step(Stage::Evaluate, Some(&why)).await.unwrap(), Stage::Evaluate);
+    assert_eq!(step(Stage::Deploy, Some(&why)).await.unwrap(), Stage::Deploy);
+    // Nothing recorded yet can be checked to leave deploy.
+    assert_eq!(open_checks(&store, &p).await, (Stage::Deploy, vec![]));
+
+    let none = || (None::<String>, None::<Vec<String>>);
+    let kept = |open: &[&str]| {
+        (
+            Some(why.as_str().to_owned()),
+            Some(open.iter().map(|k| k.to_string()).collect::<Vec<_>>()),
+        )
+    };
+    let rows: Vec<_> = stage_audits(&p)
+        .await
+        .into_iter()
+        .map(|(to, r, o)| (to, (r, o)))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("scope".into(), none()),
+            ("access".into(), none()),
+            ("build".into(), kept(&["access_granted"])),
+            ("evaluate".into(), none()),
+            ("build".into(), none()),
+            ("evaluate".into(), kept(&["criteria_have_evals"])),
+            ("deploy".into(), kept(&["criteria_met"])),
+        ]
+    );
+    // The event stays ids only: no reason and no checks in it.
+    let events = payloads(&store, &t, "fde.project.stage-changed.v1").await;
+    assert_eq!(events.len(), rows.len());
+    assert!(events.iter().all(|e| !e.to_string().contains("Customer confirmed")));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_stage_checklist_reads_only_its_own_company_and_project() {
+    use oryxa_fde_core::Stage;
+    let store = store().await;
+    let (t, p) = project_world(&store).await;
+    let by = actor("alice");
+    add_stakeholder(&store, &p.company).await;
+    let mut tx = PlanTx::from(store.project(&p).await.unwrap());
+    let note = MeetingNoteId::new(new_id("mtg")).unwrap();
+    tx.add_meeting_note(&note, &note_in(vec![]), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(open_checks(&store, &p).await.1.is_empty());
+
+    // Another company of the same tenant, and another project of the first company, see none of it.
+    let other = scope(&t, &new_id("cmp"));
+    create_company(&store, &other).await;
+    let theirs = other.project(ProjectId::new(new_id("prj")).unwrap());
+    let mut tx = store.project(&theirs).await.unwrap();
+    tx.create(&project_in("Other"), &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        open_checks(&store, &theirs).await,
+        (Stage::Discover, vec!["stakeholders_named", "discovery_notes"])
+    );
+    let sibling = add_project(&store, &p.company, "Sibling").await;
+    assert_eq!(open_checks(&store, &sibling).await.1, ["discovery_notes"]);
+
+    // The project named under the other company is not found, and cannot be moved.
+    let mismatched = other.project(p.project.clone());
+    let mut tx = store.project(&mismatched).await.unwrap();
+    assert!(tx.stage_checklist().await.unwrap().is_none());
+    assert!(tx.change_stage(Stage::Scope, None, &by).await.unwrap().is_none());
 }

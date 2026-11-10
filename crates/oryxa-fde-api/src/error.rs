@@ -93,6 +93,8 @@ impl From<StoreError> for ApiError {
             StoreError::Missing(what) => ApiError::Invalid(what),
             StoreError::Stage(_) => ApiError::Rejected("stage_transition"),
             StoreError::Rejected(why) => ApiError::Rejected(why),
+            // Handlers that can hit this answer with the open items; this is the bare fallback.
+            StoreError::ChecklistOpen(_) => ApiError::Rejected("checklist_open"),
             e => {
                 tracing::error!(error = %e, "store");
                 ApiError::Internal
@@ -122,6 +124,8 @@ mod tests {
             ApiError::Rejected("stage_transition")
         ));
         assert_eq!(ApiError::Rejected("empty_scope").status().0, StatusCode::CONFLICT);
+        let open = StoreError::ChecklistOpen(vec![oryxa_fde_core::Check::DiscoveryNotes]);
+        assert_eq!(ApiError::from(open).code(), "rejected_checklist_open");
         // What to do first is the code itself.
         let needs = ApiError::NeedsAction("bot_not_in_channel");
         assert_eq!(
