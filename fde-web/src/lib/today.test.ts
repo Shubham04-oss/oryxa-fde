@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { AccessState, TaskOut, TodayItem } from "./api/schemas"
 import { AccessRequestOut, CompanyId, ProjectId, TaskOut as Task } from "./api/schemas"
-import { groupOf, groupToday } from "./today"
+import { actionsOf, groupOf, groupToday, itemKey, summaryLine } from "./today"
 
 const TODAY = "2026-11-03"
 const where = {
@@ -92,5 +92,105 @@ describe("groupToday", () => {
 
   it("is empty when nothing is open", () => {
     expect(groupToday([], TODAY)).toEqual({ blocked: [], due: [], waiting: [] })
+  })
+})
+
+describe("summaryLine", () => {
+  it("counts what is left, across how many companies, leaving out empty groups", () => {
+    const groups = groupToday(
+      [
+        task("a", { status: "blocked" }),
+        task("b", { due_on: TODAY }),
+        task("c", { due_on: TODAY }),
+        {
+          ...task("d", { status: "waiting_on_customer" }),
+          company: { id: CompanyId.parse("cmp_2"), name: "Other" },
+        },
+      ],
+      TODAY,
+    )
+    expect(summaryLine(groups)).toBe(
+      "4 need you across 2 companies: 1 blocked, 2 due, 1 waiting on the customer.",
+    )
+  })
+
+  it("says one thing needs you in the singular, and nothing only when every group is empty", () => {
+    expect(summaryLine(groupToday([task("a", { due_on: TODAY })], TODAY))).toBe(
+      "1 needs you across 1 company: 1 due.",
+    )
+    expect(summaryLine(groupToday([], TODAY))).toBe("Nothing needs you today.")
+  })
+})
+
+describe("itemKey", () => {
+  it("tells a task from an access request with the same id", () => {
+    expect(itemKey(task("x"))).not.toBe(itemKey(access("x", "requested", "2026-10-01")))
+  })
+})
+
+describe("actionsOf", () => {
+  const labels = (item: TodayItem, group: "blocked" | "due" | "waiting") => {
+    const { primary, rest } = actionsOf(item, group)
+    return [primary.label, ...rest.map((a) => a.label)]
+  }
+
+  it("finishes a due task, with the board's other moves in the menu", () => {
+    expect(labels(task("t", { due_on: TODAY }), "due")).toEqual([
+      "Done",
+      "Start",
+      "Mark blocked…",
+      "Waiting on the customer…",
+    ])
+    // Already started: there is nothing to start.
+    expect(labels(task("t", { status: "in_progress", due_on: TODAY }), "due")).toEqual([
+      "Done",
+      "Mark blocked…",
+      "Waiting on the customer…",
+      "Back to to do",
+    ])
+  })
+
+  it("resumes a blocked or waiting task, into In progress", () => {
+    const blocked = actionsOf(task("t", { status: "blocked" }), "blocked")
+    expect(blocked.primary).toMatchObject({ label: "Unblock", kind: "task", to: "in_progress" })
+    expect(blocked.rest.map((a) => a.to)).toEqual(["done", "waiting_on_customer", "todo"])
+    const waiting = actionsOf(task("t", { status: "waiting_on_customer" }), "waiting")
+    expect(waiting.primary).toMatchObject({ label: "Got it", to: "in_progress" })
+    expect(waiting.rest.map((a) => a.to)).toEqual(["done", "blocked", "todo"])
+  })
+
+  it("never offers the status a task is in, or the main action twice", () => {
+    for (const status of ["todo", "in_progress", "waiting_on_customer", "blocked"] as const) {
+      const group =
+        status === "blocked" ? "blocked" : status === "waiting_on_customer" ? "waiting" : "due"
+      const { primary, rest } = actionsOf(task("t", { status, due_on: TODAY }), group)
+      const targets = [primary, ...rest].map((a) => a.to)
+      expect(targets).not.toContain(status)
+      expect(new Set(targets).size).toBe(targets.length)
+    }
+  })
+
+  it("lets an open access request be granted, and asks again for a refused one", () => {
+    expect(labels(access("a", "requested", "2026-10-01"), "waiting")).toEqual([
+      "Granted",
+      "Mark in progress",
+      "Mark denied",
+    ])
+    expect(labels(access("a", "in_progress", "2026-10-01"), "waiting")).toEqual([
+      "Granted",
+      "Mark denied",
+      "Back to requested",
+    ])
+    expect(labels(access("a", "denied", "2026-10-01"), "blocked")).toEqual([
+      "Ask again",
+      "Mark in progress",
+      "Mark granted",
+    ])
+    // A revoked request cannot become denied.
+    expect(labels(access("a", "revoked", "2026-10-01"), "blocked")).toEqual([
+      "Ask again",
+      "Mark in progress",
+      "Mark granted",
+    ])
   })
 })
