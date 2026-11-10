@@ -263,6 +263,11 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
+/// [`router`] and `extra`, the agent run and eval routes from `oryxa-fde-agent`, as the binary serves them.
+pub fn router_with(app: Arc<App>, extra: Router) -> Router {
+    router(app).merge(extra)
+}
+
 /// The spec of exactly the routes [`router`] serves.
 pub fn openapi() -> utoipa::openapi::OpenApi {
     let mut api = routes().split_for_parts().1;

@@ -19,7 +19,7 @@ use http_body_util::BodyExt;
 use oryxa_authz::SpiceDb;
 use oryxa_core::TenantId;
 use oryxa_fde_api::integrations::{GitHubIntegration, Integrations, SlackIntegration};
-use oryxa_fde_api::{App, SignIn, openapi, reconcile_grants, router};
+use oryxa_fde_api::{App, SignIn, openapi, reconcile_grants, router, router_with};
 use oryxa_fde_context::Context;
 use oryxa_fde_core::{CompanyId, CompanyScope, DocumentId};
 use oryxa_fde_integrations::github::WebhookSecret;
@@ -2712,6 +2712,132 @@ async fn a_project_assignee_reads_no_company_document_by_any_path() {
     let (status, resp) = w.tool(Some(&t.lead.token), "search_context", search).await;
     assert!(!mcp_succeeded(status, &resp));
     assert_eq!(resp["result"]["content"][0]["text"], "not_found");
+}
+
+/// The agent run and eval routes as `oryxa_fde_agent::prod` builds them, on this world's store and SpiceDB. The
+/// sandbox gateway is never reached: these tests only read runs and suites and set budgets.
+fn agent_routes(w: &World) -> Router {
+    use oryxa_fde_agent::access::PlatformAccess;
+    use oryxa_fde_agent::evals::{self, Evals, JudgeConfig};
+    use oryxa_fde_agent::gateway::GatewayClient;
+    use oryxa_fde_agent::live::Offline;
+    use oryxa_fde_agent::prod::{Live, Production};
+    use oryxa_fde_agent::project_context::StoreContext;
+    use oryxa_fde_agent::service::{Pricing, Runs, RunsConfig};
+    use oryxa_fde_agent::store::Budget;
+
+    let agent = oryxa_fde_agent::AgentConfig {
+        model: "model".into(),
+        region: "region".into(),
+        max_turns: 1,
+        approvals: Vec::new(),
+    };
+    let config = RunsConfig {
+        pricing: Pricing {
+            input_usd_micros_per_mtok: 1,
+            output_usd_micros_per_mtok: 1,
+        },
+        default_budget: Budget {
+            minutes: 60,
+            spend_usd_micros: 1_000_000,
+        },
+        max_run: Duration::from_secs(60),
+        grant_ttl: Duration::from_secs(60),
+        grace: Duration::from_secs(1),
+        poll: Duration::from_secs(1),
+        lease: Duration::from_secs(60),
+    };
+    let runs = Runs::<Production<support::TestKeys>>::new(
+        w.store.clone(),
+        GatewayClient::new("http://127.0.0.1:9", "unused".into()).unwrap(),
+        Live::Offline(Offline),
+        StoreContext::new(w.store.clone(), agent, Vec::new()),
+        PlatformAccess::new(support::verifier(), w.authz.clone()),
+        config,
+    );
+    let judge = JudgeConfig {
+        model: "model".into(),
+        region: "region".into(),
+        max_calls: 1,
+    };
+    let evals = Evals::new(runs.clone(), w.store.clone(), judge);
+    oryxa_fde_agent::api::router(runs).merge(evals::router(evals))
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn the_session_cookie_reaches_agent_and_eval_routes() {
+    let mut w = world().await;
+    w.router = router_with(w.app.clone(), agent_routes(&w));
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    let c = w
+        .ok(&alice, "POST", "/v1/companies", Some(json!({"name": "Acme"})), StatusCode::CREATED)
+        .await;
+    let company = c["id"].as_str().unwrap();
+    let p = w
+        .ok(
+            &alice,
+            "POST",
+            &format!("/v1/companies/{company}/projects"),
+            Some(json!({"name": "Support"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let base = format!("/v1/companies/{company}/projects/{}", p["id"].as_str().unwrap());
+    let session = w.session(&alice, &org).await;
+    let budget = || Some(json!({"minutes": 30, "spend_usd_micros": 5_000_000}));
+
+    // Reads with the cookie alone, as the web app sends them: agent runs, the budget, eval suites and criteria.
+    for path in ["agent-runs", "agent-budget", "eval-suites", "eval-runs", "eval-criteria"] {
+        let (status, _, body) = w.with_cookie(&session, "GET", &format!("{base}/{path}"), None, false).await;
+        assert_eq!(status, StatusCode::OK, "GET {path}: {body}");
+    }
+    // A change with the web app's headers works; without them, or from another origin, it is refused.
+    let path = format!("{base}/agent-budget");
+    let (status, _, body) = w.with_cookie(&session, "PUT", &path, budget(), true).await;
+    assert_eq!((status, body["budget"]["minutes"].as_u64()), (StatusCode::OK, Some(30)), "{body}");
+    let (status, _, body) = w.with_cookie(&session, "PUT", &path, budget(), false).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")));
+    let req = Request::post(format!("{base}/eval-suites"))
+        .header("cookie", format!("__Host-fde_session={session}"))
+        .header("x-oryxa-request", "1")
+        .header("origin", "https://evil.example")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name": "pwned", "criteria": [], "graders": []}).to_string()))
+        .unwrap();
+    let (status, _, body) = w.send(req).await;
+    assert_eq!((status, body["error"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")));
+
+    // A bad or expired session, or none, is refused and a useless cookie cleared.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let old = json!({
+        "purpose": "fde_session", "access_token": alice.token, "refresh_token": format!("refresh|{org}|{}|member", alice.id),
+        "user": alice.id, "organisation": org, "signed_in": now - 8 * 24 * 3600,
+    });
+    let old = workos::helpers::session::seal(&old, &w.password).unwrap();
+    for bad in [old, "garbage".to_owned()] {
+        for path in ["agent-runs", "eval-suites"] {
+            let (status, headers, _) = w.with_cookie(&bad, "GET", &format!("{base}/{path}"), None, false).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} with {bad}");
+            assert_eq!(set_cookie(&headers, "__Host-fde_session").as_deref(), Some(""));
+        }
+    }
+    let (status, _) = w.call(None, "GET", &format!("{base}/agent-runs"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Bearer tokens still work, with no web headers, for callers that are not a browser.
+    w.ok(&alice, "GET", &format!("{base}/agent-runs"), None, StatusCode::OK).await;
+    w.ok(&alice, "PUT", &path, budget(), StatusCode::OK).await;
+    w.ok(&alice, "GET", &format!("{base}/eval-runs"), None, StatusCode::OK).await;
+    // Another member of the organisation, signed in, is still refused the project.
+    let bob = user(&org, "bob", "member");
+    let bob_session = w.session(&bob, &org).await;
+    let (status, _, _) = w.with_cookie(&bob_session, "GET", &format!("{base}/agent-runs"), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
