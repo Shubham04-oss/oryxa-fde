@@ -35,6 +35,18 @@ run after a `Cargo.lock` or toolchain change on `main` is cold. We do not use sc
 it writes one cache entry per compiled object, which filled the limit with thousands of entries and evicted
 constantly. `CARGO_INCREMENTAL=0` and debug info off keep entries small.
 
+## Concurrency
+
+Runs share the group `ci-<ref>`. A new push to a pull request cancels that PR's run in progress, because only
+the latest commit matters. A push to `main` never cancels the run in progress (`cancel-in-progress` is true for
+`pull_request` events only), so each `main` run that starts finishes: its `check` goes green or red on its own
+result and `main` writes the caches. A group runs one run and keeps one pending, so a `main` run that is still queued when
+a newer push arrives is replaced by the newer one and ends as cancelled. That commit never gets a result of its own,
+but the newer run tests a superset of it. We do not key the group by commit for pushes: every `main` push would then run
+at once, none dropped, at the cost of a full set of jobs per merge (about 8 minutes of two parallel Rust jobs plus the
+web, schema, infra and sandbox jobs) and several runs racing to write the same cache entry. Do that only if a
+commit on `main` must have its own result.
+
 ## Which jobs run
 
 The `changes` job decides whether a PR can skip the Rust jobs (`lint`, `test`, `platform-base`, `deny`). It is an
@@ -51,10 +63,22 @@ test), `infra/sql/01-bootstrap.sql` (store live test), and `vendor/` (the vendor
 `Cargo.*`, `deny.toml`. A PR that adds a new `include_str!`, `include_bytes!`, `sqlx::migrate!` or run-time
 file read of such a path keeps it off the list, and `test-rust-changed.sh` gets a case for it.
 
+The `infra` job enforces this rule instead of leaving it to review. `.github/scripts/rust-reads-check.sh` scans the Rust
+sources under `crates/` and `vendor/` for every string literal with a `../` (`include_str!`, `include_bytes!`,
+`include!`, `#[path]`, `../` joined onto `CARGO_MANIFEST_DIR`, a run-time read from the crate directory), resolves
+each one against both the including file and its crate (the `CARGO_MANIFEST_DIR` or the constant can sit on another
+line), and fails if `rust-changed.sh` answers `rust=false` for a path outside `crates/` and
+`vendor/`. It compiles nothing. `test-rust-reads-check.sh` proves it: it must find the three paths above, it must
+fail when each one is added to a scratch copy of the skip list, and it must handle a made-up tree and fail closed
+when the filter script is missing or broken. It sees string literals only, so a path built at run time
+(`Path::join("..")`) still needs the review rule. `.github/scripts/**` and `.github/actions/**` steer CI as much as
+the workflows do, so like them they are hands-off without lead review (`CLAUDE.md`).
+
 The Rust jobs skip on a job-level `if`, never a workflow-level `paths:` filter: GitHub counts a skipped job as passed
 for required checks, but a filtered-out workflow leaves them pending. A diff error, an empty diff or a script
-error runs everything, and every push to `main` runs everything. `.github/scripts/test-rust-changed.sh` tests the
-filter against made-up change lists and a real rename; the `infra` job runs it on every PR.
+error runs everything, and every push to `main` runs everything. A failed write of the log line to stderr cannot
+change the answer. `.github/scripts/test-rust-changed.sh` tests the filter against made-up change lists, a real rename
+and an unwritable stderr; the `infra` job runs it on every PR.
 
 `check` is the required status check. It stays as a small job over `lint` (fmt, clippy) and `test` (unit and
 live tests) that passes when both passed or were skipped, so the required name never changes when the Rust

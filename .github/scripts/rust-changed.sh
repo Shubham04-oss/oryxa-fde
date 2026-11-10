@@ -17,9 +17,13 @@ else
 fi
 [ -n "$files" ] || { echo rust=true; exit 0; }
 
-# The paths that force the Rust jobs go to stderr, so the log shows why; stdout stays the one result line.
-grep -Ev "$SKIP" <<<"$files" >&2
+# grep writes into a variable, never to stderr, so a failed write to stderr cannot change its exit status.
+forcing=$(grep -Ev "$SKIP" <<<"$files")
 case $? in
-  1) echo rust=false ;; # every path is on the skip list
-  *) echo rust=true ;;
+  1) echo rust=false ;; # no path is left over: every one is on the skip list
+  *)
+    # The paths that force the Rust jobs go to stderr, so the log shows why; stdout stays the one result line.
+    printf '%s\n' "$forcing" >&2 || true
+    echo rust=true
+    ;;
 esac

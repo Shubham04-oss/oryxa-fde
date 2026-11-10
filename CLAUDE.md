@@ -13,7 +13,7 @@ first change.
 | API | `schema/`, `crates/oryxa-fde-events`, `crates/oryxa-fde-store`, `crates/oryxa-fde-api`, `crates/oryxa-fde-context`, `crates/oryxa-fde-mcp`, `crates/oryxa-fde-lifecycle`, `crates/oryxa-fde-integrations`, `crates/oryxa-fde-billing` | `agent:api` |
 | Web | `fde-web/`, `realtime/` (Durable Objects for presence, canvas and live agent output) | `agent:web` |
 | Agent | `sandbox/`, `crates/oryxa-fde-agent`, `crates/oryxa-fde-evals` | `agent:agent` |
-| Infra | `infra/`, and `.github/workflows/` with lead review | `agent:infra` |
+| Infra | `infra/`, and `.github/workflows/`, `.github/scripts/` and `.github/actions/` with lead review | `agent:infra` |
 
 If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the issue instead of guessing.
 
@@ -42,7 +42,7 @@ Respect each machine's heavy-job budget, and clean up the worktrees, containers 
 ## Hands off without lead review
 
 `vendor/**` (only `scripts/sync-platform.sh` writes it, in a lead PR), `crates/oryxa-fde-core/**`,
-`schema/*.zed`, `docs/adr/**`, `deny.toml`, `CLAUDE.md`, `.github/workflows/**`.
+`schema/*.zed`, `docs/adr/**`, `deny.toml`, `CLAUDE.md`, `.github/workflows/**`, `.github/scripts/**`, `.github/actions/**`.
 
 ## The platform base
 
