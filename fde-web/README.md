@@ -8,6 +8,7 @@ corepack enable    # pnpm at the version and hash package.json pins. Node 25 and
                    # run `npm install --global corepack` first.
 pnpm install --frozen-lockfile
 pnpm dev:mock      # every screen on invented sample data, no backend: http://localhost:3000
+pnpm shots         # PNGs of the screens, light and dark, three widths (needs Docker; see DESIGN.md, section 5)
 pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm build
 ```
 

@@ -1,0 +1,176 @@
+// What `pnpm shots` photographs. Add a screen by adding an entry; nothing else needs to change.
+//
+// An entry is one screenshot per size and theme:
+//   name      the file name stem: `<name>-<width>-<theme>.png`
+//   path      the route, signed in on the dev mock (a fresh session and fresh sample data every time)
+//   ready     (page) => a Playwright locator that is visible once the screen has rendered; the run
+//             fails when it never is
+//   act       (page) => the interaction to capture: open a dialog or a menu, hover, type. Optional.
+//   failWrites  true: every write answers 503 before `act` runs (the mock's `__fdeMockFailWrites`)
+//   full      false for a screen with an overlay open: the shot is then the viewport only. By
+//             default the app's own scroll container is grown so the whole page is captured.
+//   sizes, themes  names to take instead of all of `SIZES` and `THEMES`
+//   signedOut true: no sign-in first (the sign-in screen itself)
+// Everything here runs inside the Playwright container; the page is the app's, not this repo's.
+
+export const SIZES = [
+  { name: "1440", width: 1440, height: 900 },
+  { name: "1024", width: 1024, height: 768 },
+  // A phone: touch, so the hover-only controls behave as they do on a device.
+  { name: "390", width: 390, height: 844, touch: true },
+]
+export const THEMES = ["light", "dark"]
+
+const KESTREL = "/companies/cmp_kestrel"
+const DISPATCH = `${KESTREL}/projects/prj_kestrel_dispatch`
+const REPLAY = "Replay last month's orders through the planner"
+
+const heading = (name) => (page) => page.getByRole("heading", { name, exact: true }).first()
+const board = (page) => page.getByRole("region", { name: "Board" })
+const card = (page, title) => page.getByRole("button", { name: `Edit ${title}` })
+const dialog = (page, name) => page.getByRole("dialog", { name })
+
+/** Opens a card's menu: hover first, because with a mouse the button only shows then. */
+async function openMenu(page, title) {
+  await card(page, title).hover()
+  await page.getByRole("button", { name: `Actions for ${title}` }).click()
+  await page.getByRole("menu").waitFor()
+}
+
+const FINE = ["1440", "1024"]
+const ONE = { sizes: ["1440", "390"], themes: ["light"] }
+
+export const screens = [
+  {
+    name: "sign-in",
+    path: "/sign-in",
+    signedOut: true,
+    ready: (page) => page.getByRole("heading", { name: /^Sign in/ }),
+  },
+  { name: "companies", path: "/", ready: heading("Companies") },
+  { name: "today", path: "/today", ready: heading("Today") },
+  {
+    name: "company",
+    path: KESTREL,
+    ready: (page) => page.getByRole("heading", { name: "Projects" }),
+  },
+  { name: "project", path: DISPATCH, ready: (page) => board(page) },
+
+  // The board's interactions. Overlays are viewport-only (`full: false`).
+  {
+    name: "board-new-task",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await page.getByRole("button", { name: "New task" }).click()
+      await dialog(page, "New task").waitFor()
+    },
+  },
+  {
+    name: "board-edit-task",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await card(page, REPLAY).click()
+      await dialog(page, "Edit task").waitFor()
+    },
+  },
+  {
+    name: "board-ask-blocker",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await openMenu(page, REPLAY)
+      await page.getByRole("menuitem", { name: "Blocked" }).click()
+      await page.getByRole("dialog").waitFor()
+    },
+  },
+  {
+    name: "board-card-menu",
+    path: DISPATCH,
+    ready: board,
+    full: false,
+    act: (page) => openMenu(page, REPLAY),
+  },
+  {
+    name: "board-done-open",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    act: async (page) => {
+      await page.getByRole("button", { name: /^Done/ }).click()
+      await page.getByRole("button", { name: /^Show all/ }).waitFor()
+    },
+  },
+  {
+    name: "board-summary-blocked",
+    path: DISPATCH,
+    ready: board,
+    sizes: ["1024"],
+    themes: ["light"],
+    full: false,
+    act: async (page) => {
+      await page.getByRole("button", { name: /\d+ blocked/ }).click()
+      await page.waitForTimeout(700)
+    },
+  },
+  // A long title with the card hovered: the menu button must not cover it (DESIGN.md, Board).
+  {
+    name: "board-hover-card",
+    path: DISPATCH,
+    ready: board,
+    sizes: FINE,
+    themes: ["light", "dark"],
+    full: false,
+    act: async (page) => {
+      await card(page, REPLAY).scrollIntoViewIfNeeded()
+      await card(page, REPLAY).hover()
+    },
+  },
+  // The failed-write states, with the mock switched to refuse every write.
+  {
+    name: "board-move-refused",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    failWrites: true,
+    act: async (page) => {
+      await openMenu(page, REPLAY)
+      await page.getByRole("menuitem", { name: "In progress" }).click()
+      await page.getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "board-save-refused",
+    path: DISPATCH,
+    ready: board,
+    ...ONE,
+    failWrites: true,
+    full: false,
+    act: async (page) => {
+      await card(page, REPLAY).click()
+      const edit = dialog(page, "Edit task")
+      await edit.getByRole("button", { name: "Save" }).click()
+      await edit.getByRole("alert").waitFor()
+    },
+  },
+
+  { name: "run-review", path: `${DISPATCH}/runs/run_k2`, ready: (page) => page.getByRole("main") },
+  {
+    name: "jump-to",
+    path: "/",
+    ready: heading("Companies"),
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await page.keyboard.press("Control+k")
+      await page.getByRole("dialog").waitFor()
+    },
+  },
+]

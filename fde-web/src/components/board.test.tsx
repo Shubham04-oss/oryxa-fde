@@ -110,6 +110,35 @@ describe("Board", () => {
     )
   })
 
+  it("keeps the first lines of a title clear of the card's menu button", async () => {
+    await board()
+    // jsdom has no layout: this checks the spacer that floats beside the title's first lines.
+    const title = within(screen.getByRole("button", { name: `Edit ${REPLAY}` })).getByText(REPLAY)
+    expect(title.querySelector("[data-menu-gap]")).not.toBeNull()
+  })
+
+  it("does not open a card that is still moving, so saving cannot undo the move", async () => {
+    await board()
+    let answered = () => {}
+    wire.hold = new Promise((resolve) => (answered = resolve))
+    await pick(REPLAY, "In progress")
+    await screen.findByText("Moving to In progress…")
+
+    const card = screen.getByRole("button", { name: `Edit ${REPLAY}` })
+    expect(card).toHaveAttribute("aria-disabled", "true")
+    await userEvent.click(card)
+    card.focus()
+    await userEvent.keyboard("{Enter}")
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+
+    answered()
+    await waitFor(() => expect(titles("In progress")).toContain(REPLAY))
+    // Once the API has answered, the card opens again, on the new status.
+    await userEvent.click(screen.getByRole("button", { name: `Edit ${REPLAY}` }))
+    const dialog = await screen.findByRole("dialog", { name: "Edit task" })
+    expect(within(dialog).getByLabelText("Status")).toHaveValue("in_progress")
+  })
+
   it("keeps a confirmed move when a read of the board taken before it arrives after it", async () => {
     const { queryClient } = renderWithRouter(<ProjectPage scope={scope} />)
     await screen.findAllByText("Assigned to you")
@@ -488,6 +517,16 @@ describe("the API mock", () => {
     expect(await refused({ blocked_by: "acc_k1" })).toMatchObject({
       status: 409,
       code: "rejected_blocked_by_needs_blocked",
+    })
+    // Only one of this project's own access requests: not a missing one, not another company's.
+    const blocked = { status: "blocked" as const, blocker: "Waiting on access" }
+    expect(await refused({ ...blocked, blocked_by: "acc_nobody" })).toMatchObject({
+      status: 400,
+      code: "invalid_blocked_by",
+    })
+    expect(await refused({ ...blocked, blocked_by: "acc_b1" })).toMatchObject({
+      status: 400,
+      code: "invalid_blocked_by",
     })
     await expect(api.removeTask(scope, TaskId.parse("tsk_nope"))).rejects.toMatchObject({
       status: 404,

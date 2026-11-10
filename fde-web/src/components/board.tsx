@@ -553,10 +553,14 @@ function TaskCard({
   const detail = lines(task, today, person)
   const who = assigneeLabel(task.assignee, me)
 
+  // A card whose move is not confirmed shows the old status: the form would save it and undo the move.
+  const open = () => {
+    if (!pending) onOpen()
+  }
   function key(event: KeyboardEvent) {
     if (event.key !== "Enter" && event.key !== " ") return
     event.preventDefault()
-    onOpen()
+    open()
   }
 
   return (
@@ -576,13 +580,21 @@ function TaskCard({
         role="button"
         tabIndex={0}
         aria-label={`Edit ${task.title}`}
+        aria-disabled={pending || undefined}
         data-overdue={late || undefined}
-        onClick={onOpen}
+        onClick={open}
         onKeyDown={key}
         className="grid min-w-0 gap-0.5 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        {/* On touch the menu button is always there, so the title leaves room for it; with a mouse it uses the full width. */}
+        {/* The menu button sits over the title's first line. With a mouse a float beside it makes that
+            line stop short, and the rest use the full width. On touch the button is bigger and always
+            there, so every line leaves it room. */}
         <span className="text-xs leading-snug [overflow-wrap:anywhere] pointer-coarse:pr-8">
+          <span
+            aria-hidden="true"
+            data-menu-gap
+            className="float-right h-4 w-[22px] pointer-coarse:hidden"
+          />
           {task.title}
         </span>
         {who && <span className="text-[11px] text-muted-foreground">{who}</span>}
