@@ -65,8 +65,9 @@ file read of such a path keeps it off the list, and `test-rust-changed.sh` gets 
 
 The `infra` job enforces this rule instead of leaving it to review. `.github/scripts/rust-reads-check.sh` scans the Rust
 sources under `crates/` and `vendor/` for every string literal with a `../` (`include_str!`, `include_bytes!`,
-`include!`, `#[path]`, and `../` joined onto `CARGO_MANIFEST_DIR`), resolves each one against the including file (or the
-crate for `CARGO_MANIFEST_DIR`), and fails if `rust-changed.sh` answers `rust=false` for a path outside `crates/` and
+`include!`, `#[path]`, `../` joined onto `CARGO_MANIFEST_DIR`, a run-time read from the crate directory), resolves
+each one against both the including file and its crate (the `CARGO_MANIFEST_DIR` or the constant can sit on another
+line), and fails if `rust-changed.sh` answers `rust=false` for a path outside `crates/` and
 `vendor/`. It compiles nothing. `test-rust-reads-check.sh` proves it: it must find the three paths above, it must
 fail when each one is added to a scratch copy of the skip list, and it must handle a made-up tree and fail closed
 when the filter script is missing or broken. It sees string literals only, so a path built at run time

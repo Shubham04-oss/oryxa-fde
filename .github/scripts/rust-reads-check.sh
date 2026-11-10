@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fails if rust-changed.sh would let a change skip the Rust jobs although Rust code reads that path from outside
 # crates/ and vendor/. It scans the Rust sources for string literals with "../" (every include_str!, include_bytes!,
-# include! and #[path] that leaves its crate, and "../" joined onto CARGO_MANIFEST_DIR), resolves each one and asks
-# rust-changed.sh about it. No compiling.
+# include! and #[path] that leaves its crate, "../" joined onto CARGO_MANIFEST_DIR, a run-time read from the crate
+# directory), resolves each one against both the including file and its crate, and asks rust-changed.sh about each
+# result. No compiling.
 # Usage: rust-reads-check.sh [--list] [repo-root [rust-changed.sh]]
 #   --list   print the paths Rust reads from outside crates/ and vendor/, and stop
 # ponytail: finds literals only; a path built at run time (Path::join("..")) is not seen. Review catches that, and
@@ -19,9 +20,11 @@ filter=${2:-$root/.github/scripts/rust-changed.sh}
 
 # normalize <path>: resolve . and .. lexically; a path that climbs above the root keeps its leading ".."
 normalize() {
-  local -a out=()
+  local -a out=() parts=()
   local part IFS=/
-  for part in $1; do
+  # read -a splits without glob expansion, so a literal with * stays as written
+  read -r -a parts <<<"$1"
+  for part in "${parts[@]}"; do
     case $part in
       '' | .) ;;
       ..) if [ "${#out[@]}" -gt 0 ] && [ "${out[${#out[@]}-1]}" != .. ]; then unset "out[${#out[@]}-1]"; else out+=(..); fi ;;
@@ -51,21 +54,22 @@ paths=$(
     [ -n "$hit" ] || continue
     file=${hit%%:*}
     rest=${hit#*:}
-    line=${rest%%:*}
     lit=${rest#*:}
     lit=${lit#\"}
     lit=${lit%\"}
-    base=$(dirname "$file")
-    # A literal next to env!("CARGO_MANIFEST_DIR") is relative to the crate, any other one to the including file.
-    if sed -n "${line}p" "$root/$file" | grep -q CARGO_MANIFEST_DIR; then base=$(crate_dir "$base"); fi
-    normalize "$base/$lit"
-  done <<<"$hits" | grep -Ev '^(crates|vendor)(/|$)' | sort -u
+    dir=$(dirname "$file")
+    # include_str! and friends resolve from the including file; CARGO_MANIFEST_DIR joins, build.rs and run-time
+    # reads (cargo runs tests in the crate) from the crate. Which one applies can sit on another line, so try both.
+    normalize "$dir/$lit"
+    normalize "$(crate_dir "$dir")/$lit"
+  done <<<"$hits" | grep -Ev '^(crates|vendor|\.\.)(/|$)' | sort -u
 )
 
 if $list_only; then
   [ -z "$paths" ] || echo "$paths"
   exit 0
 fi
+[ -f "$filter" ] || { echo "rust-reads-check: no filter script at $filter" >&2; exit 2; }
 
 status=0
 checked=0
