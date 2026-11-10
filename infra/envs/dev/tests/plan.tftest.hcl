@@ -352,10 +352,22 @@ run "the_api_health_check_and_the_stop_sequence_match_the_code" {
   }
 }
 
-run "rejects_a_shutdown_grace_the_api_would_refuse_to_start_with" {
+# 65 is the largest grace whose stop sequence fits 120 s (45 + 65 + 10); one more is refused at the variable.
+run "accepts_the_largest_shutdown_grace_the_stop_budget_allows" {
   command = plan
   variables {
-    api_shutdown_grace_seconds = 120
+    api_shutdown_grace_seconds = 65
+  }
+  assert {
+    condition     = module.api.containers[0].stopTimeout == 75
+    error_message = "a grace of 65 gives the api container a 75 s stop timeout"
+  }
+}
+
+run "rejects_a_shutdown_grace_over_the_stop_budget" {
+  command = plan
+  variables {
+    api_shutdown_grace_seconds = 66
   }
   expect_failures = [var.api_shutdown_grace_seconds]
 }

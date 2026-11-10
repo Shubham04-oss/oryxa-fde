@@ -167,12 +167,12 @@ variable "api_port" {
 }
 
 variable "api_shutdown_grace_seconds" {
-  description = "Seconds the API drains requests and its background loops after SIGTERM (SHUTDOWN_GRACE_SECONDS, shutdown.rs). The api container's stop timeout is this plus 10, and the task's stop sequence (cloudflared's 45 s, then the API's) must fit 120 s, which the fargate_service module checks. The code accepts 1 to 119 and stops at start for anything else."
+  description = "Seconds the API drains requests and its background loops after SIGTERM (SHUTDOWN_GRACE_SECONDS, shutdown.rs). The api container's stop timeout is this plus 10, and the task's stop sequence (cloudflared's 45 s, then the API's) must fit 120 s, so at most 65, although the code accepts up to 119. The fargate_service module checks the total again."
   type        = number
   default     = 20
   validation {
-    condition     = var.api_shutdown_grace_seconds == floor(var.api_shutdown_grace_seconds) && var.api_shutdown_grace_seconds >= 1 && var.api_shutdown_grace_seconds <= 119
-    error_message = "api_shutdown_grace_seconds must be a whole number of seconds from 1 to 119: the API refuses to start with anything else."
+    condition     = var.api_shutdown_grace_seconds == floor(var.api_shutdown_grace_seconds) && var.api_shutdown_grace_seconds >= 1 && var.api_shutdown_grace_seconds <= 65
+    error_message = "api_shutdown_grace_seconds must be a whole number of seconds from 1 to 65: cloudflared's 45 s stop timeout plus this plus 10 must fit Fargate's 120 s stop budget."
   }
 }
 

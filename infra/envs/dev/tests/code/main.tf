@@ -1,7 +1,7 @@
 # Test helper: what the API's source and the image's Dockerfile say about the container health check and the
 # shutdown grace, read as text, so `envs/dev` and infra/README.md cannot drift from the code silently. Plans with
 # no provider and no resource. Each regex must match: when the code is reshaped the plan fails here, saying which
-# constant to look at.
+# constant to look at. The coupling to the Rust source is deliberate: a Rust change that trips it updates infra with it.
 
 variable "task" {
   description = "The API task's health check, plain environment and stop timeouts: the root output api_task_timing."

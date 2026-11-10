@@ -92,7 +92,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `start_services` | `false` | `false`: every service (SpiceDB, the API task, the workers) runs 0 tasks. Set `true` once the image and every secret value exist |
 | `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue. Must include those two: the workers read them |
 | `api_port` | `8080` | Port `oryxa-fde-api` listens on, on the task's loopback (`LISTEN_ADDR` is `127.0.0.1:<port>`); the health check and the Workers VPC service use it |
-| `api_shutdown_grace_seconds` | `20` | Seconds the API drains after SIGTERM: `SHUTDOWN_GRACE_SECONDS` on the API, and the `api` container's `stopTimeout` is this plus 10. A whole number from 1 to 119, the range the API starts with; the stop sequence (cloudflared's 45 s, then the API's) must fit 120 s, which allows at most 65 (Deploys, How a task stops) |
+| `api_shutdown_grace_seconds` | `20` | Seconds the API drains after SIGTERM: `SHUTDOWN_GRACE_SECONDS` on the API, and the `api` container's `stopTimeout` is this plus 10. A whole number from 1 to 65: the API starts with up to 119, but the stop sequence (cloudflared's 45 s, then the API's grace plus 10) must fit 120 s (Deploys, How a task stops) |
 | `api_cpu` | `256` | CPU units of the API task, shared by the API and the cloudflared sidecar (0.25 vCPU) |
 | `api_memory` | `512` | Memory of the API task in MiB, shared by both containers |
 | `spicedb_image` | `authzed/spicedb:v1.56.2` | Same version as CI |
@@ -207,7 +207,9 @@ must be injected from Secrets Manager, never set as plain config. Add or change 
 The line numbers are not tested: when a PR moves code a table points at, it refreshes them. Two things are also read from
 the source as text (`tests/code`): the `healthcheck` row of the `oryxa-fde-ops` table must give the command the API
 container's health check runs, and the `SHUTDOWN_GRACE_SECONDS` row's default and range must be the code's (`health.rs`,
-`shutdown.rs`), with the grace on the task inside that range and the stop timeouts derived from it.
+`shutdown.rs`), with the grace on the task inside that range and the stop timeouts derived from it. This couples the infra tests to
+the Rust source on purpose: a Rust PR that renames or reshapes those constants (or the Dockerfile's `COPY`) fails
+`tofu test` until the infra side, this README and `tests/code` are updated with it.
 
 Columns. **Needed**: `always`; a feature the variable belongs to (`agent`, `realtime`, `github`,
 `slack`; for the lifecycle worker `digest`, `slack`: needed when that feature is on, and the first row of each is its switch); `optional` (the code has
@@ -915,7 +917,8 @@ A normal stop ends within about 50 s and the worst case, a cloudflared that has 
 its stop timeout, at 45 + 30 = 75 s. Fargate allows no `stopTimeout` over 120 s and documents no longer total, so the
 budget is 120 s for the sequence: the `fargate_service` module refuses a task whose longest sidecar stop timeout plus its
 main container's is over it. With cloudflared at 45 s that makes 65 s the largest grace the task accepts, although the
-API itself starts with up to 119 (`api_shutdown_grace_seconds` takes the code's range; 66 to 119 fail the plan). The
+API itself starts with up to 119, so `api_shutdown_grace_seconds` refuses anything over 65 (the module's check stays as a
+second guard). The
 grace and the container's stop timeout both come from `api_shutdown_grace_seconds`, so they cannot drift apart, and
 `tests/plan.tftest.hcl` pins the relation and the range against `shutdown.rs`.
 
