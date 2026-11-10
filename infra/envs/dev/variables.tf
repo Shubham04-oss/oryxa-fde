@@ -30,20 +30,86 @@ variable "cloudflare_account_id" {
 }
 
 variable "cloudflare_zone_id" {
-  type = string
+  description = "ID of the Cloudflare zone named by cloudflare_zone_name."
+  type        = string
 }
 
-variable "domain" {
-  description = "Base hostname for dev; app. (fde-web) and admin. hang off it."
+variable "cloudflare_zone_name" {
+  description = "The Cloudflare zone's own name (for example example.com), the zone cloudflare_zone_id identifies. The three host names below must be this name or one label under it."
   type        = string
   validation {
-    condition     = can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.domain))
-    error_message = "domain must be a lowercase hostname."
+    condition     = can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.cloudflare_zone_name))
+    error_message = "cloudflare_zone_name must be a lowercase zone name such as example.com."
+  }
+}
+
+# No defaults, and no app./admin./mcp. pattern: a zone is shared with other environments, and the production names
+# (the zone itself, app., admin., mcp.) must not be taken by accident. Cloudflare's Universal SSL certificate covers the
+# zone and one label below it only, so a deeper name (app.fde-dev.<zone>) would have no certificate: the validations
+# below refuse it.
+variable "web_hostname" {
+  description = "Full host name of the web app (fde-web), which is also the API's WEB_ORIGIN: https://<web_hostname>. The zone itself or one label under it, for example fde-dev.example.com."
+  type        = string
+  validation {
+    condition     = can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.web_hostname))
+    error_message = "web_hostname must be a lowercase host name."
+  }
+  validation {
+    condition = (
+      var.web_hostname == var.cloudflare_zone_name
+      || (endswith(var.web_hostname, ".${var.cloudflare_zone_name}") && !strcontains(trimsuffix(var.web_hostname, ".${var.cloudflare_zone_name}"), "."))
+    )
+    error_message = "web_hostname must be the zone itself or exactly one label under it: Cloudflare's Universal SSL certificate covers the zone and one level of subdomain only, so a deeper name has no certificate."
+  }
+}
+
+variable "admin_hostname" {
+  description = "Full host name of the admin tools, behind Cloudflare Access. The zone itself or one label under it, and not the web app's, for example fde-dev-admin.example.com."
+  type        = string
+  validation {
+    condition     = can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.admin_hostname))
+    error_message = "admin_hostname must be a lowercase host name."
+  }
+  validation {
+    condition = (
+      var.admin_hostname == var.cloudflare_zone_name
+      || (endswith(var.admin_hostname, ".${var.cloudflare_zone_name}") && !strcontains(trimsuffix(var.admin_hostname, ".${var.cloudflare_zone_name}"), "."))
+    )
+    error_message = "admin_hostname must be the zone itself or exactly one label under it: Cloudflare's Universal SSL certificate covers the zone and one level of subdomain only, so a deeper name has no certificate."
+  }
+  validation {
+    condition     = var.admin_hostname != var.web_hostname
+    error_message = "admin_hostname must differ from web_hostname."
+  }
+}
+
+variable "mcp_hostname" {
+  description = "Full host name of the MCP server (MCP_ALLOWED_HOSTS and its tunnel's one public name), for example fde-dev-mcp.example.com. Required with enable_mcp, ignored (and may stay null) without it."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.mcp_hostname != null || !var.enable_mcp
+    error_message = "mcp_hostname is required when enable_mcp is true."
+  }
+  validation {
+    condition     = var.mcp_hostname == null ? true : can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.mcp_hostname))
+    error_message = "mcp_hostname must be a lowercase host name."
+  }
+  validation {
+    condition = var.mcp_hostname == null ? true : (
+      var.mcp_hostname == var.cloudflare_zone_name
+      || (endswith(var.mcp_hostname, ".${var.cloudflare_zone_name}") && !strcontains(trimsuffix(var.mcp_hostname, ".${var.cloudflare_zone_name}"), "."))
+    )
+    error_message = "mcp_hostname must be the zone itself or exactly one label under it: Cloudflare's Universal SSL certificate covers the zone and one level of subdomain only, so a deeper name has no certificate."
+  }
+  validation {
+    condition     = var.mcp_hostname == null ? true : (var.mcp_hostname != var.web_hostname && var.mcp_hostname != var.admin_hostname)
+    error_message = "mcp_hostname must differ from web_hostname and admin_hostname."
   }
 }
 
 variable "admin_emails" {
-  description = "Who may open admin.<domain> through Cloudflare Access."
+  description = "Who may open admin_hostname through Cloudflare Access."
   type        = list(string)
 }
 
@@ -311,7 +377,7 @@ variable "workos_issuer" {
 # ---- the MCP server (infra/README.md, oryxa-fde-mcp and How the MCP server is reached)
 
 variable "enable_mcp" {
-  description = "Deploy the MCP server for FDE agents: a task of its own with its own tunnel and the hostname mcp.<domain> at Cloudflare's edge (no listener in AWS), the service, its role, the secret for its tunnel and the Cloudflare tunnel, record and ingress rule. Default off, because how an FDE's agent signs in to it is not decided yet (infra/README.md, What is missing before an agent can sign in): with it on, the name answers on the internet and refuses every request without a valid WorkOS token. Off: nothing for it exists, though the binary ships in the image."
+  description = "Deploy the MCP server for FDE agents: a task of its own with its own tunnel and the hostname mcp_hostname at Cloudflare's edge (no listener in AWS), the service, its role, the secret for its tunnel and the Cloudflare tunnel, record and ingress rule. Default off, because how an FDE's agent signs in to it is not decided yet (infra/README.md, What is missing before an agent can sign in): with it on, the name answers on the internet and refuses every request without a valid WorkOS token. Off: nothing for it exists, though the binary ships in the image."
   type        = bool
   default     = false
 }

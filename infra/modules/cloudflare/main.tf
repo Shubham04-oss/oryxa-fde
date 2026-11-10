@@ -27,9 +27,24 @@ variable "name" {
   type        = string
 }
 
-variable "domain" {
-  description = "Base hostname for this environment; app. and admin. hang off it."
+variable "web_hostname" {
+  description = "Full host name of the web app (the fde-web Worker). The environment checks that it sits in the zone."
   type        = string
+}
+
+variable "admin_hostname" {
+  description = "Full host name of the admin tools, behind Cloudflare Access."
+  type        = string
+}
+
+variable "mcp_hostname" {
+  description = "Full host name of the MCP server; used only while mcp_enabled."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.mcp_hostname != null || !var.mcp_enabled
+    error_message = "mcp_hostname is required when mcp_enabled is true."
+  }
 }
 
 variable "api_port" {
@@ -38,7 +53,7 @@ variable "api_port" {
 }
 
 variable "mcp_enabled" {
-  description = "Create the MCP server's tunnel and its hostname (mcp.<domain>). Off: nothing for it exists."
+  description = "Create the MCP server's tunnel and its hostname (mcp_hostname). Off: nothing for it exists."
   type        = bool
   default     = false
 }
@@ -54,16 +69,12 @@ variable "admin_emails" {
   type        = list(string)
 }
 
-locals {
-  web   = "app.${var.domain}"
-  admin = "admin.${var.domain}"
-  mcp   = "mcp.${var.domain}"
-}
-
+# The host names are the caller's choice, not derived from a base name: the zone is shared with other
+# environments, and Universal SSL covers one label below the zone only, so the caller picks single-level names.
 # Worker hostnames: a proxied placeholder record so a Worker route has something to attach to.
-# The routes themselves (app.<domain>/*, admin.<domain>/*) belong to the Workers' wrangler config.
+# The routes themselves (<web_hostname>/*) belong to the Workers' wrangler config.
 resource "cloudflare_dns_record" "worker" {
-  for_each = toset([local.web, local.admin])
+  for_each = toset([var.web_hostname, var.admin_hostname])
   zone_id  = var.zone_id
   name     = each.value
   type     = "AAAA"
@@ -114,7 +125,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "mcp" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.mcp[0].id
   config = {
     ingress = [
-      { hostname = local.mcp, service = "http://127.0.0.1:${var.mcp_port}" },
+      { hostname = var.mcp_hostname, service = "http://127.0.0.1:${var.mcp_port}" },
       { service = "http_status:404" },
     ]
   }
@@ -124,7 +135,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "mcp" {
 resource "cloudflare_dns_record" "mcp" {
   count   = var.mcp_enabled ? 1 : 0
   zone_id = var.zone_id
-  name    = local.mcp
+  name    = var.mcp_hostname
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.mcp[0].id}.cfargotunnel.com"
   proxied = true
@@ -145,17 +156,17 @@ resource "cloudflare_zero_trust_access_application" "admin" {
   account_id       = var.account_id
   name             = "${var.name} admin"
   type             = "self_hosted"
-  domain           = local.admin
+  domain           = var.admin_hostname
   session_duration = "8h"
   policies         = [{ id = cloudflare_zero_trust_access_policy.admins.id, precedence = 1 }]
 }
 
 output "web_hostname" {
-  value = local.web
+  value = var.web_hostname
 }
 
 output "admin_hostname" {
-  value = local.admin
+  value = var.admin_hostname
 }
 
 output "tunnel_id" {
@@ -169,7 +180,7 @@ output "api_vpc_service_id" {
 
 output "mcp_hostname" {
   description = "The name an FDE's agent reaches the MCP server at (and its MCP_ALLOWED_HOSTS); null while it is off."
-  value       = var.mcp_enabled ? local.mcp : null
+  value       = var.mcp_enabled ? var.mcp_hostname : null
 }
 
 output "mcp_tunnel_id" {
