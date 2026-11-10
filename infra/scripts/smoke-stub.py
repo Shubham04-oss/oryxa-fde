@@ -6,8 +6,8 @@ CSRF rules (`X-Oryxa-Request: 1` and the app's `Origin` on a write), and logs on
 
     smoke-stub.py FLAGS LOGFILE        prints `PORT <n>` once it listens on a random loopback port
 
-FLAGS is a comma-separated list, or `-`: today-missing, rotate, ingest-stuck, ingest-fails, no-agent, run-fails,
-run-waits.
+FLAGS is a comma-separated list, or `-`: today-missing, rotate, ingest-stuck, ingest-fails, no-agent, agent-not-found,
+run-fails, run-waits.
 """
 
 import json
@@ -131,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
     def agent(self, method, sub, body, ok):
         if "no-agent" in FLAGS:
             return self.send(404, b"")  # the router has no such route: no JSON body
+        if "agent-not-found" in FLAGS:
+            return ok(404, {"error": "not_found"})  # the routes are there, the project is not
         if sub == "agent-runs" and method == "GET":
             return ok(200, [])
         if sub == "agent-runs" and method == "POST":

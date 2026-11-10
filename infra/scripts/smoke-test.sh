@@ -10,6 +10,8 @@
 # its owner can read) or SMOKE_SESSION (the value). It is never an argument and never printed. infra/README.md
 # ("Smoke test") says how to get it, what it creates and what it cannot remove.
 set -euo pipefail
+# Tracing (`bash -x`, or xtrace in SHELLOPTS) would print the cookie as it is read and written: always off.
+set +x
 
 usage="usage: smoke-test.sh [a] [b] [c] | all   (environment: see infra/README.md, Smoke test)"
 
@@ -76,6 +78,7 @@ read_session() {
     value="$(tr -d '\r\n ' <"$file")"
   elif [[ -n ${SMOKE_SESSION:-} ]]; then
     value="${SMOKE_SESSION//[$'\r\n ']/}"
+    unset SMOKE_SESSION # curl and jq need not inherit it
   else
     say "no session: set SMOKE_SESSION_FILE (or SMOKE_SESSION) to the $COOKIE_NAME cookie of a test user; see infra/README.md, Smoke test" >&2
     exit 2
@@ -102,7 +105,8 @@ write_auth() { printf 'header = "Cookie: %s=%s"\n' "$COOKIE_NAME" "$COOKIE" >"$W
 # Sets STATUS (000 when nothing answered) and leaves the body in $WORK/body. Never exits, so cleanup can use it.
 api() {
   local method="$1" path="$2" body="${3:-}" type="${4:-application/json}"
-  local args=(--silent --show-error --connect-timeout 10 --max-time "$REQ_TIMEOUT"
+  # --disable first: a ~/.curlrc must not add verbose, trace or redirect-following to a request with the cookie.
+  local args=(--disable --silent --show-error --connect-timeout 10 --max-time "$REQ_TIMEOUT"
     --config "$WORK/common.cfg" -X "$method" -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}')
   [[ ${NO_SESSION:-0} == 1 ]] || args+=(--config "$WORK/auth.cfg")
   # Like the web client: the CSRF header always, the origin on writes (a browser sends none on a read).
@@ -170,6 +174,8 @@ id_of() {
 cleanup() {
   local code=$?
   trap - EXIT
+  # A second interrupt while the API calls below run still removes the cookie file.
+  trap '[[ -n $WORK ]] && rm -rf "$WORK"; exit 130' INT TERM HUP
   if [[ -n $WORK && -f $WORK/auth.cfg ]]; then
     if [[ -n $TASK && $TASK_REMOVED == 0 ]]; then
       api DELETE "/api/v1/companies/$COMPANY/projects/$PROJECT/tasks/$TASK"
@@ -187,7 +193,7 @@ cleanup() {
     say "note: the API refreshed the session during the run, so the cookie you supplied is spent; sign in again for the next run"
   fi
   [[ -n $WORK ]] && rm -rf "$WORK"
-  ((code != 0)) && SUMMARY+=("$STAGE=FAILED")
+  if ((code == 129 || code == 130)); then SUMMARY+=("$STAGE=INTERRUPTED"); elif ((code != 0)); then SUMMARY+=("$STAGE=FAILED"); fi
   ((${#SUMMARY[@]})) && say "result: ${SUMMARY[*]}"
   exit "$code"
 }
@@ -204,6 +210,7 @@ preflight() {
   local org role
   org="$(field .organisation.name)" || fail "who am I: the response has no organisation"
   role="$(field .role)" || fail "who am I: the response has no role"
+  org="$(LC_ALL=C tr -d '[:cntrl:]' <<<"$org")" # a name is shown, so no terminal escapes
   ok "signed in to organisation '$org' as $role (use a test organisation: the run creates a company in it)"
 }
 
@@ -331,7 +338,8 @@ stage_c() {
   need_project
   local p="/api/v1/companies/$COMPANY/projects/$PROJECT"
   api GET "$p/agent-runs"
-  if [[ $STATUS == 404 ]]; then
+  # Routes that are not mounted answer a bare 404; one with an error code (a missing project) is a failure.
+  if [[ $STATUS == 404 ]] && ! field '.error' >/dev/null; then
     say "SKIP [c] agent: the agent routes are off (the API has no SANDBOX_GATEWAY_URL)"
     SKIPPED=1
     return 0
@@ -380,9 +388,10 @@ stage_c() {
 
 read_session
 umask 077
-WORK="$(mktemp -d)"
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+trap 'exit 129' HUP
+WORK="$(mktemp -d)"
 printf 'header = "X-Oryxa-Request: 1"\nuser-agent = "oryxa-fde-smoke/1"\n' >"$WORK/common.cfg"
 write_auth
 

@@ -7,6 +7,9 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 smoke="$here/smoke-test.sh"
 tmp="$(mktemp -d)"
+# The script's own temporary files go here, so the test can see they are removed.
+mkdir "$tmp/t"
+export TMPDIR="$tmp/t"
 stub_pid=""
 failures=0
 
@@ -27,7 +30,9 @@ start_stub() {
   stop_stub
   log="$tmp/stub.log"
   : >"$log"
-  python3 -I "$here/smoke-stub.py" "$1" "$log" >"$tmp/stub.out" &
+  # Emptied here, not by the child's redirect, so the loop below never reads the previous stub's port.
+  : >"$tmp/stub.out"
+  python3 -I "$here/smoke-stub.py" "$1" "$log" >>"$tmp/stub.out" &
   stub_pid=$!
   for _ in $(seq 1 100); do
     port="$(sed -n 's/^PORT //p' "$tmp/stub.out")"
@@ -71,6 +76,7 @@ logged_times() { [[ "$(grep -cxF -- "$1" "$log")" == "$2" ]]; }
 exits() { [[ $code == "$1" ]]; }
 no_secret() { ! grep -qF -- "$session" <<<"$out" && ! grep -qF stubreissued <<<"$out"; }
 no_leak() { ! grep -q '^LEAK' "$log"; }
+no_temp() { [[ -z "$(ls -A "$TMPDIR")" ]]; }
 
 # --- stage A -------------------------------------------------------------------------------------------------
 run_case - a
@@ -81,6 +87,17 @@ check "A says what it left behind" has "left behind"
 check "A never prints the session" no_secret
 check "A sends no cookie to /healthz" no_leak
 check "A moved the stage" logged "PUT /api/v1/companies/cmp_1/projects/prj_1/stage"
+check "A removes its temporary files" no_temp
+
+# Tracing, and a ~/.curlrc asking for verbose output and a trace, never print the session.
+mkdir "$tmp/home"
+printf 'verbose\ntrace-ascii = -\n' >"$tmp/home/.curlrc"
+start_stub -
+code=0
+out="$(HOME="$tmp/home" SMOKE_BASE_URL="http://127.0.0.1:$port" SMOKE_SESSION_FILE="$tmp/session" SMOKE_POLL_INTERVAL=0.1 \
+  bash -x "$smoke" a 2>&1)" || code=$?
+check "under bash -x and a verbose ~/.curlrc it still passes" exits 0
+check "bash -x and a verbose ~/.curlrc never print the session" no_secret
 
 # A failure in the middle stops there, names the step, and still removes the task.
 run_case today-missing a b c
@@ -91,6 +108,21 @@ check "failure removes the task once" logged_times "DELETE /api/v1/companies/cmp
 check "failure stops before the stage move" not_logged "PUT /api/v1/companies/cmp_1/projects/prj_1/stage"
 check "failure reports a=FAILED" has "result: a=FAILED"
 check "failure never prints the session" no_secret
+check "failure removes its temporary files" no_temp
+
+# An interrupt stops the run, cleans up and says so.
+start_stub ingest-stuck
+SMOKE_WORKERS=1 SMOKE_BASE_URL="http://127.0.0.1:$port" SMOKE_SESSION_FILE="$tmp/session" SMOKE_POLL_INTERVAL=0.1 \
+  SMOKE_INGEST_TIMEOUT=60 "$smoke" b >"$tmp/int.out" 2>&1 &
+smoke_pid=$!
+for _ in $(seq 1 100); do grep -q "uploaded" "$tmp/int.out" && break; sleep 0.1; done
+kill -TERM "$smoke_pid"
+code=0
+wait "$smoke_pid" || code=$?
+out="$(cat "$tmp/int.out")"
+check "an interrupt exits 130" exits 130
+check "an interrupt is reported" has "result: b=INTERRUPTED"
+check "an interrupt removes its temporary files" no_temp
 
 # The API reseals the session: the run follows the new cookie, and says the old one is spent.
 run_case rotate a
@@ -166,6 +198,9 @@ export SMOKE_AGENT_REPO=oryxa-sample/hello
 run_case no-agent c
 check "C skips when the agent routes are off" has "the agent routes are off"
 check "C route-off skip exits 0" exits 0
+run_case agent-not-found c
+check "C fails on a 404 that names an error" has "list agent runs: wanted HTTP 200; HTTP 404 (not_found)"
+check "C 404 with an error exits 1" exits 1
 run_case - c
 check "C passes" exits 0
 check "C sees events" has "events are arriving"

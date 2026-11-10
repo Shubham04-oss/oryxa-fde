@@ -361,28 +361,31 @@ together they share one. Every run first checks health and `/v1/me`.
 
 **Skips.** B skips unless `SMOKE_WORKERS=1` (the script cannot tell a missing worker from a slow one, so you
 say it is deployed; then a document that never ingests is a failure). C skips without `SMOKE_AGENT_REPO`, and
-when the agent routes answer `404`. A skip prints `SKIP [stage] ...` and exits 0 for that stage; the last line,
-`result: a=passed b=skipped ...`, tells passes and skips apart.
+when the agent routes answer a bare `404` (one with an error code fails). A skip prints `SKIP [stage] ...` and
+exits 0 for that stage; the last line, `result: a=passed b=skipped ...`, tells passes and skips apart.
 
 **The session.** The test signs in as the person who runs it, with the browser session cookie of a **test user in
 a test organisation**: it creates a company in that organisation, and the user becomes its lead. Never use a
 real customer's organisation or your own login.
 
 1. In a private browser window, open `https://app.<domain>` and sign in as the test user. Do not sign out
-   afterwards (sign-out ends the WorkOS session).
+   until the run is over (sign-out ends the WorkOS session, and with it the cookie the script uses).
 2. In the browser's developer tools, Application (Chrome) or Storage (Firefox), Cookies, `https://app.<domain>`:
    copy the **Value** of `__Host-fde_session` (it is `HttpOnly`, so only the tools show it). Just the value.
 3. Put it in a file only you can read, and paste it into that file in an editor, not on a command line:
    `install -m 600 /dev/null ~/.oryxa-smoke-session`. The script refuses a file that group or others can read.
    `SMOKE_SESSION` (the value in the environment) works too, for a secret manager; never an argument.
-4. Delete the file afterwards and close the private window without signing out. The cookie lasts seven days at
-   most, but WorkOS refresh tokens are single use: when the API refreshes the session during a run it reseals
-   the cookie, the run carries on with the new one in memory (the file is never written), and the browser's
-   copy is spent. The script says so at the end. Take a fresh sign-in for each run.
+4. When the run is over, sign out in the private window, then delete the file. Signing out ends the WorkOS
+   session, so every copy of the cookie stops working: the file, the clipboard, the browser's. Otherwise it stays
+   usable for up to seven days. The handed-over cookie goes stale anyway once the API refreshes the session
+   during a run: WorkOS refresh tokens are single use, so the API reseals the cookie, the run carries on with the
+   new one in memory (the file is never written), and the browser's copy is spent. The script says so at the
+   end. Take a fresh sign-in for each run.
 
 The script puts the cookie in a private temporary file for curl, never in its command line (`ps` shows
-arguments), runs without `set -x`, and strips it from any error text. It prints identifiers and API error
-codes, never a header or a response body.
+arguments), and removes it on exit, on failure and on an interrupt (only `kill -9` leaves it, in a directory
+only you can read under `$TMPDIR`). It turns tracing off, so `bash -x` cannot print it, ignores `~/.curlrc`, and
+strips it from any error text. It prints identifiers and API error codes, never a header or a response body.
 
 **What a write needs, as the browser sends it** (`fde-web/src/forward.ts`, `oryxa-fde-api/src/session.rs`):
 `Cookie: __Host-fde_session=<value>`; `X-Oryxa-Request: 1`; and an `Origin` header equal to the web app's
@@ -398,8 +401,9 @@ the end. They sit in the test organisation; do not point the script at an organi
 
 `infra/scripts/test-smoke-test.sh` proves the script without a deployed environment: it starts
 `infra/scripts/smoke-stub.py` (answers the routes the script calls with canned responses, on a random loopback
-port, stopped afterwards) and runs every stage against it: full passes, failures in the middle (cleanup), the
-skips, a session that rotates mid-run, and the session hand-over checks. It needs `bash`, `curl`, `jq` and
+port, stopped afterwards) and runs every stage against it: full passes, failures in the middle (cleanup), an
+interrupt, the skips, a session that rotates mid-run, and the session hand-over checks, including `bash -x` and
+a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
 `python3` only.
 
 ## Deploys
