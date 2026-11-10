@@ -24,20 +24,25 @@ COPY --from=harness /build/package.json /opt/oryxa-harness/package.json
 COPY --from=harness /build/node_modules /opt/oryxa-harness/node_modules
 COPY --from=harness /build/dist /opt/oryxa-harness/dist
 COPY image/egress-check.mjs /usr/local/bin/oryxa-egress-check
-# Two users, ids fixed because the gateway and the harness name them (sandbox/harness/src/users.ts):
+COPY image/isolation-check.py /usr/local/bin/oryxa-isolation-check
+# Three users, ids fixed because the gateway and the harness name them (sandbox/harness/src/users.ts):
 # - agent (1001) runs the agent and every command it starts, and owns /workspace;
-# - harness (1002) is what the harness becomes after it starts the agent, so the agent cannot open its stdin.
+# - harness (1002) is what the harness becomes after it starts the agent, so the agent cannot open its stdin;
+# - init (1003) runs only pid 1, owns nothing and cannot log in, so the agent can neither trace nor signal it.
 # Context packs live in a directory only root can open; the gateway writes them as root.
-RUN chmod +x /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-egress-check \
+RUN chmod +x /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-egress-check /usr/local/bin/oryxa-isolation-check \
   && ln -s /opt/oryxa-harness/dist/main.js /usr/local/bin/oryxa-harness \
   && useradd --create-home --uid 1001 --user-group --shell /bin/bash agent \
   && useradd --create-home --uid 1002 --user-group --shell /usr/sbin/nologin harness \
+  && useradd --no-create-home --home-dir /nonexistent --uid 1003 --user-group --shell /usr/sbin/nologin init \
   && chmod 700 /home/harness \
   && mkdir -p /workspace /etc/oryxa/runs \
   && chown agent:agent /workspace \
   && chmod 700 /etc/oryxa/runs
-# The image's default user is agent; the gateway still names the user on every exec. HTTPS trusts the ephemeral CA
-# that the gateway points every command at.
-USER agent
+# Pid 1 (the CMD; the gateway's compatibility date gives the container its own pid namespace) runs as init, not agent:
+# an agent process could otherwise trace it or write /proc/1/mem, and code put there would outlive every run's kill.
+# It is also the user of an exec that names none, which owns nothing; the gateway names the user on every exec.
+# HTTPS trusts the ephemeral CA that the gateway points every command at.
+USER init
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

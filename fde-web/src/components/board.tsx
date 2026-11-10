@@ -6,7 +6,7 @@ import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
 import { FormDialog } from "./form-dialog"
 import { Dialog } from "./ui/dialog"
-import { FIELD, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
+import { BlockedBy, FIELD, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
 import {
   Menu,
   MenuContent,
@@ -17,7 +17,14 @@ import {
   MenuTrigger,
 } from "./ui/menu"
 import { api, queries } from "@/lib/api/client"
-import type { Project, ProjectScope, StakeholderOut, TaskOut, TaskState } from "@/lib/api/schemas"
+import type {
+  AccessRequestOut,
+  Project,
+  ProjectScope,
+  StakeholderOut,
+  TaskOut,
+  TaskState,
+} from "@/lib/api/schemas"
 import {
   COLUMNS,
   DONE_SHOWN,
@@ -264,6 +271,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
             task={dialog.kind === "edit" ? dialog.task : null}
             status={dialog.kind === "new" ? dialog.status : "todo"}
             people={project.stakeholders}
+            requests={project.access}
             me={me.data?.user.id}
             onSave={(fields) =>
               mover.submit(scope, dialog.kind === "edit" ? dialog.task : null, fields)
@@ -273,7 +281,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
           />
         )}
       </Dialog>
-      <MoveAsk mover={mover} people={project.stakeholders} />
+      <MoveAsk mover={mover} people={project.stakeholders} requests={project.access} />
     </Card>
   )
 }
@@ -572,6 +580,7 @@ function TaskDialog({
   task,
   status,
   people,
+  requests,
   me,
   onSave,
   onDelete,
@@ -580,6 +589,7 @@ function TaskDialog({
   task: TaskOut | null
   status: TaskState
   people: Array<StakeholderOut>
+  requests: ReadonlyArray<AccessRequestOut>
   me: string | undefined
   onSave: (fields: Fields) => Promise<string | null>
   onDelete: (() => Promise<string | null>) | undefined
@@ -651,6 +661,13 @@ function TaskDialog({
             onChange={(e) => set({ blocker: e.target.value })}
           />
         </Labelled>
+      )}
+      {fields.status === "blocked" && (
+        <BlockedBy
+          value={fields.blockedBy}
+          requests={requests}
+          onChange={(blockedBy) => set({ blockedBy })}
+        />
       )}
       {fields.status === "waiting_on_customer" && (
         <Labelled label="Waiting on">

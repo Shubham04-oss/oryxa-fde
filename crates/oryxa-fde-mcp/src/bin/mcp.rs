@@ -1,5 +1,6 @@
-//! oryxa-fde-mcp on ECS Fargate, next to the API and with its configuration: `DATABASE_URL` (the
-//! runtime login), SpiceDB, WorkOS, `DOCUMENTS_BUCKET` and `EMBEDDING_*`; `MCP_ALLOWED_HOSTS` is a
+//! oryxa-fde-mcp on ECS Fargate, next to the API and with its configuration: the runtime login
+//! with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`), or locally `DATABASE_URL`;
+//! SpiceDB, WorkOS, `DOCUMENTS_BUCKET` and `EMBEDDING_*`; `MCP_ALLOWED_HOSTS` is a
 //! comma-separated list of the hostnames agents reach it at. Third-party host: WorkOS (JWKS).
 
 use std::time::Duration;
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Error> {
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
-    let store = Store::connect(&env("DATABASE_URL")?).await?;
+    let store = Store::from_env().await?;
     let authz = SpiceDb::connect_lazy(
         &env("SPICEDB_ENDPOINT")?,
         &env("SPICEDB_PRESHARED_KEY")?,

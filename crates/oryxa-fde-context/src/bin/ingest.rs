@@ -1,6 +1,7 @@
 //! oryxa-fde-ingest on ECS Fargate: reads `document.uploaded` from its SQS FIFO queue and ingests
-//! each document. `DATABASE_URL` is the runtime login (the store refuses an owner);
-//! `INGEST_QUEUE_URL` the queue; `EVENT_SIGNING_KID` and `EVENT_PUBLIC_KEY` the key FDE events are
+//! each document. It signs in as the runtime login with RDS IAM tokens (`DB_HOST`, `DB_PORT`,
+//! `DB_NAME`, `DB_USER`), or locally with `DATABASE_URL` (the store refuses an owner);
+//! `INGEST_QUEUE_URL` is the queue; `EVENT_SIGNING_KID` and `EVENT_PUBLIC_KEY` the key FDE events are
 //! signed with; `DOCUMENTS_BUCKET` and `EMBEDDING_*` as `Context::from_env` reads them. It calls
 //! AWS only (S3, SQS, Bedrock). Each document's text is extracted by this same binary run as
 //! `extract <content-type>` in a child process with hard limits and no environment.
@@ -35,7 +36,7 @@ async fn run() -> Result<(), Error> {
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
-    let store = Store::connect(&env("DATABASE_URL")?).await?;
+    let store = Store::from_env().await?;
     let ctx = Context::from_env().await?;
     let verifier = Verifier::default().trust(
         env("EVENT_SIGNING_KID")?,

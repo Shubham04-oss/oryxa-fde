@@ -102,6 +102,20 @@ describe("OpenCode recorded session", () => {
     expect(events.at(-1)).toMatchObject({ type: "result", outcome: "rejected" });
   });
 
+  it("refuses an input too large to match, even when the rule's pattern would not match it", async () => {
+    // The reject recording's `echo sample-one`, padded past what an engineer is shown; `deploy` is nowhere in it.
+    const frames = recording("reject").map((f) => structuredClone(f));
+    for (const { msg } of frames)
+      if (msg["method"] === "session/request_permission")
+        msg["params"].toolCall.rawInput.command = `echo sample-one ${"x".repeat(300_000)}`;
+    const peer = new RecordedPeer(frames, MODEL);
+    const { events, outcome } = run(peer);
+    expect(await outcome).toBe("rejected");
+    expect(answers(peer)).toEqual(["reject"]);
+    expect(events.some((e) => e.type === "approval_request")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "result", outcome: "rejected", reason: "approval_input_too_large" });
+  });
+
   it("rejects a tool the run does not offer without asking anyone", async () => {
     // The reject recording, with OpenCode asking to run a tool that cannot be denied in its config.
     const frames = JSON.parse(

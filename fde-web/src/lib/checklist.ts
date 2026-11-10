@@ -16,6 +16,8 @@ export type Fix =
   | "criteria"
   /** Scroll to the Access card and focus it. */
   | "access"
+  /** The Access card's blank request form. */
+  | "request-access"
 
 export type Hint = {
   /** What is missing, in a sentence. */
@@ -70,6 +72,12 @@ export function hintFor(key: string, p: Project): Hint | undefined {
         fix: { do: "add-criterion", label: "Add criterion" },
       }
     case "access_granted": {
+      // The API counts no requests as met, so this is for a view that has not caught up with a request removed or not yet read.
+      if (p.access.length === 0)
+        return {
+          missing: "No access has been requested yet.",
+          fix: { do: "request-access", label: "Request access" },
+        }
       const waiting = p.access.filter((a) => a.status !== "granted").length
       return {
         missing:

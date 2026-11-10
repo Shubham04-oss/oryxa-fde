@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { ApiError, api, queries } from "@/lib/api/client"
+import { commitAccess } from "@/lib/access"
 import type { AccessRequestOut, AccessState, ProjectScope } from "@/lib/api/schemas"
 import { reason } from "@/lib/task-move"
 import { ACCESS_LABEL } from "@/lib/today"
@@ -9,7 +10,7 @@ import { ACCESS_LABEL } from "@/lib/today"
 export type AccessRefusal = { access: AccessRequestOut; to: AccessState; why: string }
 
 /**
- * Changes an access request's status from Today, with the same honesty as a task move: the row
+ * Changes an access request's status, on Today or on the project page, with the same honesty as a task move: the row
  * shows "moving" until the API answers, and a refusal leaves it where it was.
  */
 export function useAccessMover({ onSaved }: { onSaved?: (access: AccessRequestOut) => void } = {}) {
@@ -30,32 +31,7 @@ export function useAccessMover({ onSaved }: { onSaved?: (access: AccessRequestOu
         system: access.system ?? null,
         status: to,
       })
-      // A read of Today sent before the write would land after it with the old status: drop it.
-      await queryClient.cancelQueries({ queryKey: queries.today().queryKey })
-      queryClient.setQueryData(
-        queries.today().queryKey,
-        (old) =>
-          old && {
-            ...old,
-            items: old.items.map((item) =>
-              item.kind === "access_request" && item.access.id === saved.id
-                ? { ...item, access: saved }
-                : item,
-            ),
-          },
-      )
-      queryClient.setQueryData(
-        queries.project(scope).queryKey,
-        (old) => old && { ...old, access: old.access.map((a) => (a.id === saved.id ? saved : a)) },
-      )
-      void queryClient.invalidateQueries({ queryKey: queries.today().queryKey })
-      // ponytail: the API puts the tasks blocked on a granted request back to do a moment later, by
-      // an event. One more read after a few seconds shows it; a push from the API would replace this.
-      if (to === "granted")
-        setTimeout(
-          () => void queryClient.invalidateQueries({ queryKey: queries.today().queryKey }),
-          3000,
-        )
+      await commitAccess(queryClient, scope, saved, access.status)
       say(`Marked “${access.description}” ${ACCESS_LABEL[to].toLowerCase()}.`)
       onSaved?.(saved)
     } catch (e) {
