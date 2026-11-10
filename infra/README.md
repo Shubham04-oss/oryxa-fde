@@ -260,24 +260,29 @@ Entrypoint `/usr/local/bin/oryxa-fde-ops` in the API image.
 | Subcommand | Variables (Read at) | In dev |
 | --- | --- | --- |
 | `migrate` | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` as `oryxa_fde_migrator`, and `AWS_REGION` (`store/src/lib.rs:261`, `iam.rs:82`); `MIGRATION_DATABASE_URL` for local runs only (`lib.rs:267`) | the `oryxa-fde-dev-migrate` task sets all five; its role may connect as the migrator only |
-| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:293`, `ops.rs:30`) | not deployed: no task definition |
+| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:299`, `ops.rs:30`) | not deployed: no task definition |
 
 ### Not deployed
 
 These have no image and no task definition yet; the facts for the issue that adds them. Each also needs
-`AWS_REGION` and `RUST_LOG` as above. None of them can be started on ECS until the code gap in the first row is closed.
+`AWS_REGION` and `RUST_LOG` as above. Each reaches the database as the API does (`Store::from_env`,
+`store/src/lib.rs:299`): IAM tokens when `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are all set
+(they win over `DATABASE_URL`), else `DATABASE_URL` for local runs only; a half-set `DB_*` or a missing
+token stops startup. A task role may `rds-db:connect` as its own user only, so each worker needs its
+own login, which the bootstrap does not have yet: `oryxa_fde_ingest` and `oryxa_fde_mcp` take
+`oryxa_fde_app` only, `oryxa_fde_lifecycle` takes `oryxa_fde_app` and `oryxa_fde_grants` (its
+cross-tenant scan, `store/src/engine.rs:443`), each granted without inheritance (#129).
 
 | Binary | Variables (Read at) | Permissions it will need |
 | --- | --- | --- |
-| `oryxa-fde-ingest` | `DATABASE_URL` (`oryxa-fde-context/src/bin/ingest.rs:38`: **a password URL, no IAM auth; the API stream must switch it to `Store::from_env()`** before it can run on ECS), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:39`, as the API), `EVENT_SIGNING_KID` (`:41`), `EVENT_PUBLIC_KEY` (`:43`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:45`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
-| `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
-| `oryxa-fde-mcp` | `DATABASE_URL` (`oryxa-fde-mcp/src/bin/mcp.rs:27`: same code gap as ingest), `SPICEDB_ENDPOINT` (`:29`), `SPICEDB_PRESHARED_KEY` (`:30`), `WORKOS_API_KEY` (`:34`), `WORKOS_CLIENT_ID` (`:35`), `MCP_ALLOWED_HOSTS` (`:40`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:39`); optional `WORKOS_ISSUER` (`:37`), `LISTEN_ADDR` (`:46`, default `0.0.0.0:8081`) | as the API's database, S3 read and embedding permissions; a route to it (its own load balancer listener or service, or a second tunnel route), which dev does not have |
+| `oryxa-fde-ingest` | `DB_*` as its own login (`oryxa-fde-context/src/bin/ingest.rs:39`), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:40`, as the API), `EVENT_SIGNING_KID` (`:42`), `EVENT_PUBLIC_KEY` (`:44`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:46`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as `oryxa_fde_ingest`; the queue's bus subscriber |
+| `oryxa-fde-lifecycle` | `DB_*` as its own login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as `oryxa_fde_lifecycle` |
+| `oryxa-fde-mcp` | `DB_*` as its own login (`oryxa-fde-mcp/src/bin/mcp.rs:28`), `SPICEDB_ENDPOINT` (`:30`), `SPICEDB_PRESHARED_KEY` (`:31`), `WORKOS_API_KEY` (`:35`), `WORKOS_CLIENT_ID` (`:36`), `MCP_ALLOWED_HOSTS` (`:41`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:40`); optional `WORKOS_ISSUER` (`:38`), `LISTEN_ADDR` (`:47`, default `0.0.0.0:8081`) | as the API's S3 read and embedding permissions; `rds-db:connect` as `oryxa_fde_mcp`; a route to it (its own load balancer listener or service, or a second tunnel route), which dev does not have |
 | `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
 
-The two `DATABASE_URL` readers are a code change (`Store::connect` to `Store::from_env`), not a
-rename; it is on issue #108 for the API stream. Until the ingest worker runs, nothing extracts, chunks or
-embeds an uploaded document (only that worker does: `context/src/ingest.rs:1`, `context/src/lib.rs:124`),
-so M1's "document search" step finds nothing for new uploads.
+Until the ingest worker runs, nothing extracts, chunks or embeds an uploaded document (only that
+worker does: `context/src/ingest.rs:1`, `context/src/lib.rs:124`), so M1's "document search" step
+finds nothing for new uploads.
 
 ## Apply order
 
