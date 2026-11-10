@@ -406,6 +406,17 @@ function seed() {
             due: -12,
             assignee: JONAH,
           }),
+          task("tsk_k7", "Sign the data processing terms with the customer", "done", 20, {
+            assignee: RIYA,
+          }),
+          task("tsk_k8", "Pick the two pilot depots", "done", 16, { assignee: JONAH }),
+          task("tsk_k9", "Write the first depot rules summary", "done", 9, { assignee: RIYA }),
+          task("tsk_k10", "Run the first planner replay on sample orders", "done", 6, {
+            assignee: JONAH,
+          }),
+          task("tsk_k11", "Share the pilot plan with the dispatchers", "done", 3, {
+            assignee: RIYA,
+          }),
         ],
         decisions: [
           decision(
@@ -834,6 +845,75 @@ function today(): S["TodayOut"] {
   return { items }
 }
 
+const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
+let taskCount = 0
+
+// A plain string of 1 to `max` characters, as the API's `Name` and `Text` types take it.
+const plain = (value: unknown, max: number, lines: boolean) =>
+  typeof value === "string" &&
+  [...value.trim()].length >= 1 &&
+  [...value.trim()].length <= max &&
+  // eslint-disable-next-line no-control-regex
+  !(lines ? /[\u0000-\u0008\u000b-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/).test(value.trim())
+
+/** `POST`, `PUT` and `DELETE` on a project's tasks, with the checks the API makes on a task. */
+async function taskRoutes(
+  method: string,
+  taskId: string | undefined,
+  found: CompanySeed,
+  tasks: Array<S["TaskOut"]>,
+  request: Request,
+) {
+  const at = taskId === undefined ? -1 : tasks.findIndex((t) => t.id === taskId)
+  if (method === "DELETE" && taskId !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    tasks.splice(at, 1)
+    return new Response(null, { status: 204 })
+  }
+  const adding = method === "POST" && taskId === undefined
+  if (!adding && !(method === "PUT" && taskId !== undefined)) return null
+  const body = (await request.json().catch(() => null)) as Partial<S["TaskBody"]> | null
+  if (!body) return refuse(400, "invalid")
+  const status = TASK_STATES.find((one) => one === body.status)
+  if (!plain(body.title, 200, false)) return refuse(400, "invalid_title")
+  if (!status) return refuse(400, "invalid_status")
+  const blocker = body.blocker ?? null
+  if (blocker !== null && !plain(blocker, 4000, true)) return refuse(400, "invalid_blocker")
+  const due = body.due_on ?? null
+  if (due !== null && !/^\d{4}-\d{2}-\d{2}$/.test(due)) return refuse(400, "invalid_due_on")
+  const assignee = body.assignee ?? null
+  if (assignee !== null && !found.members.some((m) => m.user === assignee))
+    return refuse(400, "invalid_assignee")
+  const waitingOn = body.waiting_on ?? null
+  if (waitingOn !== null && !found.stakeholders.some((x) => x.id === waitingOn))
+    return refuse(400, "invalid_waiting_on")
+  const blockedBy = body.blocked_by ?? null
+  if (status === "blocked" && blocker === null) return refuse(409, "rejected_blocker_required")
+  if (blockedBy !== null && status !== "blocked")
+    return refuse(409, "rejected_blocked_by_needs_blocked")
+  if (!adding && at < 0) return refuse(404, "not_found")
+
+  const now = new Date().toISOString()
+  const before = adding ? undefined : tasks[at]
+  const saved: S["TaskOut"] = {
+    id: before?.id ?? `tsk_new${++taskCount}`,
+    title: body.title!.trim(),
+    status,
+    blocker: blocker?.trim() ?? null,
+    due_on: due,
+    assignee,
+    waiting_on: waitingOn,
+    // The API keeps the first time a task started waiting.
+    waiting_since: status === "waiting_on_customer" ? (before?.waiting_since ?? now) : null,
+    blocked_by: blockedBy,
+    created_at: before?.created_at ?? now,
+    updated_at: now,
+  }
+  if (before) tasks[at] = saved
+  else tasks.push(saved)
+  return json(saved, adding ? 201 : 200)
+}
+
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
@@ -865,6 +945,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "systems") return json(found.systems)
     return null
   }
+  if (record === "tasks") return taskRoutes(method, rest[0], found, p.records.tasks, request)
   if (method === "PUT" && record === "stage") {
     const body = (await request.json().catch(() => null)) as Partial<S["StageBody"]> | null
     const to = STAGES.find((stage) => stage === body?.stage)
@@ -887,6 +968,10 @@ async function answer(request: Request): Promise<Response> {
   }
   if (!pathname.startsWith("/api/v1/")) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
+  // Dev and test only, like everything here: `globalThis.__fdeMockFailWrites = true` makes every write
+  // answer 503, so the failed-save states can be seen and tested. A production build has no mock.
+  if (method !== "GET" && (globalThis as Record<string, unknown>).__fdeMockFailWrites === true)
+    return refuse(503, "unavailable")
   const [root, ...parts] = pathname.slice("/api/v1/".length).split("/")
   if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())

@@ -30,6 +30,7 @@ export const ScopeItemId = id<"ScopeItemId">()
 export const CriterionId = id<"CriterionId">()
 export const AccessRequestId = id<"AccessRequestId">()
 export const TaskId = id<"TaskId">()
+export type TaskId = z.infer<typeof TaskId>
 export const DecisionId = id<"DecisionId">()
 
 /** Every project-scoped call takes both ids, as `ProjectScope` does in `oryxa-fde-core`. */
