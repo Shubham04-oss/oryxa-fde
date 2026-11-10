@@ -157,12 +157,17 @@ export type StakeholderOut = z.infer<typeof StakeholderOut>
 export const MemberRole = z.enum(["lead", "engineer"])
 export type MemberRole = z.infer<typeof MemberRole>
 
-/** A lead or engineer on a company. The API names them by id only (`user` is a WorkOS user id). */
-export const MemberOut = z.object({ user: UserId, role: MemberRole, added_at: instant })
+/** A lead or engineer on a company: `user` is a WorkOS user id, `name` their name when WorkOS has one. */
+export const MemberOut = z.object({
+  user: UserId,
+  name: z.string().nullish(),
+  role: MemberRole,
+  added_at: instant,
+})
 export type MemberOut = z.infer<typeof MemberOut>
 
-/** An engineer assigned to a project. */
-export const AssigneeOut = z.object({ user: UserId, added_at: instant })
+/** An engineer assigned to a project, with their name when WorkOS has one. */
+export const AssigneeOut = z.object({ user: UserId, name: z.string().nullish(), added_at: instant })
 export type AssigneeOut = z.infer<typeof AssigneeOut>
 
 export const SystemOut = z.object({

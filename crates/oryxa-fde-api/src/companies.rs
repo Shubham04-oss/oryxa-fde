@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 
 use crate::authz::{company, project, rel, user, workspace};
+use crate::people::Names;
 use crate::projects::ProjectSummaryOut;
 use crate::records::{name, text};
 use crate::{ApiError, App, ErrorBody, Principal, ts};
@@ -188,13 +189,17 @@ pub struct MemberIn {
 pub struct MemberOut {
     /// WorkOS user id.
     pub user: String,
+    /// Their first and last name in WorkOS; `null` when it has neither, they have left the
+    /// organisation, or WorkOS cannot be reached.
+    pub name: Option<String>,
     pub role: MemberRole,
     pub added_at: String,
 }
 
-impl From<Member> for MemberOut {
-    fn from(m: Member) -> Self {
+impl MemberOut {
+    fn new(m: Member, names: &Names) -> Self {
         Self {
+            name: names.of(m.user.as_str()),
             user: m.user.to_string(),
             role: m.role.into(),
             added_at: ts(m.added_at),
@@ -304,7 +309,7 @@ pub(crate) async fn update(
     Ok(Json(updated.into()))
 }
 
-/// The company's leads and engineers.
+/// The company's leads and engineers, with their names.
 #[utoipa::path(get, operation_id = "list_members", path = "/v1/companies/{company}/members", tag = "companies",
     params(("company" = String, Path, description = "Company id")),
     responses((status = 200, body = [MemberOut]), (status = 403, body = ErrorBody)))]
@@ -318,7 +323,8 @@ pub(crate) async fn members(
     let mut tx = app.store.company(&scope).await?;
     let list = tx.members().await?;
     tx.commit().await?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    let names = app.names(&who).await;
+    Ok(Json(list.into_iter().map(|m| MemberOut::new(m, &names)).collect()))
 }
 
 /// Invite a user of the organisation to the company, or change their role.

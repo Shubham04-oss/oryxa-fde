@@ -1391,7 +1391,7 @@
         "tags": [
           "companies"
         ],
-        "summary": "The company's leads and engineers.",
+        "summary": "The company's leads and engineers, with their names.",
         "operationId": "list_members",
         "parameters": [
           {
@@ -2133,7 +2133,7 @@
         "tags": [
           "projects"
         ],
-        "summary": "Users assigned to the project.",
+        "summary": "Users assigned to the project, with their names.",
         "operationId": "list_assignees",
         "parameters": [
           {
@@ -7718,6 +7718,60 @@
         }
       }
     },
+    "/v1/people": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "The organisation's own people (its admins and members in WorkOS), by name: whom a lead can add\nto a company, and the names behind the user ids in any answer. Needs `access` to the\norganisation's workspace; guests and customer people are neither listed nor allowed to list.\nNo emails. 503 when WorkOS cannot answer, never a partial list.",
+        "operationId": "list_people",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonOut"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/room/companies/{company}/projects/{project}": {
       "get": {
         "tags": [
@@ -8595,6 +8649,13 @@
         "properties": {
           "added_at": {
             "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Their first and last name in WorkOS; `null` when it has neither, they have left the\norganisation, or WorkOS cannot be reached."
           },
           "user": {
             "type": "string",
@@ -9518,6 +9579,13 @@
           "added_at": {
             "type": "string"
           },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Their first and last name in WorkOS; `null` when it has neither, they have left the\norganisation, or WorkOS cannot be reached."
+          },
           "role": {
             "$ref": "#/components/schemas/MemberRole"
           },
@@ -9571,6 +9639,25 @@
           "admin",
           "member"
         ]
+      },
+      "PersonOut": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "WorkOS user id."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "First and last name, or `null` when WorkOS has neither."
+          }
+        }
       },
       "ProjectBody": {
         "type": "object",
@@ -11538,6 +11625,10 @@
     {
       "name": "auth",
       "description": "Browser sign-in, the session cookie and who is signed in"
+    },
+    {
+      "name": "people",
+      "description": "The organisation's people and their names"
     },
     {
       "name": "context",

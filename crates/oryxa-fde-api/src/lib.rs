@@ -34,6 +34,7 @@ pub mod health;
 pub mod integrations;
 mod lifecycle;
 mod meetings;
+mod people;
 mod plan;
 mod projects;
 pub mod reads;
@@ -50,6 +51,7 @@ pub use authz::{reconcile_grants, run_reconciler};
 pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
+pub use people::Person;
 pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -179,6 +181,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(share::unsubscribe))
         .routes(routes!(share::room))
         .routes(routes!(session::me))
+        .routes(routes!(people::list))
         .routes(routes!(session::login))
         .routes(routes!(session::callback))
         .routes(routes!(session::logout))
@@ -317,6 +320,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         (name = "records", description = "Company stakeholders and systems; the organisation's security answers"),
         (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
         (name = "auth", description = "Browser sign-in, the session cookie and who is signed in"),
+        (name = "people", description = "The organisation's people and their names"),
         (name = "context", description = "A company's documents and search over them"),
         (name = "planning", description = "Canvases and their shape links, comment threads and meeting notes, \
             for a company and for each project"),
