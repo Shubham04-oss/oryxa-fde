@@ -30,15 +30,14 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          # On a PR HEAD is the merge commit, so HEAD^1..HEAD is exactly the PR's changes.
+          # On a PR HEAD is the merge commit, so HEAD^1..HEAD is exactly the PR's changes. The skip list and the
+          # diff live in a script so test-rust-changed.sh can run them without compiling anything.
           rust=true
-          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD); then
-            echo "$files"
-            if ! grep -Eq '^(crates/|vendor/|Cargo\.|rust-toolchain\.toml$|deny\.toml$|schema/|\.github/)' <<<"$files"; then
-              rust=false
-            fi
+          if [ "$EVENT" = pull_request ] && out=$(bash .github/scripts/rust-changed.sh); then
+            echo "$out"
+            case $out in rust=false) rust=false ;; esac
           fi
-          # Fails closed: a diff error or any other event leaves rust=true.
+          # Fails closed: only an explicit rust=false skips; a script error or any other event runs everything.
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
 
   lint:
@@ -231,7 +230,9 @@ jobs:
       - run: tofu -chdir=infra/envs/dev validate
       # Plans the environment and each module on mock providers and asserts the security rules.
       - run: tofu -chdir=infra/envs/dev test
-      - run: shellcheck infra/scripts/*.sh
+      - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
+      # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
+      - run: bash .github/scripts/test-rust-changed.sh
       # Every workflow, with shellcheck over their run scripts.
       - name: actionlint
         run: |
