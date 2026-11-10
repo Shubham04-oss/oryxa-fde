@@ -87,3 +87,37 @@ output "agent_model_target" {
   description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
   value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null
 }
+
+output "ingest_env_names" {
+  description = "Names, never values, of the variables the ingest worker gets. The contract test compares them with infra/README.md."
+  value = {
+    plain  = module.ingest.plain_env_names
+    secret = module.ingest.secret_env_names
+  }
+}
+
+output "lifecycle_env_names" {
+  description = "The same for the lifecycle worker; null while update_model is null and the worker is not deployed."
+  value = local.lifecycle_on ? {
+    plain  = module.lifecycle[0].plain_env_names
+    secret = module.lifecycle[0].secret_env_names
+  } : null
+}
+
+output "event_subscribers" {
+  description = "What infra/scripts/create-subscriber.sh needs for each worker: the delivery role, and the queue each subscriber feeds. The lifecycle subscriber is created only once its worker is deployed."
+  value = {
+    delivery_role = module.eventbridge.delivery_role_arn
+    consumers     = { for c in ["context-ingestion", "lifecycle"] : c => module.queue[c].url }
+  }
+}
+
+output "company_keys" {
+  description = "Input of infra/scripts/company-key.sh: `tofu output -json company_keys > <file>`. Holds ARNs and the key policy, no secret."
+  value       = module.company_keys.config
+}
+
+output "company_key_alias_arn_prefix" {
+  description = "Append a company id for the alias the API names on write and looks up (the API stream's COMPANY_KEY_ALIAS_ARN_PREFIX, once its code reads it)."
+  value       = module.company_keys.alias_arn_prefix
+}

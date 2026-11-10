@@ -22,8 +22,8 @@ a release.
 | Rust build output and registry | `Swatinem/rust-cache` with `cache-targets: true`, one entry per job |
 | pnpm store (`fde-web`) | `actions/setup-node` with `cache: pnpm` |
 | npm (`sandbox/*`) | `actions/setup-node` with `cache: npm` |
-| OpenTofu providers | `actions/cache` on `TF_PLUGIN_CACHE_DIR` |
-| Docker images | pulled each run |
+| OpenTofu providers | `actions/cache/restore` on `TF_PLUGIN_CACHE_DIR` in every run; only `main` saves it (`actions/cache/save`, after `init`) |
+| Docker images | pulled each run; the sandbox image is built with no layer cache (below) |
 
 Rust jobs get the first row from one step after the toolchain:
 `- uses: ./.github/actions/rust-cache` with a `shared-key` of the job's own (`lint`, `test`,
@@ -79,6 +79,17 @@ for required checks, but a filtered-out workflow leaves them pending. A diff err
 error runs everything, and every push to `main` runs everything. A failed write of the log line to stderr cannot
 change the answer. `.github/scripts/test-rust-changed.sh` tests the filter against made-up change lists, a real rename
 and an unwritable stderr; the `infra` job runs it on every PR.
+
+The `sandbox-image` job (build the linux/amd64 sandbox image from `sandbox/image/Dockerfile`, then run
+`sandbox/image/test/real-image.sh` on it) has its own filter, `.github/scripts/sandbox-changed.sh`, the opposite shape
+of the Rust one: it runs when a changed path is under `sandbox/` (the Docker build context), is
+`.github/workflows/ci.yml` or is under `.github/scripts/`, and skips otherwise. It fails closed the same way (an empty
+diff, a diff error or any other event runs it, and every push to `main` runs it), it skips on a job-level `if`, so the
+check still reports, and `test-sandbox-changed.sh` tests it in the `infra` job. The job takes no secrets and pushes
+nothing; its image and containers are named with the run id and removed in an `if: always()` step. It builds without a
+layer cache: the base images are pinned by digest, apt reads a fixed `snapshot.debian.org` timestamp and the harness
+installs from its lockfile, so a cache would only add a way to hide a pin that no longer resolves. If the build gets
+slow, cache layers the way the Rust caches work, written only from `main`.
 
 `check` is the required status check. It stays as a small job over `lint` (fmt, clippy) and `test` (unit and
 live tests) that passes when both passed or were skipped, so the required name never changes when the Rust

@@ -18,11 +18,12 @@ env:
 
 jobs:
   changes:
-    # Whether any Rust-relevant file changed. The Rust jobs skip on a job-level `if` (never workflow-level
-    # `paths:`), so a required check still reports. main pushes always run everything.
+    # Whether any Rust-relevant file changed, and whether the sandbox image job must run. Those jobs skip on a
+    # job-level `if` (never workflow-level `paths:`), so a required check still reports. main pushes always run everything.
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      sandbox: ${{ steps.sandbox.outputs.sandbox }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,6 +41,17 @@ jobs:
           fi
           # Fails closed: only an explicit rust=false skips; a script error or any other event runs everything.
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      - id: sandbox
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # The same shape for the sandbox image job (.github/scripts/sandbox-changed.sh, tested by test-sandbox-changed.sh).
+          sandbox=true
+          if [ "$EVENT" = pull_request ] && out=$(bash .github/scripts/sandbox-changed.sh); then
+            echo "$out"
+            case $out in sandbox=false) sandbox=false ;; esac
+          fi
+          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
 
   lint:
     needs: changes
@@ -189,6 +201,41 @@ jobs:
             exit 1
           fi
 
+  sandbox-image:
+    # The linux/amd64 sandbox image, built the way the gateway's wrangler.jsonc builds it, and the real-image checks
+    # on it (ADR 0004, "The gate's tests"; sandbox/image/test/real-image.sh). No secrets, no registry: the image is
+    # built and tested on the runner and removed. Skips like the Rust jobs, so a required check still reports.
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: fde-sandbox-${{ github.run_id }}-${{ github.run_attempt }}
+      NAME_PREFIX: fde-real-image-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same Dockerfile, platform and build context (sandbox/) as wrangler.jsonc's containers.images.sandbox. The base
+      # images and apt are pinned (digest, apt snapshot, lockfile), so no layer cache is used: a cached layer could
+      # hide a pin that no longer resolves.
+      - name: Build the image
+        run: |
+          start=$SECONDS
+          docker build --platform linux/amd64 --tag "$IMAGE" --file sandbox/image/Dockerfile sandbox
+          echo "build took $((SECONDS - start)) s"
+          docker image inspect "$IMAGE" --format 'architecture {{.Architecture}}, {{.Size}} bytes unpacked'
+      # Containers have no network, mounts or credentials, and are named with the run id; the script removes them on exit.
+      - name: Real-image checks
+        run: bash sandbox/image/test/real-image.sh "$IMAGE"
+      - name: Remove containers and image
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter "name=$NAME_PREFIX")
+          if [ -n "$ids" ]; then
+            # shellcheck disable=SC2086 # container ids never contain whitespace
+            docker rm -f $ids
+          fi
+          docker rmi -f "$IMAGE" || true
+
   deny:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -222,20 +269,33 @@ jobs:
         run: |
           echo "TF_PLUGIN_CACHE_DIR=$HOME/.cache/opentofu/plugins" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.cache/opentofu/plugins"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      # Restore only: a pull request never writes a cache (docs/ci.md); main saves it after init.
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        id: provider-cache
         with:
           path: ~/.cache/opentofu/plugins
           key: opentofu-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('infra/envs/*/.terraform.lock.hcl') }}
       - run: tofu fmt -check -recursive infra
       - run: tofu -chdir=infra/envs/dev init -backend=false -input=false -lockfile=readonly
+      - if: github.ref == 'refs/heads/main' && steps.provider-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/opentofu/plugins
+          key: ${{ steps.provider-cache.outputs.cache-primary-key }}
       - run: tofu -chdir=infra/envs/dev validate
       # Plans the environment and each module on mock providers and asserts the security rules.
       - run: tofu -chdir=infra/envs/dev test
       - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
       # The smoke test against a stub on a loopback port (bash, curl, jq and python3, all on the runner).
       - run: bash infra/scripts/test-smoke-test.sh
+      # The worker subscriber script against a fake aws, and each filter against the events its worker's code handles.
+      - run: bash infra/scripts/test-create-subscriber.sh
+      # The company-key script against a fake aws (bash, jq and python3, all on the runner).
+      - run: bash infra/scripts/test-company-key.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
+      # The same for the sandbox image job's filter.
+      - run: bash .github/scripts/test-sandbox-changed.sh
       # The skip list against the Rust sources: a path Rust reads from outside crates/ and vendor/ must run the Rust
       # jobs. The test proves the check catches a skip list that gets one wrong.
       - run: bash .github/scripts/test-rust-reads-check.sh

@@ -11,12 +11,17 @@
 //! `SLACK_SECRET_PREFIX` (`oryxa-fde/<env>/slack/`) is where tenants' Slack bot tokens are, read
 //! only; without it no approved update is posted to Slack. It calls AWS (SQS, Bedrock, SES, Secrets
 //! Manager) and Slack's API, through the integrations' host allowlist.
+//!
+//! On SIGTERM or SIGINT it stops receiving, finishes the message in hand and any drafts and digest
+//! round in progress, then exits 0. Past the container's stop timeout it is killed: the message
+//! comes back after its visibility timeout, and the rules and the drafts allow it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use oryxa_events::Verifier;
 use oryxa_fde_events::inbox::sqs;
+use oryxa_fde_events::shutdown::on_signal;
 use oryxa_fde_integrations::outbound::Outbound;
 use oryxa_fde_integrations::secrets::SecretsManager;
 use oryxa_fde_integrations::slack::SlackApp;
@@ -42,6 +47,7 @@ async fn main() -> Result<(), Error> {
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+    let stop = on_signal()?;
     let store = Store::from_env().await?;
     let verifier = Verifier::default().trust(
         env("EVENT_SIGNING_KID")?,
@@ -63,7 +69,8 @@ async fn main() -> Result<(), Error> {
     };
 
     let (drafts_store, drafts) = (store.clone(), drafter.clone());
-    tokio::spawn(async move {
+    let drafts_stop = stop.clone();
+    let rounds = tokio::spawn(async move {
         loop {
             let now = time::OffsetDateTime::now_utc();
             match draft_due(&drafts_store, drafts.as_ref(), now.date(), &DraftLimits::default()).await {
@@ -78,7 +85,11 @@ async fn main() -> Result<(), Error> {
                     Err(e) => tracing::warn!(error = %e, "weekly digest failed"),
                 }
             }
-            tokio::time::sleep(DRAFT_EVERY).await;
+            // Between rounds only: a digest stopped mid-round could mail a sponsor twice.
+            tokio::select! {
+                () = drafts_stop.cancelled() => return,
+                () = tokio::time::sleep(DRAFT_EVERY) => {}
+            }
         }
     });
 
@@ -99,10 +110,17 @@ async fn main() -> Result<(), Error> {
     let queue = env("LIFECYCLE_QUEUE_URL")?;
     let client = aws_sdk_sqs::Client::new(&aws);
     tracing::info!("lifecycle engine running");
-    sqs::run(client, queue, |msg| {
-        let (store, verifier, poster) = (&store, &verifier, poster.as_ref());
-        async move { handle_with(store, verifier, poster, &msg).await }
-    })
+    sqs::run(
+        client,
+        queue,
+        |msg| {
+            let (store, verifier, poster) = (&store, &verifier, poster.as_ref());
+            async move { handle_with(store, verifier, poster, &msg).await }
+        },
+        stop.cancelled_owned(),
+    )
     .await;
+    rounds.await?;
+    tracing::info!("stopped");
     Ok(())
 }

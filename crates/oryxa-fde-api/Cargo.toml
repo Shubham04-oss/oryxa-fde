@@ -27,11 +27,13 @@ oryxa-events.workspace = true
 oryxa-fde-agent = { path = "../oryxa-fde-agent" }
 oryxa-fde-context.workspace = true
 oryxa-fde-core.workspace = true
-oryxa-fde-events.workspace = true
+oryxa-fde-events = { workspace = true, features = ["shutdown"] }
 oryxa-fde-integrations.workspace = true
 oryxa-fde-store.workspace = true
 # Jitter for WorkOS retries; already in the tree.
 rand = "0.8"
+# The health check's one loopback request; already in the tree through the integrations and agent crates.
+reqwest = { version = "0.12", default-features = false }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true

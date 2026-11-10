@@ -11,6 +11,10 @@ create extension if not exists vector;
 --   oryxa_fde_api is the API at runtime. It is a member of oryxa_fde_runtime only, owns nothing and
 --     can never reach the owner, so it can never turn row-level security off.
 --   spicedb is SpiceDB's login.
+--   oryxa_fde_ingest, oryxa_fde_lifecycle and oryxa_fde_mcp are the workers' (#130, lead decision: no
+--     worker connects as oryxa_fde_api). Each is a member of the transaction roles it needs, none
+--     inherited, so a worker reaches a table only inside a transaction that took the role. They own
+--     nothing and cannot create roles, like the API.
 -- The NOLOGIN roles are made here, so no login needs CREATEROLE: oryxa_fde_app and oryxa_fde_relay
 -- are what each transaction takes (SET LOCAL ROLE), oryxa_fde_grants is the SpiceDB grant
 -- reconciler's, and migration 0003 grants all three to oryxa_fde_runtime without inheritance.
@@ -18,13 +22,16 @@ select 'create role oryxa_fde_migrator login nosuperuser nocreaterole nocreatedb
 where not exists (select from pg_roles where rolname = 'oryxa_fde_migrator') \gexec
 select 'create role oryxa_fde_api login nosuperuser nocreaterole nocreatedb nobypassrls'
 where not exists (select from pg_roles where rolname = 'oryxa_fde_api') \gexec
+select format('create role %I login nosuperuser nocreaterole nocreatedb nobypassrls', r)
+from unnest(array['oryxa_fde_ingest', 'oryxa_fde_lifecycle', 'oryxa_fde_mcp']) as r
+where not exists (select from pg_roles where rolname = r) \gexec
 select format('create role %I nologin', r)
 from unnest(array['oryxa_fde_app', 'oryxa_fde_relay', 'oryxa_fde_grants', 'oryxa_fde_runtime']) as r
 where not exists (select from pg_roles where rolname = r) \gexec
 select 'create role spicedb login'
 where not exists (select from pg_roles where rolname = 'spicedb') \gexec
 
-grant rds_iam to oryxa_fde_migrator, oryxa_fde_api, spicedb;
+grant rds_iam to oryxa_fde_migrator, oryxa_fde_api, spicedb, oryxa_fde_ingest, oryxa_fde_lifecycle, oryxa_fde_mcp;
 
 -- The migrator creates the schema and grants the transaction roles onward: migration 0001 to its
 -- own login, migration 0003 to oryxa_fde_runtime. Both need the admin option.
@@ -36,6 +43,13 @@ grant oryxa_fde_app, oryxa_fde_relay, oryxa_fde_grants to oryxa_fde_migrator wit
 grant usage on schema public to oryxa_fde_api;
 grant oryxa_fde_runtime to oryxa_fde_api;
 
+-- The workers: the transaction role each takes (SET LOCAL ROLE), without inheriting it. The lifecycle
+-- worker also takes oryxa_fde_grants for its cross-tenant scan. Not the relay role: only the API's
+-- outbox relay publishes. `with inherit false` also resets a grant an earlier run made differently.
+grant usage on schema public to oryxa_fde_ingest, oryxa_fde_lifecycle, oryxa_fde_mcp;
+grant oryxa_fde_app to oryxa_fde_ingest, oryxa_fde_lifecycle, oryxa_fde_mcp with inherit false, set true;
+grant oryxa_fde_grants to oryxa_fde_lifecycle with inherit false, set true;
+
 -- SpiceDB's datastore, reachable by its owner only. The RDS master is not a superuser: it takes
 -- the spicedb role just long enough to create the database and close it to everyone else.
 grant spicedb to current_user;
@@ -46,19 +60,20 @@ revoke connect on database spicedb from public;
 reset role;
 revoke spicedb from current_user;
 
--- The FDE database: the master (owner), the migrator and the API only.
+-- The FDE database: the master (owner), the migrator, the API and the workers only.
 revoke connect on database oryxa_fde from public;
-grant connect on database oryxa_fde to oryxa_fde_migrator, oryxa_fde_api;
+grant connect on database oryxa_fde to oryxa_fde_migrator, oryxa_fde_api, oryxa_fde_ingest, oryxa_fde_lifecycle, oryxa_fde_mcp;
 
--- Fail closed: stop if the API login, or any role it can reach by SET ROLE or inheritance, could
--- act as an owner, create roles or skip row-level security. On a database an earlier bootstrap
--- left with the API as owner, run infra/sql/02-api-owns-nothing.sql first.
+-- Fail closed: stop if the API login, a worker login, or any role one of them can reach by SET ROLE or
+-- inheritance, could act as an owner, create roles or skip row-level security. On a database an earlier
+-- bootstrap left with the API as owner, run infra/sql/02-api-owns-nothing.sql first.
 do $$
 declare
     bad text;
 begin
-    select string_agg(format('%s (%s)', r.rolname, why), ', ' order by r.rolname) into bad
-    from pg_roles r
+    select string_agg(format('%s -> %s (%s)', l.login, r.rolname, why), ', ' order by l.login, r.rolname) into bad
+    from unnest(array['oryxa_fde_api', 'oryxa_fde_ingest', 'oryxa_fde_lifecycle', 'oryxa_fde_mcp']) as l(login)
+    cross join pg_roles r
     cross join lateral (values
         (r.rolsuper, 'superuser'),
         (r.rolcreaterole, 'createrole'),
@@ -71,9 +86,9 @@ begin
         (has_schema_privilege(r.oid, 'public', 'create'), 'create on public'),
         (exists (select from pg_auth_members m where m.member = r.oid and m.admin_option), 'admin option')
     ) as v(failed, why)
-    where pg_has_role('oryxa_fde_api', r.oid, 'member') and v.failed;
+    where pg_has_role(l.login, r.oid, 'member') and v.failed;
     if bad is not null then
-        raise exception 'oryxa_fde_api can reach a role with owner powers: %', bad;
+        raise exception 'a login can reach a role with owner powers: %', bad;
     end if;
 end
 $$;

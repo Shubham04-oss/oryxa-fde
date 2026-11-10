@@ -277,6 +277,54 @@ async fn drain<P: Publisher>(store: &Store, signer: &Signer, publisher: &P, t: &
     panic!("relay did not drain");
 }
 
+/// Asks the relay to stop while it sends a row of `group`, as a SIGTERM in the middle of a round.
+struct StopDuringSend {
+    group: String,
+    stop: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    ok: Arc<MemoryPublisher>,
+}
+
+impl Publisher for StopDuringSend {
+    async fn send(&self, entry: Encoded) -> Result<(), PublishError> {
+        if entry.group == self.group
+            && let Some(stop) = self.stop.lock().unwrap().take()
+        {
+            let _ = stop.send(());
+        }
+        self.ok.send(entry).await
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_relay_asked_to_stop_mid_round_commits_the_round_and_then_returns() {
+    let _turn = RELAY_TESTS.lock().await;
+    let store = store().await;
+    let (signer, _) = keys();
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let publisher = StopDuringSend {
+        group: c.event_group(),
+        stop: std::sync::Mutex::new(Some(stop)),
+        ok: Arc::default(),
+    };
+    let sent = publisher.ok.clone();
+    let run = crate::relay::run(store.clone(), signer, publisher, async {
+        let _ = stopped.await;
+    });
+    tokio::time::timeout(Duration::from_secs(30), run)
+        .await
+        .expect("the relay returns once its round is done");
+    // The row whose send asked to stop was still committed as published, and sent once.
+    let rows = outbox(&store, &t).await;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].3, "published");
+    let ours = sent.sent().into_iter().filter(|e| e.group == c.event_group()).count();
+    assert_eq!(ours, 1);
+}
+
 #[tokio::test]
 #[ignore = "needs Postgres (DATABASE_URL)"]
 async fn relay_signs_and_publishes_in_order_with_the_row_id_and_scope_group() {
@@ -1750,7 +1798,18 @@ async fn the_bootstrap_makes_every_role_and_the_migrator_needs_no_other() {
     let made = roles_like(&mut master, &ours).await;
     assert_eq!(
         made,
-        ["api", "app", "grants", "migrator", "relay", "runtime"].map(role),
+        [
+            "api",
+            "app",
+            "grants",
+            "ingest",
+            "lifecycle",
+            "mcp",
+            "migrator",
+            "relay",
+            "runtime"
+        ]
+        .map(role),
         "the bootstrap makes every role"
     );
 

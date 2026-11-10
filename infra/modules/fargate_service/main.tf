@@ -1,6 +1,6 @@
 # One main container on Fargate (ARM64) in private subnets, plus optional sidecars: task definition,
 # its own log group, roles and security group, and optionally the ECS service. Used for oryxa-fde-api
-# (with the cloudflared sidecar), SpiceDB and the one-off tasks.
+# (with the cloudflared sidecar), the queue workers, SpiceDB and the one-off tasks.
 #
 # Secrets are Secrets Manager ARNs that ECS injects at task start; the execution role may read
 # exactly those ARNs (the main container's and the sidecars'), and decrypt only through Secrets
@@ -164,6 +164,16 @@ variable "single_task" {
   description = "Replace in place on deploy (min 0 %, max 100 %) instead of starting the new task first."
   type        = bool
   default     = false
+}
+
+variable "stop_timeout" {
+  description = "Seconds ECS waits after SIGTERM before it kills the main container (2 to 120 on Fargate). Null: ECS's default, 30."
+  type        = number
+  default     = null
+  validation {
+    condition     = var.stop_timeout == null || (var.stop_timeout >= 2 && var.stop_timeout <= 120)
+    error_message = "stop_timeout must be 2 to 120 seconds on Fargate."
+  }
 }
 
 variable "read_only_root" {
@@ -338,6 +348,7 @@ resource "aws_ecs_task_definition" "this" {
     entryPoint             = var.entry_point
     command                = var.command
     readonlyRootFilesystem = var.read_only_root
+    stopTimeout            = var.stop_timeout
     portMappings           = var.port == null ? [] : [{ containerPort = var.port, protocol = "tcp" }]
     environment            = [for k in sort(keys(var.environment)) : { name = k, value = var.environment[k] }]
     secrets = [for k in sort(keys(var.secrets)) : {
