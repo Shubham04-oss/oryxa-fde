@@ -1,10 +1,12 @@
-# One container on Fargate (ARM64) in private subnets: task definition, its own log group, roles
-# and security group, and optionally the ECS service. Used for oryxa-fde-api, SpiceDB, cloudflared
-# and the one-off db-admin task.
+# One main container on Fargate (ARM64) in private subnets, plus optional sidecars: task definition,
+# its own log group, roles and security group, and optionally the ECS service. Used for oryxa-fde-api
+# (with the cloudflared sidecar), SpiceDB and the one-off tasks.
 #
 # Secrets are Secrets Manager ARNs that ECS injects at task start; the execution role may read
-# exactly those ARNs, and decrypt only through Secrets Manager. The values never reach config or
-# state. The security group starts closed: every ingress and egress rule is named by the caller.
+# exactly those ARNs (the main container's and the sidecars'), and decrypt only through Secrets
+# Manager. The values never reach config or state. The security group starts closed: every ingress
+# and egress rule is named by the caller. Containers of one task share a network namespace, so a
+# sidecar reaches the main container on localhost and needs no security group rule for it.
 
 variable "name" {
   description = "Prefix for roles, log group, security group and task family, e.g. oryxa-fde-dev-api."
@@ -118,8 +120,31 @@ variable "task_policies" {
   default     = {}
 }
 
+variable "health_check" {
+  description = "Container health check of the main container (a command run inside it, exit 0 = healthy). ECS replaces a task whose essential container fails it, and a rollout waits for it. Null: none."
+  type = object({
+    command      = list(string)
+    interval     = optional(number, 10)
+    timeout      = optional(number, 5)
+    retries      = optional(number, 3)
+    start_period = optional(number, 30)
+  })
+  default = null
+}
+
+variable "sidecars" {
+  description = "Extra essential containers in the same task, keyed by container name. They start only after the main container is healthy (or started, if it has no health check) and stop before it."
+  type = map(object({
+    image        = string
+    command      = optional(list(string))
+    secrets      = optional(map(object({ arn = string })), {})
+    stop_timeout = optional(number)
+  }))
+  default = {}
+}
+
 variable "load_balancer" {
-  description = "Target group to register the task in. The object stays known while its ARN is not."
+  description = "Target group to register the task in (for an environment that fronts the service with the internal_alb module; dev does not). The object stays known while its ARN is not."
   type        = object({ target_group_arn = string })
   default     = null
 }
@@ -155,6 +180,18 @@ data "aws_region" "current" {}
 
 locals {
   region = data.aws_region.current.region
+
+  # Every secret any container of the task is injected with, for the execution role.
+  all_secrets = concat(values(var.secrets), flatten([for c in values(var.sidecars) : values(c.secrets)]))
+
+  log_configuration = { for name in concat([var.container_name], keys(var.sidecars)) : name => {
+    logDriver = "awslogs"
+    options = {
+      awslogs-group         = aws_cloudwatch_log_group.this.name
+      awslogs-region        = local.region
+      awslogs-stream-prefix = name
+    }
+  } }
 }
 
 resource "aws_cloudwatch_log_group" "this" {
@@ -186,15 +223,15 @@ data "aws_iam_policy_document" "execution" {
   }
 
   dynamic "statement" {
-    for_each = length(var.secrets) > 0 ? [1] : []
+    for_each = length(local.all_secrets) > 0 ? [1] : []
     content {
       actions   = ["secretsmanager:GetSecretValue"]
-      resources = distinct([for s in values(var.secrets) : s.arn])
+      resources = distinct([for s in local.all_secrets : s.arn])
     }
   }
 
   dynamic "statement" {
-    for_each = length(var.secrets) > 0 ? [1] : []
+    for_each = length(local.all_secrets) > 0 ? [1] : []
     content {
       actions   = ["kms:Decrypt"]
       resources = [var.kms_key_arn]
@@ -294,7 +331,7 @@ resource "aws_ecs_task_definition" "this" {
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode(concat([{
     name                   = var.container_name
     image                  = var.image
     essential              = true
@@ -307,15 +344,34 @@ resource "aws_ecs_task_definition" "this" {
       name      = k
       valueFrom = var.secrets[k].key == null ? var.secrets[k].arn : "${var.secrets[k].arn}:${var.secrets[k].key}::"
     }]
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        awslogs-group         = aws_cloudwatch_log_group.this.name
-        awslogs-region        = local.region
-        awslogs-stream-prefix = var.container_name
-      }
+    healthCheck = var.health_check == null ? null : {
+      command     = concat(["CMD"], var.health_check.command)
+      interval    = var.health_check.interval
+      timeout     = var.health_check.timeout
+      retries     = var.health_check.retries
+      startPeriod = var.health_check.start_period
     }
-  }])
+    logConfiguration = local.log_configuration[var.container_name]
+    }], [
+    for name in sort(keys(var.sidecars)) : {
+      name                   = name
+      image                  = var.sidecars[name].image
+      essential              = true
+      command                = var.sidecars[name].command
+      readonlyRootFilesystem = var.read_only_root
+      environment            = []
+      secrets = [for k in sort(keys(var.sidecars[name].secrets)) : {
+        name      = k
+        valueFrom = var.sidecars[name].secrets[k].arn
+      }]
+      stopTimeout = var.sidecars[name].stop_timeout
+      dependsOn = [{
+        containerName = var.container_name
+        condition     = var.health_check == null ? "START" : "HEALTHY"
+      }]
+      logConfiguration = local.log_configuration[name]
+    }
+  ]))
 }
 
 resource "aws_ecs_service" "this" {
@@ -395,4 +451,32 @@ output "plain_env_names" {
 output "secret_env_names" {
   description = "Env names injected from Secrets Manager, for tests."
   value       = toset(keys(var.secrets))
+}
+
+output "containers" {
+  description = "The task's container definitions, decoded (names, health check, dependencies, secret ARNs; never values), for tests."
+  value       = jsondecode(aws_ecs_task_definition.this.container_definitions)
+}
+
+output "secret_arns" {
+  description = "Secrets the execution role may read, for tests."
+  value       = toset([for s in local.all_secrets : s.arn])
+}
+
+output "ingress_sources" {
+  description = "Security groups admitted to the container port, for tests."
+  value       = toset(keys(var.ingress))
+}
+
+output "egress_names" {
+  description = "Names of the outbound rules, for tests."
+  value       = toset(keys(var.egress))
+}
+
+output "deployment" {
+  description = "Rolling deployment limits (percent of desired_count), for tests. Null for a one-off task."
+  value = var.run_as_service ? {
+    minimum_healthy_percent = aws_ecs_service.this[0].deployment_minimum_healthy_percent
+    maximum_percent         = aws_ecs_service.this[0].deployment_maximum_percent
+  } : null
 }

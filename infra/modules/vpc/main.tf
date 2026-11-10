@@ -1,7 +1,7 @@
 # The environment's VPC, adapted from oryxa-platform infra/modules/vpc (2b064a3) without the
 # connector tier. Two subnet tiers, each in two AZs:
 #   public   IGW route. Only the NAT instance.
-#   private  default route to the NAT instance. Every task, the internal ALB and Postgres.
+#   private  default route to the NAT instance. Every task and Postgres.
 # Nothing accepts traffic from the internet: no security group here or in the services has a CIDR
 # ingress rule wider than the VPC itself.
 

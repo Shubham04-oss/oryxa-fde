@@ -28,7 +28,12 @@ locals {
 
   # Tasks reach AWS APIs, image registries and WorkOS over HTTPS through the NAT instance.
   https_out = { https = { port = 443, cidr = "0.0.0.0/0" } }
-  db_out    = { postgres = { port = 5432, security_group_id = module.db.security_group_id } }
+  # The tunnel connector dials out to Cloudflare on 7844 through the NAT; nothing dials in.
+  tunnel_out = {
+    tunnel-tcp = { port = 7844, protocol = "tcp", cidr = "0.0.0.0/0" }
+    tunnel-udp = { port = 7844, protocol = "udp", cidr = "0.0.0.0/0" }
+  }
+  db_out = { postgres = { port = 5432, security_group_id = module.db.security_group_id } }
 
   # Optional API features, on while their variable is set (variables.tf). Off, the API starts without
   # them and no secret or permission for them exists.
@@ -58,7 +63,7 @@ locals {
     "api/slack-client-secret"      = "Slack app client secret: oryxa-fde-api"
     "api/slack-signing-secret"     = "Slack app signing secret (16+ bytes): oryxa-fde-api"
     "shared/spicedb-preshared-key" = "SpiceDB preshared key: SpiceDB and oryxa-fde-api"
-    "cloudflared/tunnel-token"     = "Cloudflare Tunnel token: cloudflared"
+    "cloudflared/tunnel-token"     = "Cloudflare Tunnel token: the cloudflared sidecar of the oryxa-fde-api task"
   }
 
   # Env name => secret the API task gets it from (the API contract, infra/README.md).
@@ -89,7 +94,7 @@ locals {
   api_environment = merge(
     {
       AWS_REGION         = local.region
-      LISTEN_ADDR        = "0.0.0.0:${var.api_port}"
+      LISTEN_ADDR        = "127.0.0.1:${var.api_port}" # the tunnel sidecar is the only client
       DB_HOST            = module.db.address
       DB_PORT            = tostring(module.db.port)
       DB_NAME            = local.db_name
@@ -156,14 +161,14 @@ module "network" {
   cidr                = var.vpc_cidr
   interface_endpoints = var.interface_endpoints
   nat_https_clients = {
-    api         = module.api.security_group_id
-    spicedb     = module.spicedb.security_group_id
-    cloudflared = module.cloudflared.security_group_id
-    db_admin    = module.db_admin.security_group_id
-    migrate     = module.migrate.security_group_id
-    zed         = module.zed.security_group_id
+    api      = module.api.security_group_id
+    spicedb  = module.spicedb.security_group_id
+    db_admin = module.db_admin.security_group_id
+    migrate  = module.migrate.security_group_id
+    zed      = module.zed.security_group_id
   }
-  nat_tunnel_clients = { cloudflared = module.cloudflared.security_group_id }
+  # The tunnel connector is the API task's sidecar, so the API's group is the one that dials out.
+  nat_tunnel_clients = { api = module.api.security_group_id }
 }
 
 resource "aws_service_discovery_private_dns_namespace" "this" {
@@ -266,17 +271,6 @@ resource "aws_ecr_lifecycle_policy" "api" {
   })
 }
 
-module "alb" {
-  source                   = "../../modules/internal_alb"
-  name                     = "${local.prefix}-api"
-  vpc_id                   = module.network.vpc_id
-  subnet_ids               = local.subnets
-  clients                  = { cloudflared = module.cloudflared.security_group_id }
-  target_security_group_id = module.api.security_group_id
-  target_port              = var.api_port
-  health_check_path        = var.api_health_check_path
-}
-
 data "aws_iam_policy_document" "api" {
   source_policy_documents = [module.eventbridge.publish_policy_json]
 
@@ -340,9 +334,13 @@ data "aws_iam_policy_document" "api" {
   }
 }
 
-# Reached only through the internal ALB. The environment is the API contract in infra/README.md (read
-# from the code; tests/plan.tftest.hcl checks this task against that table), except the database: IAM
-# database auth (lead decision on #37), so DB_* replace the DATABASE_URL that local and test runs use.
+# One task, two containers: the API, and cloudflared, the Workers VPC tunnel's connector. They share a
+# network namespace, so the tunnel reaches the API on 127.0.0.1 and the API listens nowhere else: no
+# security group admits anything to this task, and there is no load balancer. cloudflared starts only
+# once the API's own health check passes, stops before it, and a task that fails either is replaced.
+# The environment is the API contract in infra/README.md (read from the code; tests/plan.tftest.hcl
+# checks this task against that table), except the database: IAM database auth (lead decision on #37),
+# so DB_* replace the DATABASE_URL that local and test runs use.
 module "api" {
   source              = "../../modules/fargate_service"
   name                = "${local.prefix}-api"
@@ -353,18 +351,28 @@ module "api" {
   ecr_repository_arns = [aws_ecr_repository.api.arn]
   cpu                 = var.api_cpu
   memory              = var.api_memory
-  port                = var.api_port
   kms_key_arn         = aws_kms_key.this.arn
   vpc_id              = module.network.vpc_id
   subnet_ids          = local.subnets
-  ingress             = { alb = module.alb.security_group_id }
-  egress = merge(local.https_out, local.db_out, {
+  egress = merge(local.https_out, local.db_out, local.tunnel_out, {
     spicedb = { port = 50051, security_group_id = module.spicedb.security_group_id }
   })
-  environment        = local.api_environment
-  secrets            = { for env, k in local.api_secrets : env => { arn = local.secret_arn[k] } }
-  task_policies      = { api = data.aws_iam_policy_document.api.json }
-  load_balancer      = { target_group_arn = module.alb.target_group_arn }
+  environment   = local.api_environment
+  secrets       = { for env, k in local.api_secrets : env => { arn = local.secret_arn[k] } }
+  task_policies = { api = data.aws_iam_policy_document.api.json }
+  # busybox is in the image for this alone (infra/docker/oryxa-fde-api.Dockerfile); the image has no shell.
+  health_check = {
+    command = ["/usr/local/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${var.api_port}${var.api_health_check_path}"]
+  }
+  sidecars = {
+    cloudflared = {
+      image   = var.cloudflared_image
+      command = ["tunnel", "--no-autoupdate", "run"]
+      secrets = { TUNNEL_TOKEN = { arn = local.secret_arn["cloudflared/tunnel-token"] } }
+      # cloudflared drains requests in flight for 30 s after SIGTERM; ECS kills it at stop_timeout.
+      stop_timeout = 45
+    }
+  }
   desired_count      = local.desired
   log_retention_days = var.log_retention_days
 }
@@ -416,28 +424,6 @@ module "spicedb" {
   service_registry   = { arn = aws_service_discovery_service.spicedb.arn }
   desired_count      = local.desired
   single_task        = true # one task: never two against the same datastore during a deploy
-  log_retention_days = var.log_retention_days
-}
-
-# The Workers VPC tunnel's connector. Outbound only: HTTPS and the tunnel port through the NAT, and
-# HTTP to the internal ALB. It has no task role permissions.
-module "cloudflared" {
-  source         = "../../modules/fargate_service"
-  name           = "${local.prefix}-cloudflared"
-  cluster_arn    = aws_ecs_cluster.this.arn
-  container_name = "cloudflared"
-  image          = var.cloudflared_image
-  command        = ["tunnel", "--no-autoupdate", "run"]
-  secrets        = { TUNNEL_TOKEN = { arn = local.secret_arn["cloudflared/tunnel-token"] } }
-  kms_key_arn    = aws_kms_key.this.arn
-  vpc_id         = module.network.vpc_id
-  subnet_ids     = local.subnets
-  egress = merge(local.https_out, {
-    tunnel-tcp = { port = 7844, protocol = "tcp", cidr = "0.0.0.0/0" }
-    tunnel-udp = { port = 7844, protocol = "udp", cidr = "0.0.0.0/0" }
-    alb        = { port = 80, security_group_id = module.alb.security_group_id }
-  })
-  desired_count      = local.desired
   log_retention_days = var.log_retention_days
 }
 
@@ -543,11 +529,11 @@ module "cloudtrail" {
 # ---------------------------------------------------------------- cloudflare
 
 module "cloudflare" {
-  source              = "../../modules/cloudflare"
-  account_id          = var.cloudflare_account_id
-  zone_id             = var.cloudflare_zone_id
-  name                = local.prefix
-  domain              = var.domain
-  api_origin_hostname = module.alb.dns_name
-  admin_emails        = var.admin_emails
+  source       = "../../modules/cloudflare"
+  account_id   = var.cloudflare_account_id
+  zone_id      = var.cloudflare_zone_id
+  name         = local.prefix
+  domain       = var.domain
+  api_port     = var.api_port
+  admin_emails = var.admin_emails
 }
