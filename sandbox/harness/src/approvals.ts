@@ -25,7 +25,10 @@ export function compileRules(rules: readonly ApprovalRule[]): CompiledRule[] {
   return rules.map((rule) => ({ ...rule, regex: rule.pattern === undefined ? undefined : new RegExp(rule.pattern) }));
 }
 
-/** The first rule that covers this tool call: its tool name, and its pattern over the command or JSON input. */
+/**
+ * The first rule that covers this tool call: its tool name, and its pattern over the command (`Bash`) or any string
+ * value in the input. Never over key names: the harnesses name the same input differently (`file_path` and `path`).
+ */
 // ponytail: matches what the tool call says; an agent can obfuscate a shell command, so a host whose use needs
 // approval should also be held at the outbound handler.
 export function ruleFor(
@@ -33,8 +36,18 @@ export function ruleFor(
   tool: string,
   input: Record<string, unknown>,
 ): CompiledRule | undefined {
-  const subject = tool === "Bash" && typeof input["command"] === "string" ? input["command"] : JSON.stringify(input);
-  return rules.find((rule) => (rule.tool === "*" || rule.tool === tool) && (rule.regex?.test(subject) ?? true));
+  const subjects = tool === "Bash" && typeof input["command"] === "string" ? [input["command"]] : strings(input);
+  return rules.find(
+    (rule) =>
+      (rule.tool === "*" || rule.tool === tool) &&
+      (rule.regex === undefined || subjects.some((s) => rule.regex?.test(s))),
+  );
+}
+
+function strings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (typeof value !== "object" || value === null) return [];
+  return Object.values(value).flatMap(strings);
 }
 
 /** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */

@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Entry point inside the sandbox: `oryxa-harness --pack <path> --sha256 <hex>`. The gateway starts it as root; it
-// reads the root-only pack, starts the agent as `agent` and drops to `harness` (see `agentSpawner`). Events go to
-// stdout, approval decisions and cancellation come in on stdin, and diagnostics go to stderr.
+// reads the root-only pack, makes the sandbox clean for the run (`startClean`), starts the agent as `agent` and drops
+// to `harness` (see `agentSpawner`). Events go to stdout, approval decisions and cancellation come in on stdin, and
+// diagnostics go to stderr.
 import { parseArgs } from "node:util";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { StdioApprovals } from "./approvals.js";
+import { freshHome, HOME_PREFIXES, startClean } from "./clean.js";
 import { EventWriter, type Outcome } from "./events.js";
 import { type BackendDeps, runHarness } from "./harness.js";
 import { type LoadedPack, loadPack } from "./pack.js";
@@ -42,6 +44,14 @@ try {
   fail("invalid_context_pack");
 }
 
+// Before any agent process starts: none from an earlier run is alive, and no earlier run's directories are left.
+try {
+  await startClean();
+} catch (cause) {
+  if (cause instanceof Error) process.stderr.write(`harness: ${cause.message}\n`);
+  fail("unclean_sandbox");
+}
+
 const input = new StdioApprovals(process.stdin);
 const deps: BackendDeps = {
   approvals: input,
@@ -54,5 +64,14 @@ if (backend === "opencode") {
   // Loaded only here, so a Claude run, the only one enabled, never loads the ACP library as root.
   const { runOpenCode, startOpenCode } = await import("./opencode.js");
   outcome = await runOpenCode(loaded, { ...deps, start: startOpenCode(agentSpawner(), process.env) });
-} else outcome = await runHarness(loaded, { ...deps, query, spawn: agentSpawner() });
+} else {
+  let home: string;
+  try {
+    home = await freshHome(HOME_PREFIXES.claude);
+  } catch (cause) {
+    if (cause instanceof Error) process.stderr.write(`harness: ${cause.message}\n`);
+    fail("agent_error");
+  }
+  outcome = await runHarness(loaded, { ...deps, query, spawn: agentSpawner(), home });
+}
 process.exit(EXIT_CODES[outcome]);

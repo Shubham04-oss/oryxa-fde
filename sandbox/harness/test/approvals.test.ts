@@ -6,9 +6,11 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
-import { compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
+import { type ApprovalRule, compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
+import { ruleName } from "../src/opencode-events.js";
 import { loadPack, PACK_LIMITS, parsePack, systemPrompt } from "../src/pack.js";
-import { fixture, samplePack } from "./fakes.js";
+import { recording } from "./acp-peer.js";
+import { fixture, jsonLines, samplePack } from "./fakes.js";
 
 describe("approval rules", () => {
   const { rules } = samplePack();
@@ -27,6 +29,51 @@ describe("approval rules", () => {
 
   it("refuse a pack whose pattern does not compile", () => {
     expect(() => compileRules([{ action: "deploy", tool: "Bash", pattern: "(" }])).toThrow();
+  });
+
+  it("match the same calls on both harnesses, since a pattern matches values and never key names", () => {
+    // The same task recorded on each harness: read, edit, write a test, run it, fix it, run it again.
+    const coding = new Set(["Read", "Edit", "Write", "Bash"]);
+    const sdk = jsonLines(fixture("session.sdk.jsonl"))
+      .flatMap((m) => m.message?.content ?? [])
+      .filter((c) => c.type === "tool_use")
+      .map((c) => ({ tool: c.name as string, input: c.input as Record<string, unknown> }));
+    const opencode = recording("healthz")
+      .filter((f) => f.msg["method"] === "session/request_permission")
+      .map((f) => ({ tool: ruleName(f.msg["params"].toolCall.name), input: f.msg["params"].toolCall.rawInput }));
+    const sessions = { sdk, opencode };
+    const calls = (name: keyof typeof sessions) => sessions[name].filter((c) => coding.has(c.tool));
+    expect(calls("sdk").map((c) => c.tool)).toEqual(["Read", "Edit", "Write", "Bash", "Edit", "Bash"]);
+    expect(calls("opencode").map((c) => c.tool)).toEqual(calls("sdk").map((c) => c.tool));
+
+    const cases: [ApprovalRule, boolean[]][] = [
+      [{ action: "src", tool: "*", pattern: "^/workspace/repo/src/" }, [true, true, false, false, false, false]],
+      [{ action: "tests", tool: "Write", pattern: "\\.test\\.mjs$" }, [false, false, true, false, false, false]],
+      [{ action: "route", tool: "Edit", pattern: "healthz" }, [false, true, false, false, true, false]],
+      // The SDK's model wrote `cd repo && npm test`, OpenCode's `npm test` with a `workdir`.
+      [{ action: "run", tool: "Bash", pattern: "\\bnpm test$" }, [false, false, false, true, false, true]],
+      // Key names differ between harnesses (`file_path` and `path`, `old_string` and `oldString`), so none match.
+      [{ action: "keys", tool: "*", pattern: '"file_path":"/workspace' }, [false, false, false, false, false, false]],
+      [{ action: "keys", tool: "*", pattern: '"path":"/workspace' }, [false, false, false, false, false, false]],
+      [{ action: "keys", tool: "Edit", pattern: "old_?[sS]tring" }, [false, false, false, false, false, false]],
+    ];
+    for (const [rule, expected] of cases)
+      for (const name of ["sdk", "opencode"] as const) {
+        const rules = compileRules([rule]);
+        const matched = calls(name).map((c) => ruleFor(rules, c.tool, c.input) !== undefined);
+        expect(matched, `${rule.pattern} on ${name}`).toEqual(expected);
+      }
+  });
+
+  it("match any string in the input, however deep, and nothing else", () => {
+    const rules = compileRules([{ action: "send", tool: "*", pattern: "^customer@example\\.com$" }]);
+    expect(ruleFor(rules, "mcp__x__send", { to: ["customer@example.com"] })?.action).toBe("send");
+    expect(ruleFor(rules, "mcp__x__send", { message: { to: { address: "customer@example.com" } } })).toBeDefined();
+    expect(ruleFor(rules, "mcp__x__send", { "customer@example.com": true })).toBeUndefined();
+    const numbers = compileRules([{ action: "n", tool: "*", pattern: "^10$" }]);
+    expect(ruleFor(numbers, "Read", { file_path: "/a", offset: 10 })).toBeUndefined();
+    // A rule with no pattern covers every call to its tool.
+    expect(ruleFor(compileRules([{ action: "any", tool: "Read" }]), "Read", {})?.action).toBe("any");
   });
 });
 
