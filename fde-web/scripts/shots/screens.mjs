@@ -15,6 +15,8 @@
 //             `__fdeMockStaleChecklist`, set before the app loads), so the stale-view refusal can be shown
 //   (a screen can make someone else change a record between its open and its save with the mock's
 //   `__fdeMockSomeoneElse`, set from `act`, to show a stale save)
+//   evalsOff  true: the API serves no eval routes, as where no sandbox gateway is set (the mock's
+//             `__fdeMockEvalsOff`, set before the app loads)
 //   signedOut true: no sign-in first (the sign-in screen itself)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
@@ -842,6 +844,209 @@ function staleScreens() {
   ]
 }
 
+// Proof (DESIGN.md §3). Kestrel's dispatch project has three criteria: one met by imported results (with a trend),
+// one not met by runs in the sandbox (one case errored), one with a suite that has not been run. Lumen's forecast is
+// met but three weeks old, and has a criterion no suite measures. Atlas's first-notice project has criteria and no
+// suite at all.
+const LUMEN = "/companies/cmp_lumen/projects/prj_lumen_forecast"
+const proofCard = (page) => page.getByRole("region", { name: "Proof", exact: true })
+const suitesCard = (page) => page.getByRole("region", { name: "Eval suites", exact: true })
+const proofReady = (page) =>
+  proofCard(page).getByRole("list", { name: "Success criteria and their proof" })
+const PROOF = { ready: proofReady, full: false }
+const toProof = toCard(proofCard)
+const toSuites = toCard(suitesCard)
+const suiteItem = (page, name) =>
+  suitesCard(page).getByRole("listitem").filter({ hasText: name }).first()
+async function openSuite(page, name) {
+  await suiteItem(page, name).getByRole("button", { expanded: false }).first().click()
+}
+/** Chooses a CSV in an import dialog from text made here. */
+async function chooseCsv(page, dialogName, name, text) {
+  await dialog(page, dialogName)
+    .getByLabel("CSV file", { exact: true })
+    .setInputFiles({ name, mimeType: "text/csv", buffer: Buffer.from(text) })
+}
+const PLAN_IDS = Array.from({ length: 12 }, (_, i) => `plan-${String(i + 1).padStart(2, "0")}`)
+
+function proofScreens() {
+  return [
+    // The glance: met with a trend, not met, no result yet.
+    { name: "proof-card", path: DISPATCH, ...PROOF, act: toProof },
+    // Met but old, and a criterion nothing measures yet.
+    { name: "proof-stale-and-missing", path: LUMEN, ...PROOF, act: toProof },
+    // Nothing measures any criterion: what to do next.
+    { name: "proof-no-suite", path: ATLAS_FNOL, ...PROOF, act: toProof },
+    // A project with no criteria.
+    {
+      name: "proof-no-criteria",
+      path: KESTREL_CLAIMS,
+      ready: (page) => proofCard(page),
+      full: false,
+      act: toProof,
+    },
+    // Where the API serves no evals: said plainly, no errors.
+    {
+      name: "proof-unavailable",
+      path: DISPATCH,
+      ...PROOF,
+      evalsOff: true,
+      ready: (page) => proofCard(page).getByText(/Evals are not available/),
+      act: toProof,
+    },
+    // The suites: graders, where outputs come from, the runs, and the latest run's counts.
+    {
+      name: "proof-suite-open",
+      path: DISPATCH,
+      ready: (page) => suitesCard(page),
+      full: false,
+      act: async (page) => {
+        await suitesCard(page).getByRole("list", { name: "Eval suites" }).waitFor()
+        await openSuite(page, "Driver-hours rules")
+        await toSuites(page)
+      },
+    },
+    // A failed case: the input, the output (text, whatever it holds) and each grader's reason.
+    {
+      name: "proof-failed-case",
+      path: DISPATCH,
+      ready: (page) => suitesCard(page),
+      full: false,
+      act: async (page) => {
+        await suitesCard(page).getByRole("list", { name: "Eval suites" }).waitFor()
+        await openSuite(page, "Plan acceptance")
+        const open = suiteItem(page, "Plan acceptance")
+        await open.getByRole("button", { name: /^plan-04/ }).click()
+        await open
+          .getByText(/<b>Depot 4<\/b>/)
+          .first()
+          .waitFor()
+        await open.getByRole("button", { name: /^plan-04/ }).scrollIntoViewIfNeeded()
+        await open.getByRole("button", { name: /^plan-04/ }).evaluate((el) => {
+          el.scrollIntoView({ block: "start" })
+          document.querySelector(".app-canvas")?.scrollBy(0, -16)
+        })
+      },
+    },
+    // Started from the web: running until the API says it has finished.
+    {
+      name: "proof-running",
+      path: DISPATCH,
+      ...PROOF,
+      act: async (page) => {
+        await page.evaluate(() => (globalThis.__fdeMockEvalMs = 600000))
+        await proofCard(page).getByRole("button", { name: "Run Time to a first draft" }).click()
+        await proofCard(page)
+          .getByText(/is being graded/)
+          .waitFor()
+        await toProof(page)
+      },
+    },
+    // A new suite: its criteria, graders and where outputs come from.
+    {
+      name: "proof-new-suite",
+      path: LUMEN,
+      ...PROOF,
+      full: false,
+      act: async (page) => {
+        await proofCard(page).getByRole("button", { name: "New eval suite for this" }).click()
+        const box = dialog(page, "New eval suite")
+        await box.waitFor()
+        await box.getByLabel("Name", { exact: true }).fill("Reasons a buyer finds useful")
+        await box.getByRole("combobox", { name: "Grader 1" }).selectOption("judge")
+        await box
+          .getByLabel("Rubric")
+          .fill("Each of the three reasons names a store fact a buyer can check.")
+      },
+    },
+    // A file of results with rows the API would refuse: named by row, nothing sent.
+    {
+      name: "proof-import-refused",
+      path: DISPATCH,
+      ready: (page) => suitesCard(page),
+      full: false,
+      act: async (page) => {
+        await suitesCard(page).getByRole("list", { name: "Eval suites" }).waitFor()
+        await openSuite(page, "Plan acceptance")
+        await suiteItem(page, "Plan acceptance")
+          .getByRole("button", {
+            name: "Import results for Plan acceptance, reviewed by dispatchers",
+          })
+          .click()
+        await chooseCsv(
+          page,
+          "Import results",
+          "results.csv",
+          ["case,output", "plan-01,fine", "plan-01,fine again", "plan-99,fine", "plan 3,fine"].join(
+            "\n",
+          ),
+        )
+        await dialog(page, "Import results")
+          .getByText(/would make the API refuse it/)
+          .waitFor()
+      },
+    },
+    // A file that is fine, with four cases it leaves without an output.
+    {
+      name: "proof-import-ready",
+      path: DISPATCH,
+      ready: (page) => suitesCard(page),
+      full: false,
+      act: async (page) => {
+        await suitesCard(page).getByRole("list", { name: "Eval suites" }).waitFor()
+        await openSuite(page, "Plan acceptance")
+        await suiteItem(page, "Plan acceptance")
+          .getByRole("button", {
+            name: "Import results for Plan acceptance, reviewed by dispatchers",
+          })
+          .click()
+        const rows = PLAN_IDS.slice(0, 8).map((id) => `${id},Plan with every load assigned`)
+        await chooseCsv(page, "Import results", "results.csv", ["case,output", ...rows].join("\n"))
+        await dialog(page, "Import results")
+          .getByText(/have no row/)
+          .waitFor()
+      },
+    },
+    // The API cannot take it: the file stays chosen and the reason is in the dialog.
+    {
+      name: "proof-import-save-refused",
+      path: DISPATCH,
+      ready: (page) => suitesCard(page),
+      full: false,
+      failWrites: true,
+      act: async (page) => {
+        await suitesCard(page).getByRole("list", { name: "Eval suites" }).waitFor()
+        await openSuite(page, "Plan acceptance")
+        await suiteItem(page, "Plan acceptance")
+          .getByRole("button", {
+            name: "Import results for Plan acceptance, reviewed by dispatchers",
+          })
+          .click()
+        await chooseCsv(
+          page,
+          "Import results",
+          "results.csv",
+          ["case,output", "plan-01,fine"].join("\n"),
+        )
+        await dialog(page, "Import results")
+          .getByText(/Read 1 row/)
+          .waitFor()
+        await dialog(page, "Import results")
+          .getByRole("button", { name: "Grade these results", exact: true })
+          .click()
+        await dialog(page, "Import results").getByRole("alert").waitFor()
+      },
+    },
+    // The checklist's eval items lead here.
+    {
+      name: "proof-checklist",
+      path: LUMEN,
+      ready: (page) => page.getByRole("region", { name: "To leave Evaluate" }),
+      full: false,
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -1358,6 +1563,9 @@ export const screens = [
   // The stage checklist and the move that asks for a reason. The checklist sits under the stage
   // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.
   ...checklistScreens(),
+
+  // Proof: each criterion with its eval results, and the suites and runs behind them.
+  ...proofScreens(),
 
   { name: "run-review", path: `${DISPATCH}/runs/run_k2`, ready: (page) => page.getByRole("main") },
   {

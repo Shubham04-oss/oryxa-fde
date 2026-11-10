@@ -2,7 +2,10 @@ import { queryOptions } from "@tanstack/react-query"
 import createClient from "openapi-fetch"
 import { z } from "zod"
 import type { paths as RunPaths } from "./agent-runs.gen"
+import type { paths as EvalPaths } from "./evals.gen"
 import type { paths } from "./fde-api.gen"
+import { EvalRunOut, ProofRoom, SuiteOut } from "./evals"
+import type { EvalRunId, SuiteId } from "./evals"
 import { ApprovalOut, EventsOut, RunOut, isActive, parseEvents } from "./runs"
 import type { AgentRunId, ApprovalId, CreateRun, RunEvent } from "./runs"
 import {
@@ -41,6 +44,7 @@ import type {
   SystemBody,
 } from "../records"
 import type { CriterionBody, ScopeItemBody } from "../scope"
+import type { SuiteBody } from "../suite"
 import type {
   AccessRequestId,
   ChecklistItem,
@@ -152,6 +156,17 @@ export const SAFE_TEXT: Record<string, string> = {
   rejected_blocker_required: "Say what is blocking it.",
   rejected_blocked_by_needs_blocked: "Only a blocked task can name an access request.",
   rejected_over_budget: "This project's agent budget is used up.",
+  invalid_suite:
+    "That suite was refused. Check its name, its criteria (they must be this project's), each grader and the target.",
+  invalid_csv:
+    "That file was refused. It needs a header row with the right columns, and every row must be well formed.",
+  invalid_cases:
+    "Those cases were refused. A case id is used once in a suite, and a case can name only the suite's own criteria.",
+  invalid_case: "That file names a case that is not in this suite.",
+  rejected_no_target:
+    "This suite has no target command, so it cannot be run. Import results to grade instead.",
+  rejected_no_cases: "This suite has no cases yet. Add some from a CSV first.",
+  rejected_conflict: "A case in that file is already in the suite.",
   rejected_ended: "This run has already ended.",
   rejected_not_pending: "This approval is no longer waiting for a decision.",
   rejected_already_decided: "Someone has already decided this approval.",
@@ -248,6 +263,9 @@ function connect(transport: Transport) {
   const auth = createClient<paths>({ baseUrl: origin(), ...options })
   // Agent runs are served by the same API, from their own spec (crates/oryxa-fde-agent/openapi.json).
   const runs = createClient<RunPaths>({ baseUrl: `${origin()}/api`, ...options })
+  // Eval suites and runs too, from theirs (crates/oryxa-fde-agent/openapi.evals.json). Both are mounted only
+  // where the sandbox gateway is configured: elsewhere these routes answer 404.
+  const evals = createClient<EvalPaths>({ baseUrl: `${origin()}/api`, ...options })
 
   /** One call's answer, parsed; a refusal throws an `ApiError`. */
   async function read<T>(
@@ -295,8 +313,38 @@ function connect(transport: Transport) {
     return refusal(response.status, body)
   }
 
+  /** One CSV to an eval suite's `cases` or `results`, sent as the file it is; the answer's JSON, or a refusal. */
+  async function sendCsv(
+    scope: ProjectScope,
+    suite: SuiteId,
+    to: "cases" | "results",
+    file: Blob,
+    onProgress: (sent: number, total: number) => void,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const path = `companies/${encodeURIComponent(scope.company)}/projects/${encodeURIComponent(scope.project)}/eval-suites/${encodeURIComponent(suite)}/${to}`
+    const response = await transport.upload({
+      url: `${origin()}/api/v1/${path}`,
+      headers: { ...HEADERS, "Content-Type": "text/csv" },
+      body: file,
+      signal,
+      onProgress,
+    })
+    if (response.status === 413)
+      throw new ApiError(413, "payload_too_large", "That file is over the 8 MB limit.")
+    const body: unknown = await response.json().catch(() => null)
+    if (!response.ok) throw refusal(response.status, body)
+    return body
+  }
+
   const company = (id: CompanyId) => ({ params: { path: { company: id } } })
   const project = (scope: ProjectScope) => ({ params: { path: scope } })
+  const suiteOf = (scope: ProjectScope, suite: SuiteId) => ({
+    params: { path: { ...scope, suite } },
+  })
+  const evalRun = (scope: ProjectScope, run: EvalRunId) => ({
+    params: { path: { ...scope, run } },
+  })
   const agentRun = (scope: ProjectScope, run: AgentRunId) => ({
     params: { path: { ...scope, run } },
   })
@@ -823,6 +871,82 @@ function connect(transport: Transport) {
 
     runs: runsOf,
 
+    // ── Proof: eval suites, runs and results ───────────────────────────────
+
+    /** The project's eval suites, newest first. A 404 means this API serves no evals (no sandbox gateway). */
+    evalSuites: (scope: ProjectScope) =>
+      read(
+        z.array(SuiteOut),
+        evals.GET("/v1/companies/{company}/projects/{project}/eval-suites", project(scope)),
+      ),
+
+    /** The project's eval runs, newest first, each with its report once it has finished. */
+    evalRuns: (scope: ProjectScope) =>
+      read(
+        z.array(EvalRunOut),
+        evals.GET("/v1/companies/{company}/projects/{project}/eval-runs", project(scope)),
+      ),
+
+    evalRun: (scope: ProjectScope, id: EvalRunId) =>
+      read(
+        EvalRunOut,
+        evals.GET("/v1/companies/{company}/projects/{project}/eval-runs/{run}", evalRun(scope, id)),
+      ),
+
+    createSuite: (scope: ProjectScope, body: SuiteBody) =>
+      read(
+        SuiteOut,
+        evals.POST("/v1/companies/{company}/projects/{project}/eval-suites", {
+          ...project(scope),
+          body,
+        }),
+      ),
+
+    /** Starts a run of the suite's target in the company's sandbox. The API answers once it is queued, `running`. */
+    startEvalRun: (scope: ProjectScope, suite: SuiteId) =>
+      read(
+        EvalRunOut,
+        evals.POST(
+          "/v1/companies/{company}/projects/{project}/eval-suites/{suite}/runs",
+          suiteOf(scope, suite),
+        ),
+      ),
+
+    /**
+     * Sends a CSV of cases for the suite, as the file it is (`text/csv`), reporting how much has left the browser.
+     * The API takes all of it or none, and answers with the suite as it now is.
+     */
+    async importCases(
+      scope: ProjectScope,
+      suite: SuiteId,
+      file: Blob,
+      onProgress: (sent: number, total: number) => void,
+      signal?: AbortSignal,
+    ) {
+      return SuiteOut.parse(await sendCsv(scope, suite, "cases", file, onProgress, signal))
+    },
+
+    /** Sends a CSV of outputs (columns `case` and `output`) for the API to grade: a run that is `running` once accepted. */
+    async importResults(
+      scope: ProjectScope,
+      suite: SuiteId,
+      file: Blob,
+      onProgress: (sent: number, total: number) => void,
+      signal?: AbortSignal,
+    ) {
+      return EvalRunOut.parse(await sendCsv(scope, suite, "results", file, onProgress, signal))
+    },
+
+    /**
+     * The room's criteria, each with the API's latest value and whether it meets the target. The room is the
+     * customer's view; an FDE with `work` reads it too. This is the one place the API says "met".
+     */
+    room: (scope: ProjectScope) =>
+      read(
+        ProofRoom,
+        client.GET("/v1/room/companies/{company}/projects/{project}", project(scope)),
+      ),
+
     /** A run with its events so far and its approval requests. */
     async run(scope: ProjectScope, id: AgentRunId): Promise<RunDetail> {
       const path = "/v1/companies/{company}/projects/{project}/agent-runs/{run}"
@@ -969,6 +1093,16 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     removeCriterion: async (scope, criterion) => (await use()).removeCriterion(scope, criterion),
     signOffScope: async (scope, stakeholder, version) =>
       (await use()).signOffScope(scope, stakeholder, version),
+    evalSuites: async (scope) => (await use()).evalSuites(scope),
+    evalRuns: async (scope) => (await use()).evalRuns(scope),
+    evalRun: async (scope, id) => (await use()).evalRun(scope, id),
+    createSuite: async (scope, body) => (await use()).createSuite(scope, body),
+    startEvalRun: async (scope, suite) => (await use()).startEvalRun(scope, suite),
+    importCases: async (scope, suite, file, onProgress, signal) =>
+      (await use()).importCases(scope, suite, file, onProgress, signal),
+    importResults: async (scope, suite, file, onProgress, signal) =>
+      (await use()).importResults(scope, suite, file, onProgress, signal),
+    room: async (scope) => (await use()).room(scope),
     runs: async (scope) => (await use()).runs(scope),
     run: async (scope, id) => (await use()).run(scope, id),
     startRun: async (scope, body) => (await use()).startRun(scope, body),
@@ -1013,6 +1147,9 @@ function retry(failures: number, error: unknown) {
 }
 
 const read = { retry }
+
+/** The API answers 404 to the eval routes where it serves none: that is "not available here", not a failed read. */
+export const evalsOff = (error: unknown) => error instanceof ApiError && error.status === 404
 
 export const queries = {
   me: () => queryOptions({ queryKey: ["me"], queryFn: api.me, ...read, staleTime: 60_000 }),
@@ -1088,6 +1225,34 @@ export const queries = {
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project, "runs"],
       queryFn: () => api.runs(scope),
+      ...read,
+    }),
+  /** The project's eval suites. A 404 means evals are not served here (`evalsOff`). */
+  evalSuites: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "eval-suites"],
+      queryFn: () => api.evalSuites(scope),
+      ...read,
+    }),
+  /** The project's eval runs with their reports. Read again by hand, and a running run by `evalRun`. */
+  evalRuns: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "eval-runs"],
+      queryFn: () => api.evalRuns(scope),
+      ...read,
+    }),
+  /** One eval run; the caller polls it while it is `running`, gently (`pollDelay`). */
+  evalRun: (scope: ProjectScope, id: EvalRunId) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "eval-run", id],
+      queryFn: () => api.evalRun(scope, id),
+      ...read,
+    }),
+  /** The API's verdict on each criterion's latest value (the room's criteria). */
+  room: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "room"],
+      queryFn: () => api.room(scope),
       ...read,
     }),
   /** A run, read again every few seconds while it may change; live output arrives in between. */

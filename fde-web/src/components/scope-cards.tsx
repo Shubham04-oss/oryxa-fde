@@ -384,6 +384,7 @@ export function CriteriaCard({
       }
     >
       {criteria.length === 0 ? (
+        // A criterion is written in the customer's terms (#193), even while an eval's share is compared as written.
         <Quiet>
           Say how done is measured: one target the customer can check, such as plans accepted
           unchanged, at least 70%.

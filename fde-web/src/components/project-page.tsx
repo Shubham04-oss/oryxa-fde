@@ -11,6 +11,8 @@ import type { AccessCardHandle } from "./access-card"
 import { DecisionsCard } from "./decisions-card"
 import { NotesCard } from "./notes-card"
 import type { NotesHandle } from "./notes-card"
+import { ProofSection } from "./proof-card"
+import type { ProofHandle } from "./proof-card"
 import { ScopeCard, CriteriaCard } from "./scope-cards"
 import type { CriteriaCardHandle, ScopeCardHandle } from "./scope-cards"
 import { AssigneesCard } from "./team"
@@ -47,6 +49,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const checklist = useQuery(queries.stageChecklist(scope))
   const scopeCard = useRef<ScopeCardHandle>(null)
   const criteriaCard = useRef<CriteriaCardHandle>(null)
+  const proofCard = useRef<ProofHandle>(null)
   const accessCard = useRef<HTMLElement>(null)
   const accessHandle = useRef<AccessCardHandle>(null)
   const notesHandle = useRef<NotesHandle>(null)
@@ -86,7 +89,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     else if (to === "add-in-scope") scopeCard.current?.add("in")
     else if (to === "add-out-of-scope") scopeCard.current?.add("out")
     else if (to === "add-criterion") criteriaCard.current?.add()
-    else if (to === "criteria") criteriaCard.current?.show()
+    else if (to === "proof") proofCard.current?.show()
     else if (to === "request-access") accessHandle.current?.request()
     else if (to === "write-note") notesHandle.current?.write()
     else accessHandle.current?.show()
@@ -186,6 +189,13 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
             signedOff={p.scope.signed_off}
           />
         </div>
+
+        <ProofSection
+          handle={proofCard}
+          scope={scope}
+          criteria={p.scope.criteria}
+          me={me.data?.user.id}
+        />
 
         <AccessCard card={accessCard} handle={accessHandle} scope={scope} project={p} />
 
