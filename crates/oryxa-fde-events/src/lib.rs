@@ -7,6 +7,8 @@
 //! `CompanyScope::event_group`.
 
 pub mod inbox;
+#[cfg(feature = "shutdown")]
+pub mod shutdown;
 
 use oryxa_core::TenantId;
 use oryxa_events::Event;

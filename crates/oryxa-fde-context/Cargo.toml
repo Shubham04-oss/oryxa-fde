@@ -21,7 +21,7 @@ lopdf = { version = "0.47", default-features = false }
 oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
-oryxa-fde-events = { workspace = true, features = ["sqs"] }
+oryxa-fde-events = { workspace = true, features = ["sqs", "shutdown"] }
 oryxa-fde-store.workspace = true
 quick-xml = "0.42"
 serde.workspace = true
