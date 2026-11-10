@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Ellipsis } from "lucide-react"
 import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
+import { FIELD, Footer, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
 import {
   Menu,
   MenuContent,
@@ -14,27 +15,23 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "./ui/menu"
-import { ApiError, api, queries } from "@/lib/api/client"
+import { api, queries } from "@/lib/api/client"
 import type { Project, ProjectScope, StakeholderOut, TaskOut, TaskState } from "@/lib/api/schemas"
 import {
   COLUMNS,
   DONE_SHOWN,
   STATUS_LABEL,
-  asksFirst,
   fieldsOf,
   inColumn,
   isOverdue,
   problem,
   recentDone,
   summarise,
-  toBody,
 } from "@/lib/board"
 import type { Fields } from "@/lib/board"
+import { commitRemoved, reason } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
-
-const FIELD =
-  "w-full rounded-lg border bg-raised px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:border-strong"
 
 const DOT: Record<TaskState, string> = {
   todo: "bg-strong",
@@ -44,19 +41,7 @@ const DOT: Record<TaskState, string> = {
   done: "bg-success",
 }
 
-/** Why a save failed, in words: what the API said, or a short generic line. */
-function reason(error: unknown) {
-  if (error instanceof ApiError) {
-    if (error.status === 404) return "The task is no longer there."
-    if (error.message !== error.code) return error.message
-  }
-  return "Check your connection and try again."
-}
-
-type Dialogs =
-  | { kind: "new"; status: TaskState }
-  | { kind: "edit"; task: TaskOut }
-  | { kind: "ask"; task: TaskOut; to: "blocked" | "waiting_on_customer" }
+type Dialogs = { kind: "new"; status: TaskState } | { kind: "edit"; task: TaskOut }
 
 /**
  * The project's tasks as a board (DESIGN.md §3): one column per status. A card moves by drag, or
@@ -67,92 +52,35 @@ type Dialogs =
 export function Board({ scope, project }: { scope: ProjectScope; project: Project }) {
   const queryClient = useQueryClient()
   const me = useQuery(queries.me())
+  const mover = useTaskMover()
+  const { saving } = mover
   const [dialog, setDialog] = useState<Dialogs | null>(null)
-  // The status each card is on its way to, until the API answers.
-  const [saving, setSaving] = useState<Record<string, TaskState>>({})
   const [dragging, setDragging] = useState<string | null>(null)
   const [over, setOver] = useState<TaskState | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [done, setDone] = useState("")
   // Done is the longest and least urgent column, so it starts collapsed (DESIGN.md §3).
   const [doneOpen, setDoneOpen] = useState(false)
   const [doneAll, setDoneAll] = useState(false)
   const columns = useRef(new Map<TaskState, HTMLElement>())
 
-  const key = queries.project(scope).queryKey
-  async function change(edit: (tasks: Array<TaskOut>) => Array<TaskOut>) {
-    // A read of the board sent before the write would land after it with the old task: drop it.
-    await queryClient.cancelQueries({ queryKey: key })
-    queryClient.setQueryData(key, (old) => old && { ...old, tasks: edit(old.tasks) })
-  }
-  // Today lists the same tasks.
-  const refreshToday = () =>
-    void queryClient.invalidateQueries({ queryKey: queries.today().queryKey })
-
-  const save = useMutation({
-    mutationFn: ({ task, fields }: { task: TaskOut | null; fields: Fields }) =>
-      task ? api.updateTask(scope, task.id, toBody(fields)) : api.addTask(scope, toBody(fields)),
-    async onSuccess(saved) {
-      await change((tasks) =>
-        tasks.some((t) => t.id === saved.id)
-          ? tasks.map((t) => (t.id === saved.id ? saved : t))
-          : [...tasks, saved],
-      )
-      refreshToday()
-    },
-  })
   const remove = useMutation({
     mutationFn: (task: TaskOut) => api.removeTask(scope, task.id),
-    async onSuccess(_, task) {
-      await change((tasks) => tasks.filter((t) => t.id !== task.id))
-      refreshToday()
-    },
+    onSuccess: (_, task) => commitRemoved(queryClient, scope, task),
   })
 
   const people = new Map(project.stakeholders.map((s) => [s.id as string, s.name]))
   const today = localDay()
+  const refused = mover.refusal
+  const error =
+    refused &&
+    `Couldn't move “${refused.task.title}” to ${STATUS_LABEL[refused.to]}. ${refused.why}`
 
-  /** Moves a task that needs no answer, or one whose answer is in `fields`. */
-  async function move(task: TaskOut, fields: Fields) {
-    setError(null)
-    setSaving((s) => ({ ...s, [task.id]: fields.status }))
-    try {
-      await save.mutateAsync({ task, fields })
-      setDone(`Moved “${task.title}” to ${STATUS_LABEL[fields.status]}.`)
-    } catch (e) {
-      setDone("")
-      setError(`Couldn't move “${task.title}” to ${STATUS_LABEL[fields.status]}. ${reason(e)}`)
-      // The task may have changed or gone elsewhere: read the board again.
-      if (e instanceof ApiError && e.status === 404)
-        void queryClient.invalidateQueries({ queryKey: key })
-    } finally {
-      setSaving(({ [task.id]: _, ...rest }) => rest)
-    }
-  }
-
-  function requestMove(task: TaskOut, to: TaskState) {
-    if (to === task.status || saving[task.id]) return
-    if (asksFirst(to)) setDialog({ kind: "ask", task, to })
-    else void move(task, { ...fieldsOf(task), status: to })
-  }
-
-  /** What a dialog's Save does: null when the API confirmed it, or why it did not. */
-  async function submit(task: TaskOut | null, fields: Fields) {
-    try {
-      await save.mutateAsync({ task, fields })
-      setDone(task ? `Saved “${fields.title.trim()}”.` : `Added “${fields.title.trim()}”.`)
-      setError(null)
-      return null
-    } catch (e) {
-      return reason(e)
-    }
-  }
+  const requestMove = (task: TaskOut, to: TaskState) => mover.request(scope, task, to)
 
   async function discard(task: TaskOut) {
     try {
       await remove.mutateAsync(task)
-      setDone(`Deleted “${task.title}”.`)
-      setError(null)
+      mover.say(`Deleted “${task.title}”.`)
+      mover.dismiss()
       return null
     } catch (e) {
       return reason(e)
@@ -205,7 +133,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
       }
     >
       <p role="status" className="sr-only">
-        {done}
+        {mover.announcement}
       </p>
       {error && (
         <p
@@ -213,11 +141,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
           className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-destructive"
         >
           {error}
-          <button
-            type="button"
-            className="text-muted-foreground underline"
-            onClick={() => setError(null)}
-          >
+          <button type="button" className="text-muted-foreground underline" onClick={mover.dismiss}>
             Dismiss
           </button>
         </p>
@@ -329,29 +253,22 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
       )}
 
       <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}>
-        {dialog?.kind === "ask" && (
-          <AskDialog
-            key={dialog.task.id + dialog.to}
-            task={dialog.task}
-            to={dialog.to}
-            people={project.stakeholders}
-            onSave={(fields) => submit(dialog.task, fields)}
-            onClose={() => setDialog(null)}
-          />
-        )}
-        {dialog && dialog.kind !== "ask" && (
+        {dialog && (
           <TaskDialog
             key={dialog.kind === "edit" ? dialog.task.id : "new"}
             task={dialog.kind === "edit" ? dialog.task : null}
             status={dialog.kind === "new" ? dialog.status : "todo"}
             people={project.stakeholders}
             me={me.data?.user.id}
-            onSave={(fields) => submit(dialog.kind === "edit" ? dialog.task : null, fields)}
+            onSave={(fields) =>
+              mover.submit(scope, dialog.kind === "edit" ? dialog.task : null, fields)
+            }
             onDelete={dialog.kind === "edit" ? () => discard(dialog.task) : undefined}
             onClose={() => setDialog(null)}
           />
         )}
       </Dialog>
+      <MoveAsk mover={mover} people={project.stakeholders} />
     </Card>
   )
 }
@@ -642,142 +559,6 @@ function TaskCard({
         </MenuContent>
       </Menu>
     </li>
-  )
-}
-
-function Labelled({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label className="grid gap-1 text-[11px] text-muted-foreground">
-      {label}
-      {children}
-    </label>
-  )
-}
-
-/** The stakeholder choices for a task that waits on the customer. */
-function WaitingOn({
-  value,
-  people,
-  onChange,
-}: {
-  value: string | null
-  people: Array<StakeholderOut>
-  onChange: (id: string | null) => void
-}) {
-  const listed = value === null || people.some((s) => s.id === value)
-  return (
-    <select
-      className={FIELD}
-      value={value ?? ""}
-      onChange={(e) => onChange(e.target.value || null)}
-    >
-      <option value="">No one in particular</option>
-      {!listed && <option value={value}>A stakeholder no longer listed</option>}
-      {people.map((s) => (
-        <option key={s.id} value={s.id}>
-          {s.title ? `${s.name}, ${s.title}` : s.name}
-        </option>
-      ))}
-    </select>
-  )
-}
-
-/** The dialog's buttons and the API's answer to Save, shared by both dialogs. */
-function Footer({
-  busy,
-  error,
-  save,
-  onClose,
-  extra,
-}: {
-  busy: boolean
-  error: string | null
-  save: string
-  onClose: () => void
-  extra?: ReactNode
-}) {
-  return (
-    <>
-      {error && (
-        <p role="alert" className="text-xs text-destructive">
-          {error}
-        </p>
-      )}
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        {extra}
-        <Button type="button" variant="ghost" onClick={onClose} className="max-[800px]:ml-auto">
-          Cancel
-        </Button>
-        <Button type="submit" disabled={busy}>
-          {busy ? "Saving…" : save}
-        </Button>
-      </div>
-    </>
-  )
-}
-
-/** Asks what blocks a task, or who it waits on, before it moves. */
-function AskDialog({
-  task,
-  to,
-  people,
-  onSave,
-  onClose,
-}: {
-  task: TaskOut
-  to: "blocked" | "waiting_on_customer"
-  people: Array<StakeholderOut>
-  onSave: (fields: Fields) => Promise<string | null>
-  onClose: () => void
-}) {
-  const [fields, setFields] = useState<Fields>({ ...fieldsOf(task), status: to, blocker: "" })
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const blocked = to === "blocked"
-
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const bad = problem(fields)
-    if (bad) return setError(bad)
-    setBusy(true)
-    const failed = await onSave(fields)
-    setBusy(false)
-    if (failed) setError(failed)
-    else onClose()
-  }
-
-  return (
-    <DialogContent placement="center" className="p-5">
-      <form onSubmit={(e) => void submit(e)} className="grid gap-3.5 text-xs">
-        <div className="grid gap-1">
-          <DialogTitle className="text-[13px] font-semibold">
-            {blocked ? "What is blocking this?" : "Who is this waiting on?"}
-          </DialogTitle>
-          <DialogDescription className="text-[11px] [overflow-wrap:anywhere] text-muted-foreground">
-            {task.title}
-          </DialogDescription>
-        </div>
-        {blocked ? (
-          <Labelled label="The blocker">
-            <textarea
-              autoFocus
-              className={`${FIELD} min-h-20`}
-              value={fields.blocker}
-              onChange={(e) => setFields({ ...fields, blocker: e.target.value })}
-            />
-          </Labelled>
-        ) : (
-          <Labelled label="Waiting on">
-            <WaitingOn
-              value={fields.waitingOn}
-              people={people}
-              onChange={(waitingOn) => setFields({ ...fields, waitingOn })}
-            />
-          </Labelled>
-        )}
-        <Footer busy={busy} error={error} save={`Move to ${STATUS_LABEL[to]}`} onClose={onClose} />
-      </form>
-    </DialogContent>
   )
 }
 

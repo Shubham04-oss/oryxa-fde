@@ -37,6 +37,15 @@ async function openMenu(page, title) {
   await page.getByRole("menu").waitFor()
 }
 
+const DUE_ROW = "Map intake form fields"
+const BLOCKED_ROW = "Roll out to the north depot crews"
+const todayReady = (page) => page.getByRole("region", { name: "Blocked" })
+/** Opens a Today row's menu, with the keyboard's own key. */
+async function openRowMenu(page, title) {
+  await page.getByRole("button", { name: `Actions for ${title}` }).click()
+  await page.getByRole("menu").waitFor()
+}
+
 const FINE = ["1440", "1024"]
 const ONE = { sizes: ["1440", "390"], themes: ["light"] }
 
@@ -55,6 +64,78 @@ export const screens = [
     ready: (page) => page.getByRole("heading", { name: "Projects" }),
   },
   { name: "project", path: DISPATCH, ready: (page) => board(page) },
+
+  // Today as an inbox: the keyboard on a row, its menu, the two prompts, a refusal and the all clear.
+  {
+    name: "today-keyboard",
+    path: "/today",
+    ready: todayReady,
+    act: async (page) => {
+      await page.keyboard.press("j")
+      await page.keyboard.press("j")
+    },
+  },
+  {
+    name: "today-menu",
+    path: "/today",
+    ready: todayReady,
+    full: false,
+    act: (page) => openRowMenu(page, BLOCKED_ROW),
+  },
+  {
+    name: "today-ask-blocker",
+    path: "/today",
+    ready: todayReady,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await openRowMenu(page, DUE_ROW)
+      await page.getByRole("menuitem", { name: "Mark blocked…" }).click()
+      await page.getByRole("dialog").waitFor()
+    },
+  },
+  {
+    name: "today-ask-waiting",
+    path: "/today",
+    ready: todayReady,
+    ...ONE,
+    full: false,
+    act: async (page) => {
+      await openRowMenu(page, DUE_ROW)
+      await page.getByRole("menuitem", { name: "Waiting on the customer…" }).click()
+      await page.getByRole("dialog").waitFor()
+      await page.locator("option", { hasText: "Owen Price" }).waitFor({ state: "attached" })
+    },
+  },
+  {
+    name: "today-refused",
+    path: "/today",
+    ready: todayReady,
+    failWrites: true,
+    act: async (page) => {
+      await page.getByRole("button", { name: `Done: ${DUE_ROW}` }).click()
+      await page.getByRole("alert").waitFor()
+    },
+  },
+  // Every row acted on with its main action, until Today says it is clear.
+  {
+    name: "today-all-clear",
+    path: "/today",
+    ready: todayReady,
+    ...ONE,
+    act: async (page) => {
+      const clear = page.getByText("Nothing needs you today.")
+      for (let n = 0; n < 400 && !(await clear.isVisible()); n += 1) {
+        const next = page.locator("[data-primary]:not([disabled])").first()
+        if (await next.isVisible()) await next.click()
+        await page.waitForTimeout(80)
+      }
+      if (!(await clear.isVisible())) {
+        const left = await page.locator("[data-row]").allInnerTexts()
+        throw new Error(`rows left: ${left.join(" | ").replace(/\n/g, " ")}`)
+      }
+    },
+  },
 
   // The board's interactions. Overlays are viewport-only (`full: false`).
   {

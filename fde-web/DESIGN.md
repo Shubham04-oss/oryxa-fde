@@ -78,10 +78,52 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - **Companies (home).** Two cards per row (one below 960px): name, industry and the FDE's part
   (Lead, Engineer, or Organisation admin when they reach it as one), each project with its stage,
   and what needs the FDE there today.
-- **Today.** Three cards in a 880px column: **Blocked** (blocked tasks, denied or revoked access),
-  **Due** (open tasks due today or overdue, oldest first) and **Waiting on the customer** (tasks
-  waiting on the customer, open access requests, longest wait first). Each item appears once:
-  blocked wins over waiting, waiting over due. Each row says why it is there.
+- **Today.** An inbox: three cards in an 880px column, **Blocked** (blocked tasks, denied or revoked
+  access), **Due** (open tasks due today or overdue, oldest first) and **Waiting on the customer**
+  (tasks waiting on the customer, open access requests, longest wait first). Each item appears
+  once: blocked wins over waiting, waiting over due. A row says what it is, where it is (company
+  and project) and why it is there, and **acts in place**. The agent runs card follows.
+  - **One action per row, the rest in a menu.** The button is the move most likely wanted for
+    why the row is there; the row's menu (the round dots button) holds the rest and **Open project**.
+    Due: **Done**. Blocked task: **Unblock** (to In progress: the blocker is gone, so work resumes).
+    Waiting task: **Received** (to In progress: the customer answered). A due task that is not yet
+    started finds **Start** in its menu. The menu also has, for a task, **Mark done**, **Mark
+    blocked…**, **Waiting on the customer…** and **Back to to do** (minus the status it is in).
+    Those are the board's five moves, from the same code (`useTaskMover`, `MoveAsk`, `board.ts`).
+  - **Access request rows** change status through `PUT .../access-requests/{id}`, which replaces the
+    request, so everything but the status is sent as it was. The API puts no limit on which status
+    follows which. Open (requested, in progress): **Mark granted**, with **Mark in progress**,
+    **Mark denied** and **Back to requested** in the menu. Denied or revoked: **Ask again** (back to
+    requested, which moves it under Waiting), with **Mark in progress** and **Mark granted**. A
+    granted request leaves Today, and the API's rules put the tasks blocked on it back to do, so
+    Today reads again a few seconds later.
+  - **The two prompts are the board's.** Into Blocked asks what is blocking it (required); into
+    Waiting on the customer asks who, from the project's stakeholders, read when the prompt opens.
+  - **Honest saving, as on the board.** A row that is saving stays where it is, dimmed, its reason
+    line saying "Moving to Done…" (the line count does not change, so nothing shifts) and its buttons
+    off. It leaves or changes group only when the API answers, and a read of Today sent before the
+    write cannot bring it back. A refused action leaves the row where it was and says why in the row,
+    in red, with Dismiss; if the row has gone (deleted elsewhere), the reason is said above the
+    groups instead. A dialog that fails stays open with its reason.
+  - **Keys.** The row is one stop for Tab (its link, its button and its menu; every other row is
+    skipped, so sixty rows are not sixty stops). **J** and **K**, or the arrows once a row has
+    focus, move between rows; **Enter** on a row opens the project; **E** does the row's main action;
+    **M** opens its menu, on its first entry. Nothing is taken while a field, dialog or menu has
+    focus, with Ctrl, Cmd, Alt or Shift held, or by the arrows before any row has focus (they
+    still scroll the page). The keys are shown in a quiet line above the groups (hidden on touch)
+    and **E** shows on the focused row's button. A click anywhere on a row but its buttons opens the
+    project.
+  - **Focus after an action** moves to the row that followed it (the one before, when it was last)
+    once the API confirms, so the keyboard can work down the list. It waits for a prompt to close
+    and does not take focus from someone who has moved elsewhere.
+  - **What is left.** The line above the groups counts everything and says where: "20 need you
+    across 5 companies: 5 blocked, 6 due, 9 waiting on the customer." Groups with none are left out
+    of the parts. "Nothing needs you today." appears only when the API has answered and every group
+    is empty; the three cards stay, each saying what is not there, so the page does not change
+    shape as the last row goes.
+  - **Phones.** The button and menu sit beside the text, at 36px, and the key hints are not shown.
+  - Signals from other tools (ADR 0006) will be more row kinds: a row is a `TodayItem`, its actions
+    come from `actionsOf` (`src/lib/today.ts`), and `TodayRow` draws any of them.
 - **Company.** Profile (summary, industry, region and the FDE's part), then Stakeholders (with
   their part) and Systems (with their kind) side by side (stacked below 960px), then Projects.
 - **Project.** The company link, the summary, the stage bar, the **Board** (the one card that

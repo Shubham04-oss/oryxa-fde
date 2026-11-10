@@ -69,6 +69,7 @@ function task(
     due?: number
     assignee?: string
     blocker?: string
+    blockedBy?: string
     waitingOn?: string
     waitingDays?: number
   } = {},
@@ -82,6 +83,7 @@ function task(
     assignee: extra.assignee ?? null,
     waiting_on: extra.waitingOn ?? null,
     waiting_since: extra.waitingDays === undefined ? null : ago(extra.waitingDays),
+    blocked_by: extra.blockedBy ?? null,
     created_at: ago(daysAgo + 10),
     updated_at: ago(daysAgo),
   }
@@ -514,6 +516,7 @@ function seed() {
             due: 2,
             assignee: JONAH,
             blocker: "Waiting for the intake API access request",
+            blockedBy: "acc_b2",
           }),
         ],
         decisions: [
@@ -686,7 +689,7 @@ function seed() {
           access("acc_c1", "Outage log, read only", "sys_c1", "stk_c2", "granted", 130, 125),
         ],
         tasks: [
-          task("tsk_c1", "Monthly accuracy spot check", "todo", 3, { due: 0, assignee: RIYA }),
+          task("tsk_c1", "Monthly accuracy spot check", "todo", 3, { due: 0, assignee: JONAH }),
           task("tsk_c2", "Handoff notes for the operations team", "done", 30, {
             due: -30,
             assignee: RIYA,
@@ -918,6 +921,67 @@ async function taskRoutes(
   return json(saved, adding ? 201 : 200)
 }
 
+const ACCESS_STATES = ["requested", "in_progress", "granted", "denied", "revoked"] as const
+
+/** `PUT` on an access request: the API replaces it, stamps a status change and sets or clears `granted_at`. */
+async function accessRoutes(
+  method: string,
+  id: string | undefined,
+  found: CompanySeed,
+  records: Records,
+  request: Request,
+) {
+  if (method !== "PUT" || id === undefined) return null
+  const body = (await request.json().catch(() => null)) as Partial<S["AccessRequestBody"]> | null
+  if (!body) return refuse(400, "invalid")
+  const status = ACCESS_STATES.find((one) => one === body.status)
+  if (!status) return refuse(400, "invalid_status")
+  if (!plain(body.description, 4000, true)) return refuse(400, "invalid_description")
+  const owner = body.owner ?? null
+  if (owner !== null && !found.stakeholders.some((x) => x.id === owner))
+    return refuse(400, "invalid_owner")
+  const systemId = body.system ?? null
+  if (systemId !== null && !found.systems.some((x) => x.id === systemId))
+    return refuse(400, "invalid_system")
+  const at = records.access.findIndex((a) => a.id === id)
+  const before = records.access[at]
+  if (!before) return refuse(404, "not_found")
+
+  const now = new Date().toISOString()
+  const changed = before.status !== status
+  const open = status === "requested" || status === "in_progress"
+  const changedAt = changed ? now : before.status_changed_at
+  const grantedAt = !changed
+    ? before.granted_at
+    : status === "granted"
+      ? now
+      : open
+        ? null
+        : before.granted_at
+  const saved: S["AccessRequestOut"] = {
+    id,
+    description: body.description!.trim(),
+    system: systemId,
+    owner,
+    status,
+    requested_at: before.requested_at,
+    status_changed_at: changedAt,
+    granted_at: grantedAt,
+    days_waiting: Math.floor(
+      (Date.parse(open ? now : (grantedAt ?? changedAt)) - Date.parse(before.requested_at)) /
+        86_400_000,
+    ),
+  }
+  records.access[at] = saved
+  // The API's rules put the tasks blocked on a request that is granted back to do, a moment later.
+  if (changed && status === "granted")
+    records.tasks.forEach((t, i) => {
+      if (t.blocked_by !== id) return
+      records.tasks[i] = { ...t, status: "todo", blocker: null, blocked_by: null, updated_at: now }
+    })
+  return json(saved)
+}
+
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
@@ -950,6 +1014,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     return null
   }
   if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
+  if (record === "access-requests") return accessRoutes(method, rest[0], found, p.records, request)
   if (method === "PUT" && record === "stage") {
     const body = (await request.json().catch(() => null)) as Partial<S["StageBody"]> | null
     const to = STAGES.find((stage) => stage === body?.stage)

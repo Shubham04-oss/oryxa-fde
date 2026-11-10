@@ -19,7 +19,17 @@ import {
   TodayOut,
 } from "./schemas"
 import type { TaskBody } from "../board"
-import type { Company, CompanyId, Project, ProjectId, ProjectScope, Stage, TaskId } from "./schemas"
+import type { AccessBody } from "../today"
+import type {
+  AccessRequestId,
+  Company,
+  CompanyId,
+  Project,
+  ProjectId,
+  ProjectScope,
+  Stage,
+  TaskId,
+} from "./schemas"
 
 // The app's only way to the FDE API. Screens use `api` and `queries` and never see where the
 // answers come from. Calls go through a client generated from the API's OpenAPI spec
@@ -264,6 +274,19 @@ function connect(transport: Transport) {
         }),
       ),
 
+    /** Replaces an access request: every field, so a change of status sends them all. */
+    updateAccess: (scope: ProjectScope, access: AccessRequestId, body: AccessBody) =>
+      read(
+        AccessRequestOut,
+        client.PUT("/v1/companies/{company}/projects/{project}/access-requests/{access_request}", {
+          params: { path: { ...scope, access_request: access } },
+          body,
+        }),
+      ),
+
+    /** The people at a project's company, for a prompt that asks who a task waits on. */
+    projectStakeholders: (scope: ProjectScope) => get.projectStakeholders(scope),
+
     async removeTask(scope: ProjectScope, task: TaskId) {
       const { error, response } = await client.DELETE(
         "/v1/companies/{company}/projects/{project}/tasks/{task}",
@@ -373,6 +396,8 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     moveStage: async (scope, to) => (await use()).moveStage(scope, to),
     addTask: async (scope, body) => (await use()).addTask(scope, body),
     updateTask: async (scope, task, body) => (await use()).updateTask(scope, task, body),
+    updateAccess: async (scope, access, body) => (await use()).updateAccess(scope, access, body),
+    projectStakeholders: async (scope) => (await use()).projectStakeholders(scope),
     removeTask: async (scope, task) => (await use()).removeTask(scope, task),
     runs: async (scope) => (await use()).runs(scope),
     run: async (scope, id) => (await use()).run(scope, id),
@@ -431,6 +456,14 @@ export const queries = {
       ...read,
     }),
   today: () => queryOptions({ queryKey: ["today"], queryFn: api.today, ...read }),
+  /** The people at a project's company, read when a prompt needs them. */
+  projectStakeholders: (scope: ProjectScope) =>
+    queryOptions({
+      queryKey: ["companies", scope.company, "projects", scope.project, "stakeholders"],
+      queryFn: () => api.projectStakeholders(scope),
+      ...read,
+      staleTime: 60_000,
+    }),
   runs: (scope: ProjectScope) =>
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project, "runs"],
