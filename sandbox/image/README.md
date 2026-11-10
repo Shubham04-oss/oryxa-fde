@@ -2,8 +2,8 @@
 
 The image every company's sandbox runs. It is based on `node:24-trixie`, the full Debian image, so git, curl,
 gcc, make and python3 are already there. It adds `sandbox-shim` from `cloudflare/sandbox:1.0.3`, which the
-gateway's file API runs, the harness at `/usr/local/bin/oryxa-harness`, and the egress check at
-`/usr/local/bin/oryxa-egress-check`.
+gateway's file API runs, the harness at `/usr/local/bin/oryxa-harness`, the egress check at
+`/usr/local/bin/oryxa-egress-check` and the isolation check at `/usr/local/bin/oryxa-isolation-check`.
 
 ```bash
 docker build --platform linux/amd64 -f sandbox/image/Dockerfile sandbox
@@ -39,9 +39,12 @@ Only HTTP on 80 and HTTPS on 443 should leave a sandbox, and only through the ga
 sandbox and record the result below:
 
 ```bash
-curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -X POST \
+curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -H "x-oryxa-lease: <generation>" -X POST \
   "$GATEWAY/v1/sandboxes/<tenant>/<company>/exec" -d '{"argv":["oryxa-egress-check"],"timeoutMs":120000}'
 ```
+
+`<generation>` is the sandbox's current lease generation in the API's store (`sandbox/gateway/README.md`). A higher
+one would make the gateway refuse every call from the run that holds the sandbox next.
 
 It tries TCP to ports 22, 53, 853, 8080 and 8443 on public addresses, a UDP DNS query to public resolvers, a
 lookup of a fresh random name through each configured resolver (an answer, even NXDOMAIN, means the query left),
@@ -75,7 +78,7 @@ pid 1 under its own user the refusal no longer depends on them, but the first de
 records the ptrace scope it prints:
 
 ```bash
-curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -X POST \
+curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -H "x-oryxa-lease: <generation>" -X POST \
   "$GATEWAY/v1/sandboxes/<tenant>/<company>/exec" -d '{"argv":["oryxa-isolation-check","pid1"],"timeoutMs":60000}'
 ```
 
