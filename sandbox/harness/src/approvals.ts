@@ -28,6 +28,7 @@ export function compileRules(rules: readonly ApprovalRule[]): CompiledRule[] {
 /**
  * The first rule that covers this tool call: its tool name, and its pattern over the command (`Bash`) or any string
  * value in the input. Never over key names: the harnesses name the same input differently (`file_path` and `path`).
+ * An input nested too deep to walk is covered by any rule on its tool, whatever the pattern: it fails closed.
  */
 // ponytail: matches what the tool call says; an agent can obfuscate a shell command, so a host whose use needs
 // approval should also be held at the outbound handler.
@@ -40,18 +41,38 @@ export function ruleFor(
   return rules.find(
     (rule) =>
       (rule.tool === "*" || rule.tool === tool) &&
-      (rule.regex === undefined || subjects.some((s) => rule.regex?.test(s))),
+      (rule.regex === undefined || subjects === undefined || subjects.some((s) => rule.regex?.test(s))),
   );
 }
 
-function strings(value: unknown): string[] {
+/** Deeper than any tool's real input; bounds the walk well below the stack's limit. */
+const MAX_INPUT_DEPTH = 64;
+
+/** Every string value in `value`, or `undefined` when it is nested deeper than `MAX_INPUT_DEPTH`. */
+function strings(value: unknown, depth = 0): string[] | undefined {
   if (typeof value === "string") return [value];
   if (typeof value !== "object" || value === null) return [];
-  return Object.values(value).flatMap(strings);
+  if (depth === MAX_INPUT_DEPTH) return undefined;
+  const found: string[] = [];
+  for (const item of Object.values(value)) {
+    const inner = strings(item, depth + 1);
+    if (inner === undefined) return undefined;
+    found.push(...inner);
+  }
+  return found;
 }
 
 /** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */
 const MAX_APPROVAL_INPUT_BYTES = 256 * 1024;
+
+/** The input's size as an engineer would see it; one that cannot be serialised (too deep) is `Infinity`. */
+function inputBytes(input: Record<string, unknown>): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(input));
+  } catch {
+    return Infinity;
+  }
+}
 
 /** `unlisted`: no rule covers the call. `too_large`: a rule does, but the input is too large for an engineer to read. */
 export type Verdict = "unlisted" | "too_large" | ApprovalOutcome;
@@ -80,7 +101,7 @@ export class ApprovalGate {
   ): Promise<Verdict> {
     const rule = ruleFor(this.rules, tool, input);
     if (rule === undefined) return "unlisted";
-    if (Buffer.byteLength(JSON.stringify(input)) > MAX_APPROVAL_INPUT_BYTES) return "too_large";
+    if (inputBytes(input) > MAX_APPROVAL_INPUT_BYTES) return "too_large";
     const decision = this.#queue.then(() => {
       if (this.stopped.aborted) return "rejected" as const;
       const id = this.newApprovalId();

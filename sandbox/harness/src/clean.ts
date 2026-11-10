@@ -45,9 +45,10 @@ export function agentProcesses(spawn: Spawn = nodeSpawn, proc = "/proc"): AgentP
 }
 
 /**
- * Pids in `proc` with `uid` among their real, effective, saved and file system user ids. Zombies run nothing. Pid 1 is
- * the container's init, the image's `sleep infinity` (as `agent`, the image's user): the runtime starts it before any
- * run, nothing in the container can kill it, and kill(-1) never reaches it.
+ * Pids in `proc` with `uid` among their real, effective, saved and file system user ids. A zombie with one thread runs
+ * nothing; one with more is a leader whose main thread exited alone, and its other threads still run. Pid 1 is the
+ * container's init, the image's `sleep infinity` (as `agent`, the image's user): the runtime starts it before any run,
+ * nothing in the container can kill it, and kill(-1) never reaches it (#156 moves it off `agent`).
  */
 export async function agentPids(proc: string, uid: number): Promise<number[]> {
   const pids: number[] = [];
@@ -66,22 +67,28 @@ export async function agentPids(proc: string, uid: number): Promise<number[]> {
     const uids = /^Uid:\s+(.+)$/m.exec(status)?.[1]?.trim().split(/\s+/).map(Number);
     if (uids === undefined) throw new Error(`no user ids in the status of process ${name}`);
     const state = /^State:\s+(\S)/m.exec(status)?.[1];
-    if (uids.includes(uid) && state !== "Z" && state !== "X") pids.push(Number(name));
+    // A missing or unreadable thread count is not 1: such a process counts as alive.
+    const threads = Number(/^Threads:\s+([0-9]+)$/m.exec(status)?.[1]);
+    const dead = (state === "Z" || state === "X") && threads === 1;
+    if (uids.includes(uid) && !dead) pids.push(Number(name));
   }
   return pids;
 }
 
-/** Kills the agent's processes until none is left, or throws: a run never starts beside one from an earlier run. */
+/**
+ * Kills the agent's processes until none is left, or throws: a run never starts beside one from an earlier run. The
+ * first kill does not wait for the scan to find anything, so a process the scan misses is still killed.
+ */
 export async function stopAgentProcesses(
   procs: AgentProcesses,
   { attempts = 5, waitMs = 200 }: { attempts?: number; waitMs?: number } = {},
 ): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 1; ; attempt++) {
+    await procs.killAll();
+    await sleep(waitMs);
     const left = await procs.list();
     if (left.length === 0) return;
     if (attempt === attempts) throw new Error(`${left.length} agent processes are still running`);
-    await procs.killAll();
-    await sleep(waitMs);
   }
 }
 
@@ -104,9 +111,10 @@ export async function removeRunDirs(roots: { config: string; run: string } = RUN
 }
 
 /**
- * Makes the sandbox clean for a run, as root, before the agent starts: first no process of `agent` is left, then no
- * earlier run's directories. In that order nothing of the agent's is alive from the cleanup until the harness starts
- * the agent itself, so nothing can race the removal or plant anything in the run's fresh directories.
+ * Makes the sandbox clean for a run, as root, before the agent starts: first the agent's processes are killed and the
+ * scan finds none left, then earlier runs' directories are removed. In that order nothing an earlier run left running
+ * can race the removal or write into the fresh directories, with one exception: pid 1 runs as `agent`, is skipped and
+ * cannot be killed, so code injected into it (if the runtime lets the agent trace it) would survive. #156 moves it.
  */
 export async function startClean(
   procs: AgentProcesses = agentProcesses(),
@@ -129,7 +137,7 @@ export async function freshHome(
   const home = await mkdtemp(join(root, prefix));
   const dirs = HOME_DIRS.map((dir) => join(home, dir));
   for (const dir of dirs) await mkdir(dir, { mode: 0o700 });
-  // Home is handed over last: until then no agent process could plant a link in it for root's `chown` to follow.
+  // Home is handed over last, so root's `chown` never works inside a directory the agent already owns.
   for (const dir of [...dirs.reverse(), home]) await owner(dir);
   return home;
 }

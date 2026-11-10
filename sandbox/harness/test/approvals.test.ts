@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
-import { type ApprovalRule, compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
+import { ApprovalGate, type ApprovalRule, compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
 import { ruleName } from "../src/opencode-events.js";
 import { loadPack, PACK_LIMITS, parsePack, systemPrompt } from "../src/pack.js";
 import { recording } from "./acp-peer.js";
@@ -74,6 +74,43 @@ describe("approval rules", () => {
     expect(ruleFor(numbers, "Read", { file_path: "/a", offset: 10 })).toBeUndefined();
     // A rule with no pattern covers every call to its tool.
     expect(ruleFor(compileRules([{ action: "any", tool: "Read" }]), "Read", {})?.action).toBe("any");
+  });
+});
+
+describe("approval rules on input too deep to walk", () => {
+  // As deep as a model can make it: deep enough to overflow the stack if walked recursively.
+  const deep = (levels: number, leaf: unknown = "deploy") => {
+    let value: unknown = leaf;
+    for (let i = 0; i < levels; i++) value = { next: [value] };
+    return value as Record<string, unknown>;
+  };
+
+  it("needs approval from a rule on that tool, whatever its pattern, and never throws", () => {
+    const rules = compileRules([
+      { action: "other", tool: "Read", pattern: "x" },
+      { action: "send", tool: "mcp__x__send", pattern: "^never$" },
+    ]);
+    expect(ruleFor(rules, "mcp__x__send", deep(200))?.action).toBe("send");
+    expect(ruleFor(rules, "mcp__x__send", deep(100_000))?.action).toBe("send");
+    // Shallow enough to walk: matched on its values as usual.
+    expect(ruleFor(rules, "mcp__x__send", deep(10))).toBeUndefined();
+    // No rule names the tool, so none could have matched.
+    expect(ruleFor(rules, "Write", deep(100_000))).toBeUndefined();
+  });
+
+  it("is refused, not passed and not thrown, when a rule covers it", async () => {
+    const rules = compileRules([{ action: "send", tool: "*", pattern: "^never$" }]);
+    const emitted: unknown[] = [];
+    const gate = new ApprovalGate(
+      rules,
+      { request: async () => "approved" },
+      (e) => emitted.push(e),
+      () => "apr_1",
+      new AbortController().signal,
+    );
+    const describe = () => ({ toolCallId: "t1", title: "Send" });
+    expect(await gate.decide("mcp__x__send", deep(100_000), new AbortController().signal, describe)).toBe("too_large");
+    expect(emitted).toEqual([]);
   });
 });
 

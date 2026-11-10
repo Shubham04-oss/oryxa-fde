@@ -44,11 +44,14 @@ into the system prompt as fenced data, not as instructions.
 - **No repository settings.** The run passes `settingSources: []`. The SDK otherwise loads `.claude/` settings
   and hooks from the repository, and their allow rules would skip approvals.
 - **A clean start.** Before the agent starts, root kills every process of `agent` left from an earlier run (one
-  `kill(-1)` run as `agent`, which no fork slips past), confirms in `/proc` that none is left and otherwise ends the
-  run as `unclean_sandbox`. Only then does it remove every earlier run's directories (`/tmp/oryxa-claude-*`,
-  `/tmp/oryxa-opencode-*`, `/etc/oryxa/opencode-*`), listing their parents and never following a link, and make
-  this run's (`src/clean.ts`). No process of the agent's is alive from the cleanup until the harness starts the
-  agent. Each run, on either backend, gets a fresh home with its own XDG and temp directories. With
+  `kill(-1)` run as `agent`, which no fork slips past, always run once), confirms in `/proc` that none is left and
+  otherwise ends the run as `unclean_sandbox`. A zombie counts as gone only with one thread: a leader whose main
+  thread exited alone is a zombie whose other threads still run. Only then does it remove every earlier run's
+  directories (`/tmp/oryxa-claude-*`, `/tmp/oryxa-opencode-*`, `/etc/oryxa/opencode-*`), listing their parents and
+  never following a link, and make this run's (`src/clean.ts`). So nothing an earlier run left running can race the
+  cleanup, with one exception: pid 1, the image's `sleep infinity`, runs as `agent`, cannot be killed and is
+  skipped; if the runtime lets the agent trace it, code injected there would survive (#156 moves it off `agent`).
+  Each run, on either backend, gets a fresh home with its own XDG and temp directories. With
   `settingSources: []` the CLI ignored user settings, hooks, MCP servers, `CLAUDE.md`, skills, agents and commands
   planted in its home, but its shell tool sources `~/.bashrc`, so a shared home would let one run change the
   next one's commands. Today the API also gives every run a new container; this does not rely on it.

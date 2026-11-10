@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   type AgentProcesses,
@@ -23,6 +23,10 @@ const exists = (path: string) =>
     () => true,
     () => false,
   );
+
+// The raw `exit` syscall, which ends only the calling thread.
+const SYS_EXIT = process.platform !== "linux" ? undefined : { x64: 60, arm64: 93 }[process.arch as string];
+const hasPython = spawnSync("python3", ["-I", "-c", "import ctypes, threading"]).status === 0;
 
 let root: string;
 let roots: { config: string; run: string };
@@ -104,10 +108,10 @@ describe("earlier runs' directories", () => {
 });
 
 describe("agent processes", () => {
-  it("are left alone when there are none", async () => {
+  it("are killed once even when the scan finds none, so the kill does not rest on the scan", async () => {
     const none = processes([]);
     await stopAgentProcesses(none, { attempts: 3, waitMs: 0 });
-    expect(none.kills).toBe(0);
+    expect(none.kills).toBe(1);
   });
 
   it("are killed again until none is left, and the run refuses to start if one survives", async () => {
@@ -124,11 +128,12 @@ describe("agent processes", () => {
     expect(stuck.kills).toBe(3);
   });
 
-  it("are found in /proc by any of their user ids, except zombies", async () => {
+  it("are found in /proc by any of their user ids, except zombies with no thread left running", async () => {
     const proc = join(root, "proc");
-    const status = async (pid: string, uid: string, state = "S (sleeping)") => {
+    const status = async (pid: string, uid: string, state = "S (sleeping)", threads: string | null = "1") => {
       await mkdir(join(proc, pid), { recursive: true });
-      await writeFile(join(proc, pid, "status"), `Name:\tsample\nState:\t${state}\nUid:\t${uid}\nGid:\t0\t0\t0\t0\n`);
+      const lines = [`Name:\tsample`, `State:\t${state}`, ...(threads === null ? [] : [`Threads:\t${threads}`])];
+      await writeFile(join(proc, pid, "status"), `${lines.join("\n")}\nUid:\t${uid}\nGid:\t0\t0\t0\t0\n`);
     };
     const a = AGENT.uid;
     // The container's init, the image's `sleep infinity` as `agent`: started before any run, and the kernel never
@@ -138,16 +143,51 @@ describe("agent processes", () => {
     await status("20", `${a}\t${a}\t${a}\t${a}`);
     // A setuid program the agent ran: root's effective id, the agent's real one.
     await status("21", `${a}\t0\t0\t0`);
+    // An orphan waiting to be reaped runs nothing.
     await status("22", `${a}\t${a}\t${a}\t${a}`, "Z (zombie)");
     await status("23", `1002\t1002\t1002\t1002`);
+    // A leader whose main thread exited alone shows as a zombie while its other threads run on.
+    await status("25", `${a}\t${a}\t${a}\t${a}`, "Z (zombie)", "2");
+    // No thread count to go by: alive.
+    await status("26", `${a}\t${a}\t${a}\t${a}`, "Z (zombie)", null);
+    await status("27", `${a}\t${a}\t${a}\t${a}`, "X (dead)", "garbled");
     // Gone between the listing and the read, and entries that are not processes.
     await mkdir(join(proc, "24"));
     await mkdir(join(proc, "net"));
     await writeFile(join(proc, "uptime"), "1 1");
-    expect((await agentPids(proc, a)).sort()).toEqual([20, 21]);
+    expect((await agentPids(proc, a)).sort((x, y) => x - y)).toEqual([20, 21, 25, 26, 27]);
     await writeFile(join(proc, "19", "status"), "Name:\tsample\n");
     await expect(agentPids(proc, a)).rejects.toThrow("status");
   });
+
+  it.skipIf(SYS_EXIT === undefined || !hasPython)(
+    "include a real process whose main thread exited while another thread runs on",
+    async () => {
+      // The main thread leaves with the raw `exit` syscall, not `exit_group`: the leader shows as a zombie.
+      const script = [
+        "import ctypes, sys, threading, time",
+        "threading.Thread(target=lambda: [time.sleep(0.05) for _ in iter(int, 1)]).start()",
+        "ctypes.CDLL(None).syscall(int(sys.argv[1]), 0)",
+      ].join("\n");
+      const child = spawn("python3", ["-I", "-c", script, String(SYS_EXIT)], { stdio: "ignore" });
+      const pid = child.pid ?? -1;
+      const gone = new Promise((resolve) => child.once("exit", resolve));
+      try {
+        await vi.waitFor(
+          async () => {
+            const status = await readFile(`/proc/${pid}/status`, "utf8");
+            expect(status).toMatch(/^State:\s+Z/m);
+            expect(status).toMatch(/^Threads:\s+2$/m);
+          },
+          { timeout: 5000 },
+        );
+        expect(await agentPids("/proc", process.getuid?.() ?? -1)).toContain(pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+      await gone;
+    },
+  );
 
   it("include a real process left running, which is gone once killed", async () => {
     const child = spawn("sleep", ["30"], { stdio: "ignore" });
