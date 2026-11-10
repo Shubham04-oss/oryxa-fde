@@ -13,55 +13,56 @@ mock_provider "aws" {
     defaults = { account_id = "000000000000" }
   }
   mock_data "aws_region" {
-    defaults = { region = "us-west-2" }
+    defaults = { region = "ap-south-1" }
   }
   mock_data "aws_availability_zones" {
-    defaults = { names = ["us-west-2a", "us-west-2b"] }
+    defaults = { names = ["ap-south-1a", "ap-south-1b"] }
   }
   mock_resource "aws_db_instance" {
     defaults = {
       master_user_secret = [{
         kms_key_id    = "mock"
-        secret_arn    = "arn:aws:secretsmanager:us-west-2:000000000000:secret:mock"
+        secret_arn    = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mock"
         secret_status = "active"
       }]
     }
   }
   mock_resource "aws_kms_key" {
-    defaults = { arn = "arn:aws:kms:us-west-2:000000000000:key/mock" }
+    defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::000000000000:role/mock" }
   }
+  # Only the internal_alb module test below uses these (dev has no load balancer since #145).
   mock_resource "aws_lb" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/mock/0" }
+    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
   mock_resource "aws_lb_target_group" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:us-west-2:000000000000:targetgroup/mock/0" }
+    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:targetgroup/mock/0" }
   }
   mock_resource "aws_ecs_cluster" {
-    defaults = { arn = "arn:aws:ecs:us-west-2:000000000000:cluster/mock" }
+    defaults = { arn = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock" }
   }
   mock_resource "aws_ecs_task_definition" {
-    defaults = { arn = "arn:aws:ecs:us-west-2:000000000000:task-definition/mock:1" }
+    defaults = { arn = "arn:aws:ecs:ap-south-1:000000000000:task-definition/mock:1" }
   }
   mock_resource "aws_secretsmanager_secret" {
-    defaults = { arn = "arn:aws:secretsmanager:us-west-2:000000000000:secret:mock" }
+    defaults = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mock" }
   }
   mock_resource "aws_service_discovery_service" {
-    defaults = { arn = "arn:aws:servicediscovery:us-west-2:000000000000:service/srv-mock" }
+    defaults = { arn = "arn:aws:servicediscovery:ap-south-1:000000000000:service/srv-mock" }
   }
   mock_resource "aws_s3_bucket" {
     defaults = { arn = "arn:aws:s3:::mock" }
   }
   mock_resource "aws_sqs_queue" {
-    defaults = { arn = "arn:aws:sqs:us-west-2:000000000000:mock" }
+    defaults = { arn = "arn:aws:sqs:ap-south-1:000000000000:mock" }
   }
   mock_resource "aws_ecr_repository" {
-    defaults = { arn = "arn:aws:ecr:us-west-2:000000000000:repository/mock" }
+    defaults = { arn = "arn:aws:ecr:ap-south-1:000000000000:repository/mock" }
   }
   mock_resource "aws_cloudwatch_log_group" {
-    defaults = { arn = "arn:aws:logs:us-west-2:000000000000:log-group:mock" }
+    defaults = { arn = "arn:aws:logs:ap-south-1:000000000000:log-group:mock" }
   }
 }
 
@@ -74,7 +75,7 @@ variables {
   domain                 = "fde-dev.example.com"
   admin_emails           = ["owner@example.com"]
   workos_client_id       = "client_mock"
-  event_bus_arn          = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+  event_bus_arn          = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
   data_bucket_name       = "oryxa-fde-dev-data-mock"
   cloudtrail_bucket_name = "oryxa-fde-dev-trail-mock"
   api_image_tag          = "mock"
@@ -100,6 +101,16 @@ run "dev_plans_without_credentials" {
   assert {
     condition     = aws_ecr_repository.api.force_delete == false
     error_message = "destroy may empty nothing until allow_destroy is set"
+  }
+
+  # The founder chose Mumbai for dev (#144). Everything regional follows var.aws_region; nothing hard-codes it.
+  assert {
+    condition     = var.aws_region == "ap-south-1" && output.region == "ap-south-1"
+    error_message = "dev defaults to ap-south-1 (Mumbai)"
+  }
+  assert {
+    condition     = output.agent_model_target == null
+    error_message = "the agent model target exists only while the agent routes are on"
   }
 }
 
@@ -128,7 +139,7 @@ run "api_task_with_every_feature_off" {
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"
-    ]) == ["arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0"]
+    ]) == ["arn:aws:bedrock:ap-south-1::foundation-model/amazon.titan-embed-text-v2:0"]
     error_message = "the API may invoke the embedding model only, in its region"
   }
   assert {
@@ -146,6 +157,72 @@ run "api_task_with_every_feature_off" {
   assert {
     condition     = !contains(module.migrate.env_names, "DATABASE_URL") && length(setsubtract(["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "AWS_REGION"], module.migrate.env_names)) == 0
     error_message = "oryxa-fde-ops migrate takes DB_* and AWS_REGION"
+  }
+}
+
+# The shorter path (#145): web Worker, Workers VPC service, tunnel, API. The tunnel's connector is a
+# sidecar in the API task, so there is no load balancer and nothing is admitted to the API.
+run "the_api_task_carries_its_own_tunnel_and_admits_nothing" {
+  command = plan
+
+  assert {
+    condition     = length(module.api.ingress_sources) == 0
+    error_message = "no security group admits anything to the API task: the tunnel reaches it on the task's loopback"
+  }
+  assert {
+    condition     = local.api_environment.LISTEN_ADDR == "127.0.0.1:8080" && alltrue([for c in module.api.containers : length(try(c.portMappings, [])) == 0])
+    error_message = "the API listens on the task's loopback and publishes no port"
+  }
+  assert {
+    condition     = [for c in module.api.containers : c.name] == ["api", "cloudflared"]
+    error_message = "the API task is the API and the cloudflared sidecar, in that order (the deploy workflow swaps the image by prefix, not by position)"
+  }
+  assert {
+    condition = (
+      module.api.containers[0].healthCheck.command[0] == "CMD"
+      && endswith(join(" ", module.api.containers[0].healthCheck.command), "http://127.0.0.1:8080/healthz")
+      && module.api.containers[0].healthCheck.retries >= 2
+    )
+    error_message = "the API container has its own health check on /healthz, on the loopback"
+  }
+  assert {
+    condition = (
+      module.api.containers[1].dependsOn == [{ containerName = "api", condition = "HEALTHY" }]
+      && module.api.containers[1].essential && module.api.containers[0].essential
+    )
+    error_message = "the tunnel starts only once the API is healthy, and a task that loses either container is replaced"
+  }
+  assert {
+    condition     = strcontains(module.api.containers[1].image, "@sha256:")
+    error_message = "cloudflared runs with the API task's role, so its image is pinned by digest, not a tag"
+  }
+  assert {
+    condition     = module.api.containers[1].stopTimeout > 30
+    error_message = "cloudflared's 30 second drain must finish before ECS kills it"
+  }
+  assert {
+    condition = (
+      module.api.containers[1].secrets == [{ name = "TUNNEL_TOKEN", valueFrom = local.secret_arn["cloudflared/tunnel-token"] }]
+      && length(module.api.containers[1].environment) == 0
+      && contains(module.api.secret_arns, local.secret_arn["cloudflared/tunnel-token"])
+    )
+    error_message = "the tunnel token is a Secrets Manager reference, injected into the sidecar only, and the execution role may read it"
+  }
+  assert {
+    condition     = module.api.deployment.minimum_healthy_percent == 100 && module.api.deployment.maximum_percent == 200
+    error_message = "a rollout starts the new task and waits for it to be healthy before it stops the old one: never zero healthy tasks"
+  }
+  assert {
+    condition     = contains(module.api.egress_names, "tunnel-tcp") && contains(module.api.egress_names, "tunnel-udp") && !contains(module.api.egress_names, "alb")
+    error_message = "the API task dials the tunnel out and talks to no load balancer"
+  }
+  assert {
+    condition     = module.spicedb.ingress_sources == toset(["api", "zed"])
+    error_message = "SpiceDB is its own service: the API and the zed task call it, it calls nothing back"
+  }
+  assert {
+    condition     = module.api.deployment.minimum_healthy_percent == 100 && module.spicedb.deployment.minimum_healthy_percent == 0
+    error_message = "only SpiceDB replaces its single task in place"
   }
 }
 
@@ -205,7 +282,7 @@ run "api_task_with_agent_github_and_slack_on" {
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "SlackTokenSecrets"
-    ]) == ["arn:aws:secretsmanager:us-west-2:000000000000:secret:oryxa-fde/dev/slack/*"]
+    ]) == ["arn:aws:secretsmanager:ap-south-1:000000000000:secret:oryxa-fde/dev/slack/*"]
     error_message = "the API may touch Slack token secrets under its own prefix only"
   }
   assert {
@@ -266,6 +343,38 @@ run "contract_with_slack_only" {
   assert {
     condition     = length(output.missing) == 0 && length(output.unexpected) == 0
     error_message = "slack alone sets Slack's variables and the install state key, no GitHub or agent one: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+}
+
+# In Mumbai the Claude models are reached only through cross-Region inference profiles, so the agent's Region
+# is an explicit variable (infra/README.md, Where prompts are processed). Unset, it is the main Region;
+# set, the contract's AGENT_REGION is that Region and nothing else.
+run "agent_region_defaults_to_the_main_region" {
+  command = plan
+  variables {
+    sandbox_gateway_url = "https://gateway.example.com"
+    agent_model         = "global.anthropic.claude-opus-5-5"
+  }
+
+  assert {
+    condition = (
+      output.agent_model_target.model == "global.anthropic.claude-opus-5-5" && output.agent_model_target.region == "ap-south-1"
+    )
+    error_message = "AGENT_REGION is aws_region when agent_region is null"
+  }
+}
+
+run "agent_region_is_the_one_asked_for" {
+  command = plan
+  variables {
+    sandbox_gateway_url = "https://gateway.example.com"
+    agent_model         = "eu.anthropic.claude-opus-5-5"
+    agent_region        = "eu-west-2"
+  }
+
+  assert {
+    condition     = output.agent_model_target.region == "eu-west-2" && var.aws_region == "ap-south-1" && local.api_environment.AGENT_REGION == "eu-west-2"
+    error_message = "a geography profile is called from its own Region; the main Region does not move"
   }
 }
 
@@ -376,13 +485,13 @@ run "deploy_role_reaches_only_the_api_image_migrate_task_and_api_service" {
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:RunTask")
-    ]) == ["arn:aws:ecs:us-west-2:000000000000:task-definition/oryxa-fde-dev-migrate:*"]
+    ]) == ["arn:aws:ecs:ap-south-1:000000000000:task-definition/oryxa-fde-dev-migrate:*"]
     error_message = "the only task the deploy role may run is the migrate task"
   }
   assert {
     condition = flatten([
       for s in data.aws_iam_policy_document.github_deploy.statement : s.resources if contains(s.actions, "ecs:UpdateService")
-    ]) == ["arn:aws:ecs:us-west-2:000000000000:service/oryxa-fde-dev/oryxa-fde-api"]
+    ]) == ["arn:aws:ecs:ap-south-1:000000000000:service/oryxa-fde-dev/oryxa-fde-api"]
     error_message = "the only service the deploy role may update is the API"
   }
 }
@@ -413,7 +522,7 @@ run "rejects_a_wildcard_repository" {
 run "rejects_a_bus_that_is_not_oryxa_fde" {
   command = plan
   variables {
-    event_bus_arn = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-dev/abcdefghij0123456789abcde"
+    event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-dev/abcdefghij0123456789abcde"
   }
   expect_failures = [var.event_bus_arn]
 }
@@ -447,7 +556,7 @@ run "postgres_is_private_encrypted_and_iam_only" {
   variables {
     name                    = "oryxa-fde-test"
     database_name           = "oryxa_fde"
-    kms_key_arn             = "arn:aws:kms:us-west-2:000000000000:key/mock"
+    kms_key_arn             = "arn:aws:kms:ap-south-1:000000000000:key/mock"
     vpc_id                  = "vpc-mock"
     subnet_ids              = ["subnet-a", "subnet-b"]
     allowed_security_groups = { api = "sg-api" }
@@ -466,7 +575,7 @@ run "postgres_is_private_encrypted_and_iam_only" {
   assert {
     condition = (
       aws_db_instance.this.storage_encrypted
-      && aws_db_instance.this.kms_key_id == "arn:aws:kms:us-west-2:000000000000:key/mock"
+      && aws_db_instance.this.kms_key_id == "arn:aws:kms:ap-south-1:000000000000:key/mock"
     )
     error_message = "storage encrypted with the environment key"
   }
@@ -504,8 +613,8 @@ run "bus_must_be_this_envs_in_this_account_and_region" {
   }
   variables {
     name                = "oryxa-fde-dev"
-    bus_arn             = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
-    consumer_queue_arns = ["arn:aws:sqs:us-west-2:000000000000:mock"]
+    bus_arn             = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+    consumer_queue_arns = ["arn:aws:sqs:ap-south-1:000000000000:mock"]
   }
 }
 
@@ -535,7 +644,7 @@ run "rejects_a_bus_in_another_account" {
   }
   variables {
     name                = "oryxa-fde-dev"
-    bus_arn             = "arn:aws:events:us-west-2:111111111111:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
+    bus_arn             = "arn:aws:events:ap-south-1:111111111111:event-busv2/oryxa-fde-dev/abcdefghij0123456789abcde"
     consumer_queue_arns = []
   }
   expect_failures = [data.aws_iam_policy_document.publish]
@@ -551,12 +660,13 @@ run "rejects_another_envs_bus" {
   }
   variables {
     name                = "oryxa-fde-dev"
-    bus_arn             = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-prod/abcdefghij0123456789abcde"
+    bus_arn             = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-prod/abcdefghij0123456789abcde"
     consumer_queue_arns = []
   }
   expect_failures = [data.aws_iam_policy_document.publish]
 }
 
+# Not used by dev since #145; kept for an environment that wants a load balancer in front of a service.
 run "alb_is_internal_and_reached_only_by_named_groups" {
   command = plan
   module {
@@ -625,17 +735,17 @@ run "fargate_task_takes_secrets_by_reference_and_no_public_ip" {
   }
   variables {
     name           = "oryxa-fde-test-api"
-    cluster_arn    = "arn:aws:ecs:us-west-2:000000000000:cluster/mock"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
     container_name = "api"
     image          = "example/api:1"
     port           = 8080
-    kms_key_arn    = "arn:aws:kms:us-west-2:000000000000:key/mock"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
     vpc_id         = "vpc-mock"
     subnet_ids     = ["subnet-a"]
     environment    = { B = "2", A = "1" }
     secrets = {
-      KEY      = { arn = "arn:aws:secretsmanager:us-west-2:000000000000:secret:key" }
-      PASSWORD = { arn = "arn:aws:secretsmanager:us-west-2:000000000000:secret:master", key = "password" }
+      KEY      = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:key" }
+      PASSWORD = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:master", key = "password" }
     }
     egress        = { https = { port = 443, cidr = "0.0.0.0/0" } }
     desired_count = 0
@@ -643,8 +753,8 @@ run "fargate_task_takes_secrets_by_reference_and_no_public_ip" {
 
   assert {
     condition = jsondecode(aws_ecs_task_definition.this.container_definitions)[0].secrets == [
-      { name = "KEY", valueFrom = "arn:aws:secretsmanager:us-west-2:000000000000:secret:key" },
-      { name = "PASSWORD", valueFrom = "arn:aws:secretsmanager:us-west-2:000000000000:secret:master:password::" },
+      { name = "KEY", valueFrom = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:key" },
+      { name = "PASSWORD", valueFrom = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:master:password::" },
     ]
     error_message = "secrets are injected by ARN (and JSON key), never as values"
   }
@@ -679,10 +789,10 @@ run "one_off_task_has_no_service" {
   variables {
     name           = "oryxa-fde-test-db-admin"
     run_as_service = false
-    cluster_arn    = "arn:aws:ecs:us-west-2:000000000000:cluster/mock"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
     container_name = "psql"
     image          = "example/psql:1"
-    kms_key_arn    = "arn:aws:kms:us-west-2:000000000000:key/mock"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
     vpc_id         = "vpc-mock"
     subnet_ids     = ["subnet-a"]
     egress         = {}
@@ -691,6 +801,51 @@ run "one_off_task_has_no_service" {
   assert {
     condition     = length(aws_ecs_service.this) == 0
     error_message = "db-admin runs only when started by hand"
+  }
+}
+
+run "a_sidecar_waits_for_a_healthy_main_container_and_shares_its_log_group" {
+  command = plan
+  module {
+    source = "../../modules/fargate_service"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name           = "oryxa-fde-test-api"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
+    container_name = "api"
+    image          = "example/api:1"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+    vpc_id         = "vpc-mock"
+    subnet_ids     = ["subnet-a"]
+    egress         = {}
+    health_check   = { command = ["/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"] }
+    sidecars = {
+      tunnel = { image = "example/tunnel:1", secrets = { TOKEN = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:tunnel" } } }
+    }
+    desired_count = 0
+  }
+
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.this.container_definitions)[1].dependsOn == [{ containerName = "api", condition = "HEALTHY" }]
+    error_message = "a sidecar starts after the main container passes its health check"
+  }
+  assert {
+    condition = jsondecode(aws_ecs_task_definition.this.container_definitions)[0].healthCheck == {
+      command  = ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval = 10, timeout = 5, retries = 3, startPeriod = 30
+    }
+    error_message = "the health check runs as CMD (no shell in the image) with the defaults"
+  }
+  assert {
+    condition     = contains(local.all_secrets[*].arn, "arn:aws:secretsmanager:ap-south-1:000000000000:secret:tunnel")
+    error_message = "the execution role may read the sidecar's secret"
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.this) == 0
+    error_message = "a sidecar needs no ingress rule: it shares the main container's network"
   }
 }
 
@@ -703,20 +858,21 @@ run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
     cloudflare = cloudflare
   }
   variables {
-    account_id          = "mock"
-    zone_id             = "mock"
-    name                = "oryxa-fde-test"
-    domain              = "fde-dev.example.com"
-    api_origin_hostname = "internal-oryxa-fde-test-api.us-west-2.elb.amazonaws.com"
-    admin_emails        = ["owner@example.com"]
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    admin_emails = ["owner@example.com"]
   }
 
   assert {
     condition = (
-      cloudflare_connectivity_directory_service.api.host.hostname == var.api_origin_hostname
-      && cloudflare_connectivity_directory_service.api.host.resolver_network.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
+      cloudflare_connectivity_directory_service.api.host.ipv4 == "127.0.0.1"
+      && cloudflare_connectivity_directory_service.api.http_port == var.api_port
+      && cloudflare_connectivity_directory_service.api.host.network.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
     )
-    error_message = "the Workers VPC service targets the internal ALB"
+    error_message = "the Workers VPC service targets the API on the loopback of the tunnel's connector (the sidecar in the API task)"
   }
   assert {
     condition = toset(keys(cloudflare_dns_record.worker)) == toset([

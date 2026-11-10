@@ -11,8 +11,8 @@ The S3, SQS FIFO and EventBridge modules and the VPC are adapted from there, and
 
 ```
 Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
-  -> vpc_services binding (Workers VPC) -> Cloudflare Tunnel -> cloudflared on Fargate (private subnet)
-  -> internal ALB -> oryxa-fde-api on Fargate
+  -> vpc_services binding (Workers VPC) -> Cloudflare Tunnel
+  -> one Fargate task in a private subnet: cloudflared (sidecar) -> 127.0.0.1:8080 -> oryxa-fde-api
        -> RDS PostgreSQL 17 + pgvector    (IAM database auth, TLS, private)
        -> SpiceDB on Fargate              (spicedb.oryxa-fde-dev.internal:50051, Cloud Map, private)
        -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company)
@@ -23,21 +23,25 @@ CloudTrail logs management events and object access on the data bucket.
 
 Nothing in AWS accepts traffic from the internet. No security group has a CIDR ingress rule wider
 than the VPC, and the API has no public hostname. Only Workers in this Cloudflare account that
-are bound to the VPC service reach it, through the tunnel.
+are bound to the VPC service reach it, through the tunnel. The tunnel's connector is a second
+container in the API's task, so it reaches the API on the task's loopback: the API listens on
+`127.0.0.1` only, and no security group admits anything to it (#145; the path used to go through
+a separate cloudflared service and an internal ALB, and "What the load balancer gave" in Deploys
+says what replaced it).
 
 | Path | What |
 | --- | --- |
 | `modules/vpc` | VPC `10.50.0.0/16`, public and private subnets in two AZs, fck-nat instance, S3 gateway endpoint, optional interface endpoints |
 | `modules/postgres` | RDS for PostgreSQL 17, encrypted, IAM auth, `rds.force_ssl`, master password managed by RDS in Secrets Manager |
-| `modules/fargate_service` | One ARM64 container: task definition, log group, execution and task roles, security group, optional ECS service |
-| `modules/internal_alb` | Internal ALB, target group (`ip`), HTTP listener reachable from named security groups only |
+| `modules/fargate_service` | One ARM64 main container, with optional health check and sidecars: task definition, log group, execution and task roles, security group, optional ECS service |
+| `modules/internal_alb` | Internal ALB, target group (`ip`), HTTP listener reachable from named security groups only. **Not used by `envs/dev` since #145**; kept, with its test, for a production environment that fronts a service with a load balancer (pair it with `fargate_service`'s `load_balancer`) |
 | `modules/s3` | Private bucket: KMS, versioned, public access blocked, TLS only; `force_destroy` for teardown only |
 | `modules/sqs_fifo` | FIFO queue, FIFO DLQ, optional undelivered queue (names and attributes match the platform's consumer kit) |
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
-| `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the ALB, Access on `admin.` |
+| `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the API on the loopback of the tunnel's connector, Access on `admin.` |
 | `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the API environment contract below); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
-| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot |
+| `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot, plus a static `busybox` that only the container health check runs |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
 | `sql/01-bootstrap.sql` | pgvector, the IAM logins `oryxa_fde_migrator`, `oryxa_fde_api` and `spicedb`, the NOLOGIN roles the API reaches through `oryxa_fde_runtime`, the `spicedb` database, and a check that nothing the API reaches has owner powers |
@@ -57,7 +61,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | --- | --- | --- |
 | `env` | `dev` | Environment name in every resource name (`oryxa-fde-<env>`); 2 to 10 lowercase letters or digits |
 | `aws_account_id` | required | The only account the AWS provider will touch (`allowed_account_ids`) |
-| `aws_region` | `us-west-2` | The platform's region, until the first region is decided (plan, open decisions) |
+| `aws_region` | `ap-south-1` | Mumbai, chosen by the founder to see real latency from the team and first customers (#144). Everything in AWS runs and rests here; what Mumbai does and does not offer is in Mumbai (ap-south-1) below |
 | `cloudflare_account_id` | required | Account for the tunnel, the Workers VPC service and Access |
 | `cloudflare_zone_id` | required | Zone holding `domain` |
 | `domain` | required | Base hostname for dev; `app.<domain>` (fde-web) and `admin.<domain>` hang off it |
@@ -70,14 +74,14 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `api_image_tag` | required | Seeds `/oryxa-fde-<env>/api-image-tag` on the first apply (any value while nothing runs); after that `deploy-api` owns the tag (Deploys) |
 | `github_repository` | `Shubham04-oss/oryxa-fde` | The repository whose `environment: <env>` jobs may assume the deploy role |
 | `github_oidc_provider_arn` | `null` | The account's GitHub OIDC provider, if it already has one; null creates it |
-| `start_services` | `false` | `false`: every service runs 0 tasks. Set `true` once the image and every secret value exist |
+| `start_services` | `false` | `false`: every service (SpiceDB, the API task) runs 0 tasks. Set `true` once the image and every secret value exist |
 | `consumers` | `["lifecycle", "context-ingestion"]` | Event consumers; each gets a FIFO queue, a DLQ and an undelivered queue |
-| `api_port` | `8080` | Port `oryxa-fde-api` listens on (`LISTEN_ADDR`) |
-| `api_health_check_path` | `/healthz` | Path the ALB polls; must answer 200 without auth |
-| `api_cpu` | `256` | API task CPU units (0.25 vCPU) |
-| `api_memory` | `512` | API task memory in MiB |
+| `api_port` | `8080` | Port `oryxa-fde-api` listens on, on the task's loopback (`LISTEN_ADDR` is `127.0.0.1:<port>`); the health check and the Workers VPC service use it |
+| `api_health_check_path` | `/healthz` | Path the API container's health check polls; must answer 200 without auth |
+| `api_cpu` | `256` | CPU units of the API task, shared by the API and the cloudflared sidecar (0.25 vCPU) |
+| `api_memory` | `512` | Memory of the API task in MiB, shared by both containers |
 | `spicedb_image` | `authzed/spicedb:v1.56.2` | Same version as CI |
-| `cloudflared_image` | `cloudflare/cloudflared:2026.10.7` | Tunnel connector |
+| `cloudflared_image` | `cloudflare/cloudflared@sha256:4955524aeaa3...` (2026.10.7) | Tunnel connector, the sidecar of the API task. Pinned by digest because it runs with the API task's role |
 | `db_instance_class` | `db.t4g.micro` | RDS instance class |
 | `allow_destroy` | `false` | Set `true` only to tear the environment down: lifts RDS deletion protection and lets `destroy` empty both buckets and the ECR repository |
 | `vpc_cidr` | `10.50.0.0/16` | Distinct from the platform's `10.40.0.0/16`, so the two can be peered later |
@@ -85,8 +89,8 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `log_retention_days` | `14` | CloudWatch retention for every task's logs |
 | `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's role may invoke this model only, in `aws_region` |
 | `sandbox_gateway_url` | `null` | Gateway Worker's URL (`SANDBOX_GATEWAY_URL`), known after `deploy-workers`. Null: agent and eval routes are not mounted, and the next three are unused |
-| `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url` |
-| `agent_region` | `null` | Its region (`AGENT_REGION`); null means `aws_region` |
+| `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url`. In Mumbai the Claude models need an inference profile, and which one decides where prompts are processed (Where prompts are processed) |
+| `agent_region` | `null` | The Region the agent's Bedrock calls start from (`AGENT_REGION`); null means `aws_region`. Set it only to call a geography profile from a Region inside that geography |
 | `realtime_url` | `null` | Realtime Worker's URL (`REALTIME_URL`); null: output is stored, not streamed |
 | `github_app` | `null` | `{ app_id, slug, client_id }` of the GitHub App (all public). Null: GitHub routes answer 503 |
 | `slack_client_id` | `null` | The Slack app's client id (public). Null: Slack routes answer 503 |
@@ -112,7 +116,7 @@ them as env vars when a task starts, and a task cannot start until its secrets h
 | `api/slack-client-secret`, `api/slack-signing-secret` | `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` | oryxa-fde-api, only with `slack_client_id` |
 | `api/install-state-key` | `INSTALL_STATE_KEY` | oryxa-fde-api, with `github_app` or `slack_client_id` |
 | `shared/spicedb-preshared-key` | `SPICEDB_PRESHARED_KEY` (API), `SPICEDB_GRPC_PRESHARED_KEY` (SpiceDB), `ZED_TOKEN` (zed task) | oryxa-fde-api, SpiceDB, the zed task |
-| `cloudflared/tunnel-token` | `TUNNEL_TOKEN` | cloudflared |
+| `cloudflared/tunnel-token` | `TUNNEL_TOKEN` | the cloudflared sidecar of the API task only (ECS injects secrets per container: the API container does not see it, and cloudflared sees none of the API's) |
 | RDS master (created by RDS) | `PGUSER`, `PGPASSWORD` | the db-admin task only |
 
 A secret exists only while the feature that reads it is switched on (`tofu output secrets` lists the
@@ -174,11 +178,13 @@ Columns. **Needed**: `always`; a feature the variable belongs to (`agent`, `real
 a default); `local only` (tests and laptops). **Kind**: `config` (plain, visible in the task definition),
 `secret` (a value; ECS injects it from Secrets Manager), `reference` (a Secrets Manager name or KMS key
 ARN, not a value). Every task also gets its AWS identity from the task role: the SDK reads
-`AWS_REGION` and the container credentials ECS provides (`aws_config::load_from_env`).
+`AWS_REGION` and the container credentials ECS provides (`aws_config::load_from_env`). The API's
+task is two containers (the API and cloudflared), so the table below describes the `api` container
+only; the sidecar has one variable, `TUNNEL_TOKEN`.
 
 ### `oryxa-fde-api`
 
-The service, entrypoint `/usr/local/bin/oryxa-fde-api` (deployed). A variable that is missing, or
+The service, entrypoint `/usr/local/bin/oryxa-fde-api` (deployed), container `api` of the `oryxa-fde-api` task. A variable that is missing, or
 not valid, stops startup. The agent and eval routes mount only when `SANDBOX_GATEWAY_URL` is set;
 GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 
@@ -199,7 +205,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EVENT_SIGNING_KEY` | always | secret | none | `main.rs:72` | `api/event-signing-key` |
 | `EVENT_BUS_ARN` | always | config | none | `main.rs:73` | `event_bus_arn` |
 | `DOCUMENTS_BUCKET` | always | config | none | `oryxa-fde-context/src/lib.rs:103` | the data bucket |
-| `LISTEN_ADDR` | optional | config | `0.0.0.0:8080` | `main.rs:81` | `0.0.0.0:<api_port>` |
+| `LISTEN_ADDR` | optional | config | `0.0.0.0:8080` | `main.rs:81` | `127.0.0.1:<api_port>`: the tunnel sidecar is the only client |
 | `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:108` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
@@ -209,8 +215,8 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:301` | never set |
 | `SANDBOX_GATEWAY_URL` | agent | config | none: agent routes off | `oryxa-fde-agent/src/prod.rs:124` | `sandbox_gateway_url` |
 | `SANDBOX_GATEWAY_TOKEN` | agent | secret | none | `prod.rs:128` | `api/sandbox-gateway-token` |
-| `AGENT_MODEL` | agent | config | none | `prod.rs:149` | `agent_model` |
-| `AGENT_REGION` | agent | config | none | `prod.rs:150` | `agent_region`, else `aws_region` |
+| `AGENT_MODEL` | agent | config | none | `prod.rs:149` | `agent_model` (in Mumbai a profile id; Where prompts are processed) |
+| `AGENT_REGION` | agent | config | none | `prod.rs:150` | `agent_region`, else `aws_region`; the test reads it from output `agent_model_target` |
 | `REALTIME_URL` | realtime | config | none: output not streamed | `prod.rs:130` | `realtime_url` |
 | `REALTIME_TOKEN` | realtime | secret | none; both or neither | `prod.rs:130` | `api/realtime-token` |
 | `AGENT_MAX_TURNS` | optional | config | `100` | `prod.rs:151` | not set |
@@ -254,21 +260,24 @@ Entrypoint `/usr/local/bin/oryxa-fde-ops` in the API image.
 | Subcommand | Variables (Read at) | In dev |
 | --- | --- | --- |
 | `migrate` | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` as `oryxa_fde_migrator`, and `AWS_REGION` (`store/src/lib.rs:261`, `iam.rs:82`); `MIGRATION_DATABASE_URL` for local runs only (`lib.rs:267`) | the `oryxa-fde-dev-migrate` task sets all five; its role may connect as the migrator only |
-| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:293`, `ops.rs:30`) | not deployed: no task definition |
+| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:299`, `ops.rs:30`) | not deployed: no task definition |
 
 ### Not deployed
 
 These have no image and no task definition yet; the facts for the issue that adds them. Each also needs
 `AWS_REGION` and `RUST_LOG` as above. Each reaches the database as the API does (`Store::from_env`,
-`store/src/lib.rs:293`): IAM tokens when `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are set, else
-`DATABASE_URL` for local runs only; a missing token stops startup. `DB_USER` is `oryxa_fde_api` until
-the bootstrap has a login per worker (#129).
+`store/src/lib.rs:299`): IAM tokens when `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are all set
+(they win over `DATABASE_URL`), else `DATABASE_URL` for local runs only; a half-set `DB_*` or a missing
+token stops startup. A task role may `rds-db:connect` as its own user only, so each worker needs its
+own login, which the bootstrap does not have yet: `oryxa_fde_ingest` and `oryxa_fde_mcp` take
+`oryxa_fde_app` only, `oryxa_fde_lifecycle` takes `oryxa_fde_app` and `oryxa_fde_grants` (its
+cross-tenant scan, `store/src/engine.rs:443`), each granted without inheritance (#129).
 
 | Binary | Variables (Read at) | Permissions it will need |
 | --- | --- | --- |
-| `oryxa-fde-ingest` | `DB_*` as the runtime login (`oryxa-fde-context/src/bin/ingest.rs:39`), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:40`, as the API), `EVENT_SIGNING_KID` (`:42`), `EVENT_PUBLIC_KEY` (`:44`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:46`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
-| `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
-| `oryxa-fde-mcp` | `DB_*` as the runtime login (`oryxa-fde-mcp/src/bin/mcp.rs:28`), `SPICEDB_ENDPOINT` (`:30`), `SPICEDB_PRESHARED_KEY` (`:31`), `WORKOS_API_KEY` (`:35`), `WORKOS_CLIENT_ID` (`:36`), `MCP_ALLOWED_HOSTS` (`:41`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:40`); optional `WORKOS_ISSUER` (`:38`), `LISTEN_ADDR` (`:47`, default `0.0.0.0:8081`) | as the API's database, S3 read and embedding permissions; a route to it (its own ALB listener or service), which dev does not have |
+| `oryxa-fde-ingest` | `DB_*` as its own login (`oryxa-fde-context/src/bin/ingest.rs:39`), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:40`, as the API), `EVENT_SIGNING_KID` (`:42`), `EVENT_PUBLIC_KEY` (`:44`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:46`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as `oryxa_fde_ingest`; the queue's bus subscriber |
+| `oryxa-fde-lifecycle` | `DB_*` as its own login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default; its Bedrock client is built from `AWS_REGION` alone, `:51`, `:53`, so from Mumbai the profile must be one Mumbai can call: see Where prompts are processed), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as `oryxa_fde_lifecycle` |
+| `oryxa-fde-mcp` | `DB_*` as its own login (`oryxa-fde-mcp/src/bin/mcp.rs:28`), `SPICEDB_ENDPOINT` (`:30`), `SPICEDB_PRESHARED_KEY` (`:31`), `WORKOS_API_KEY` (`:35`), `WORKOS_CLIENT_ID` (`:36`), `MCP_ALLOWED_HOSTS` (`:41`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:40`); optional `WORKOS_ISSUER` (`:38`), `LISTEN_ADDR` (`:47`, default `0.0.0.0:8081`) | as the API's S3 read and embedding permissions; `rds-db:connect` as `oryxa_fde_mcp`; a route to it (its own load balancer listener or service, or a second tunnel route), which dev does not have |
 | `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
 
 Until the ingest worker runs, nothing extracts, chunks or embeds an uploaded document (only that
@@ -284,8 +293,8 @@ and zone with these permissions, all Edit: Cloudflare Tunnel, Access: Apps and P
 workflows (Deploys, below), not from the owner's machine.
 
 1. **State.** Create a versioned, encrypted, private S3 bucket by hand, then run
-   `tofu -chdir=infra/envs/dev init -backend-config="bucket=<state bucket>" -backend-config="region=us-west-2"`.
-2. **Bus.** Run `infra/scripts/create-event-bus.sh dev <account id> us-west-2`, with the region you
+   `tofu -chdir=infra/envs/dev init -backend-config="bucket=<state bucket>" -backend-config="region=ap-south-1"` (the state bucket is in `aws_region`).
+2. **Bus.** Run `infra/scripts/create-event-bus.sh dev <account id> ap-south-1`, with the region you
    set as `aws_region`. It refuses any other account and prints the ARN for `event_bus_arn`.
 3. **The protected `dev` environment, before the deploy role exists.** In GitHub, Settings,
    Environments, New environment `dev`: deployment branches, selected branches, `main` only. Add the
@@ -293,7 +302,7 @@ workflows (Deploys, below), not from the owner's machine.
 4. **First apply, nothing running.** Fill `terraform.tfvars` with `start_services = false` and any
    `api_image_tag`, then run `tofu -chdir=infra/envs/dev plan -out dev.tfplan` and
    `tofu -chdir=infra/envs/dev apply dev.tfplan`. This creates the network, keys, the database (about
-   10 minutes), the empty secrets, ECR, the ALB, the cluster with every service at 0 tasks, queues,
+   10 minutes), the empty secrets, ECR, the cluster with every service at 0 tasks, queues,
    CloudTrail, the GitHub deploy role and its two SSM parameters (and the account's GitHub OIDC
    provider unless `github_oidc_provider_arn` is set), and on Cloudflare the DNS records, the
    tunnel, the VPC service and Access.
@@ -312,21 +321,95 @@ workflows (Deploys, below), not from the owner's machine.
 9. **API image and migrations.** Run the `deploy-api` workflow on `main`. It pushes the image, runs
    the store's migrations as `oryxa_fde_migrator` in the migrate task, points the service (still at
    0 tasks) at the image, and records the sha for OpenTofu.
-10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB, cloudflared and the API
-    each start one task, the API on the sha `deploy-api` recorded. The API registers with the ALB
-    once `/healthz` answers 200.
+10. **Start.** Set `start_services = true`, then plan and apply. SpiceDB and the API each start one
+    task, the API's on the sha `deploy-api` recorded. The API task starts the API container first;
+    cloudflared starts once its health check on `/healthz` passes, and only then connects the tunnel.
 11. **SpiceDB schema.** Run `infra/scripts/run-task.sh spicedb-schema schema/fde.zed`. Until this
     runs, every permission check fails closed.
 12. **Workers.** Run the `deploy-workers` workflow on `main`. Then set the gateway's Worker secrets
     once, from `sandbox/gateway` (`npx wrangler secret put SERVICE_TOKEN`, and `DEV_SECRETS` per its
     README); until then the gateway refuses every call. Secrets survive later deploys.
-13. **Smoke test.** The ALB target is healthy, `https://app.<domain>` reaches the API through the
+13. **Smoke test.** The `oryxa-fde-api` service has one running task whose `api` container reports
+    `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), the tunnel `oryxa-fde-dev-api`
+    shows healthy in the Cloudflare dashboard, `https://app.<domain>` reaches the API through the
     binding, `admin.<domain>` asks for an Access login, and CloudTrail delivers to its bucket.
+    Then run stage A of the scripted smoke test (next section).
 
 When a consumer lands (wave 2), create its FIFO subscriber into `oryxa-fde-dev-<consumer>.fifo`,
 with the `-undelivered` queue as its on-failure target and `tofu output eventbus_delivery_role_arn`
 as its role (`aws eventsv2 create-subscriber`, or the platform kit's `provision` with env
 `fde-dev`). Grant its service `ReceiveMessage` on that queue only; nothing reads the queues yet.
+
+## Smoke test
+
+`infra/scripts/smoke-test.sh` is one scripted pass against a deployed environment, so each stage of the first
+deploy ends in a pass or a fail. It goes to the web app's public address the way a browser does and stops at the
+first failure with a plain message and a non-zero exit. Needs `bash`, `curl` and `jq`.
+
+```bash
+export SMOKE_BASE_URL=https://app.<domain>               # exactly the web app's origin (the API's WEB_ORIGIN)
+export SMOKE_SESSION_FILE=~/.oryxa-smoke-session         # the session cookie, see below
+infra/scripts/smoke-test.sh a                            # stage A, the core (the default)
+SMOKE_WORKERS=1 infra/scripts/smoke-test.sh b            # stage B, once the ingest worker is deployed
+SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh c   # stage C, once the agent routes are on
+SMOKE_WORKERS=1 SMOKE_AGENT_REPO=<owner>/<repo> infra/scripts/smoke-test.sh all
+```
+
+Stages run in the order given. B and C need a company and a project, so run alone they make their own; run
+together they share one. Every run first checks health and `/v1/me`.
+
+| Stage | Checks, in order |
+| --- | --- |
+| **A, core** | `GET /api/healthz` (no session); `GET /v1/me` (the session is accepted; prints the organisation and role); create a company; create a project (starts in `discover`); add a task; the task is on `GET /v1/today`; the stage checklist reads (`discover`); a move to `scope` with items open and no reason is refused (`409 rejected_checklist_open`), then the same move with a reason succeeds and the checklist now reads `scope`; the task is removed and gone from Today |
+| **B, workers** | Upload a small Markdown document with a one-off code word; poll until `status` is `ingested` with chunks (a `failed` status stops it, and so does `SMOKE_INGEST_TIMEOUT`, default 180 s); search for the code word and find that document's passage |
+| **C, agent** | List the project's agent runs (a `404` means the agent routes are off); start a read-only run on the sample repository (`SMOKE_AGENT_BASE`, default `main`); poll until events arrive and the run is `finished` (`SMOKE_RUN_TIMEOUT`, default 900 s) with a `result` as its last event. A run that fails, or waits for an approval (the test never approves), stops it and is cancelled |
+
+**Skips.** B skips unless `SMOKE_WORKERS=1` (the script cannot tell a missing worker from a slow one, so you
+say it is deployed; then a document that never ingests is a failure). C skips without `SMOKE_AGENT_REPO`, and
+when the agent routes answer a bare `404` (one with an error code fails). A skip prints `SKIP [stage] ...` and
+exits 0 for that stage; the last line, `result: a=passed b=skipped ...`, tells passes and skips apart.
+
+**The session.** The test signs in as the person who runs it, with the browser session cookie of a **test user in
+a test organisation**: it creates a company in that organisation, and the user becomes its lead. Never use a
+real customer's organisation or your own login.
+
+1. In a private browser window, open `https://app.<domain>` and sign in as the test user. Do not sign out
+   until the run is over (sign-out ends the WorkOS session, and with it the cookie the script uses).
+2. In the browser's developer tools, Application (Chrome) or Storage (Firefox), Cookies, `https://app.<domain>`:
+   copy the **Value** of `__Host-fde_session` (it is `HttpOnly`, so only the tools show it). Just the value.
+3. Put it in a file only you can read, and paste it into that file in an editor, not on a command line:
+   `install -m 600 /dev/null ~/.oryxa-smoke-session`. The script refuses a file that group or others can read.
+   `SMOKE_SESSION` (the value in the environment) works too, for a secret manager; never an argument.
+4. When the run is over, sign out in the private window, then delete the file. Signing out ends the WorkOS
+   session, so every copy of the cookie stops working: the file, the clipboard, the browser's. Otherwise it stays
+   usable for up to seven days. The handed-over cookie goes stale anyway once the API refreshes the session
+   during a run: WorkOS refresh tokens are single use, so the API reseals the cookie, the run carries on with the
+   new one in memory (the file is never written), and the browser's copy is spent. The script says so at the
+   end. Take a fresh sign-in for each run.
+
+The script puts the cookie in a private temporary file for curl, never in its command line (`ps` shows
+arguments), and removes it on exit, on failure and on an interrupt (only `kill -9` leaves it, in a directory
+only you can read under `$TMPDIR`). It turns tracing off, so `bash -x` cannot print it, ignores `~/.curlrc`, and
+strips it from any error text. It prints identifiers and API error codes, never a header or a response body.
+
+**What a write needs, as the browser sends it** (`fde-web/src/forward.ts`, `oryxa-fde-api/src/session.rs`):
+`Cookie: __Host-fde_session=<value>`; `X-Oryxa-Request: 1`; and an `Origin` header equal to the web app's
+origin on anything but a read. The Worker refuses a write whose `Origin` is not its own, and the API refuses one
+whose `Origin` is not `WEB_ORIGIN` (`403 csrf`); that is why `SMOKE_BASE_URL` must be exactly that origin, with
+`https` (plain `http` is accepted for `localhost` only). `/api/*` goes to the API with the `/api` prefix removed.
+
+**What it makes, and what stays.** Everything is named `oryxa-smoke-<UTC time>-<random>`, with a summary saying
+it is safe to ignore. It removes the task it adds, on success and on failure (and cancels a run it stops on).
+The API has no delete for **companies, projects, documents or agent runs**, so each run leaves behind one company
+and one project (stage `scope`), a document after B and a finished run after C. The script prints their ids at
+the end. They sit in the test organisation; do not point the script at an organisation anyone works in.
+
+`infra/scripts/test-smoke-test.sh` proves the script without a deployed environment: it starts
+`infra/scripts/smoke-stub.py` (answers the routes the script calls with canned responses, on a random loopback
+port, stopped afterwards) and runs every stage against it: full passes, failures in the middle (cleanup), an
+interrupt, the skips, a session that rotates mid-run, and the session hand-over checks, including `bash -x` and
+a verbose `~/.curlrc`. It needs `bash`, `curl`, `jq` and
+`python3` only.
 
 ## Deploys
 
@@ -336,7 +419,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
-| `deploy-api` | Builds `oryxa-fde-api` for `linux/arm64`, pushes it to ECR, runs migrations as the one-off migrate task, rolls the service onto it | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
+| `deploy-api` | Builds `oryxa-fde-api` for `linux/arm64`, pushes it to ECR, runs migrations as the one-off migrate task, rolls the service onto it (the tunnel sidecar included in the new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
 | `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
@@ -375,13 +458,42 @@ definitions that run as the API's or the migrate task's roles only, run the migr
    security group; written by OpenTofu) and pushes the image tagged with the commit sha. Tags are
    immutable: a sha already in ECR is reused.
 3. Registers new revisions of `oryxa-fde-dev-migrate` and `oryxa-fde-dev-api` that differ from the
-   current ones only in the image, so env, secrets and roles stay as OpenTofu set them.
+   current ones only in the image, so env, secrets and roles stay as OpenTofu set them. The API task
+   also holds the cloudflared sidecar (#145), so it swaps the image of the one container that runs
+   the ECR repository's image and stops if that is not exactly one.
 4. Runs the migrate task and stops on a non-zero exit, before the service changes. Migrations must
    therefore work with the image still running (add first, remove in a later deploy).
-5. Updates the service, waits for it to settle, and fails if the circuit breaker rolled it back.
+5. Updates the service, waits for it to settle (the new task's `api` container must pass its health
+   check; "What the load balancer gave", below), and fails if the circuit breaker rolled it back.
 6. Writes the sha to `/oryxa-fde-dev/api-image-tag`. OpenTofu reads that parameter on every plan,
    so a later apply keeps the deployed image instead of rolling it back. To roll back, revert the
    change on `main` and run `deploy-api` again.
+
+**What the load balancer gave, and what replaced it** (#145). The ALB health-checked the API and
+registered it only when healthy, drained connections on a rollout, and never took the old task out
+before the new one answered. Without it:
+
+| ALB did | Now |
+| --- | --- |
+| Polled `/healthz`; ECS replaced an unhealthy target | The `api` container has its own health check (`busybox wget` on `127.0.0.1:<api_port><api_health_check_path>`, every 10 s, 3 failures, 30 s start period). ECS replaces the task when it fails |
+| Held the old task until the new target was healthy | The service keeps `deployment_minimum_healthy_percent = 100` and `maximum_percent = 200`: ECS starts the new task, counts it healthy once the `api` container's health check passes (cloudflared has none, so it does not count), then stops the old one. The deployment circuit breaker rolls back a task that never gets there. A rollout never runs fewer than one healthy task |
+| Kept traffic off a target that was not ready | `cloudflared` has `dependsOn` the `api` container being `HEALTHY`, so the tunnel does not connect until the API answers |
+| Drained connections for 30 s on deregistration | ECS stops a task's containers in reverse start order, so cloudflared gets SIGTERM first (per AWS's container dependency docs; the first deploy's logs confirm it). It stops taking new requests and lets those in flight finish for up to 30 s (`stopTimeout` 45 s), and only then does the API get SIGTERM |
+
+**What happens to requests during a deploy, honestly.** For a moment two tasks hold two connectors of
+one tunnel, and Cloudflare sends each request to either. A request in flight on the old connector
+finishes if it takes under 30 s. Before, an API deploy never touched the tunnel (the ALB drained the old
+API task); now every API deploy replaces a connector. ECS counts the new task healthy on the API's
+check alone, so the old connector can start shutting down a few seconds before the new one has
+registered with Cloudflare; a request in that gap, or one routed to the old connector as it begins
+shutting down, fails with a 502. Nothing closes that window. A web Worker that retries an idempotent
+request once covers it (that is the web stream's to add). **Every API deploy cuts every long-lived
+connection through the API**: a WebSocket or streamed response ends when the old connector's 30 s drain
+runs out, and the client has to reconnect. Today the API serves no stream (live agent output is a
+Durable Object, `docs/plan.md`); anything that later streams through the API, live agent output
+included, gets cut on each deploy and must resume on reconnect. The API has no graceful-shutdown handler of its own
+(`axum::serve` without `with_graceful_shutdown`, `crates/oryxa-fde-api/src/main.rs:84`), so SIGTERM ends
+it at once; adding one is the API stream's call. Migrations still run before the service changes.
 
 Without the workflow, the same steps by hand: push an image, put its sha in
 `/oryxa-fde-dev/api-image-tag`, apply, and run `infra/scripts/run-task.sh migrate`.
@@ -398,7 +510,7 @@ Worker secrets are set by hand with `wrangler secret put` and are never in the w
    both buckets and the ECR repository for emptying on destroy; nothing is deleted yet.
 2. Run `tofu -chdir=infra/envs/dev destroy`. It deletes every object version in the data and
    CloudTrail buckets and every image in ECR.
-3. Delete the bus: `aws eventsv2 delete-event-bus --region us-west-2 --name oryxa-fde-dev`.
+3. Delete the bus: `aws eventsv2 delete-event-bus --region ap-south-1 --name oryxa-fde-dev`.
 
 What stays behind:
 - RDS keeps a final snapshot named `oryxa-fde-dev-final-<time the instance was created>`, so a
@@ -408,43 +520,120 @@ What stays behind:
 - Secrets stay recoverable for 7 days. To rebuild within that window, restore them
   (`aws secretsmanager restore-secret`) and `tofu import` them, or the first apply fails on their names.
 
+## Mumbai (ap-south-1)
+
+The founder chose Mumbai for the first environment (#144). Read from AWS's own pages on 10 November 2026;
+service and model availability changes, so `tofu plan` and the first apply are still the test. **In Mumbai**
+means the service or model runs there. **Profile only** means the model has no in-Region endpoint in Mumbai and
+is reached by naming a cross-Region inference profile, so Bedrock runs the request in another Region.
+
+| What the code or infra uses | In Mumbai? | Source |
+| --- | --- | --- |
+| ECS Fargate, Linux | In Mumbai | [Fargate Regions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate-Regions.html) lists `ap-south-1` |
+| Fargate on ARM64 | In Mumbai (no exception listed) | [ARM64 task definitions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-arm64.html): the only Fargate exception is `use1-az3`; the [price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonECS/current/ap-south-1/index.json) has Fargate ARM vCPU and memory SKUs for Mumbai |
+| RDS PostgreSQL 17 on `db.t4g.micro` | In Mumbai. The class and engine pairing is from the docs; Mumbai from AWS's T4g announcement and the price list | [DB engines per instance class](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.Support.html) (`db.t4g.micro`: all PostgreSQL 17 versions); [T4g in 28 Regions incl. Mumbai, Aug 2023](https://aws.amazon.com/about-aws/whats-new/2023/08/amazon-rds-t4g-instances-6-regions/); [RDS price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/ap-south-1/index.json) has `db.t4g.micro` PostgreSQL Single-AZ. AWS has no per-Region table for this pairing: `aws rds describe-orderable-db-instance-options --engine postgres --engine-version 17 --db-instance-class db.t4g.micro --region ap-south-1` is the check |
+| pgvector on RDS PostgreSQL 17 | In the engine (0.8.x) | [Extension versions](https://docs.aws.amazon.com/AmazonRDS/latest/PostgreSQLReleaseNotes/postgresql-extensions.html); AWS lists extensions per engine version, not per Region |
+| EventBridge v2 bus and `aws eventsv2` | In Mumbai | [Launch announcement, 24 Sep 2026](https://aws.amazon.com/about-aws/whats-new/2026/09/eventbridge-relaunches-custom-event-buses/): 14 Regions including Mumbai and Oregon; [API reference](https://docs.aws.amazon.com/eventbridgev2/latest/APIReference/Welcome.html); [price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSEvents/current/ap-south-1/index.json) has `EventsV2` SKUs for Mumbai |
+| Bedrock embeddings, `amazon.titan-embed-text-v2:0` (`EMBEDDING_MODEL`) | **In Mumbai, in-Region** (not a profile; there is no geography or global profile for it) | [Titan Text Embeddings V2 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-titan-text-embeddings-v2.html): `ap-south-1` In-Region yes, Geo no, Global no |
+| Claude Opus 5.5 (`anthropic.claude-opus-5-5`; the id the code's lifecycle note and tests name) | **Profile only**: `global.anthropic.claude-opus-5-5` | [Opus 5.5 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html): Mumbai In-Region no, Geo no, Global yes. The bare id works in `eu-west-2` only. There is no India or Asia Pacific-wide profile; the geography profiles are `us.`, `eu.`, `au.` and `jp.` |
+| Claude Sonnet 5.5, Haiku 5.5, Fable 5.2 | **Profile only**, `global.` from Mumbai | [Sonnet 5.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html), [Haiku 5.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html), [Fable 5.2](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-2.html): Mumbai In-Region no, Geo no, Global yes for each |
+| Claude Opus 5 (the previous Opus) | **Profile only, but inside India**: `in.anthropic.claude-opus-5`, from Mumbai to Mumbai or Hyderabad | [Opus 5 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html): Geo India, source `ap-south-1`, destinations `ap-south-1`, `ap-south-2` |
+| SES (the lifecycle digest; the code uses the SES v2 API) | In Mumbai | [SES endpoints](https://docs.aws.amazon.com/general/latest/gr/ses.html): `email.ap-south-1.amazonaws.com`. SES sandbox status is [per Region](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html): the digest needs production access in Mumbai and a verified `DIGEST_FROM` identity there |
+| fck-nat AMI (`fck-nat-al2023-*-arm64-ebs`, owner `568608671756`) | In Mumbai | [fck-nat's published Region list](https://github.com/AndrewGuenther/fck-nat/blob/main/packer/fck-nat-public-all-regions.pkrvars.hcl) includes `ap-south-1` (last changed 31 May 2026); the owner id is in [its deploy guide](https://fck-nat.dev/stable/deploying/). The list says what the build publishes; `aws ec2 describe-images --owners 568608671756 --filters 'Name=name,Values=fck-nat-al2023-*-arm64-ebs' --region ap-south-1` is the check |
+| `t4g.nano` (the NAT), KMS, Secrets Manager, Cloud Map, CloudTrail, ECR, S3, SQS FIFO | In Mumbai | each has Mumbai SKUs in AWS's price list for `ap-south-1` (the Monthly cost estimate below links them by name) |
+
+Not offered in Mumbai: nothing the infra creates. Two things the code asks for are offered only through a
+profile: the agent's Claude model and the weekly drafting model.
+
+### Where prompts are processed
+
+ADR 0003 keeps customer data **at rest** in AWS in one Region, and in dev that Region is Mumbai: the database,
+the data bucket, the queues, the secrets and the logs. A Bedrock request is different. A prompt and its
+answer pass through whatever Region serves the model:
+
+- **Titan embeddings** (document text and search queries): processed in Mumbai.
+- **A `global.` profile** (the only kind that reaches Opus 5.5, Sonnet 5.5, Haiku 5.5 or Fable 5.2 from Mumbai):
+  [global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)
+  may process a request in any supported commercial AWS Region, and [AWS lists the destinations as all
+  commercial Regions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html), which
+  [can include Regions an account has not enabled](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html).
+  The model cards do not list the current set for Opus 5.5; `aws bedrock get-inference-profile --region ap-south-1
+  --inference-profile-identifier global.anthropic.claude-opus-5-5 --query 'models[].modelArn'` does. In plain
+  terms: **with a `global.` profile, prompts and outputs leave India.** They
+  [may be stored for abuse detection](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)
+  in the Region that processes them, opt-in Regions included. For Fable 5.2, AWS's
+  [abuse detection page](https://docs.aws.amazon.com/bedrock/latest/userguide/abuse-detection.html) says all traffic
+  is retained for up to 30 days in that Region, and flagged traffic may be reviewed by people at AWS. CloudTrail
+  records the Region in `additionalEventData.inferenceRegion` of each call, in Mumbai's trail.
+- **A geography profile** keeps processing inside its geography: [AWS's page](https://docs.aws.amazon.com/bedrock/latest/userguide/geographic-cross-region-inference.html)
+  says to check the destinations with `GetInferenceProfile` from the Region you call, not to trust the id's prefix.
+  For Opus 5.5 the cards give: `eu.` from `eu-west-2` (London), to Frankfurt, Stockholm, Milan, Spain, Ireland,
+  Paris and London; `au.` from Sydney or Melbourne, to those two; `jp.` from Tokyo or Osaka, to those two; `us.`
+  from the US Regions. None of them can be called from Mumbai, so a geography profile means setting
+  `agent_region` to a Region in that geography and calling Bedrock there, with the round trip that adds.
+- **`in.anthropic.claude-opus-5`** is the one profile that keeps Opus-class inference inside India (Mumbai and
+  Hyderabad), on the previous model.
+
+Which of these to use is **the founder's decision, recorded in ADR 0003 before real customer data reaches any
+model** (the agent or the weekly drafts). None is chosen yet. The options: a `global.` profile (cheapest, lowest
+latency from Mumbai, prompts processed and possibly stored outside India), a geography profile called from
+another Region (processed inside that geography, which is not India), or `in.` on Opus 5 (inside India, the
+previous model). Until then P0 holds sample data only, as the Cloudflare sandboxes already do (ADR 0003's
+amendment). This PR changes no model setting: `agent_model` stays null, and the example in
+`terraform.tfvars.example` is commented out.
+
+A role that calls a `global.` profile needs the three statements AWS documents
+([IAM policy for global inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)):
+the profile in the calling Region, the foundation model in that Region only when called through the profile, and
+the foundation model with `aws:RequestedRegion` set to `unspecified`. The API's role has none of it today, because
+the agent's Bedrock calls are signed by the gateway's outbound handler and the lifecycle worker is not deployed; the
+streams that add those identities need this, and an SCP that denies Regions will refuse the call.
+
 ## Monthly dev cost estimate
 
-us-west-2 list prices, 730 hours a month, dev traffic. Check against the AWS pricing calculator
-before apply.
+`ap-south-1` list prices, 730 hours a month, dev traffic, in US dollars. Prices were read on 10 November 2026
+from AWS's public price lists (`https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/<offer>/current/ap-south-1/index.json`;
+the Checked column names the offer and its publication date). Check against the AWS pricing calculator before apply.
 
-| Item | Assumption | $/month |
-| --- | --- | --- |
-| Fargate: oryxa-fde-api, SpiceDB, cloudflared | 3 tasks, each 0.25 vCPU + 0.5 GB ARM64, always on ($7.21 each) | 21.63 |
-| Internal ALB | 730 h at $0.0225, under 1 LCU | 16.50 to 18.50 |
-| RDS PostgreSQL | `db.t4g.micro` single-AZ ($11.68), 20 GB gp3 ($2.30), backups inside the free allowance | 14 |
-| NAT instance | fck-nat on `t4g.nano` ($3.07), its public IPv4 ($3.65), root volume and transfer | 7 to 8.50 |
-| Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 |
-| KMS | environment key + CloudTrail key at $1, requests (S3 Bucket Keys on) | 2 to 2.50 |
-| Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance | 0.60 |
-| CloudWatch Logs | 14-day retention, low volume | 1 to 2 |
-| CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 |
-| S3 (data, trail logs), ECR (under 1 GB) | low volume | 0.50 to 1 |
-| SQS, EventBridge v2 | no consumer polls yet; low event volume | 0 to 1 |
-| S3 gateway endpoint, one-off tasks | free; one-off tasks bill seconds | 0 |
-| Cloudflare Workers Paid | needed for Sandboxes and Durable Objects anyway | 5 |
-| Cloudflare Tunnel, Workers VPC, Access (under 50 users), DNS | free tiers; confirm Workers VPC pricing before apply | 0 |
-| **Total** | excluding Bedrock tokens and sandbox container time | **about $70 to 78** |
+| Item | Assumption | $/month | Checked |
+| --- | --- | --- | --- |
+| Fargate: oryxa-fde-api (with the cloudflared sidecar), SpiceDB | 2 tasks, each 0.25 vCPU + 0.5 GB ARM64, always on ($0.02383 per vCPU-hour, $0.00261 per GB-hour: $5.30 each) | 10.60 | AmazonECS, 19 Oct |
+| RDS PostgreSQL | `db.t4g.micro` single-AZ ($0.021 an hour: $15.33), 20 GB gp3 ($0.131 a GB: $2.62), backups inside the free allowance | 18 | AmazonRDS, 29 Oct |
+| NAT instance | fck-nat on `t4g.nano` ($0.0028 an hour: $2.04), its public IPv4 ($0.005 an hour: $3.65), 8 GB gp3 root volume ($0.0912 a GB: $0.73), and an assumed 10 GB or less a month out to the internet at $0.1093 a GB | 6.50 to 8 | AmazonEC2, 7 Nov; AmazonVPC, 5 Nov; AWSDataTransfer, 3 Nov; the root volume's size and the traffic are assumptions |
+| Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 | AWSSecretsManager, 11 Sep |
+| KMS | environment key + CloudTrail key at $1, requests at $0.03 per 10,000 (S3 Bucket Keys on) | 2 to 2.50 | awskms, 8 Nov |
+| Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance ($0.10) | 0.60 | instance: AWSCloudMap, 6 Nov; the hosted zone's price is global and **was not rechecked** |
+| CloudWatch Logs | 14-day retention, about 2 to 3 GB a month ingested at $0.67 a GB, storage $0.03 a GB-month | 1.50 to 2.50 | AmazonCloudWatch, 4 Nov; the volume is an assumption |
+| CloudTrail | first trail's management events are free; data events on the data bucket at $0.10 per 100,000 | 0 to 0.50 | AWSCloudTrail, 2 Nov |
+| S3 (data, trail logs), ECR (under 1 GB) | low volume, S3 $0.025 a GB-month, ECR $0.10 a GB-month | 0.50 to 1 | AmazonS3, 9 Nov; AmazonECR, 11 Sep |
+| SQS, EventBridge v2 | no consumer polls yet; low event volume. SQS FIFO $0.50 per million requests; EventBridge v2 is priced by data: $0.19 a GB in, $0.059 a GB out, $0.087 a GB-month retained | 0 to 1 | AWSQueueService, 11 Sep; AWSEvents, 8 Nov |
+| S3 gateway endpoint, one-off tasks | free; one-off tasks bill seconds | 0 | not rechecked (free) |
+| Cloudflare Workers Paid | needed for Sandboxes and Durable Objects anyway | 5 | not AWS; unchanged |
+| Cloudflare Tunnel, Workers VPC, Access (under 50 users), DNS | free tiers; confirm Workers VPC pricing before apply | 0 | not AWS; unchanged |
+| **Total** | excluding Bedrock tokens and sandbox container time | **about $47 to 52** | |
 
-With `start_services = false` the three tasks cost nothing, so the total is about $49 to 56. If the
-account already has a CloudTrail trail, this trail's management events add about $2 to 5.
+With `start_services = false` the two tasks cost nothing, so the total is about $37 to 42. If the
+account already has a CloudTrail trail, this trail's management events add about $2 to 5 (that rate was not
+rechecked). Lines removed by #145: the internal ALB (17.50 to 19.50, `AWSELB`) and the cloudflared task
+($5.30, now a container in the API's task that adds no Fargate line of its own), $22.80 to 24.80 in all, from
+a total of about $70 to 77. The table for Oregon (us-west-2 list prices) had come to $70 to 78 at that point.
 
-Compared with the platform's $38 to 50, the difference is the internal ALB ($16.50) and an
-always-on API on Fargate plus an RDS instance instead of Lambda and scale-to-zero Aurora (ADR 0003
-picks Fargate because agent runs and live streams outlast Lambda). Cuts, each with a cost:
+Bedrock tokens are not in the total. Mumbai list prices, from the Bedrock price lists
+([foundation models](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/ap-south-1/index.json),
+[Titan](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/ap-south-1/index.json), 9 and 6 Nov), per million tokens
+input and output: Titan Embeddings V2 $0.024 in; Opus 5.5 through the global profile $4 and $20; Opus 5 through
+`in.` $5.50 and $27.50 (global $5 and $25); Sonnet 5.5 global $2 and $10; Haiku 5.5 global $0.10 and $0.50;
+Fable 5.2 global $8 and $40. The Mumbai list prices Opus 5.5 only for global use.
 
-- Drop the ALB and point the VPC service at the API task through Cloud Map: saves about $17, but
-  loses health-checked rolling deploys. The issue asks for the ALB, so that is the lead's call.
-- Fargate Spot for the three tasks, if ARM64 Spot is offered in the region: saves about $15, but
-  tasks can be interrupted.
-- Run cloudflared as a sidecar in the API task: saves $7.21, but ties the tunnel to API deploys and
-  bypasses the ALB.
-- Stop the RDS instance while unused (at most 7 days at a time): up to $11.68, prorated.
+Compared with the platform's $38 to 50, the difference is an always-on API on Fargate plus an RDS
+instance instead of Lambda and scale-to-zero Aurora (ADR 0003 picks Fargate because agent runs and live
+streams outlast Lambda). Cuts that are left, each with a cost:
+
+- Fargate Spot for the two tasks, if ARM64 Spot is offered in the region: saves up to about $7 (the
+  earlier estimate's roughly 70% discount, applied to $10.60; Spot prices are not in the price list, and AWS's
+  Fargate capacity-provider page names no Region limit, so Mumbai was **not rechecked**), but tasks can be
+  interrupted, and an interrupted API task takes its tunnel connector with it.
+- Stop the RDS instance while unused (at most 7 days at a time): up to $15.33, prorated.
 
 ## Verify before apply
 
@@ -453,15 +642,28 @@ These could not be checked without an account. Each one is flagged at the place 
 - **EventBridge v2.** There is no OpenTofu resource, so the bus is created by script. The publish
   action `events:PutEvents` on the v2 bus ARN is inferred from the SDK's signing name, as in the
   platform. The CLI field names in `create-event-bus.sh` match `aws-sdk-eventbridgev2` 1.2.0.
-- **Workers VPC.** `cloudflare_connectivity_directory_service` (provider 5.27) resolves the ALB's
-  hostname through the tunnel (`resolver_network`). Confirm the service shows healthy and that
-  fde-web's binding reaches `/healthz`.
-- **fck-nat AMI owner** `568608671756`. Confirm it against fck-nat's docs, as in the platform.
+- **Workers VPC reaching the loopback.** `cloudflare_connectivity_directory_service` (provider 5.27) is
+  set to `ipv4 = "127.0.0.1"` on `http_port = api_port`, reached through the tunnel (`network.tunnel_id`):
+  the connector's own loopback, which is the API's, because the sidecar shares its task's network. Whether
+  Workers VPC accepts a loopback address is **not confirmed**; the apply of the VPC service answers it. If it
+  refuses, try `hostname = "localhost"` with `resolver_network = { tunnel_id = ... }` (a three-line change in
+  `modules/cloudflare`). If neither is accepted, the fallback is a separate cloudflared service reaching the
+  API through Cloud Map (the other option in #145). Then confirm the service shows healthy and that fde-web's
+  binding reaches `/healthz`.
+- **Health check and start order.** The API container's health check runs `/usr/local/bin/busybox wget`
+  (the image has no shell); `docker run` of that wget against a local server gave exit 0 for 200 and 1 for
+  404 and a refused connection. Confirm in the first run that the `api` container reaches `HEALTHY` and that
+  cloudflared waits for it (`describe-tasks`). The shutdown order (cloudflared first) is from AWS's
+  `dependsOn` docs ("for container shutdown it is reversed"); the first deploy's CloudWatch streams
+  (`api/` and `cloudflared/` in `/ecs/oryxa-fde-dev-api`) show whether the tunnel drained first.
+- **fck-nat AMI owner** `568608671756` is the one fck-nat's deploy guide gives. That the AMI exists in
+  Mumbai is the project's published Region list; run the `describe-images` check in Mumbai (ap-south-1) first.
 - **zed task.** `authzed/zed:v1.14.0-debug` (busybox shell, ARM64 confirmed on ghcr.io) reads the
   key from `ZED_TOKEN` through zed's `ZED_` env flag binding. If zed reports no token, that binding
   did not apply.
 - **Docker Hub pulls** (SpiceDB, cloudflared, zed) are anonymous and rate-limited per NAT IP. An ECR
-  pull-through cache fixes it if it bites. Images are pinned by tag, not digest.
+  pull-through cache fixes it if it bites. SpiceDB and zed are pinned by tag; cloudflared by digest (it
+  holds the API's role).
 - **Deploy role.** `ecs:RegisterTaskDefinition` and `ecs:DescribeTaskDefinition` take `*` (not
   scoped to a family); `iam:PassRole` on four roles is what limits a new revision. If the account
   already has a GitHub OIDC provider, set `github_oidc_provider_arn` or the first apply fails on it.
@@ -476,7 +678,11 @@ These could not be checked without an account. Each one is flagged at the place 
   `kms:Decrypt` for the caller; AWS's reference may also list `kms:DescribeKey`. The Slack statement grants
   the first two, only through Secrets Manager. The first Slack install shows whether a third is needed.
 - **Bedrock.** The API's role may `bedrock:InvokeModel` on `foundation-model/amazon.titan-embed-text-v2:0` in
-  `aws_region`. Confirm the model is available there and enabled for the account (model access) before the first upload.
+  `aws_region`. AWS lists the model as in-Region in Mumbai (Mumbai (ap-south-1)); confirm it works for the account
+  (model access) before the first upload. The Claude models need an inference profile there, and the profile
+  chosen decides where prompts are processed (Where prompts are processed).
+- **RDS in Mumbai.** AWS has no per-Region table for PostgreSQL 17 on `db.t4g.micro`; the
+  `describe-orderable-db-instance-options` command in Mumbai (ap-south-1) answers it before the first apply.
 - **`WORKOS_ISSUER`.** The code's default is `https://api.workos.com/`, pinned against the token's `iss`
   (`oryxa-authn/src/workos_jwt.rs:57`). If the WorkOS environment uses a custom auth domain, the issuer is
   that domain and the API needs `WORKOS_ISSUER` (not set here; add it to the contract when it is known).
@@ -487,14 +693,30 @@ These could not be checked without an account. Each one is flagged at the place 
 ## Known limits (dev only)
 
 - `ponytail:` one NAT instance, single-AZ RDS and one SpiceDB task, with no failover.
-- `ponytail:` plaintext hops inside the VPC, limited by security groups: cloudflared to the ALB to
-  the API (HTTP), and the API to SpiceDB (gRPC). SpiceDB reaches RDS with `sslmode=require`, which
+- `ponytail:` plaintext hops inside the VPC, limited by security groups: the API to SpiceDB (gRPC).
+  The tunnel to the API is loopback inside one task. SpiceDB reaches RDS with `sslmode=require`, which
   does not verify the CA. Prod adds TLS on each hop and the RDS CA bundle.
 - Tasks may reach any host on 443 through the NAT. The application's outbound allowlist
   (CLAUDE.md) is the control; a network firewall is a prod decision.
 - **No per-company KMS keys in P0** (ADR 0003, amendment of 4 November). The bucket encrypts with
   the environment key, and the API's role is limited to company documents and canvas snapshots. A provisioning step
   adds a key per company before the first real customer data (P1).
+- `ponytail:` the API and the tunnel connector share one 0.25 vCPU / 512 MiB task (`api_cpu`, `api_memory`).
+  cloudflared is small, but a busy tunnel and a busy API compete; raise the task, not one container.
+- `ponytail:` no health check on cloudflared itself: a connector that is running but not connected is not
+  replaced (the standalone service had none either). A crashed one stops the task, and ECS replaces it.
+- A rollout can fail a request in the seconds the old connector shuts down before the new one registers, and
+  cuts every stream or WebSocket through the API (Deploys, "What the load balancer gave").
+- `ponytail:` cloudflared shares the API task's role and security group. It makes no AWS call, but a
+  compromised connector gets the API's credentials (S3 company prefixes, Bedrock, `rds-db:connect` as the
+  API, its Secrets Manager reads), where the separate service had a role with no permissions. Its image is
+  pinned by digest for that reason. Dev holds sample data only (ADR 0003). Prod runs the connector as its
+  own service with an empty role, reaching the API through an internal load balancer (`modules/internal_alb`)
+  or Cloud Map, with an ingress rule from the connector's group only.
+- `ponytail:` the API image carries a static `busybox` so the container health check has a command to run.
+  It gives code running in the container a shell and network tools it did not have (no new permission:
+  nonroot, read-only root). Replace it with a health-check subcommand in `oryxa-fde-ops` (API stream) and drop
+  the busybox stage.
 - ECR lives in the dev stack until a second environment needs it.
 
 ## Contracts with other streams
@@ -514,7 +736,9 @@ These could not be checked without an account. Each one is flagged at the place 
     inside a transaction that took `oryxa_fde_app`, `oryxa_fde_relay` or `oryxa_fde_grants`. The
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
-  - It serves `GET /healthz` without auth (it does), keeps files under
+  - It serves `GET /healthz` without auth (it does; the container health check and the deploy rely on
+    it), listens where `LISTEN_ADDR` says (`127.0.0.1:<api_port>` in dev; the tunnel sidecar is its only
+    client), keeps files under
     `<tenant>/<company>/` (`oryxa-fde-context/src/blob.rs`), and writes nothing to its root filesystem, which is
     read-only. Infra builds the image (`deploy-api`) from the `oryxa-fde-api` package's two binaries:
     `oryxa-fde-api` is the entrypoint, and the migrate task runs `/usr/local/bin/oryxa-fde-ops migrate`.
@@ -535,5 +759,6 @@ tofu -chdir=infra/envs/dev init -backend=false
 tofu -chdir=infra/envs/dev validate
 tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API task against the contract table
 shellcheck infra/scripts/*.sh
+bash infra/scripts/test-smoke-test.sh # the smoke test against a local stub; no environment needed
 actionlint                            # the deploy workflows
 ```

@@ -20,9 +20,9 @@ variable "aws_account_id" {
 }
 
 variable "aws_region" {
-  description = "Dev runs in the platform's region until the first region is decided (plan, open decisions)."
+  description = "Where the environment runs: Mumbai (ap-south-1), chosen by the founder to measure latency from the team and first customers (#144). Customer data at rest stays here (ADR 0003). Bedrock embeddings are in-region here; the Claude models are not (agent_region)."
   type        = string
-  default     = "us-west-2"
+  default     = "ap-south-1"
 }
 
 variable "cloudflare_account_id" {
@@ -117,12 +117,13 @@ variable "consumers" {
 }
 
 variable "api_port" {
-  type    = number
-  default = 8080
+  description = "Port oryxa-fde-api listens on, on the task's loopback (LISTEN_ADDR). The health check and the Workers VPC service use it; nothing else can reach it."
+  type        = number
+  default     = 8080
 }
 
 variable "api_health_check_path" {
-  description = "Path the ALB polls; must answer 200 without auth."
+  description = "Path the API container's health check polls; must answer 200 without auth."
   type        = string
   default     = "/healthz"
 }
@@ -143,8 +144,9 @@ variable "spicedb_image" {
 }
 
 variable "cloudflared_image" {
-  type    = string
-  default = "cloudflare/cloudflared:2026.10.7"
+  description = "Tunnel connector (2026.10.7), pinned by digest: it runs with the API task's role, so a re-pushed tag must not reach it."
+  type        = string
+  default     = "cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba"
 }
 
 variable "db_instance_class" {
@@ -210,7 +212,7 @@ variable "agent_model" {
 }
 
 variable "agent_region" {
-  description = "Region of agent_model (AGENT_REGION). Null: aws_region."
+  description = "Region the agent's Bedrock calls start from (AGENT_REGION); null means aws_region. In ap-south-1 Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 are served only through a cross-Region inference profile, and none has a geography profile for India: `global.anthropic.claude-opus-5-5` lets Bedrock process prompts and outputs in any commercial AWS Region (infra/README.md, Where prompts are processed). A profile tied to a geography keeps processing inside it, but is called from a source Region in that geography, which is what this variable is for (for example `eu.anthropic.claude-opus-5-5` from eu-west-2). The profile id's prefix does not say where requests go: check the profile's destination Regions with GetInferenceProfile from this Region."
   type        = string
   default     = null
 }

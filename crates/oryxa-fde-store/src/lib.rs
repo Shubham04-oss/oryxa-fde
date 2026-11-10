@@ -13,12 +13,13 @@ use std::fmt;
 
 use oryxa_core::{TenantId, UserId};
 use oryxa_events::{Event, encode, new_envelope, v1};
-use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, StageError};
+use oryxa_fde_core::{Check, CompanyId, CompanyScope, ProjectId, ProjectScope, StageError};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
 mod canvas;
+mod checklist;
 mod companies;
 mod digest;
 mod documents;
@@ -49,6 +50,7 @@ pub use access::{AccessRequest, AccessRequestIn};
 pub use canvas::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,
 };
+pub use checklist::{ChecklistItem, MAX_REASON_CHARS, Reason, ReasonError};
 pub use companies::{Company, CompanyIn, CompanyTx, Member, Role};
 pub use digest::{DIGEST_ATTEMPTS, DIGEST_WINDOW, DigestClaim, DueDigest, UnsubscribeToken};
 pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, DocumentStatus};
@@ -108,6 +110,9 @@ pub enum StoreError {
     /// The request breaks a rule of the record, e.g. signing off an empty scope.
     #[error("{0}")]
     Rejected(&'static str),
+    /// A forward stage move with these checks open and no reason given.
+    #[error("checks open to leave the stage: {0:?}")]
+    ChecklistOpen(Vec<Check>),
 }
 
 impl StoreError {
@@ -117,6 +122,7 @@ impl StoreError {
     pub fn is_permanent(&self) -> bool {
         match self {
             StoreError::Rejected(_)
+            | StoreError::ChecklistOpen(_)
             | StoreError::Corrupt(_)
             | StoreError::Missing(_)
             | StoreError::Conflict
@@ -428,9 +434,27 @@ async fn audit(
     action: &'static str,
     target: Option<&str>,
 ) -> Result<(), StoreError> {
+    audit_override(conn, scope, project, by, action, target, None).await
+}
+
+/// Appends an audit row that may also record why a rule was overridden and what it left open:
+/// the one free-text field in the log.
+async fn audit_override(
+    conn: &mut PgConnection,
+    scope: &CompanyScope,
+    project: Option<&ProjectId>,
+    by: &Actor,
+    action: &'static str,
+    target: Option<&str>,
+    overridden: Option<(&Reason, &[Check])>,
+) -> Result<(), StoreError> {
+    let (reason, open) = match overridden {
+        Some((r, open)) => (Some(r.as_str()), Some(open.iter().map(|c| c.key()).collect::<Vec<_>>())),
+        None => (None, None),
+    };
     sqlx::query(
-        "insert into audit_log (tenant_id, company_id, project_id, actor, action, target)
-         values ($1, $2, $3, $4, $5, $6)",
+        "insert into audit_log (tenant_id, company_id, project_id, actor, action, target, reason, open_items)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(scope.tenant.as_str())
     .bind(scope.company.as_str())
@@ -438,6 +462,8 @@ async fn audit(
     .bind(by.user.as_str())
     .bind(action)
     .bind(target)
+    .bind(reason)
+    .bind(open)
     .execute(conn)
     .await?;
     Ok(())

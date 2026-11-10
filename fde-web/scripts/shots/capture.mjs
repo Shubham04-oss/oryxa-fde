@@ -39,6 +39,9 @@ async function shoot(screen, size, theme) {
   // Before the app's own code runs, so the mock seeds a workspace with no company.
   if (screen.emptyWorkspace)
     await page.addInitScript(() => (globalThis.__fdeMockNoCompanies = true))
+  // Reads of the stage checklist say everything is met, so the stale-view refusal can be shown.
+  if (screen.staleChecklist)
+    await page.addInitScript(() => (globalThis.__fdeMockStaleChecklist = true))
   try {
     const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"))
     if (response && response.status() >= 400) problems.push(`HTTP ${response.status()}`)

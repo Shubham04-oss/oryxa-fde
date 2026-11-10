@@ -6,9 +6,11 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
-import { compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
+import { ApprovalGate, type ApprovalRule, compileRules, ruleFor, StdioApprovals } from "../src/approvals.js";
+import { ruleName } from "../src/opencode-events.js";
 import { loadPack, PACK_LIMITS, parsePack, systemPrompt } from "../src/pack.js";
-import { fixture, samplePack } from "./fakes.js";
+import { recording } from "./acp-peer.js";
+import { fixture, jsonLines, samplePack } from "./fakes.js";
 
 describe("approval rules", () => {
   const { rules } = samplePack();
@@ -27,6 +29,96 @@ describe("approval rules", () => {
 
   it("refuse a pack whose pattern does not compile", () => {
     expect(() => compileRules([{ action: "deploy", tool: "Bash", pattern: "(" }])).toThrow();
+  });
+
+  it("match the same calls on both harnesses, since a pattern matches values and never key names", () => {
+    // The same task recorded on each harness: read, edit, write a test, run it, fix it, run it again.
+    const coding = new Set(["Read", "Edit", "Write", "Bash"]);
+    const sdk = jsonLines(fixture("session.sdk.jsonl"))
+      .flatMap((m) => m.message?.content ?? [])
+      .filter((c) => c.type === "tool_use")
+      .map((c) => ({ tool: c.name as string, input: c.input as Record<string, unknown> }));
+    const opencode = recording("healthz")
+      .filter((f) => f.msg["method"] === "session/request_permission")
+      .map((f) => ({ tool: ruleName(f.msg["params"].toolCall.name), input: f.msg["params"].toolCall.rawInput }));
+    const sessions = { sdk, opencode };
+    const calls = (name: keyof typeof sessions) => sessions[name].filter((c) => coding.has(c.tool));
+    expect(calls("sdk").map((c) => c.tool)).toEqual(["Read", "Edit", "Write", "Bash", "Edit", "Bash"]);
+    expect(calls("opencode").map((c) => c.tool)).toEqual(calls("sdk").map((c) => c.tool));
+
+    const cases: [ApprovalRule, boolean[]][] = [
+      [{ action: "src", tool: "*", pattern: "^/workspace/repo/src/" }, [true, true, false, false, false, false]],
+      [{ action: "tests", tool: "Write", pattern: "\\.test\\.mjs$" }, [false, false, true, false, false, false]],
+      [{ action: "route", tool: "Edit", pattern: "healthz" }, [false, true, false, false, true, false]],
+      // The SDK's model wrote `cd repo && npm test`, OpenCode's `npm test` with a `workdir`.
+      [{ action: "run", tool: "Bash", pattern: "\\bnpm test$" }, [false, false, false, true, false, true]],
+      // Key names differ between harnesses (`file_path` and `path`, `old_string` and `oldString`), so none match.
+      [{ action: "keys", tool: "*", pattern: '"file_path":"/workspace' }, [false, false, false, false, false, false]],
+      [{ action: "keys", tool: "*", pattern: '"path":"/workspace' }, [false, false, false, false, false, false]],
+      [{ action: "keys", tool: "Edit", pattern: "old_?[sS]tring" }, [false, false, false, false, false, false]],
+    ];
+    for (const [rule, expected] of cases)
+      for (const name of ["sdk", "opencode"] as const) {
+        const rules = compileRules([rule]);
+        const matched = calls(name).map((c) => ruleFor(rules, c.tool, c.input) !== undefined);
+        expect(matched, `${rule.pattern} on ${name}`).toEqual(expected);
+      }
+  });
+
+  it("match any string in the input, however deep, and nothing else", () => {
+    const rules = compileRules([{ action: "send", tool: "*", pattern: "^customer@example\\.com$" }]);
+    expect(ruleFor(rules, "mcp__x__send", { to: ["customer@example.com"] })?.action).toBe("send");
+    expect(ruleFor(rules, "mcp__x__send", { message: { to: { address: "customer@example.com" } } })).toBeDefined();
+    expect(ruleFor(rules, "mcp__x__send", { "customer@example.com": true })).toBeUndefined();
+    const numbers = compileRules([{ action: "n", tool: "*", pattern: "^10$" }]);
+    expect(ruleFor(numbers, "Read", { file_path: "/a", offset: 10 })).toBeUndefined();
+    // A rule with no pattern covers every call to its tool.
+    expect(ruleFor(compileRules([{ action: "any", tool: "Read" }]), "Read", {})?.action).toBe("any");
+  });
+});
+
+describe("approval rules on input too deep to walk", () => {
+  // As deep as a model can make it: deep enough to overflow the stack if walked recursively.
+  const deep = (levels: number, leaf: unknown = "deploy") => {
+    let value: unknown = leaf;
+    for (let i = 0; i < levels; i++) value = { next: [value] };
+    return value as Record<string, unknown>;
+  };
+
+  it("needs approval from a rule on that tool, whatever its pattern, and never throws", () => {
+    const rules = compileRules([
+      { action: "other", tool: "Read", pattern: "x" },
+      { action: "send", tool: "mcp__x__send", pattern: "^never$" },
+    ]);
+    expect(ruleFor(rules, "mcp__x__send", deep(200))?.action).toBe("send");
+    expect(ruleFor(rules, "mcp__x__send", deep(100_000))?.action).toBe("send");
+    // Shallow enough to walk: matched on its values as usual.
+    expect(ruleFor(rules, "mcp__x__send", deep(10))).toBeUndefined();
+    // No rule names the tool, so none could have matched.
+    expect(ruleFor(rules, "Write", deep(100_000))).toBeUndefined();
+  });
+
+  it("matches wide input, many values under one key, without throwing", async () => {
+    const wide = { items: [...Array.from({ length: 200_000 }, () => "x"), "deploy"] };
+    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^deploy$" }]), "Write", wide)?.action).toBe(
+      "send",
+    );
+    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^never$" }]), "Write", wide)).toBeUndefined();
+  });
+
+  it("is refused, not passed and not thrown, when a rule covers it", async () => {
+    const rules = compileRules([{ action: "send", tool: "*", pattern: "^never$" }]);
+    const emitted: unknown[] = [];
+    const gate = new ApprovalGate(
+      rules,
+      { request: async () => "approved" },
+      (e) => emitted.push(e),
+      () => "apr_1",
+      new AbortController().signal,
+    );
+    const describe = () => ({ toolCallId: "t1", title: "Send" });
+    expect(await gate.decide("mcp__x__send", deep(100_000), new AbortController().signal, describe)).toBe("too_large");
+    expect(emitted).toEqual([]);
   });
 });
 

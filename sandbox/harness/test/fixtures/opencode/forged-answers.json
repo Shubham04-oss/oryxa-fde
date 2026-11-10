@@ -1,0 +1,75 @@
+{
+  "http-readable": {
+    "steps": [
+      {
+        "step": "find",
+        "acp": "opencode acp ",
+        "serve": "/usr/local/bin/opencode serve --stdio --port"
+      },
+      {
+        "step": "port",
+        "found": true,
+        "loopback": true
+      },
+      {
+        "step": "unauthenticated request",
+        "status": 401
+      },
+      {
+        "step": "read OPENCODE_PASSWORD from /proc/<serve pid>/environ",
+        "ok": true,
+        "length": 43
+      },
+      {
+        "step": "authenticated list of pending permission requests",
+        "status": 200
+      },
+      {
+        "step": "reply once to a pending request",
+        "status": 204,
+        "action": "edit"
+      }
+    ]
+  },
+  "stdin-readable": {
+    "steps": [
+      {
+        "step": "find",
+        "acp": "opencode acp ",
+        "serve": "/usr/local/bin/opencode serve --stdio --port"
+      },
+      {
+        "step": "open fd/0 for write",
+        "ok": false,
+        "error": "ENXIO"
+      }
+    ]
+  },
+  "http-execonly": {
+    "steps": [
+      {
+        "step": "find",
+        "acp": "opencode acp ",
+        "serve": "/usr/local/bin/opencode serve --stdio --port"
+      },
+      {
+        "step": "failed",
+        "error": "EACCES"
+      }
+    ]
+  },
+  "stdin-execonly": {
+    "steps": [
+      {
+        "step": "find",
+        "acp": "opencode acp ",
+        "serve": "/usr/local/bin/opencode serve --stdio --port"
+      },
+      {
+        "step": "open fd/0 for write",
+        "ok": false,
+        "error": "EACCES"
+      }
+    ]
+  }
+}

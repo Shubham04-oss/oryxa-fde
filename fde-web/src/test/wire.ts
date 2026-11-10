@@ -11,11 +11,13 @@ export type Wire = {
   refuse: Response | null
   /** Holds every read's answer, already taken, so it arrives late with what was true when it was asked. */
   holdReads: Promise<void> | null
+  /** Answers every read whose path ends with `ending` with `response`, as the API would. */
+  refuseReads: { ending: string; response: Response } | null
   /** Every write sent, in order. */
   sent: Array<{ method: string; path: string; body: unknown }>
 }
 
-export const wire: Wire = { hold: null, refuse: null, holdReads: null, sent: [] }
+export const wire: Wire = { hold: null, refuse: null, holdReads: null, refuseReads: null, sent: [] }
 
 const answer = mockApi.fetch
 let installed = false
@@ -24,6 +26,7 @@ export function resetWire() {
   wire.hold = null
   wire.refuse = null
   wire.holdReads = null
+  wire.refuseReads = null
   wire.sent = []
 }
 
@@ -43,6 +46,12 @@ export function installWire() {
     }
     if (write && wire.hold) await wire.hold
     if (write && wire.refuse) return wire.refuse.clone()
+    if (
+      !write &&
+      wire.refuseReads &&
+      new URL(request.url).pathname.endsWith(wire.refuseReads.ending)
+    )
+      return wire.refuseReads.response.clone()
     const response = await answer(request)
     if (!write && wire.holdReads) await wire.holdReads
     return response

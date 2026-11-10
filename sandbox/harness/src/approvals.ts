@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
 
+import type { HarnessEvent } from "./events.js";
+
 export type ApprovalOutcome = "approved" | "rejected";
 
 /** Where approval requests go. The run waits on `request` until an FDE decides. */
@@ -23,7 +25,11 @@ export function compileRules(rules: readonly ApprovalRule[]): CompiledRule[] {
   return rules.map((rule) => ({ ...rule, regex: rule.pattern === undefined ? undefined : new RegExp(rule.pattern) }));
 }
 
-/** The first rule that covers this tool call: its tool name, and its pattern over the command or JSON input. */
+/**
+ * The first rule that covers this tool call: its tool name, and its pattern over the command (`Bash`) or any string
+ * value in the input. Never over key names: the harnesses name the same input differently (`file_path` and `path`).
+ * An input nested too deep to walk is covered by any rule on its tool, whatever the pattern: it fails closed.
+ */
 // ponytail: matches what the tool call says; an agent can obfuscate a shell command, so a host whose use needs
 // approval should also be held at the outbound handler.
 export function ruleFor(
@@ -31,8 +37,77 @@ export function ruleFor(
   tool: string,
   input: Record<string, unknown>,
 ): CompiledRule | undefined {
-  const subject = tool === "Bash" && typeof input["command"] === "string" ? input["command"] : JSON.stringify(input);
-  return rules.find((rule) => (rule.tool === "*" || rule.tool === tool) && (rule.regex?.test(subject) ?? true));
+  const subjects = tool === "Bash" && typeof input["command"] === "string" ? [input["command"]] : strings(input);
+  return rules.find(
+    (rule) =>
+      (rule.tool === "*" || rule.tool === tool) &&
+      (rule.regex === undefined || subjects === undefined || subjects.some((s) => rule.regex?.test(s))),
+  );
+}
+
+/** Deeper than any tool's real input; bounds the walk well below the stack's limit. */
+const MAX_INPUT_DEPTH = 64;
+
+/** Every string value in `value`, or `undefined` when it is nested deeper than `MAX_INPUT_DEPTH`. */
+function strings(value: unknown, found: string[] = [], depth = 0): string[] | undefined {
+  // Pushed one at a time: spreading a wide input's values into `push` overflows the stack.
+  if (typeof value === "string") found.push(value);
+  if (typeof value !== "object" || value === null) return found;
+  if (depth === MAX_INPUT_DEPTH) return undefined;
+  for (const item of Object.values(value)) if (strings(item, found, depth + 1) === undefined) return undefined;
+  return found;
+}
+
+/** Largest tool input sent for approval; the event line itself is capped at 1 MiB. */
+const MAX_APPROVAL_INPUT_BYTES = 256 * 1024;
+
+/** The input's size as an engineer would see it; one that cannot be serialised (too deep) is `Infinity`. */
+function inputBytes(input: Record<string, unknown>): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(input));
+  } catch {
+    return Infinity;
+  }
+}
+
+/** `unlisted`: no rule covers the call. `too_large`: a rule does, but the input is too large for an engineer to read. */
+export type Verdict = "unlisted" | "too_large" | ApprovalOutcome;
+
+/**
+ * Asks an engineer about each call the company's approval list covers, one at a time so the run never waits on two.
+ * The engineer approves the exact input; one too large to show is refused, never cut short. Every backend uses it.
+ */
+export class ApprovalGate {
+  #queue: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private readonly rules: readonly CompiledRule[],
+    private readonly approvals: ApprovalChannel,
+    private readonly emit: (event: HarnessEvent) => void,
+    private readonly newApprovalId: () => string,
+    /** Aborts when the run ends: a pending or queued approval is then rejected. */
+    private readonly stopped: AbortSignal,
+  ) {}
+
+  async decide(
+    tool: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    describe: () => { toolCallId: string; title: string },
+  ): Promise<Verdict> {
+    const rule = ruleFor(this.rules, tool, input);
+    if (rule === undefined) return "unlisted";
+    if (inputBytes(input) > MAX_APPROVAL_INPUT_BYTES) return "too_large";
+    const decision = this.#queue.then(() => {
+      if (this.stopped.aborted) return "rejected" as const;
+      const id = this.newApprovalId();
+      const { toolCallId, title } = describe();
+      this.emit({ type: "approval_request", id, tool_call_id: toolCallId, action: rule.action, title, tool, input });
+      return this.approvals.request(id, AbortSignal.any([signal, this.stopped]));
+    });
+    this.#queue = decision.catch(() => {});
+    return decision.catch(() => "rejected" as const);
+  }
 }
 
 const Input = z.discriminatedUnion("type", [

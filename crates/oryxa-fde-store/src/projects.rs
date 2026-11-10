@@ -7,7 +7,9 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
-use crate::{Actor, Name, StoreError, Text, audit, enqueue, id, name, opt, text, unique_violation};
+use crate::{
+    Actor, Name, Reason, StoreError, Text, audit, audit_override, enqueue, id, name, opt, text, unique_violation,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -170,8 +172,16 @@ impl ProjectTx {
     }
 
     /// Moves the project to `to` through [`Stage::transition`] and queues `project.stage-changed`.
+    /// A forward move with checks of the current stage's checklist open needs `reason`, which the
+    /// audit row keeps with the open checks; without one it fails with
+    /// [`StoreError::ChecklistOpen`]. A move back, or one with nothing open, ignores `reason`.
     /// `None` if the project is not in this company.
-    pub async fn change_stage(&mut self, to: Stage, by: &Actor) -> Result<Option<Project>, StoreError> {
+    pub async fn change_stage(
+        &mut self,
+        to: Stage,
+        reason: Option<&Reason>,
+        by: &Actor,
+    ) -> Result<Option<Project>, StoreError> {
         let s = &self.scope;
         let from: Option<String> = sqlx::query_scalar(
             "select stage from projects where tenant_id = $1 and company_id = $2 and project_id = $3 for update",
@@ -184,6 +194,23 @@ impl ProjectTx {
         let Some(from) = from else { return Ok(None) };
         let from = stage(&from)?;
         from.transition(to)?;
+        // Read under the row lock, so the checks judged are the ones the move goes ahead on.
+        let open: Vec<_> = if to > from {
+            self.checklist(from)
+                .await?
+                .into_iter()
+                .filter(|i| !i.met)
+                .map(|i| i.check)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let overridden = match (open.is_empty(), reason) {
+            (true, _) => None,
+            (false, Some(r)) => Some((r, open.as_slice())),
+            (false, None) => return Err(StoreError::ChecklistOpen(open)),
+        };
+        let s = &self.scope;
         let row = sqlx::query(&format!(
             "update projects set stage = $4, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 returning {COLUMNS}"
@@ -194,13 +221,14 @@ impl ProjectTx {
         .bind(to.as_str())
         .fetch_one(&mut *self.tx)
         .await?;
-        audit(
+        audit_override(
             &mut self.tx,
             &s.company,
             Some(&s.project),
             by,
             "project.stage_changed",
             Some(to.as_str()),
+            overridden,
         )
         .await?;
         enqueue(&mut self.tx, &s.company, by, &ProjectStageChanged::new(s, from, to)).await?;

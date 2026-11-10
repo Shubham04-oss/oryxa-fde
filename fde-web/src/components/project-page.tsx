@@ -1,27 +1,38 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { ChevronLeft } from "lucide-react"
-import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
+import {
+  Card,
+  Failed,
+  Loading,
+  NotFound,
+  Page,
+  Quiet,
+  Row,
+  Rows,
+  Status,
+  isNotFound,
+  reveal,
+} from "./page"
 import type { Tone } from "./page"
 import { Board } from "./board"
 import { ProjectDialog } from "./company-forms"
+import { ScopeCard, CriteriaCard } from "./scope-cards"
+import type { CriteriaCardHandle, ScopeCardHandle } from "./scope-cards"
 import { AssigneesCard } from "./team"
 import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
 import { StageBar } from "./stage-bar"
+import type { MoveRefusal } from "./stage-bar"
+import { StageChecklist } from "./stage-checklist"
 import { RunsCard } from "./runs"
-import { ApiError, api, queries } from "@/lib/api/client"
-import type {
-  AccessState,
-  CriterionOut,
-  Project,
-  ProjectOut,
-  ProjectScope,
-  Stage,
-} from "@/lib/api/schemas"
+import { ChecklistOpenError, api, queries } from "@/lib/api/client"
+import type { AccessState, ProjectOut, ProjectScope, Stage } from "@/lib/api/schemas"
+import type { Fix } from "@/lib/checklist"
 import { canManage } from "@/lib/records"
+import { reason as said } from "@/lib/task-move"
 import { dayOf, shortDate } from "@/lib/time"
 
 const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
@@ -32,34 +43,10 @@ const ACCESS: Record<AccessState, { label: string; tone: Tone }> = {
   revoked: { label: "Revoked", tone: "attention" },
 }
 
-const COMPARATOR: Record<CriterionOut["comparator"], string> = {
-  at_least: "at least",
-  at_most: "at most",
-}
-
-/** "plans accepted unchanged, at least 70%". */
-function target({ metric, comparator, target: value, unit }: CriterionOut) {
-  const units = unit ? (unit === "%" ? "%" : ` ${unit}`) : ""
-  return `${metric}, ${COMPARATOR[comparator]} ${value}${units}`
-}
-
 /** The page column (1040px) the cards sit in; the board alone breaks out to the canvas. */
 function Column({ children }: { children: ReactNode }) {
   return (
     <div className="mx-auto grid w-[min(1040px,100%)] gap-4 max-[800px]:gap-3.5">{children}</div>
-  )
-}
-
-/** How scope sign-off stands: signed for this version, signed before a change, or never. */
-function signOffStatus(p: Project, person: (id: string) => string) {
-  const signed = p.scope.sign_off
-  if (!signed) return <Status tone="neutral">Not signed off</Status>
-  const by = person(signed.stakeholder)
-  if (!p.scope.signed_off) return <Status tone="neutral">Changed since {by} signed off</Status>
-  return (
-    <Status tone="success">
-      Signed off by {by}, {shortDate(dayOf(signed.signed_at))}
-    </Status>
   )
 }
 
@@ -74,17 +61,49 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   // The FDE's part at the company comes with their list of companies, already read for the sidebar.
   const companies = useQuery(queries.companies())
   const [editing, setEditing] = useState(false)
+  const checklist = useQuery(queries.stageChecklist(scope))
+  const scopeCard = useRef<ScopeCardHandle>(null)
+  const criteriaCard = useRef<CriteriaCardHandle>(null)
+  const accessCard = useRef<HTMLElement>(null)
   const move = useMutation({
-    mutationFn: (to: Stage) => api.moveStage(scope, to),
-    onSuccess: (moved: ProjectOut) => {
+    mutationFn: ({ to, reason }: { to: Stage; reason?: string }) =>
+      api.moveStage(scope, to, reason),
+    onSuccess: async (moved: ProjectOut) => {
+      // A read sent before the move would land after it with the old stage.
+      await queryClient.cancelQueries({ queryKey: queries.project(scope).queryKey })
       queryClient.setQueryData(
         queries.project(scope).queryKey,
         (old) => old && { ...old, stage: moved.stage, updated_at: moved.updated_at },
       )
-      // Stages show on the company, Home and Jump to.
+      // Stages show on the company, Home and Jump to, and the checklist is the new stage's.
       void queryClient.invalidateQueries({ queryKey: ["companies"], exact: false })
     },
   })
+
+  /** The stage bar's move: how the API refused, or null once it has moved. */
+  async function moveTo(to: Stage, reason?: string): Promise<MoveRefusal | null> {
+    try {
+      await move.mutateAsync({ to, reason })
+      return null
+    } catch (error) {
+      if (error instanceof ChecklistOpenError) {
+        // The page's view of the checklist was stale: read it again, and show what the API found.
+        void queryClient.invalidateQueries({ queryKey: queries.stageChecklist(scope).queryKey })
+        return { open: error.open }
+      }
+      return { error: said(error, "project") }
+    }
+  }
+
+  /** Goes to where a checklist item is put right on this page. */
+  function fix(to: Exclude<Fix, "add-stakeholder">) {
+    if (to === "sign-off") scopeCard.current?.signOff()
+    else if (to === "add-in-scope") scopeCard.current?.add("in")
+    else if (to === "add-out-of-scope") scopeCard.current?.add("out")
+    else if (to === "add-criterion") criteriaCard.current?.add()
+    else if (to === "criteria") criteriaCard.current?.show()
+    else reveal(accessCard.current)
+  }
 
   if (project.isPending)
     return (
@@ -116,16 +135,10 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
     p.tasks.length === 0 &&
     p.access.length === 0 &&
     p.decisions.length === 0
-  const moveError = move.isError
-    ? move.error instanceof ApiError && move.error.status === 409
-      ? move.error.message
-      : "Couldn't move the project. Try again."
-    : null
+  const current = checklist.data?.stage === p.stage ? checklist.data : undefined
   const people = new Map(p.stakeholders.map((s) => [s.id as string, s.name]))
   const systems = new Map(p.systems.map((s) => [s.id as string, s.name]))
   const person = (id: string) => people.get(id) ?? "a stakeholder no longer listed"
-  const inScope = p.scope.items.filter((item) => item.kind === "in")
-  const outOfScope = p.scope.items.filter((item) => item.kind === "out")
 
   return (
     <Page full>
@@ -158,61 +171,39 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
 
         <StageBar
           stage={p.stage}
-          moving={move.isPending}
-          error={moveError}
-          onMove={(to) => move.mutate(to)}
+          // The checklist is read for the stage it names: one still on the way from the last stage says nothing.
+          open={current ? current.items.filter((item) => !item.met) : []}
+          onMove={moveTo}
         />
+
+        {current ? (
+          <StageChecklist project={p} checklist={current} onFix={fix} />
+        ) : checklist.isError ? (
+          <p role="alert" className="flex items-center gap-2 text-xs text-muted-foreground">
+            We couldn't read what this stage needs.
+            <Button variant="ghost" size="sm" onClick={() => void checklist.refetch()}>
+              Try again
+            </Button>
+          </p>
+        ) : (
+          <Loading>Reading what this stage needs…</Loading>
+        )}
       </Column>
 
       <Board scope={scope} project={p} />
 
       <Column>
         <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-          <Card title="Scope" aside={signOffStatus(p, person)}>
-            {p.scope.items.length === 0 ? (
-              <Quiet>No scope written yet.</Quiet>
-            ) : (
-              <div className="grid gap-3 text-xs">
-                {(
-                  [
-                    ["In scope", inScope],
-                    ["Out of scope", outOfScope],
-                  ] as const
-                ).map(([heading, items]) => (
-                  <div key={heading}>
-                    <h3 className="text-[11px] text-muted-foreground">{heading}</h3>
-                    {items.length === 0 ? (
-                      <Quiet>None listed.</Quiet>
-                    ) : (
-                      <ul className="mt-1 grid list-disc gap-1 pl-4 marker:text-muted-foreground">
-                        {items.map((item) => (
-                          <li key={item.id}>{item.description}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-
-          <Card title="Success criteria">
-            {p.scope.criteria.length === 0 ? (
-              <Quiet>No success criteria yet.</Quiet>
-            ) : (
-              <Rows>
-                {p.scope.criteria.map((criterion) => (
-                  <Row key={criterion.id}>
-                    <p className="min-w-0 text-xs">{criterion.description}</p>
-                    <Quiet>Target: {target(criterion)}</Quiet>
-                  </Row>
-                ))}
-              </Rows>
-            )}
-          </Card>
+          <ScopeCard handle={scopeCard} scope={scope} project={p} me={me.data?.user.id} />
+          <CriteriaCard
+            handle={criteriaCard}
+            scope={scope}
+            criteria={p.scope.criteria}
+            signedOff={p.scope.signed_off}
+          />
         </div>
 
-        <Card title="Access">
+        <Card ref={accessCard} title="Access">
           {p.access.length === 0 ? (
             <Quiet>No access requested yet.</Quiet>
           ) : (

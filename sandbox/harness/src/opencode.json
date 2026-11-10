@@ -1,0 +1,26 @@
+{
+  "enabled_providers": ["amazon-bedrock"],
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "websearch": false,
+  "plugin": [],
+  "mcp": {},
+  "permission": {
+    "*": "ask",
+    "question": "deny",
+    "subagent": "deny",
+    "skill": "deny",
+    "websearch": "deny",
+    "webfetch": "deny",
+    "execute": "deny",
+    "opencode_list_mcp_resources": "deny",
+    "opencode_models": "deny",
+    "opencode_read_mcp_resource": "deny",
+    "opencode_session_move": "deny",
+    "opencode_session_rename": "deny",
+    "opencode_worktree_create": "deny",
+    "opencode_worktree_list": "deny",
+    "opencode_worktree_remove": "deny"
+  }
+}

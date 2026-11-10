@@ -11,6 +11,8 @@
 //             default the app's own scroll container is grown so the whole page is captured.
 //   sizes, themes  names to take instead of all of `SIZES` and `THEMES`
 //   emptyWorkspace  true: a workspace with no company yet (the mock's `__fdeMockNoCompanies`, set before the app loads)
+//   staleChecklist true: reads of a project's stage checklist say everything is met (the mock's
+//             `__fdeMockStaleChecklist`, set before the app loads), so the stale-view refusal can be shown
 //   signedOut true: no sign-in first (the sign-in screen itself)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
@@ -56,6 +58,125 @@ const company = (page) => page.getByRole("heading", { name: "Projects" })
 const newCompany = async (page) => {
   await button(page, "New company").click()
   await dialog(page, "New company").waitFor()
+}
+
+// The scope and success criteria. Each state is the viewport with the two cards scrolled to the top,
+// so they are seen as a person sees them; `full` keeps whole pages for the one that shows the layout.
+const BW_REFERRALS = "/companies/cmp_brightwater/projects/prj_bw_referrals"
+const ATLAS_FNOL = "/companies/cmp_atlas/projects/prj_atlas_fnol"
+const KESTREL_CLAIMS = `${KESTREL}/projects/prj_kestrel_claims`
+const scopeCard = (page) => page.getByRole("region", { name: "Scope", exact: true })
+const criteriaCard = (page) => page.getByRole("region", { name: "Success criteria", exact: true })
+const scopeReady = (page) => scopeCard(page)
+const toScope = (page) =>
+  scopeCard(page).evaluate((el) => {
+    el.scrollIntoView({ block: "start" })
+    // A little air above the cards, as a person who scrolled to them would leave it.
+    document.querySelector(".app-canvas")?.scrollBy(0, -16)
+  })
+const SCOPE = { ready: scopeReady, full: false }
+
+// The stage checklist (DESIGN.md §3). Kestrel's claims project starts in Discover with no scope written.
+const COBALT_FIELD = "/companies/cmp_cobalt/projects/prj_cobalt_field"
+const checklistRegion = (page, stage) => page.getByRole("region", { name: `To leave ${stage}` })
+const confirmation = (page) => page.getByRole("group", { name: "Confirm the move" })
+const TOP = { full: false }
+/** Moves a project forward with a reason, so the next stage's checklist (all open) can be seen. */
+async function moveOn(page, to, reason) {
+  await button(page, `Move to ${to}`).click()
+  await confirmation(page)
+    .getByLabel(/Why are you moving on/)
+    .fill(reason)
+  await confirmation(page).getByRole("button", { name: "Move with items open" }).click()
+  await confirmation(page).waitFor({ state: "detached" })
+}
+const askToMove = async (page) => {
+  await button(page, "Move to Access").click()
+  await confirmation(page)
+    .getByLabel(/Why are you moving on/)
+    .waitFor()
+}
+
+function checklistScreens() {
+  return [
+    // One item open, two met: the common case.
+    {
+      name: "checklist-open",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+    },
+    // Nothing done yet at Scope: every item open, each with the button to where it is fixed.
+    {
+      name: "checklist-open-all",
+      path: KESTREL_CLAIMS,
+      ready: (page) => checklistRegion(page, "Discover"),
+      ...TOP,
+      act: async (page) => {
+        await moveOn(page, "Scope", "The customer has no notes yet; we start from the kickoff call")
+        await checklistRegion(page, "Scope").waitFor()
+      },
+    },
+    // Every item met: one quiet line.
+    {
+      name: "checklist-met",
+      path: DISPATCH,
+      ready: (page) => page.getByText(/Ready to leave Build/),
+      ...TOP,
+    },
+    // Deploy has nothing to check yet: the page shows nothing.
+    {
+      name: "checklist-none",
+      path: COBALT_FIELD,
+      ready: (page) => button(page, "Move back to Evaluate"),
+      ...TOP,
+    },
+    {
+      name: "move-confirm-open",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: askToMove,
+    },
+    {
+      name: "move-reason-typed",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: async (page) => {
+        await askToMove(page)
+        await confirmation(page)
+          .getByLabel(/Why are you moving on/)
+          .fill("Daniel Osei will sign off on Monday; the scope will not change before then.")
+      },
+    },
+    {
+      name: "move-reason-invalid",
+      path: ATLAS_FNOL,
+      ready: (page) => checklistRegion(page, "Scope"),
+      ...TOP,
+      act: async (page) => {
+        await askToMove(page)
+        await confirmation(page).getByRole("button", { name: "Move with items open" }).click()
+        await confirmation(page).getByRole("alert").waitFor()
+      },
+    },
+    // The page thought nothing was open; the API found one, so the reason is asked for then.
+    {
+      name: "move-stale-409",
+      path: ATLAS_FNOL,
+      ready: (page) => page.getByText(/Ready to leave Scope/),
+      staleChecklist: true,
+      ...TOP,
+      act: async (page) => {
+        await button(page, "Move to Access").click()
+        await confirmation(page).getByRole("button", { name: "Move", exact: true }).click()
+        await confirmation(page)
+          .getByLabel(/Why are you moving on/)
+          .waitFor()
+      },
+    },
+  ]
 }
 
 const FINE = ["1440", "1024"]
@@ -415,6 +536,158 @@ export const screens = [
       await dialog(page, "Edit stakeholder").getByRole("alert").waitFor()
     },
   },
+
+  // Scope, success criteria and sign-off: the three sign-off states, the empty states, the forms, a refusal.
+  { name: "scope-signed", path: DISPATCH, ready: scopeReady },
+  { name: "scope-changed", path: BW_REFERRALS, ...SCOPE, act: toScope },
+  { name: "scope-unsigned", path: ATLAS_FNOL, ...SCOPE, act: toScope },
+  { name: "scope-empty", path: KESTREL_CLAIMS, ...SCOPE, act: toScope },
+  {
+    name: "scope-item-add",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add in scope").click()
+      await dialog(page, "Add to scope").waitFor()
+      await dialog(page, "Add to scope")
+        .getByLabel("Description")
+        .fill("Sort each incoming damage claim by likely cause\nand name the team it goes to")
+    },
+  },
+  {
+    name: "scope-item-edit-signed",
+    path: DISPATCH,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Changing the planning database").click()
+      await dialog(page, "Edit scope item").waitFor()
+    },
+  },
+  {
+    name: "scope-item-remove-ask",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Live re-routing during the day").click()
+      await button(page, "Remove item").click()
+      await page.getByRole("group", { name: "Confirm the removal" }).waitFor()
+    },
+  },
+  {
+    name: "scope-item-invalid",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add out of scope").click()
+      await dialog(page, "Add to scope").getByRole("button", { name: "Add", exact: true }).click()
+      await dialog(page, "Add to scope").getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "criterion-add",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add criterion").click()
+      const box = dialog(page, "Add success criterion")
+      await box.waitFor()
+      await box
+        .getByLabel("What must be true")
+        .fill("Claims reach the right team the first time, with no one re-routing them")
+      await box.getByLabel("What is measured").fill("claims routed correctly")
+      await box.getByLabel("Target").fill("85")
+      await box.getByLabel("Unit").fill("%")
+    },
+  },
+  {
+    name: "criterion-invalid",
+    path: KESTREL_CLAIMS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Add criterion").click()
+      const box = dialog(page, "Add success criterion")
+      await box.getByLabel("What must be true").fill("Fast enough")
+      await box.getByLabel("What is measured").fill("seconds per claim")
+      await box.getByLabel("Target").fill("ten")
+      await box.getByRole("button", { name: "Add criterion", exact: true }).click()
+      await box.getByRole("alert").waitFor()
+    },
+  },
+  {
+    name: "criterion-edit-signed",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Time to a draft plan").click()
+      await dialog(page, "Edit success criterion").waitFor()
+    },
+  },
+  {
+    name: "signoff-unsigned",
+    path: ATLAS_FNOL,
+    ...SCOPE,
+    act: async (page) => {
+      await toScope(page)
+      await scopeCard(page).getByRole("button", { name: "Record sign-off", exact: true }).click()
+      await dialog(page, "Record sign-off").waitFor()
+    },
+  },
+  {
+    name: "signoff-again",
+    path: BW_REFERRALS,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Sign off again").click()
+      await dialog(page, "Sign off again").waitFor()
+    },
+  },
+  {
+    name: "signoff-recorded",
+    path: ATLAS_FNOL,
+    ...SCOPE,
+    ...ONE,
+    act: async (page) => {
+      await toScope(page)
+      await scopeCard(page).getByRole("button", { name: "Record sign-off", exact: true }).click()
+      const box = dialog(page, "Record sign-off")
+      await box.getByLabel("Signed off by").selectOption({ label: "Daniel Osei, Champion" })
+      await box.getByRole("button", { name: "Record sign-off", exact: true }).click()
+      await page.getByText(/Daniel Osei agreed/).waitFor()
+      await toScope(page)
+    },
+  },
+  {
+    name: "scope-save-refused",
+    path: DISPATCH,
+    ...SCOPE,
+    ...ONE,
+    failWrites: true,
+    act: async (page) => {
+      await toScope(page)
+      await button(page, "Edit: Changing the planning database").click()
+      const box = dialog(page, "Edit scope item")
+      await box.getByLabel("Description").fill("Changing the planning database schema")
+      await box.getByRole("button", { name: "Save", exact: true }).click()
+      await box.getByRole("alert").waitFor()
+    },
+  },
+
+  // The stage checklist and the move that asks for a reason. The checklist sits under the stage
+  // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.
+  ...checklistScreens(),
 
   { name: "run-review", path: `${DISPATCH}/runs/run_k2`, ready: (page) => page.getByRole("main") },
   {

@@ -7,6 +7,8 @@ import { harnessEnv, runHarness } from "../src/harness.js";
 import { collect, FakeQuery, fixture, jsonLines, ManualApprovals, samplePack } from "./fakes.js";
 
 const SESSION = "5b0f3d0e-sample-session";
+// The run's fresh home, which `main.ts` makes with `freshHome`.
+const HOME = "/tmp/oryxa-claude-sample";
 const deployCall = {
   type: "assistant",
   message: {
@@ -55,6 +57,7 @@ describe("recorded session", () => {
     const lines: string[] = [];
     const writer = new EventWriter((line) => lines.push(line));
     const outcome = await runHarness(samplePack(), {
+      home: HOME,
       query: fake.query,
       approvals: new ManualApprovals(),
       emit: (e) => writer.emit(e),
@@ -71,7 +74,14 @@ describe("approvals", () => {
     const fake = new FakeQuery(deployScript);
     const approvals = new ManualApprovals();
     const { events, emit } = collect();
-    const run = runHarness(samplePack(), { query: fake.query, approvals, emit, env: {}, newApprovalId: () => "apr_1" });
+    const run = runHarness(samplePack(), {
+      home: HOME,
+      query: fake.query,
+      approvals,
+      emit,
+      env: {},
+      newApprovalId: () => "apr_1",
+    });
 
     await vi.waitFor(() => expect(events.at(-1)?.type).toBe("approval_request"));
     expect(events.at(-1)).toEqual({
@@ -97,7 +107,14 @@ describe("approvals", () => {
     const fake = new FakeQuery(deployScript);
     const approvals = new ManualApprovals();
     const { events, emit } = collect();
-    const run = runHarness(samplePack(), { query: fake.query, approvals, emit, env: {}, newApprovalId: () => "apr_1" });
+    const run = runHarness(samplePack(), {
+      home: HOME,
+      query: fake.query,
+      approvals,
+      emit,
+      env: {},
+      newApprovalId: () => "apr_1",
+    });
 
     await vi.waitFor(() => expect(events.at(-1)?.type).toBe("approval_request"));
     approvals.decide("apr_1", "rejected");
@@ -113,7 +130,14 @@ describe("approvals", () => {
     const fake = new FakeQuery([{ ask: "Bash", input: { command: padded } }, success]);
     const approvals = new ManualApprovals();
     const { events, emit } = collect();
-    const run = runHarness(samplePack(), { query: fake.query, approvals, emit, env: {}, newApprovalId: () => "apr_1" });
+    const run = runHarness(samplePack(), {
+      home: HOME,
+      query: fake.query,
+      approvals,
+      emit,
+      env: {},
+      newApprovalId: () => "apr_1",
+    });
     await vi.waitFor(() => expect(events.at(-1)?.type).toBe("approval_request"));
     expect(events.at(-1)).toMatchObject({ tool: "Bash", input: { command: padded } });
     approvals.decide("apr_1", "rejected");
@@ -124,7 +148,13 @@ describe("approvals", () => {
       success,
     ]);
     const second = collect();
-    await runHarness(samplePack(), { query: huge.query, approvals: new ManualApprovals(), emit: second.emit, env: {} });
+    await runHarness(samplePack(), {
+      home: HOME,
+      query: huge.query,
+      approvals: new ManualApprovals(),
+      emit: second.emit,
+      env: {},
+    });
     expect(second.events.some((e) => e.type === "approval_request")).toBe(false);
     expect(huge.permissions).toEqual([expect.objectContaining({ behavior: "deny" })]);
   });
@@ -132,9 +162,15 @@ describe("approvals", () => {
   it("let tools outside the approval list run without asking", async () => {
     const fake = new FakeQuery([{ ask: "Bash", input: { command: "npm test" } }, success]);
     const { events, emit } = collect();
-    expect(await runHarness(samplePack(), { query: fake.query, approvals: new ManualApprovals(), emit, env: {} })).toBe(
-      "success",
-    );
+    expect(
+      await runHarness(samplePack(), {
+        home: HOME,
+        query: fake.query,
+        approvals: new ManualApprovals(),
+        emit,
+        env: {},
+      }),
+    ).toBe("success");
     expect(fake.permissions).toEqual([{ behavior: "allow", updatedInput: { command: "npm test" } }]);
     expect(events.some((e) => e.type === "approval_request")).toBe(false);
   });
@@ -146,6 +182,7 @@ describe("SDK options", () => {
     const env = {
       PATH: "/usr/bin",
       HOME: "/root",
+      TMPDIR: "/tmp",
       SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
       ANTHROPIC_API_KEY: "sample-key-that-must-not-pass",
       AWS_ACCESS_KEY_ID: "sample-key-that-must-not-pass",
@@ -153,7 +190,13 @@ describe("SDK options", () => {
       AWS_BEARER_TOKEN_BEDROCK: "sample-key-that-must-not-pass",
       CLAUDE_CODE_OAUTH_TOKEN: "sample-key-that-must-not-pass",
     };
-    await runHarness(samplePack(), { query: fake.query, approvals: new ManualApprovals(), emit: () => {}, env });
+    await runHarness(samplePack(), {
+      home: HOME,
+      query: fake.query,
+      approvals: new ManualApprovals(),
+      emit: () => {},
+      env,
+    });
     const options = fake.options;
     expect(options?.settingSources).toEqual([]);
     expect(options?.includePartialMessages).toBe(true);
@@ -164,7 +207,13 @@ describe("SDK options", () => {
     expect(fake.prompt).toBe("Add a /healthz endpoint to the API service, with a test.");
     expect(options?.env).toEqual({
       PATH: "/usr/bin",
-      HOME: "/home/agent",
+      // The run's own home, XDG and temp directories, never the agent's shared home or the harness's.
+      HOME,
+      XDG_CONFIG_HOME: `${HOME}/.config`,
+      XDG_DATA_HOME: `${HOME}/.local/share`,
+      XDG_STATE_HOME: `${HOME}/.local/state`,
+      XDG_CACHE_HOME: `${HOME}/.cache`,
+      TMPDIR: `${HOME}/tmp`,
       SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
       CLAUDE_CODE_USE_BEDROCK: "1",
       CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
@@ -173,13 +222,14 @@ describe("SDK options", () => {
       DISABLE_AUTOUPDATER: "1",
       CLAUDE_AGENT_SDK_CLIENT_APP: "oryxa-fde-harness/0.1.0",
     });
-    expect(JSON.stringify(harnessEnv(env, samplePack().pack))).not.toContain("sample-key-that-must-not-pass");
+    expect(JSON.stringify(harnessEnv(env, samplePack().pack, HOME))).not.toContain("sample-key-that-must-not-pass");
   });
 
   it("start the agent through the spawner it is given", async () => {
     const fake = new FakeQuery([success]);
     const spawn = vi.fn();
     await runHarness(samplePack(), {
+      home: HOME,
       query: fake.query,
       approvals: new ManualApprovals(),
       emit: () => {},
@@ -192,9 +242,15 @@ describe("SDK options", () => {
   it("report an SDK that ends without a result as an error", async () => {
     const { events, emit } = collect();
     const fake = new FakeQuery([]);
-    expect(await runHarness(samplePack(), { query: fake.query, approvals: new ManualApprovals(), emit, env: {} })).toBe(
-      "error",
-    );
+    expect(
+      await runHarness(samplePack(), {
+        home: HOME,
+        query: fake.query,
+        approvals: new ManualApprovals(),
+        emit,
+        env: {},
+      }),
+    ).toBe("error");
     expect(events).toEqual([expect.objectContaining({ type: "result", outcome: "error", reason: "no_result" })]);
   });
 });
@@ -206,9 +262,9 @@ describe("errors", () => {
         throw new Error("Claude Code process exited with code 1");
       })()) as unknown as Parameters<typeof runHarness>[1]["query"];
     const { events, emit } = collect();
-    expect(await runHarness(samplePack(), { query: failing, approvals: new ManualApprovals(), emit, env: {} })).toBe(
-      "error",
-    );
+    expect(
+      await runHarness(samplePack(), { home: HOME, query: failing, approvals: new ManualApprovals(), emit, env: {} }),
+    ).toBe("error");
     const result = events.at(-1);
     expect(result).toMatchObject({ type: "result", outcome: "error", reason: "sdk_error" });
     expect(JSON.stringify(result)).not.toMatch(/claude/i);
@@ -227,6 +283,7 @@ describe("cancel", () => {
     const cancel = new AbortController();
     const { events, emit } = collect();
     const run = runHarness(samplePack(), {
+      home: HOME,
       query: stuck,
       approvals: new ManualApprovals(),
       emit,
@@ -252,6 +309,7 @@ describe("cancel", () => {
     const cancel = new AbortController();
     const { events, emit } = collect();
     const run = runHarness(samplePack(), {
+      home: HOME,
       query: fake.query,
       approvals,
       emit,
@@ -277,6 +335,7 @@ describe("cancel", () => {
     cancel.abort();
     const { events, emit } = collect();
     const outcome = await runHarness(samplePack(), {
+      home: HOME,
       query: fake.query,
       approvals: new ManualApprovals(),
       emit,

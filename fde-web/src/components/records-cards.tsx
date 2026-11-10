@@ -25,13 +25,15 @@ import {
 
 const PARTS = Object.keys(PART_LABEL) as Array<StakeholderPart>
 
-/** A row that is also the button that edits it. */
-function EditRow({
+/** A row that is also the button that edits it. `id` marks it, so focus can come back to it. */
+export function EditRow({
   label,
+  id,
   onOpen,
   children,
 }: {
   label: string
+  id?: string
   onOpen: () => void
   children: React.ReactNode
 }) {
@@ -39,6 +41,7 @@ function EditRow({
     <Row>
       <button
         type="button"
+        data-row={id}
         aria-label={label}
         onClick={onOpen}
         className="-mx-2 block w-[calc(100%+16px)] rounded-lg px-2 py-1 text-left hover:bg-selected"
@@ -52,12 +55,15 @@ function EditRow({
 export function StakeholdersCard({
   company,
   people,
+  startOpen = false,
 }: {
   company: CompanyId
   people: Array<StakeholderOut>
+  /** Starts with the blank form open. */
+  startOpen?: boolean
 }) {
   // A person to edit, "new" for a blank form, or nothing.
-  const [open, setOpen] = useState<StakeholderOut | "new" | null>(null)
+  const [open, setOpen] = useState<StakeholderOut | "new" | null>(startOpen ? "new" : null)
   return (
     <Card
       title="Stakeholders"

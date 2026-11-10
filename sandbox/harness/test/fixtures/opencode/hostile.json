@@ -1,0 +1,143 @@
+{
+  "note": "One healthz session against a repository and a home holding hostile config, plugins, MCP servers, instructions and skills (opencode-spike/hostile-seed.sh).",
+  "clean_reference": {
+    "files_created_by_hostile_code": [],
+    "hosts_reached": [],
+    "models_requested": [
+      "stub-1"
+    ],
+    "tools_offered": [
+      "edit",
+      "glob",
+      "grep",
+      "opencode_worktree_remove",
+      "read",
+      "shell",
+      "skill",
+      "todowrite",
+      "write"
+    ],
+    "hostile_text_in_requests": [],
+    "system_prompt_length": 2190
+  },
+  "hostile_with_intended_settings": {
+    "files_created_by_hostile_code": [],
+    "hosts_reached": [],
+    "models_requested": [
+      "stub-1"
+    ],
+    "tools_offered": [
+      "edit",
+      "glob",
+      "grep",
+      "opencode_worktree_remove",
+      "read",
+      "shell",
+      "skill",
+      "todowrite",
+      "write"
+    ],
+    "hostile_text_in_requests": [],
+    "system_prompt_length": 2190
+  },
+  "hostile_without_protections_stub_model_kept": {
+    "files_created_by_hostile_code": [
+      "PWNED-mcp-home",
+      "PWNED-plugin-home",
+      "PWNED-plugin-project"
+    ],
+    "hosts_reached": [
+      "plugin.evil-repo.spike.example"
+    ],
+    "models_requested": [
+      "stub-1"
+    ],
+    "tools_offered": [
+      "edit",
+      "glob",
+      "grep",
+      "question",
+      "read",
+      "shell",
+      "skill",
+      "subagent",
+      "webfetch",
+      "websearch",
+      "write",
+      "execute"
+    ],
+    "hostile_text_in_requests": [
+      "HOSTILE-AGENTS-MD-MARKER",
+      "HOSTILE-HOME-AGENTS-MARKER",
+      "HOSTILE-HOME-SKILL-MARKER",
+      "HOSTILE-INSTRUCTIONS-FILE-MARKER",
+      "HOSTILE-SKILL-MARKER"
+    ],
+    "system_prompt_length": 8725
+  },
+  "hostile_with_intended_settings_and_skills_offered": {
+    "files_created_by_hostile_code": [],
+    "hosts_reached": [],
+    "models_requested": [
+      "stub-1"
+    ],
+    "tools_offered": [
+      "edit",
+      "glob",
+      "grep",
+      "opencode_worktree_remove",
+      "read",
+      "shell",
+      "skill",
+      "todowrite",
+      "write"
+    ],
+    "hostile_text_in_requests": [
+      "HOSTILE-HOME-SKILL-MARKER"
+    ],
+    "system_prompt_length": 3611
+  },
+  "hostile_with_intended_settings_skills_offered_fresh_home": {
+    "files_created_by_hostile_code": [],
+    "hosts_reached": [],
+    "models_requested": [
+      "stub-1"
+    ],
+    "tools_offered": [
+      "edit",
+      "glob",
+      "grep",
+      "opencode_worktree_remove",
+      "read",
+      "shell",
+      "skill",
+      "todowrite",
+      "write"
+    ],
+    "hostile_text_in_requests": [],
+    "system_prompt_length": 3472
+  },
+  "hostile_without_protections": {
+    "files_created_by_hostile_code": [
+      "PWNED-mcp-home",
+      "PWNED-mcp-project",
+      "PWNED-plugin-home",
+      "PWNED-plugin-project"
+    ],
+    "hosts_reached": [
+      "mcp.evil-repo.spike.example",
+      "models.opencode.ai",
+      "plugin.evil-repo.spike.example",
+      "registry.npmjs.org"
+    ],
+    "models_requested": [],
+    "tools_offered": [],
+    "hostile_text_in_requests": [],
+    "system_prompt_length": null
+  },
+  "identical_to_clean": true,
+  "home_auth_json_overrides_config_key": {
+    "default_home": "Bearer planted-home-key-sample",
+    "fresh_home_and_xdg_dirs": "Bearer placeholder"
+  }
+}

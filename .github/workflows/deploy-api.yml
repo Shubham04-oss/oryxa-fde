@@ -110,10 +110,10 @@ jobs:
           register() {
             local current="$RUNNER_TEMP/$1.current.json" next="$RUNNER_TEMP/$1.json"
             aws ecs describe-task-definition --task-definition "$1" --query taskDefinition --output json > "$current" || return 1
-            jq -e --arg repo "${IMAGE%:*}" '(.containerDefinitions | length) == 1
-              and (.containerDefinitions[0].image | startswith($repo + ":"))' "$current" > /dev/null \
-              || { echo "$1 is not a single container running ${IMAGE%:*}" >&2; return 1; }
-            jq --arg image "$IMAGE" '.containerDefinitions[0].image = $image
+            # The API task also carries the tunnel's sidecar: exactly one container runs our image, and only it changes.
+            jq -e --arg repo "${IMAGE%:*}" '[.containerDefinitions[] | select(.image | startswith($repo + ":"))] | length == 1' "$current" > /dev/null \
+              || { echo "$1 does not have exactly one container running ${IMAGE%:*}" >&2; return 1; }
+            jq --arg repo "${IMAGE%:*}" --arg image "$IMAGE" '(.containerDefinitions[] | select(.image | startswith($repo + ":")) | .image) = $image
               | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
                     .registeredAt, .registeredBy, .deregisteredAt)' "$current" > "$next" || return 1
             aws ecs register-task-definition --cli-input-json "file://$next" \

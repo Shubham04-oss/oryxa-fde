@@ -183,6 +183,12 @@ type Records = {
   access: Array<S["AccessRequestOut"]>
   tasks: Array<S["TaskOut"]>
   decisions: Array<S["DecisionOut"]>
+  /** Meeting notes on the project. The web has no screen for them, so the mock only counts them. */
+  notes: number
+  /** The criteria an eval suite measures. */
+  evaluated: Array<string>
+  /** The latest measured value of each criterion that has one. */
+  results: Record<string, number>
 }
 
 type CompanySeed = {
@@ -223,7 +229,15 @@ function project(
 }
 
 /** A project with nothing written in it yet. A function, so no two projects share an array. */
-const emptyRecords = (): Records => ({ scope: scope([], []), access: [], tasks: [], decisions: [] })
+const emptyRecords = (): Records => ({
+  scope: scope([], []),
+  access: [],
+  tasks: [],
+  decisions: [],
+  notes: 0,
+  evaluated: [],
+  results: {},
+})
 
 function seed() {
   const companies: Array<CompanySeed> = [
@@ -339,6 +353,9 @@ function seed() {
         "Drafts load plans for dispatchers from open orders, driver hours and depot rules.",
       ),
       records: {
+        notes: 2,
+        evaluated: ["crt_k1", "crt_k2", "crt_k3"],
+        results: { crt_k1: 74, crt_k2: 0, crt_k3: 1.5 },
         scope: scope(
           [
             inScope("itm_k1", "Draft next-day load plans for the two pilot depots"),
@@ -474,6 +491,9 @@ function seed() {
         "Reads referral letters and fills the intake form for the clinic's coordinators.",
       ),
       records: {
+        notes: 1,
+        evaluated: [],
+        results: {},
         scope: scope(
           [
             inScope("itm_b1", "Extract patient-free fields from synthetic referral letters"),
@@ -541,6 +561,10 @@ function seed() {
         "Daily demand forecasts for fresh produce in forty stores, with reasons a buyer reads.",
       ),
       records: {
+        notes: 3,
+        evaluated: ["crt_l1", "crt_l2"],
+        // One criterion measured and passing, the other not measured yet.
+        results: { crt_l1: 16.2 },
         scope: scope(
           [
             inScope("itm_l1", "Fresh produce in forty pilot stores"),
@@ -608,6 +632,9 @@ function seed() {
         "Helps call handlers capture a claim's first notice in one pass.",
       ),
       records: {
+        notes: 1,
+        evaluated: [],
+        results: {},
         scope: scope(
           [
             inScope("itm_a1", "Home claims by phone"),
@@ -660,6 +687,9 @@ function seed() {
         "Summarises overnight outage reports for the morning operations call.",
       ),
       records: {
+        notes: 2,
+        evaluated: ["crt_c1", "crt_c2"],
+        results: { crt_c1: 100, crt_c2: 100 },
         scope: scope(
           [
             inScope("itm_c1", "Overnight reports from the outage log"),
@@ -717,6 +747,9 @@ function seed() {
         "Lets field crews search safety procedures from a phone, offline-first.",
       ),
       records: {
+        notes: 2,
+        evaluated: ["crt_f1"],
+        results: { crt_f1: 94 },
         scope: scope(
           [
             inScope("itm_f1", "The 2026 safety handbook"),
@@ -1120,6 +1153,97 @@ async function projectWrites(
   return json(p.project)
 }
 
+let scopeCount = 0
+const KINDS = ["in", "out"] as const
+const COMPARATORS = ["at_least", "at_most"] as const
+
+/** Every change to the items or criteria moves the version on, and the last sign-off no longer covers it. */
+function bumped(current: S["ScopeOut"]) {
+  current.version += 1
+  current.signed_off = current.sign_off?.version === current.version
+}
+
+/**
+ * A project's scope writes, with the API's rules: each item and criterion on its own, a `PUT` that
+ * replaces it, a version bumped by every change (even one that changes nothing), one sign-off per
+ * version, and no sign-off of an empty scope. All of them need `work`, which the caller has here.
+ */
+async function scopeRoutes(
+  method: string,
+  rest: Array<string>,
+  found: CompanySeed,
+  current: S["ScopeOut"],
+  request: Request,
+) {
+  const [collection, id] = rest
+  const now = new Date().toISOString()
+  if (collection === "sign-offs" && method === "POST" && id === undefined) {
+    const body = await readBody(request)
+    if (!body || typeof body.stakeholder !== "string") return refuse(400, "invalid")
+    if (current.items.length === 0 && current.criteria.length === 0)
+      return refuse(409, "rejected_empty_scope")
+    if (!found.stakeholders.some((x) => x.id === body.stakeholder))
+      return refuse(400, "invalid_stakeholder")
+    if (current.sign_off?.version === current.version) return refuse(409, "conflict")
+    const signed: S["SignOffOut"] = {
+      version: current.version,
+      stakeholder: body.stakeholder,
+      recorded_by: state.me.user.id,
+      signed_at: now,
+    }
+    current.sign_off = signed
+    current.signed_off = true
+    return json(signed, 201)
+  }
+  if (collection !== "items" && collection !== "criteria") return null
+  const list: Array<{ id: string }> = collection === "items" ? current.items : current.criteria
+  const at = id === undefined ? -1 : list.findIndex((x) => x.id === id)
+  if (method === "DELETE" && id !== undefined) {
+    if (at < 0) return refuse(404, "not_found")
+    list.splice(at, 1)
+    bumped(current)
+    return noContent()
+  }
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
+  const body = await readBody(request)
+  if (!body) return refuse(400, "invalid")
+  if (!plain(body.description, 4000, true)) return refuse(400, "invalid_description")
+  let saved: S["ScopeItemOut"] | S["CriterionOut"]
+  if (collection === "items") {
+    const kind = KINDS.find((k) => k === body.kind)
+    if (!kind) return refuse(400, "invalid_kind")
+    saved = {
+      id: id ?? `itm_new${++scopeCount}`,
+      kind,
+      description: (body.description as string).trim(),
+      updated_at: now,
+    }
+  } else {
+    const comparator = COMPARATORS.find((c) => c === body.comparator)
+    if (!plain(body.metric, 200, false)) return refuse(400, "invalid_metric")
+    if (!comparator) return refuse(400, "invalid_comparator")
+    if (typeof body.target !== "number" || !Number.isFinite(body.target))
+      return refuse(400, "invalid_target")
+    if (body.unit !== undefined && body.unit !== null && !plain(body.unit, 200, false))
+      return refuse(400, "invalid_unit")
+    saved = {
+      id: id ?? `crt_new${++scopeCount}`,
+      description: (body.description as string).trim(),
+      metric: (body.metric as string).trim(),
+      comparator,
+      target: body.target,
+      unit: typeof body.unit === "string" ? body.unit.trim() : null,
+      updated_at: now,
+    }
+  }
+  if (!adding && at < 0) return refuse(404, "not_found")
+  if (adding) list.push(saved)
+  else list[at] = saved
+  bumped(current)
+  return json(saved, adding ? 201 : 200)
+}
+
 /** `POST`, `PUT` and `DELETE` on a company's stakeholders: the API's `work`, and its checks. */
 async function stakeholderRoutes(
   method: string,
@@ -1276,6 +1400,121 @@ function assigneeRoutes(
   return noContent()
 }
 
+/**
+ * What leaves each stage, as `oryxa_fde_core::Check` lists it, with its words. `met` judges the
+ * project's records the way `oryxa-fde-store` does (checklist.rs), so the mock refuses what the
+ * API refuses: the same rules on invented data.
+ */
+const CHECKS: Record<
+  string,
+  { stage: Stage; label: string; met: (c: CompanySeed, r: Records) => boolean }
+> = {
+  stakeholders_named: {
+    stage: "discover",
+    label: "Stakeholders named",
+    met: (c) => c.stakeholders.length > 0,
+  },
+  discovery_notes: {
+    stage: "discover",
+    label: "A meeting note on the project",
+    met: (_, r) => r.notes > 0,
+  },
+  scope_signed_off: {
+    stage: "scope",
+    label: "Scope signed off, and unchanged since",
+    // A sign-off covers the scope only while nothing changed after it.
+    met: (_, r) => r.scope.sign_off?.version === r.scope.version,
+  },
+  out_of_scope_listed: {
+    stage: "scope",
+    label: "What is out of scope is listed",
+    met: (_, r) => r.scope.items.some((i) => i.kind === "out"),
+  },
+  criteria_have_targets: {
+    stage: "scope",
+    label: "Success criteria set, each with a target",
+    // Every criterion has a target (it is required), so this needs one to exist.
+    met: (_, r) => r.scope.criteria.length > 0,
+  },
+  access_granted: {
+    stage: "access",
+    label: "Every access request granted",
+    // Vacuously met with no requests: a project may need no access.
+    met: (_, r) => r.access.every((a) => a.status === "granted"),
+  },
+  criteria_have_evals: {
+    stage: "build",
+    label: "An eval suite measures every criterion",
+    met: (_, r) =>
+      r.scope.criteria.length > 0 && r.scope.criteria.every((k) => r.evaluated.includes(k.id)),
+  },
+  criteria_met: {
+    stage: "evaluate",
+    label: "Every criterion meets its target",
+    met: (_, r) =>
+      r.scope.criteria.length > 0 &&
+      r.scope.criteria.every((k) => {
+        const value = r.results[k.id]
+        return (
+          value !== undefined &&
+          (k.comparator === "at_least" ? value >= k.target : value <= k.target)
+        )
+      }),
+  },
+}
+
+/** The checklist to leave `stage`; empty for a stage with nothing to check yet. */
+function checklist(
+  stage: Stage,
+  found: CompanySeed,
+  records: Records,
+): Array<S["ChecklistItemOut"]> {
+  return Object.entries(CHECKS)
+    .filter(([, check]) => check.stage === stage)
+    .map(([key, check]) => ({ key, label: check.label, met: check.met(found, records) }))
+}
+
+/** A reason is 1 to 500 characters once trimmed, with no control character (C0 or C1) but newline and tab. */
+// eslint-disable-next-line no-control-regex
+const REASON_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
+function validReason(value: unknown) {
+  if (typeof value !== "string") return false
+  const v = value.trim()
+  const n = [...v].length
+  return n >= 1 && n <= 500 && !REASON_CONTROL.test(v)
+}
+
+/**
+ * `PUT .../stage`: one stage forward, or back to an earlier one. A forward move with checks of the
+ * current stage open needs a `reason` (409 with the open items without one); a move back, or one
+ * with nothing open, ignores it. A reason that is not valid is a 400 whenever it is sent.
+ */
+async function stageMove(
+  p: { project: S["ProjectOut"]; records: Records },
+  found: CompanySeed,
+  request: Request,
+) {
+  const body = (await request.json().catch(() => null)) as Partial<S["StageBody"]> | null
+  const to = STAGES.find((stage) => stage === body?.stage)
+  if (!to) return refuse(400, "invalid_stage")
+  if (body?.reason !== undefined && body.reason !== null && !validReason(body.reason))
+    return refuse(400, "invalid_reason")
+  const from = p.project.stage
+  if (!canMove(from, to)) return refuse(409, "rejected_stage_transition")
+  const open =
+    STAGES.indexOf(to) > STAGES.indexOf(from)
+      ? checklist(from, found, p.records).filter((item) => !item.met)
+      : []
+  if (open.length > 0 && body?.reason == null) {
+    // The refusal is what makes a stale page read again, so its stale read ends here.
+    delete (globalThis as Record<string, unknown>).__fdeMockStaleChecklist
+    return Response.json({ error: "rejected_checklist_open", open }, { status: 409 })
+  }
+  p.project.stage = to
+  p.project.updated_at = new Date().toISOString()
+  return json(p.project)
+}
+
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
@@ -1312,6 +1551,17 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     return runRoutes((state.runs[projectId] ??= []), method, rest, request, state.me.user.id)
   if (record === "assignees") return assigneeRoutes(method, rest[0], found, projectId)
   if (method === "GET") {
+    if (record === "stage-checklist") {
+      const items = checklist(p.project.stage, found, p.records)
+      // Dev and test only: `globalThis.__fdeMockStaleChecklist = true` reads every item as met, as a page
+      // does that has not heard of a change made elsewhere, so the stale-view refusal can be seen. It ends
+      // with that refusal, as a re-read would.
+      const stale = (globalThis as Record<string, unknown>).__fdeMockStaleChecklist === true
+      return json({
+        stage: p.project.stage,
+        items: stale ? items.map((i) => ({ ...i, met: true })) : items,
+      })
+    }
     if (record === undefined) return json(p.project)
     if (record === "scope") return json(p.records.scope)
     if (record === "access-requests") return json(p.records.access)
@@ -1322,17 +1572,10 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "systems") return json(found.systems)
     return null
   }
+  if (record === "scope") return scopeRoutes(method, rest, found, p.records.scope, request)
   if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
   if (record === "access-requests") return accessRoutes(method, rest[0], found, p.records, request)
-  if (method === "PUT" && record === "stage") {
-    const body = (await request.json().catch(() => null)) as Partial<S["StageBody"]> | null
-    const to = STAGES.find((stage) => stage === body?.stage)
-    if (!to) return refuse(400, "invalid_stage")
-    if (!canMove(p.project.stage, to)) return refuse(409, "rejected_stage_transition")
-    p.project.stage = to
-    p.project.updated_at = new Date().toISOString()
-    return json(p.project)
-  }
+  if (method === "PUT" && record === "stage") return stageMove(p, found, request)
   return null
 }
 
