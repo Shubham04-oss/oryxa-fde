@@ -444,9 +444,13 @@ answer pass through whatever Region serves the model:
   commercial Regions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html), which
   [can include Regions an account has not enabled](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html).
   The model cards do not list the current set for Opus 5.5; `aws bedrock get-inference-profile --region ap-south-1
-  --inference-profile-identifier global.anthropic.claude-opus-5-5 --query 'models[].modelArn'` does. Prompts and
-  outputs may be stored for abuse detection in the Region that processes them. CloudTrail records the Region in
-  `additionalEventData.inferenceRegion` of each call, in Mumbai's trail.
+  --inference-profile-identifier global.anthropic.claude-opus-5-5 --query 'models[].modelArn'` does. In plain
+  terms: **with a `global.` profile, prompts and outputs leave India.** They
+  [may be stored for abuse detection](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)
+  in the Region that processes them, opt-in Regions included. For Fable 5.2, AWS's
+  [abuse detection page](https://docs.aws.amazon.com/bedrock/latest/userguide/abuse-detection.html) says all traffic
+  is retained for up to 30 days in that Region, and flagged traffic may be reviewed by people at AWS. CloudTrail
+  records the Region in `additionalEventData.inferenceRegion` of each call, in Mumbai's trail.
 - **A geography profile** keeps processing inside its geography: [AWS's page](https://docs.aws.amazon.com/bedrock/latest/userguide/geographic-cross-region-inference.html)
   says to check the destinations with `GetInferenceProfile` from the Region you call, not to trust the id's prefix.
   For Opus 5.5 the cards give: `eu.` from `eu-west-2` (London), to Frankfurt, Stockholm, Milan, Spain, Ireland,
@@ -456,11 +460,13 @@ answer pass through whatever Region serves the model:
 - **`in.anthropic.claude-opus-5`** is the one profile that keeps Opus-class inference inside India (Mumbai and
   Hyderabad), on the previous model.
 
-What dev may do is the lead's and the founder's call (P0 holds sample data only, and the Cloudflare sandboxes
-already work that way, ADR 0003's amendment). This PR changes no model setting: `agent_model` stays null, and
-the example in `terraform.tfvars.example` is commented out. Before real customer data reaches an agent run,
-decide between a `global.` profile (cheapest, lowest latency from Mumbai, processed anywhere), a geography profile
-called from another Region, and `in.` on Opus 5; and write the answer into the ADR.
+Which of these to use is **the founder's decision, recorded in ADR 0003 before real customer data reaches any
+model** (the agent or the weekly drafts). None is chosen yet. The options: a `global.` profile (cheapest, lowest
+latency from Mumbai, prompts processed and possibly stored outside India), a geography profile called from
+another Region (processed inside that geography, which is not India), or `in.` on Opus 5 (inside India, the
+previous model). Until then P0 holds sample data only, as the Cloudflare sandboxes already do (ADR 0003's
+amendment). This PR changes no model setting: `agent_model` stays null, and the example in
+`terraform.tfvars.example` is commented out.
 
 A role that calls a `global.` profile needs the three statements AWS documents
 ([IAM policy for global inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)):

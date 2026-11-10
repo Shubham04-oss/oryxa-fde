@@ -306,7 +306,7 @@ run "agent_region_is_the_one_asked_for" {
   }
 
   assert {
-    condition     = output.agent_model_target.region == "eu-west-2" && var.aws_region == "ap-south-1"
+    condition     = output.agent_model_target.region == "eu-west-2" && var.aws_region == "ap-south-1" && local.api_environment.AGENT_REGION == "eu-west-2"
     error_message = "a geography profile is called from its own Region; the main Region does not move"
   }
 }
