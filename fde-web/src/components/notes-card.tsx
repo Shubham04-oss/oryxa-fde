@@ -1,6 +1,7 @@
-import { useEffect, useImperativeHandle, useRef, useState } from "react"
+import { useEffect, useId, useImperativeHandle, useRef, useState } from "react"
 import type { Ref } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useBlocker } from "@tanstack/react-router"
 import { ChevronDown, ChevronRight } from "lucide-react"
 import { TaskDialog } from "./board"
 import { DecisionDialog } from "./decisions-card"
@@ -251,6 +252,7 @@ function NoteRow({
   const attended = attendeesLine(note, me)
   const customers = stakeholdersLine(note, people)
   const bodyId = `note-${note.id}`
+  const hintId = useId()
   return (
     <Row>
       <div className="flex items-start justify-between gap-3">
@@ -307,6 +309,7 @@ function NoteRow({
             size="sm"
             className="max-[800px]:h-9"
             aria-label={`Make a task from ${note.title}`}
+            aria-describedby={hintId}
             onClick={(event) => onMake("task", event.currentTarget)}
           >
             Make a task
@@ -316,11 +319,12 @@ function NoteRow({
             size="sm"
             className="max-[800px]:h-9"
             aria-label={`Log a decision from ${note.title}`}
+            aria-describedby={hintId}
             onClick={(event) => onMake("decision", event.currentTarget)}
           >
             Log a decision
           </Button>
-          <Quiet>Select a line first to start from it, or type the title.</Quiet>
+          <Quiet id={hintId}>Select a line first to start from it, or type the title.</Quiet>
         </div>
       )}
     </Row>
@@ -421,9 +425,42 @@ function NoteWriter({
   }
   const dirty = noteChanged(opened, fields)
   const count = noteLength(fields.body)
+  const hintId = useId()
+  const askId = useId()
+  // The back button, a link, Jump to or a sign-in redirect would unmount the dialog: they ask first too.
+  const blocker = useBlocker({
+    shouldBlockFn: () => true,
+    disabled: !dirty,
+    enableBeforeUnload: dirty,
+    withResolver: true,
+  })
+  const confirming = asking || blocker.status === "blocked"
+  // The count, said to a screen reader once typing pauses rather than on every key.
+  const [heard, setHeard] = useState("")
+  const counted = useRef(count)
+  useEffect(() => {
+    if (count === counted.current) return
+    counted.current = count
+    const said = setTimeout(
+      () =>
+        setHeard(
+          `${count.toLocaleString("en-GB")} of ${MAX_NOTE.toLocaleString("en-GB")} characters`,
+        ),
+      1000,
+    )
+    return () => clearTimeout(said)
+  }, [count])
 
   /** Cancel, Escape or a click outside: asks first when words would be lost. */
   const leave = () => (dirty ? setAsking(true) : onClose())
+  function keepWriting() {
+    setAsking(false)
+    blocker.reset?.()
+  }
+  function discard() {
+    blocker.proceed?.()
+    onClose()
+  }
 
   function start(kind: Making["kind"], from: HTMLElement) {
     opener.current = from
@@ -552,14 +589,18 @@ function NoteWriter({
           <Quiet className={cn(count > MAX_NOTE && "text-destructive")}>
             {count.toLocaleString("en-GB")} of {MAX_NOTE.toLocaleString("en-GB")} characters
           </Quiet>
+          <span aria-live="polite" className="sr-only">
+            {heard}
+          </span>
           {scope && (
             <div className="flex flex-wrap items-center gap-2">
-              <Quiet>Select a line, or put the cursor on it:</Quiet>
+              <Quiet id={hintId}>Select a line, or put the cursor on it:</Quiet>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="max-[800px]:h-9"
+                aria-describedby={hintId}
                 onClick={(event) => start("task", event.currentTarget)}
               >
                 Make a task
@@ -569,6 +610,7 @@ function NoteWriter({
                 variant="outline"
                 size="sm"
                 className="max-[800px]:h-9"
+                aria-describedby={hintId}
                 onClick={(event) => start("decision", event.currentTarget)}
               >
                 Log a decision
@@ -609,21 +651,22 @@ function NoteWriter({
           onChange={(next) => set({ stakeholders: next })}
           empty="No one at the customer is named yet. Add people on the company page."
         />
-        {asking && (
+        {confirming && (
           <div
-            role="group"
+            role="alertdialog"
             aria-label="Confirm leaving the note"
+            aria-describedby={askId}
             className="flex flex-wrap items-center gap-2 rounded-xl border bg-raised px-3.5 py-2.5"
           >
-            <p className="mr-auto">
+            <p id={askId} className="mr-auto">
               {note ? "Leave without saving your changes?" : "Leave without saving this note?"} What
               you wrote is lost.
             </p>
             {/* The safe answer takes focus: Escape twice must not throw a long note away. */}
-            <Button type="button" variant="ghost" autoFocus onClick={() => setAsking(false)}>
+            <Button type="button" variant="ghost" autoFocus onClick={keepWriting}>
               Keep writing
             </Button>
-            <Button type="button" onClick={onClose}>
+            <Button type="button" onClick={discard}>
               Leave
             </Button>
           </div>

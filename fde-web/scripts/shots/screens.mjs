@@ -468,7 +468,7 @@ function notesScreens() {
       act: async (page) => {
         const box = await writeNote(page)
         await box.getByRole("button", { name: "Cancel", exact: true }).click()
-        await box.getByRole("group", { name: "Confirm leaving the note" }).waitFor()
+        await box.getByRole("alertdialog", { name: "Confirm leaving the note" }).waitFor()
       },
     },
     {

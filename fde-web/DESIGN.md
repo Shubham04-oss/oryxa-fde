@@ -339,7 +339,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     the dialog open with every word in it and says what happened. Cancel, Escape and a click outside ask
     first when there is something to lose ("Leave without saving this note? What you wrote is lost."): the
     safe answer, **Keep writing**, has focus, so pressing Escape twice does not throw a long note away. A
-    note nobody has written in closes at once. Removing asks first, in the dialog.
+    note nobody has written in closes at once. Leaving the page with words in the note (the back button, a
+    link, Jump to, or the redirect to sign-in when the session has ended) asks the same question first, and
+    closing or reloading the tab gets the browser's own. Removing asks first, in the dialog. The counter is
+    said to a screen reader once typing pauses, not on every key.
   - **From a line to a task or a decision.** While writing, **Make a task** and **Log a decision** sit under the
     words; while reading an open note they sit under it. Each opens the board's task form or the
     Decisions card's decision form (the same forms, saving and refusals), with the title started from

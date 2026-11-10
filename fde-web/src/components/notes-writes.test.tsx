@@ -104,6 +104,12 @@ describe("the notes list", () => {
     renderWithRouter(<ProjectPage scope={CLAIMS} />, { keep: true })
     const notes = await card()
     const row = (await within(notes).findAllByRole("listitem"))[0]!
+    // The two-line preview on the card is text too, before the note is opened.
+    const preview = row.querySelector("[data-note-body]")!
+    expect(preview).toHaveClass("line-clamp-2")
+    expect(preview.children).toHaveLength(0)
+    expect(preview.textContent).toContain("<script>alert(1)</script>")
+    expect(row.querySelector("img, b, script, strong")).toBeNull()
     await userEvent.click(within(row).getAllByRole("button")[0]!)
     const body = row.querySelector("[data-note-body]")!
     expect(body.textContent).toBe(
@@ -287,7 +293,7 @@ describe("writing a note", () => {
     box = await writer()
     await write(box, { text: "A page of thoughts" })
     await userEvent.click(within(box).getByRole("button", { name: "Cancel" }))
-    const ask = await within(box).findByRole("group", { name: "Confirm leaving the note" })
+    const ask = await within(box).findByRole("alertdialog", { name: "Confirm leaving the note" })
     expect(ask).toHaveTextContent("What you wrote is lost")
     const keep = within(ask).getByRole("button", { name: "Keep writing" })
     expect(keep).toHaveFocus()
@@ -295,7 +301,7 @@ describe("writing a note", () => {
     await userEvent.keyboard("{Escape}")
     expect(screen.getByRole("dialog", { name: "Write a note" })).toBeInTheDocument()
     await userEvent.click(keep)
-    expect(within(box).queryByRole("group", { name: "Confirm leaving the note" })).toBeNull()
+    expect(within(box).queryByRole("alertdialog", { name: "Confirm leaving the note" })).toBeNull()
     expect(bodyOf(box).value).toBe("A page of thoughts")
 
     await userEvent.click(within(box).getByRole("button", { name: "Cancel" }))
@@ -304,6 +310,51 @@ describe("writing a note", () => {
     expect(wire.sent).toEqual([])
     await waitFor(() =>
       expect(within(notes).getByRole("button", { name: "Write a note" })).toHaveFocus(),
+    )
+  })
+
+  it("asks before leaving the page with words in it, and lets a note nobody wrote go at once", async () => {
+    const { router } = renderWithRouter(<ProjectPage scope={CLAIMS} />, { at: "/projects/claims" })
+    const notes = await card()
+    await userEvent.click(within(notes).getByRole("button", { name: "Write a note" }))
+    let box = await writer()
+    // Nothing written: going elsewhere is not held up.
+    await router.navigate({ to: "/elsewhere" as never })
+    await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"))
+    await router.navigate({ to: "/projects/claims" as never })
+
+    // Every path renders the page here, so the dialog is still open.
+    box = await writer()
+    await write(box, { text: "Forty minutes of notes" })
+    // The back button, a link or a sign-in redirect: the page stays, and asks.
+    void router.navigate({ to: "/elsewhere" as never })
+    const ask = await within(box).findByRole("alertdialog", { name: "Confirm leaving the note" })
+    expect(router.state.location.pathname).toBe("/projects/claims")
+    await userEvent.click(within(ask).getByRole("button", { name: "Keep writing" }))
+    expect(within(box).queryByRole("alertdialog")).toBeNull()
+    expect(bodyOf(box).value).toBe("Forty minutes of notes")
+    expect(router.state.location.pathname).toBe("/projects/claims")
+
+    void router.navigate({ to: "/elsewhere" as never })
+    await userEvent.click(
+      within(
+        await within(box).findByRole("alertdialog", { name: "Confirm leaving the note" }),
+      ).getByRole("button", { name: "Leave" }),
+    )
+    await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"))
+    expect(wire.sent).toEqual([])
+  })
+
+  it("tells a screen reader the count once typing pauses", async () => {
+    renderWithRouter(<ProjectPage scope={CLAIMS} />)
+    await userEvent.click(within(await card()).getByRole("button", { name: "Write a note" }))
+    const box = await writer()
+    const live = box.querySelector("[aria-live='polite']")!
+    expect(live.textContent).toBe("")
+    await write(box, { text: "Twelve words" })
+    await waitFor(() => expect(live.textContent).toBe("12 of 20,000 characters"), { timeout: 2000 })
+    expect(within(box).getByRole("button", { name: "Make a task" })).toHaveAccessibleDescription(
+      "Select a line, or put the cursor on it:",
     )
   })
 
