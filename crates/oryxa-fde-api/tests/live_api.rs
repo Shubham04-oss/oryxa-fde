@@ -647,6 +647,24 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("POST", "/webhooks/slack"),
 ];
 
+/// The targeted saves that check the `version` their caller read: the whole-record `PUT`s and the
+/// scope sign-off.
+const VERSIONED: &[(&str, &str)] = &[
+    ("PUT", "/v1/companies/{company}/stakeholders/{stakeholder}"),
+    ("PUT", "/v1/companies/{company}/systems/{system}"),
+    ("PUT", "/v1/companies/{company}/projects/{project}/scope/items/{item}"),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/scope/criteria/{criterion}",
+    ),
+    ("POST", "/v1/companies/{company}/projects/{project}/scope/sign-offs"),
+    (
+        "PUT",
+        "/v1/companies/{company}/projects/{project}/access-requests/{access_request}",
+    ),
+    ("PUT", "/v1/companies/{company}/projects/{project}/tasks/{task}"),
+];
+
 /// Every route that names a company, project, record or answer, with a body that would succeed if
 /// the call were allowed. Placeholders in braces are filled per attack, in the path and the body.
 const TARGETED: &[(&str, &str, Option<&str>)] = &[
@@ -1459,6 +1477,12 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
         .chain(TARGETED.iter().map(|(m, p, _)| (m.to_string(), p.to_string())))
         .collect();
     assert_eq!(covered, spec_routes(), "add new routes to the isolation suite");
+    assert!(
+        VERSIONED
+            .iter()
+            .all(|v| TARGETED.iter().any(|(m, p, b)| (*m, *p) == *v && b.is_some())),
+        "every versioned save is a targeted route with a body"
+    );
 
     // Companies A and B in one tenant, C in another.
     let (org1, org2) = (new_id("org"), new_id("org"));
@@ -1532,6 +1556,27 @@ async fn isolation_suite_no_endpoint_reaches_another_company_or_tenant() {
                     "{} ({:?}) {method} {path} -> {status} {resp}",
                     at.who.id, at.kind
                 ));
+            }
+            // Versions start at 1, so 0 is always stale: a version check run before the tenant and
+            // company filter would answer 409 with the victim's record as `current`.
+            // A sign-off in the attacker's own project rightly answers stale with their own scope.
+            let own_scope = at.kind == Kind::OwnProject && template.ends_with("/sign-offs");
+            if let Some(mut stale) = body
+                .clone()
+                .filter(|_| VERSIONED.contains(&(*method, *template)) && !own_scope)
+            {
+                stale["version"] = json!(0);
+                let (status, resp) = w.call(Some(&at.who.token), method, &path, Some(stale)).await;
+                calls += 1;
+                // In the attacker's own project the body may be refused (400) before the record is looked up.
+                let refused = matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+                    || (at.kind == Kind::OwnProject && status == StatusCode::BAD_REQUEST);
+                if !refused || resp.get("current").is_some() {
+                    leaks.push(format!(
+                        "{} ({:?}, version 0) {method} {path} -> {status} {resp}",
+                        at.who.id, at.kind
+                    ));
+                }
             }
             if matches!(at.kind, Kind::Victim | Kind::OwnProjectInVictimCompany) {
                 let body = match raw {
