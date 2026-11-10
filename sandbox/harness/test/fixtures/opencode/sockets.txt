@@ -1,0 +1,4 @@
+udp UNCONN 0 0 127.0.0.11:<port> 0.0.0.0:*
+tcp LISTEN 0 512 127.0.0.1:<port> 0.0.0.0:*
+tcp LISTEN 0 4096 127.0.0.11:<port> 0.0.0.0:*
+probe from fde-123-model to 10.123.0.10:<port> -> ECONNREFUSED
