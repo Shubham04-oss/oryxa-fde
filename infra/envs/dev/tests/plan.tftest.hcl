@@ -90,16 +90,6 @@ run "dev_plans_without_credentials" {
     error_message = "one queue set per default consumer"
   }
 
-  # The env names crates/oryxa-fde-api/src/main.rs reads, plus DB_* for IAM database auth in place of
-  # the DATABASE_URL of local and test runs (infra/README.md). Secrets arrive by reference only.
-  assert {
-    condition = length(setsubtract([
-      "LISTEN_ADDR", "SPICEDB_ENDPOINT", "SPICEDB_PRESHARED_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID",
-      "EVENT_SIGNING_KID", "EVENT_SIGNING_KEY", "EVENT_BUS_ARN", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER",
-    ], module.api.env_names)) == 0
-    error_message = "oryxa-fde-api is missing an env name from the contract"
-  }
-
   assert {
     condition = (
       output.web_hostname == "app.fde-dev.example.com" && output.admin_hostname == "admin.fde-dev.example.com"
@@ -111,6 +101,188 @@ run "dev_plans_without_credentials" {
     condition     = aws_ecr_repository.api.force_delete == false
     error_message = "destroy may empty nothing until allow_destroy is set"
   }
+}
+
+# The API's environment contract (#108): infra/README.md's table, read from the code, is what the API
+# task definition must match. A variable the code needs and the task lacks (the API would not start),
+# one the task sets that the table does not know (a rename the code never saw, like DATA_BUCKET for
+# DOCUMENTS_BUCKET), a feature's variable with the feature off, or a secret value set as plain config,
+# fails here. Each scenario applies the environment to the mock providers (a plan run exposes no outputs to
+# later runs), then ./tests/contract compares the names.
+run "api_task_with_every_feature_off" {
+  command = apply
+
+  # Least privilege: what the code calls, on what it uses, never a bare wildcard.
+  assert {
+    condition = toset(flatten([
+      for s in data.aws_iam_policy_document.api.statement : s.actions if contains(["CompanyFiles", "EmbedOnTheConfiguredModel"], s.sid)
+    ])) == toset(["bedrock:InvokeModel", "s3:GetObject", "s3:PutObject"])
+    error_message = "files are got and put, embeddings invoked: nothing else (the code never deletes or lists)"
+  }
+  assert {
+    condition = toset(flatten([
+      for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "CompanyFiles"
+    ])) == toset(["${module.data_bucket.arn}/*/*/documents/*", "${module.data_bucket.arn}/*/*/canvas/*"])
+    error_message = "the API's files are at the keys oryxa-fde-context blob.rs builds: <tenant>/<company>/documents and canvas"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "EmbedOnTheConfiguredModel"
+    ]) == ["arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0"]
+    error_message = "the API may invoke the embedding model only, in its region"
+  }
+  assert {
+    condition     = alltrue([for s in data.aws_iam_policy_document.api.statement : !contains(s.resources, "*")])
+    error_message = "no statement of the API's role takes a bare wildcard resource"
+  }
+  assert {
+    condition     = length([for s in data.aws_iam_policy_document.api.statement : s if startswith(s.sid, "Slack")]) == 0
+    error_message = "Slack permissions exist only with slack_client_id"
+  }
+  assert {
+    condition     = contains(keys(output.secrets), "api/session-password") && !contains(keys(output.secrets), "api/slack-client-secret") && !contains(keys(output.secrets), "api/install-state-key")
+    error_message = "a secret exists only while its feature is on"
+  }
+  assert {
+    condition     = !contains(module.migrate.env_names, "DATABASE_URL") && length(setsubtract(["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "AWS_REGION"], module.migrate.env_names)) == 0
+    error_message = "oryxa-fde-ops migrate takes DB_* and AWS_REGION"
+  }
+}
+
+run "contract_with_every_feature_off" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    plain_env_names  = run.api_task_with_every_feature_off.api_env_names.plain
+    secret_env_names = run.api_task_with_every_feature_off.api_env_names.secret
+    features         = []
+  }
+
+  assert {
+    condition     = output.table_read
+    error_message = "the table in infra/README.md was not read (its heading or row format changed?)"
+  }
+  assert {
+    condition     = length(output.missing) == 0
+    error_message = "the API task definition lacks what the API requires at start: ${join(", ", output.missing)}"
+  }
+  assert {
+    condition     = length(output.unexpected) == 0
+    error_message = "the API task definition sets what the contract table does not allow: ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0
+    error_message = "secret values set as plain config: ${join(", ", output.secrets_as_plain)}"
+  }
+  assert {
+    condition     = length(output.injected_non_secrets) == 0
+    error_message = "injected from Secrets Manager but not a secret in the table: ${join(", ", output.injected_non_secrets)}"
+  }
+}
+
+run "api_task_with_agent_github_and_slack_on" {
+  command = apply
+  variables {
+    sandbox_gateway_url = "https://gateway.example.com"
+    agent_model         = "eu.anthropic.claude-opus-5-5"
+    agent_region        = "eu-west-1"
+    realtime_url        = "https://realtime.example.com"
+    github_app          = { app_id = "12345", slug = "oryxa-fde-dev", client_id = "Iv1.mock" }
+    slack_client_id     = "1234.5678"
+  }
+
+  assert {
+    condition = toset([
+      for s in data.aws_iam_policy_document.api.statement : s.sid if startswith(s.sid, "Slack")
+    ]) == toset(["SlackTokenSecrets", "SlackTokenKeyViaSecretsManager"])
+    error_message = "Slack's permissions are two statements"
+  }
+  assert {
+    condition = flatten([
+      for s in data.aws_iam_policy_document.api.statement : s.resources if s.sid == "SlackTokenSecrets"
+    ]) == ["arn:aws:secretsmanager:us-west-2:000000000000:secret:oryxa-fde/dev/slack/*"]
+    error_message = "the API may touch Slack token secrets under its own prefix only"
+  }
+  assert {
+    condition     = alltrue([for s in data.aws_iam_policy_document.api.statement : !contains(s.resources, "*")])
+    error_message = "no statement of the API's role takes a bare wildcard resource"
+  }
+}
+
+run "contract_with_agent_github_and_slack_on" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    plain_env_names  = run.api_task_with_agent_github_and_slack_on.api_env_names.plain
+    secret_env_names = run.api_task_with_agent_github_and_slack_on.api_env_names.secret
+    features         = ["agent", "realtime", "github", "slack"]
+  }
+
+  assert {
+    condition     = length(output.missing) == 0
+    error_message = "the API task definition lacks what the API requires at start: ${join(", ", output.missing)}"
+  }
+  assert {
+    condition     = length(output.unexpected) == 0
+    error_message = "the API task definition sets what the contract table does not allow: ${join(", ", output.unexpected)}"
+  }
+  assert {
+    condition     = length(output.secrets_as_plain) == 0 && length(output.injected_non_secrets) == 0
+    error_message = "secrets are injected from Secrets Manager, never plain config: ${join(", ", concat(output.secrets_as_plain, output.injected_non_secrets))}"
+  }
+}
+
+run "api_task_with_slack_only" {
+  command = apply
+  variables {
+    slack_client_id = "1234.5678"
+  }
+}
+
+run "contract_with_slack_only" {
+  command = plan
+  module {
+    source = "./tests/contract"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    plain_env_names  = run.api_task_with_slack_only.api_env_names.plain
+    secret_env_names = run.api_task_with_slack_only.api_env_names.secret
+    features         = ["slack"]
+  }
+
+  assert {
+    condition     = length(output.missing) == 0 && length(output.unexpected) == 0
+    error_message = "slack alone sets Slack's variables and the install state key, no GitHub or agent one: missing ${join(", ", output.missing)}; unexpected ${join(", ", output.unexpected)}"
+  }
+}
+
+run "an_agent_needs_its_model" {
+  command = plan
+  variables {
+    sandbox_gateway_url = "https://gateway.example.com"
+  }
+  expect_failures = [var.agent_model]
+}
+
+run "realtime_needs_the_gateway" {
+  command = plan
+  variables {
+    realtime_url = "https://realtime.example.com"
+  }
+  expect_failures = [var.realtime_url]
 }
 
 run "allow_destroy_lets_teardown_empty_what_holds_data" {

@@ -386,3 +386,13 @@ output "env_names" {
   description = "Every env name the container gets (plain and secret), for tests."
   value       = setunion(keys(var.environment), keys(var.secrets))
 }
+
+output "plain_env_names" {
+  description = "Env names set as plain configuration (visible in the task definition), for tests."
+  value       = toset(keys(var.environment))
+}
+
+output "secret_env_names" {
+  description = "Env names injected from Secrets Manager, for tests."
+  value       = toset(keys(var.secrets))
+}

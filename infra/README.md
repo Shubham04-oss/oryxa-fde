@@ -15,7 +15,7 @@ Browser -> Cloudflare (DNS, Access on admin.) -> fde-web Worker (app.<domain>)
   -> internal ALB -> oryxa-fde-api on Fargate
        -> RDS PostgreSQL 17 + pgvector    (IAM database auth, TLS, private)
        -> SpiceDB on Fargate              (spicedb.oryxa-fde-dev.internal:50051, Cloud Map, private)
-       -> S3 data bucket                  (KMS, tenants/<tenant>/companies/<company>/ prefix per company)
+       -> S3 data bucket                  (KMS, <tenant>/<company>/ prefix per company)
        -> EventBridge v2 bus oryxa-fde-dev -> per-consumer SQS FIFO + DLQ + undelivered queue
 Everything outbound (AWS APIs, image pulls, WorkOS, the tunnel) leaves through one fck-nat instance.
 CloudTrail logs management events and object access on the data bucket.
@@ -36,7 +36,7 @@ are bound to the VPC service reach it, through the tunnel.
 | `modules/eventbridge` | Delivery role for bus subscribers and the publish policy (the bus itself is created by script) |
 | `modules/cloudtrail` | Multi-region trail with its own bucket and key, log file validation, data events on the data bucket |
 | `modules/cloudflare` | DNS for `app.` and `admin.`, the tunnel, the Workers VPC service to the ALB, Access on `admin.` |
-| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl`; `deploy.tf` holds the GitHub deploy role and the deploy parameters |
+| `envs/dev` | The composition, variables, outputs, lock file and `tests/plan.tftest.hcl` (with `tests/contract`, which reads the API environment contract below); `deploy.tf` holds the GitHub deploy role and the deploy parameters |
 | `docker/oryxa-fde-api.Dockerfile` | The API image: the prebuilt ARM64 `oryxa-fde-api` and `oryxa-fde-ops` on distroless Debian 13, nonroot |
 | `scripts/create-event-bus.sh` | Creates the EventBridge v2 bus `oryxa-fde-<env>` in a named region (no OpenTofu resource yet) |
 | `scripts/run-task.sh` | One-off tasks in the private subnets: bootstrap SQL, the store's migrations, SpiceDB migrate, SpiceDB schema write |
@@ -83,6 +83,13 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `vpc_cidr` | `10.50.0.0/16` | Distinct from the platform's `10.40.0.0/16`, so the two can be peered later |
 | `interface_endpoints` | `[]` | PrivateLink endpoints for AWS APIs (about $7.30/month each); empty means the NAT carries that traffic |
 | `log_retention_days` | `14` | CloudWatch retention for every task's logs |
+| `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's role may invoke this model only, in `aws_region` |
+| `sandbox_gateway_url` | `null` | Gateway Worker's URL (`SANDBOX_GATEWAY_URL`), known after `deploy-workers`. Null: agent and eval routes are not mounted, and the next three are unused |
+| `agent_model` | `null` | Bedrock model or inference profile for agents (`AGENT_MODEL`); required with `sandbox_gateway_url` |
+| `agent_region` | `null` | Its region (`AGENT_REGION`); null means `aws_region` |
+| `realtime_url` | `null` | Realtime Worker's URL (`REALTIME_URL`); null: output is stored, not streamed |
+| `github_app` | `null` | `{ app_id, slug, client_id }` of the GitHub App (all public). Null: GitHub routes answer 503 |
+| `slack_client_id` | `null` | The Slack app's client id (public). Null: Slack routes answer 503 |
 
 The state backend takes `bucket` and `region` at `tofu init` (step 1); the state key is
 `oryxa-fde/dev/terraform.tfstate`.
@@ -98,9 +105,27 @@ them as env vars when a task starts, and a task cannot start until its secrets h
 | --- | --- | --- |
 | `api/workos-api-key` | `WORKOS_API_KEY` | oryxa-fde-api |
 | `api/event-signing-key` | `EVENT_SIGNING_KEY` | oryxa-fde-api (outbox relay) |
+| `api/session-password` | `SESSION_PASSWORD` | oryxa-fde-api (seals the session cookie) |
+| `api/sandbox-gateway-token` | `SANDBOX_GATEWAY_TOKEN` | oryxa-fde-api, only with `sandbox_gateway_url` |
+| `api/realtime-token` | `REALTIME_TOKEN` | oryxa-fde-api, only with `realtime_url` |
+| `api/github-app-private-key`, `api/github-client-secret`, `api/github-webhook-secret` | `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET` | oryxa-fde-api, only with `github_app` |
+| `api/slack-client-secret`, `api/slack-signing-secret` | `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` | oryxa-fde-api, only with `slack_client_id` |
+| `api/install-state-key` | `INSTALL_STATE_KEY` | oryxa-fde-api, with `github_app` or `slack_client_id` |
 | `shared/spicedb-preshared-key` | `SPICEDB_PRESHARED_KEY` (API), `SPICEDB_GRPC_PRESHARED_KEY` (SpiceDB), `ZED_TOKEN` (zed task) | oryxa-fde-api, SpiceDB, the zed task |
 | `cloudflared/tunnel-token` | `TUNNEL_TOKEN` | cloudflared |
 | RDS master (created by RDS) | `PGUSER`, `PGPASSWORD` | the db-admin task only |
+
+A secret exists only while the feature that reads it is switched on (`tofu output secrets` lists the
+ones that do). How to fill the new ones: `api/session-password` is 64 hex characters
+(`openssl rand -hex 32`); `api/install-state-key` is at least 32 random bytes (`openssl rand -base64 48`);
+`api/sandbox-gateway-token` is the same value as the gateway Worker's `SERVICE_TOKEN`;
+`api/realtime-token` the same as the realtime Worker's token; the GitHub and Slack values come from
+those apps' settings pages (the private key is the App's PEM; the webhook secret at least 32 bytes,
+the Slack signing secret at least 16).
+
+Slack bot tokens are not in this list: the API creates one secret per workspace at run time under
+`oryxa-fde/<env>/slack/` (`SLACK_SECRET_PREFIX`), and its role may touch that prefix only. Teardown
+leaves them behind; delete them by hand.
 
 No service has a database password: the API, the migrate task and SpiceDB connect with IAM
 database auth, as `oryxa_fde_api`, `oryxa_fde_migrator` and `spicedb`, and each task role may
@@ -135,6 +160,118 @@ startup) needs this once, before the first deploy of the non-owner API (#39):
    `reassign owned by oryxa_fde_api to oryxa_fde_migrator`, then revokes the API's `create` on
    `public` and its direct grants of `oryxa_fde_app` and `oryxa_fde_relay`.
 3. `infra/scripts/run-task.sh sql infra/sql/01-bootstrap.sql` again: the check passes.
+
+## The API environment contract
+
+Read from the code, not from memory (each `Read at` is `file:line` in `crates/`, checked against
+`main` at `039df45`), and compared with what `envs/dev` sets. `tests/plan.tftest.hcl` reads these
+tables: every `always` variable of the API must be on its task definition, every variable the
+task definition sets must be in the table, and a secret must be injected from Secrets Manager, never set as plain
+config. Add or change a variable in the code, and the table and `envs/dev` change in the same PR.
+
+Columns. **Needed**: `always`; a feature the variable belongs to (`agent`, `realtime`, `github`,
+`slack`: needed when that feature is on, and the first row of each is its switch); `optional` (the code has
+a default); `local only` (tests and laptops). **Kind**: `config` (plain, visible in the task definition),
+`secret` (a value; ECS injects it from Secrets Manager), `reference` (a Secrets Manager name or KMS key
+ARN, not a value). Every task also gets its AWS identity from the task role: the SDK reads
+`AWS_REGION` and the container credentials ECS provides (`aws_config::load_from_env`).
+
+### `oryxa-fde-api`
+
+The service, entrypoint `/usr/local/bin/oryxa-fde-api` (deployed). A variable that is missing, or
+not valid, stops startup. The agent and eval routes mount only when `SANDBOX_GATEWAY_URL` is set;
+GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
+
+| Variable | Needed | Kind | Default | Read at | Infra |
+| --- | --- | --- | --- | --- | --- |
+| `DB_HOST` | always | config | none | `oryxa-fde-store/src/iam.rs:82` | RDS address |
+| `DB_PORT` | always | config | none | `iam.rs:82` | RDS port |
+| `DB_NAME` | always | config | none | `iam.rs:82` | `oryxa_fde` |
+| `DB_USER` | always | config | none | `iam.rs:82` | `oryxa_fde_api` |
+| `AWS_REGION` | always | config | none | `iam.rs:133`, `oryxa-fde-context/src/lib.rs:102`, `oryxa-events/src/lib.rs:210` | `aws_region` |
+| `SPICEDB_ENDPOINT` | always | config | none | `oryxa-fde-api/src/main.rs:45` | Cloud Map name |
+| `SPICEDB_PRESHARED_KEY` | always | secret | none | `main.rs:46` | `shared/spicedb-preshared-key` |
+| `WORKOS_API_KEY` | always | secret | none | `main.rs:50` | `api/workos-api-key` |
+| `WORKOS_CLIENT_ID` | always | config | none | `main.rs:51` | `workos_client_id` |
+| `WEB_ORIGIN` | always | config | none | `main.rs:64`, `main.rs:77` | `https://app.<domain>` |
+| `SESSION_PASSWORD` | always | secret | none | `main.rs:65` | `api/session-password` |
+| `EVENT_SIGNING_KID` | always | config | none | `main.rs:72` | `event_signing_kid` |
+| `EVENT_SIGNING_KEY` | always | secret | none | `main.rs:72` | `api/event-signing-key` |
+| `EVENT_BUS_ARN` | always | config | none | `main.rs:73` | `event_bus_arn` |
+| `DOCUMENTS_BUCKET` | always | config | none | `oryxa-fde-context/src/lib.rs:103` | the data bucket |
+| `LISTEN_ADDR` | optional | config | `0.0.0.0:8080` | `main.rs:81` | `0.0.0.0:<api_port>` |
+| `EMBEDDING_PROVIDER` | optional | config | `bedrock` (`fake` for tests) | `context/src/lib.rs:104` | `bedrock` |
+| `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:108` | `embedding_model` |
+| `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:113` | not set |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:55` | not set |
+| `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:68` | not set; add a secret when rotating |
+| `RUST_LOG` | optional | config | `info` | `main.rs:40` | not set |
+| `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:301` | never set |
+| `SANDBOX_GATEWAY_URL` | agent | config | none: agent routes off | `oryxa-fde-agent/src/prod.rs:124` | `sandbox_gateway_url` |
+| `SANDBOX_GATEWAY_TOKEN` | agent | secret | none | `prod.rs:128` | `api/sandbox-gateway-token` |
+| `AGENT_MODEL` | agent | config | none | `prod.rs:149` | `agent_model` |
+| `AGENT_REGION` | agent | config | none | `prod.rs:150` | `agent_region`, else `aws_region` |
+| `REALTIME_URL` | realtime | config | none: output not streamed | `prod.rs:130` | `realtime_url` |
+| `REALTIME_TOKEN` | realtime | secret | none; both or neither | `prod.rs:130` | `api/realtime-token` |
+| `AGENT_MAX_TURNS` | optional | config | `100` | `prod.rs:151` | not set |
+| `AGENT_APPROVALS` | optional | config | deploys and customer sends (JSON) | `prod.rs:142` | not set |
+| `AGENT_RUN_MAX_MINUTES` | optional | config | `60` | `prod.rs:168` | not set |
+| `AGENT_BUDGET_MINUTES` | optional | config | `600` | `prod.rs:165` | not set |
+| `AGENT_BUDGET_USD` | optional | config | `100` | `prod.rs:166` | not set |
+| `AGENT_PRICE_INPUT_USD_PER_MTOK` | optional | config | `15` | `prod.rs:161` | not set |
+| `AGENT_PRICE_OUTPUT_USD_PER_MTOK` | optional | config | `75` | `prod.rs:162` | not set |
+| `EVAL_JUDGE_MODEL` | optional | config | `AGENT_MODEL` | `prod.rs:155` | not set |
+| `EVAL_JUDGE_MAX_CALLS` | optional | config | `200` | `prod.rs:157` | not set |
+| `GITHUB_APP_ID` | github | config | none: GitHub off | `oryxa-fde-api/src/integrations.rs:84` | `github_app.app_id` |
+| `GITHUB_APP_SLUG` | github | config | none | `integrations.rs:89` | `github_app.slug` |
+| `GITHUB_APP_PRIVATE_KEY` | github | secret | none (PEM) | `integrations.rs:90` | `api/github-app-private-key` |
+| `GITHUB_CLIENT_ID` | github | config | none | `integrations.rs:91` | `github_app.client_id` |
+| `GITHUB_CLIENT_SECRET` | github | secret | none | `integrations.rs:92` | `api/github-client-secret` |
+| `GITHUB_WEBHOOK_SECRET` | github | secret | none (32+ bytes) | `integrations.rs:98` | `api/github-webhook-secret` |
+| `SLACK_CLIENT_ID` | slack | config | none: Slack off | `integrations.rs:104` | `slack_client_id` |
+| `SLACK_CLIENT_SECRET` | slack | secret | none | `integrations.rs:110` | `api/slack-client-secret` |
+| `SLACK_SIGNING_SECRET` | slack | secret | none (16+ bytes) | `integrations.rs:124` | `api/slack-signing-secret` |
+| `SLACK_SECRET_PREFIX` | slack | reference | none; `oryxa-fde/<env>/slack/` | `integrations.rs:118` | `oryxa-fde/<env>/slack/` |
+| `SLACK_KMS_KEY_ID` | slack | reference | none | `integrations.rs:119` | the environment key's ARN |
+| `INSTALL_STATE_KEY` | github, slack | secret | none (32+ bytes) | `integrations.rs:80` | `api/install-state-key` |
+
+What the API's task role may do, from what the code calls:
+
+| Permission | Why (`Read at`) | In dev |
+| --- | --- | --- |
+| `rds-db:connect` as `oryxa_fde_api` | the store (`iam.rs`) | granted |
+| `events:PutEvents` on the bus | the outbox relay (`oryxa-events/src/lib.rs:234`) | granted |
+| `s3:GetObject`, `s3:PutObject` on `*/*/documents/*` and `*/*/canvas/*` | documents and canvas snapshots at `<tenant>/<company>/documents/<id>` and `.../canvas/<id>` (`context/src/blob.rs:31`, `:37`, `:65`, `:81`; the code never deletes or lists) | granted; delete and list removed |
+| `kms:Decrypt`, `kms:GenerateDataKey`, only through S3 | the bucket's default encryption | granted |
+| `bedrock:InvokeModel` on `foundation-model/<embedding_model>` in `aws_region` | embeddings (`context/src/embed.rs:95`) | granted |
+| `secretsmanager:CreateSecret`, `TagResource`, `PutSecretValue`, `GetSecretValue`, `DeleteSecret` on `oryxa-fde/<env>/slack/*`, and `kms:Decrypt`, `kms:GenerateDataKey` only through Secrets Manager | Slack bot tokens (`integrations/src/secrets.rs:87`, `:99`, `:117`, `:134`) | only with `slack_client_id` |
+| Bedrock for `AGENT_MODEL`, `EVAL_JUDGE_MODEL` | not the API: the judge is a `curl` run inside the sandbox (`agent/src/evals.rs:232`), signed by the gateway's outbound handler | not granted; the gateway's AWS identity is the agent stream's follow-up |
+
+### `oryxa-fde-ops`
+
+Entrypoint `/usr/local/bin/oryxa-fde-ops` in the API image.
+
+| Subcommand | Variables (Read at) | In dev |
+| --- | --- | --- |
+| `migrate` | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` as `oryxa_fde_migrator`, and `AWS_REGION` (`store/src/lib.rs:261`, `iam.rs:82`); `MIGRATION_DATABASE_URL` for local runs only (`lib.rs:267`) | the `oryxa-fde-dev-migrate` task sets all five; its role may connect as the migrator only |
+| `replay-dead-events [tenant]` | `DB_*` as the runtime login, and `AWS_REGION` (`store/src/lib.rs:293`, `ops.rs:30`) | not deployed: no task definition |
+
+### Not deployed
+
+These have no image and no task definition yet; the facts for the issue that adds them. Each also needs
+`AWS_REGION` and `RUST_LOG` as above. None of them can be started on ECS until the code gap in the first row is closed.
+
+| Binary | Variables (Read at) | Permissions it will need |
+| --- | --- | --- |
+| `oryxa-fde-ingest` | `DATABASE_URL` (`oryxa-fde-context/src/bin/ingest.rs:38`: **a password URL, no IAM auth; the API stream must switch it to `Store::from_env()`** before it can run on ECS), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`ingest.rs:39`, as the API), `EVENT_SIGNING_KID` (`:41`), `EVENT_PUBLIC_KEY` (`:43`, the public half of the API's signing key, plain config), `INGEST_QUEUE_URL` (`:45`, `queue_urls["context-ingestion"]`) | SQS `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility` on that queue (`oryxa-fde-events/src/inbox.rs:91`, `:147`, `:161`); `s3:GetObject` on the company prefix; `bedrock:InvokeModel` on the embedding model; `rds-db:connect` as a runtime login; the queue's bus subscriber |
+| `oryxa-fde-lifecycle` | `DB_*` as the runtime login (`lifecycle.rs:45`), `EVENT_SIGNING_KID` (`:47`), `EVENT_PUBLIC_KEY` (`:49`), `UPDATE_MODEL` (`:52`, a Bedrock inference profile, no default), `LIFECYCLE_QUEUE_URL` (`:99`, `queue_urls["lifecycle"]`); optional `DIGEST_FROM` (`:54`, an SES identity; without it no digest) with `WEB_ORIGIN` (`:57`, required then), optional `SLACK_SECRET_PREFIX` (`:85`, read only) | SQS as above on the lifecycle queue; `bedrock:InvokeModel` on the profile and the foundation models behind it (`lifecycle/src/drafts.rs:102`); `ses:SendEmail` on the `DIGEST_FROM` identity (`digest.rs:90`); `secretsmanager:GetSecretValue` on `oryxa-fde/<env>/slack/*` (`secrets.rs:117`); `rds-db:connect` as a runtime login |
+| `oryxa-fde-mcp` | `DATABASE_URL` (`oryxa-fde-mcp/src/bin/mcp.rs:27`: same code gap as ingest), `SPICEDB_ENDPOINT` (`:29`), `SPICEDB_PRESHARED_KEY` (`:30`), `WORKOS_API_KEY` (`:34`), `WORKOS_CLIENT_ID` (`:35`), `MCP_ALLOWED_HOSTS` (`:40`, hostnames agents reach it at), `DOCUMENTS_BUCKET` and `EMBEDDING_*` (`:39`); optional `WORKOS_ISSUER` (`:37`), `LISTEN_ADDR` (`:46`, default `0.0.0.0:8081`) | as the API's database, S3 read and embedding permissions; a route to it (its own ALB listener or service), which dev does not have |
+| `oryxa-fde-ops replay-dead-events` | see above | `rds-db:connect` as a runtime login |
+
+The two `DATABASE_URL` readers are a code change (`Store::connect` to `Store::from_env`), not a
+rename; it is on issue #108 for the API stream. Until the ingest worker runs, nothing extracts, chunks or
+embeds an uploaded document (only that worker does: `context/src/ingest.rs:1`, `context/src/lib.rs:124`),
+so M1's "document search" step finds nothing for new uploads.
 
 ## Apply order
 
@@ -280,7 +417,7 @@ before apply.
 | Internal ALB | 730 h at $0.0225, under 1 LCU | 16.50 to 18.50 |
 | RDS PostgreSQL | `db.t4g.micro` single-AZ ($11.68), 20 GB gp3 ($2.30), backups inside the free allowance | 14 |
 | NAT instance | fck-nat on `t4g.nano` ($3.07), its public IPv4 ($3.65), root volume and transfer | 7 to 8.50 |
-| Secrets Manager | 4 secrets + the RDS master secret at $0.40 | 2 |
+| Secrets Manager | 5 secrets + the RDS master secret at $0.40 (each switched-on feature adds 1 to 4) | 2.40 |
 | KMS | environment key + CloudTrail key at $1, requests (S3 Bucket Keys on) | 2 to 2.50 |
 | Cloud Map | private DNS namespace (a Route 53 zone, $0.50) + 1 instance | 0.60 |
 | CloudWatch Logs | 14-day retention, low volume | 1 to 2 |
@@ -333,6 +470,18 @@ These could not be checked without an account. Each one is flagged at the place 
   whether binding a Workers VPC service needs a Connectivity Directory permission too) are from the
   docs; the first `deploy-workers` run confirms them.
 
+- **Secrets Manager with the environment key.** `CreateSecret` with `KmsKeyId` needs `kms:GenerateDataKey` and
+  `kms:Decrypt` for the caller; AWS's reference may also list `kms:DescribeKey`. The Slack statement grants
+  the first two, only through Secrets Manager. The first Slack install shows whether a third is needed.
+- **Bedrock.** The API's role may `bedrock:InvokeModel` on `foundation-model/amazon.titan-embed-text-v2:0` in
+  `aws_region`. Confirm the model is available there and enabled for the account (model access) before the first upload.
+- **`WORKOS_ISSUER`.** The code's default is `https://api.workos.com/`, pinned against the token's `iss`
+  (`oryxa-authn/src/workos_jwt.rs:57`). If the WorkOS environment uses a custom auth domain, the issuer is
+  that domain and the API needs `WORKOS_ISSUER` (not set here; add it to the contract when it is known).
+- **Gateway and realtime URLs** are known only after `deploy-workers`, so agent routes are switched on by a
+  second apply (`sandbox_gateway_url`, `agent_model`), after the gateway's `SERVICE_TOKEN` and
+  `api/sandbox-gateway-token` hold the same value.
+
 ## Known limits (dev only)
 
 - `ponytail:` one NAT instance, single-AZ RDS and one SpiceDB task, with no failover.
@@ -342,21 +491,20 @@ These could not be checked without an account. Each one is flagged at the place 
 - Tasks may reach any host on 443 through the NAT. The application's outbound allowlist
   (CLAUDE.md) is the control; a network firewall is a prod decision.
 - **No per-company KMS keys in P0** (ADR 0003, amendment of 4 November). The bucket encrypts with
-  the environment key, and the API's role is limited to `tenants/*/companies/*`. A provisioning step
+  the environment key, and the API's role is limited to company documents and canvas snapshots. A provisioning step
   adds a key per company before the first real customer data (P1).
 - ECR lives in the dev stack until a second environment needs it.
 
 ## Contracts with other streams
 
-- **API (`crates/oryxa-fde-api`)** gets the env names its `main.rs` reads: `LISTEN_ADDR`,
-  `SPICEDB_ENDPOINT`, `SPICEDB_PRESHARED_KEY`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
-  `EVENT_SIGNING_KID`, `EVENT_SIGNING_KEY` and `EVENT_BUS_ARN`, plus `AWS_REGION`, `ORYXA_ENV`,
-  `DATA_BUCKET` and `WEB_ORIGIN`. `tests/plan.tftest.hcl` pins the list.
+- **API (`crates/oryxa-fde-api`)** gets the env names its code reads, listed with file and line in
+  The API environment contract above; `tests/plan.tftest.hcl` reads that table.
   - **The database: IAM authentication** (lead decision on #37), no stored passwords. Infra gives the
     service and the migrate task `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` (`oryxa_fde_api` and
     `oryxa_fde_migrator`), and each task role may `rds-db:connect` as its own login only. The API
-    stream adds IAM token support to both binaries in a follow-up; local and test runs keep
-    `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). Until then, neither task can connect here.
+    and `oryxa-fde-ops` sign in with IAM tokens when those four are set (`store/src/iam.rs`); local
+    and test runs keep `DATABASE_URL` (and `MIGRATION_DATABASE_URL`). The ingest worker and the MCP
+    server do not yet (the table above).
   - **Migrations run as a one-off task, never at startup** (#32, #39). The migrate task runs
     `oryxa-fde-ops migrate` from the API's image (`/usr/local/bin/oryxa-fde-ops`, beside
     `/usr/local/bin/oryxa-fde-api`), connected as `oryxa_fde_migrator`, and exits 0 when done. The
@@ -365,7 +513,7 @@ These could not be checked without an account. Each one is flagged at the place 
     bootstrap creates those roles and `oryxa_fde_runtime`, so no login needs CREATEROLE, and the
     migrator holds the first three with admin option for migrations 0001 and 0003.
   - It serves `GET /healthz` without auth (it does), keeps files under
-    `tenants/<tenant>/companies/<company>/`, and writes nothing to its root filesystem, which is
+    `<tenant>/<company>/` (`oryxa-fde-context/src/blob.rs`), and writes nothing to its root filesystem, which is
     read-only. Infra builds the image (`deploy-api`) from the `oryxa-fde-api` package's two binaries:
     `oryxa-fde-api` is the entrypoint, and the migrate task runs `/usr/local/bin/oryxa-fde-ops migrate`.
 - **Web (`fde-web/`, `realtime/`).** `deploy-workers` adds the `API` binding (`env.API`, the Workers
@@ -383,7 +531,7 @@ These could not be checked without an account. Each one is flagged at the place 
 tofu fmt -check -recursive infra
 tofu -chdir=infra/envs/dev init -backend=false
 tofu -chdir=infra/envs/dev validate
-tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls
+tofu -chdir=infra/envs/dev test      # mock providers: no credentials, no cloud calls; checks the API task against the contract table
 shellcheck infra/scripts/*.sh
 actionlint                            # the deploy workflows
 ```

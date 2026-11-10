@@ -174,3 +174,73 @@ variable "log_retention_days" {
   type    = number
   default = 14
 }
+
+# ---- optional API features (infra/README.md, API environment contract). Each is off while null: the
+# API then starts without it, and no secret or permission for it exists. Turn one on after the thing it
+# talks to exists, then put its secret values in (README, secrets).
+
+variable "embedding_model" {
+  description = "Bedrock foundation model that embeds document text and search queries (EMBEDDING_MODEL). The API's role may invoke this model only, in aws_region."
+  type        = string
+  default     = "amazon.titan-embed-text-v2:0"
+  validation {
+    condition     = can(regex("^[a-z0-9-]+\\.[a-z0-9.:-]+$", var.embedding_model))
+    error_message = "embedding_model must be a foundation model id such as amazon.titan-embed-text-v2:0 (not an inference profile)."
+  }
+}
+
+variable "sandbox_gateway_url" {
+  description = "Base URL of the sandbox gateway Worker (SANDBOX_GATEWAY_URL), known after the deploy-workers workflow. Null: agent and eval routes are not mounted."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.sandbox_gateway_url == null || can(regex("^https://[a-z0-9.-]+(/.*)?$", var.sandbox_gateway_url))
+    error_message = "sandbox_gateway_url must be an https URL."
+  }
+}
+
+variable "agent_model" {
+  description = "Bedrock model or inference profile the agent runs on (AGENT_MODEL). Required with sandbox_gateway_url. The sandbox's outbound handler calls Bedrock, not the API, so the API's role gets no Bedrock permission for it."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.sandbox_gateway_url == null || var.agent_model != null
+    error_message = "agent_model is required with sandbox_gateway_url."
+  }
+}
+
+variable "agent_region" {
+  description = "Region of agent_model (AGENT_REGION). Null: aws_region."
+  type        = string
+  default     = null
+}
+
+variable "realtime_url" {
+  description = "Base URL of the realtime Worker (REALTIME_URL), with sandbox_gateway_url only. Null: agent output is stored, not streamed."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.realtime_url == null || (var.sandbox_gateway_url != null && can(regex("^https://[a-z0-9.-]+(/.*)?$", var.realtime_url)))
+    error_message = "realtime_url must be an https URL and needs sandbox_gateway_url."
+  }
+}
+
+variable "github_app" {
+  description = "The GitHub App's public settings: numeric app id, URL slug and OAuth client id. Null: GitHub routes answer 503. Its private key, client secret and webhook secret are Secrets Manager entries."
+  type = object({
+    app_id    = string
+    slug      = string
+    client_id = string
+  })
+  default = null
+  validation {
+    condition     = var.github_app == null || can(regex("^[0-9]+$", var.github_app.app_id))
+    error_message = "github_app.app_id must be the numeric App ID."
+  }
+}
+
+variable "slack_client_id" {
+  description = "The Slack app's client id (public). Null: Slack routes answer 503. Its client secret and signing secret are Secrets Manager entries."
+  type        = string
+  default     = null
+}
