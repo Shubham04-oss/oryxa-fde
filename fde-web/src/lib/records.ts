@@ -49,8 +49,9 @@ function checkText(value: string, code: string) {
   return length(v) > MAX_TEXT || TEXT_CONTROL.test(v) ? say(code) : null
 }
 
-// The API's address rule, in short: one @, something each side, no spaces, 254 characters at most.
-const EMAIL = /^[^\s@]{1,64}@[^\s@]+$/
+// The API's address rule, in short: one @, up to 64 characters before it, a dotted domain after it,
+// no spaces, 254 characters at most.
+const EMAIL = /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/
 const checkEmail = (value: string) => {
   const v = value.trim()
   return !v || (v.length <= 254 && EMAIL.test(v)) ? null : say("invalid_email")

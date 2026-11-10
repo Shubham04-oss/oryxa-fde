@@ -28,16 +28,18 @@ import type { ProjectRecord } from "@/lib/records"
 export function CompanyDialog({ company, onClose }: { company?: CompanyOut; onClose: () => void }) {
   const client = useQueryClient()
   const navigate = useNavigate()
+  // What the form opened with: a later read of the company must not turn an untouched field into a change.
+  const [before] = useState(company)
   const [fields, setFields] = useState(companyFields(company))
   const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
 
   async function save() {
-    if (company) {
-      const patch = companyPatch(company, fields)
+    if (before) {
+      const patch = companyPatch(before, fields)
       // Nothing changed: nothing to send.
       if (Object.keys(patch).length === 0) return null
       return attempt(
-        async () => commitCompanyChanged(client, await api.updateCompany(company.id, patch)),
+        async () => commitCompanyChanged(client, await api.updateCompany(before.id, patch)),
         "company",
       )
     }
@@ -95,14 +97,16 @@ export function ProjectDialog({
 }) {
   const client = useQueryClient()
   const navigate = useNavigate()
+  // As for a company: the edit is against what the form opened with.
+  const [before] = useState(project)
   const [fields, setFields] = useState(projectFields(project))
   const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
 
   async function save() {
-    if (project) {
-      const patch = projectPatch(project, fields)
+    if (before) {
+      const patch = projectPatch(before, fields)
       if (Object.keys(patch).length === 0) return null
-      const scope = { company, project: project.id }
+      const scope = { company, project: before.id }
       return attempt(
         async () => commitProjectChanged(client, scope, await api.updateProject(scope, patch)),
         "project",

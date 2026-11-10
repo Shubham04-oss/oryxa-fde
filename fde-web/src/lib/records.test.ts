@@ -117,9 +117,21 @@ describe("project and record forms", () => {
   it("check a stakeholder's address and a system's fields", () => {
     const person = { name: "Ines", role: "champion" as const, title: "", email: "" }
     expect(stakeholderProblem(person)).toBeNull()
+    expect(stakeholderProblem({ ...person, title: "t".repeat(201) })).toBe(
+      "The title is one line, up to 200 characters.",
+    )
     expect(stakeholderProblem({ ...person, name: "" })).toBe("Name the stakeholder.")
     expect(stakeholderProblem({ ...person, email: "ines@example.com" })).toBeNull()
-    for (const bad of ["ines", "ines@", "@example.com", "in es@example.com"])
+    for (const bad of [
+      "ines",
+      "ines@",
+      "@example.com",
+      "in es@example.com",
+      "ines@example",
+      "ines@.example.com",
+      "ines@example..com",
+      "ines@example.com.",
+    ])
       expect(stakeholderProblem({ ...person, email: bad }), bad).toBe(
         "Use an address like name@example.com.",
       )

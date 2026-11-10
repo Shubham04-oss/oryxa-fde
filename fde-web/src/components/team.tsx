@@ -70,7 +70,8 @@ function RemoveButton({
   return (
     <span role="group" aria-label={`Confirm removing ${name}`} className="flex items-center gap-1">
       <span className="text-[11px] text-muted-foreground">{ask}</span>
-      <Button variant="ghost" size="sm" onClick={() => setAsking(false)}>
+      {/* The button that asked is gone: focus lands on the safe answer. */}
+      <Button variant="ghost" size="sm" autoFocus onClick={() => setAsking(false)}>
         Keep
       </Button>
       <Button
@@ -87,7 +88,11 @@ function RemoveButton({
   )
 }
 
-/** The company's leads and engineers; a lead or admin changes a role or removes someone. */
+/**
+ * The company's leads and engineers; a lead or admin changes a role or removes someone. The API lets
+ * the last lead go (a finding for the API stream), so the screen never offers it, and asks before
+ * anyone is removed or a lead steps down.
+ */
 export function MembersCard({
   company,
   me,
@@ -102,6 +107,8 @@ export function MembersCard({
   // The person a save is in flight for, and a refusal, kept in their row.
   const [saving, setSaving] = useState<string | null>(null)
   const [refused, setRefused] = useState<{ user: string; why: string } | null>(null)
+  // Stepping down from lead, once asked.
+  const [steppingDown, setSteppingDown] = useState(false)
 
   const change = useMutation({
     mutationFn: async ({ user, role }: { user: UserId; role: MemberRole | null }) =>
@@ -131,18 +138,26 @@ export function MembersCard({
         <Rows label="Team">
           {members.data.map((member) => {
             const busy = saving === member.user
+            const you = member.user === me
+            const onlyLead =
+              member.role === "lead" && members.data.filter((m) => m.role === "lead").length === 1
             return (
               <Row key={member.user}>
                 <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                   <Who user={member.user} me={me} />
                   <div className="flex items-center gap-2">
-                    {manage ? (
+                    {manage && !onlyLead ? (
                       <select
-                        aria-label={`Role of ${member.user === me ? "you" : `teammate …${member.user.slice(-6)}`}`}
+                        aria-label={`Role of ${you ? "you" : `teammate …${member.user.slice(-6)}`}`}
                         className={`${FIELD} w-auto`}
                         value={member.role}
-                        disabled={busy}
-                        onChange={(e) => void run(member.user, e.target.value as MemberRole)}
+                        disabled={busy || (you && steppingDown)}
+                        onChange={(e) => {
+                          const role = e.target.value as MemberRole
+                          if (you && member.role === "lead" && role === "engineer")
+                            setSteppingDown(true)
+                          else void run(member.user, role)
+                        }}
                       >
                         {(Object.keys(ROLE_LABEL) as Array<MemberRole>).map((role) => (
                           <option key={role} value={role}>
@@ -153,11 +168,9 @@ export function MembersCard({
                     ) : (
                       <span className="text-[11px] text-soft">{ROLE_LABEL[member.role]}</span>
                     )}
-                    {manage && (
+                    {manage && !onlyLead && (
                       <RemoveButton
-                        name={
-                          member.user === me ? "yourself" : `teammate …${member.user.slice(-6)}`
-                        }
+                        name={you ? "yourself" : `teammate …${member.user.slice(-6)}`}
                         ask="Remove from this company?"
                         disabled={busy}
                         onRemove={() => void run(member.user, null)}
@@ -165,6 +178,40 @@ export function MembersCard({
                     )}
                   </div>
                 </div>
+                {manage && onlyLead && (
+                  <Quiet className="mt-1">
+                    A company always has a lead. Make someone else lead first.
+                  </Quiet>
+                )}
+                {you && steppingDown && (
+                  <div
+                    role="group"
+                    aria-label="Confirm stepping down"
+                    className="mt-1 flex flex-wrap items-center gap-1"
+                  >
+                    <span className="mr-auto text-[11px] text-muted-foreground">
+                      Step down to engineer? A lead or an organisation admin then manages this
+                      company.
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      autoFocus
+                      onClick={() => setSteppingDown(false)}
+                    >
+                      Keep
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setSteppingDown(false)
+                        void run(member.user, "engineer")
+                      }}
+                    >
+                      Step down
+                    </Button>
+                  </div>
+                )}
                 {busy && <Quiet>Saving…</Quiet>}
                 {refused?.user === member.user && (
                   <Said text={refused.why} onDismiss={() => setRefused(null)} />

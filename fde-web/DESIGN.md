@@ -134,7 +134,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   as a list of next steps: "Add the people you work with at the customer: the sponsor who signs off,
   a champion, someone in IT."
 - **Project.** The company link, with **Edit project** at its right, the summary, the stage bar, the **Board** (the one card that
-  takes the canvas's full width, up to 1600px; the others stay in the 1040px page column), Scope beside Success
+  takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
+  with the others), Scope beside Success
   criteria (each with its target), then Access, Agent runs and Decisions, then **Assigned**. Scope
   says whether it is signed off, changed since sign-off, or not signed off. Access and waiting tasks
   name people and systems from the company's records. A project with nothing written in it yet
@@ -149,10 +150,11 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   (`commitCompanyCreated` and the rest of `lib/records.ts`), so the sidebar, Jump to and Home have a
   new company or project without a reload.
   - **Who is offered what.** Anyone in the organisation may create a company and becomes its lead.
-    Editing the profile, starting or editing a project, and changing the team need `manage`: the
-    company's lead, or an organisation admin (`canManage`, from the FDE's part in their list and
+    Editing the profile, starting a project, and changing the team or who is assigned need `manage`:
+    the company's lead, or an organisation admin (`canManage`, from the FDE's part in their list and
     `GET /v1/me`). An engineer sees none of those buttons and a quiet line saying who changes them.
-    Stakeholders and systems need `work`, which every member has. The API still decides: a refusal
+    Editing a project's name and summary, and stakeholders and systems, need `work`, which everyone
+    who can open the page has. The API still decides: a refusal
     is shown as it is, in the dialog or the row ("You are not allowed to do that here"), never hidden.
   - **What is sent.** A company or project edit is a `PATCH` of the fields that changed, a blank
     field sent as `null` to clear it, nothing sent when nothing changed. A stakeholder or a system
@@ -166,7 +168,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     with the end of their id, like the board, until names arrive (#110). A lead or an admin changes
     a member's role or removes them (the role is a select that shows the saved role until the API
     answers; removal asks in the row), and assigns or unassigns engineers on a project from the
-    company's team. A refusal stays in the row. There is no way to add someone to a company yet: the
+    company's team. A refusal stays in the row. The only lead is never offered for removal or a
+    change of role (the API would allow it): their row says "A company always has a lead. Make
+    someone else lead first." A lead who makes themselves an engineer is asked first, in the row. There is no way to add someone to a company yet: the
     API only takes the id of a user, and has no list of the organisation's people to choose from.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,

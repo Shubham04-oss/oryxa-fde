@@ -1019,13 +1019,13 @@ const readBody = async (request: Request) =>
 const badOptional = (value: unknown, max: number, lines: boolean) =>
   value !== undefined && value !== null && !plain(value, max, lines)
 const trimmed = (value: unknown) => (typeof value === "string" ? value.trim() || null : null)
-// The API's address rule in short: one @ with something each side, no spaces, 254 characters at most.
+// The API's address rule in short: one @, a dotted domain, no spaces, 254 characters at most.
 const validEmail = (value: unknown) =>
   value === undefined ||
   value === null ||
   (typeof value === "string" &&
     value.trim().length <= 254 &&
-    /^[^\s@]{1,64}@[^\s@]+$/.test(value.trim()))
+    /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/.test(value.trim()))
 const PARTS = ["sponsor", "champion", "user", "it", "security", "other"] as const
 let recordCount = 0
 
@@ -1076,14 +1076,17 @@ async function patchCompany(found: CompanySeed, request: Request) {
   return json(c)
 }
 
-/** `POST` and `PATCH` on a company's projects. A new project starts at Discover. */
+/**
+ * `POST` and `PATCH` on a company's projects. A new project starts at Discover. Creating one is the
+ * API's `manage`; changing one is the project's `work` (the caller already has it here).
+ */
 async function projectWrites(
   method: string,
   projectId: string | undefined,
   found: CompanySeed,
   request: Request,
 ) {
-  if (!mayManage(found)) return refuse(403, "forbidden")
+  if (method === "POST" && !mayManage(found)) return refuse(403, "forbidden")
   const b = await readBody(request)
   if (!b) return refuse(400, "invalid")
   const now = new Date().toISOString()

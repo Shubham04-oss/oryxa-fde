@@ -106,7 +106,8 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
 
   const p = project.data
   const role = companies.data?.companies.find((c) => c.id === p.company.id)?.role
-  // Editing a project and its team need `manage` on the company; the API still decides.
+  // Its team needs `manage` on the company; its name and summary need only `work`, which anyone who
+  // can read the project has. The API still decides.
   const manage = canManage(me.data, role)
   // A project nobody has written anything in yet: say what to do first.
   const fresh =
@@ -139,11 +140,9 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
               <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
               {p.company.name}
             </Link>
-            {manage && (
-              <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-                Edit project
-              </Button>
-            )}
+            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+              Edit project
+            </Button>
           </div>
           {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
           {fresh && (

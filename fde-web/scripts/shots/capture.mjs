@@ -30,6 +30,9 @@ async function shoot(screen, size, theme) {
     isMobile: size.touch === true,
     hasTouch: size.touch === true,
   })
+  // The dev server compiles a route's modules on its first visit, which can take more than
+  // Playwright's 30s default on a small machine: every navigation and wait gets 60s.
+  context.setDefaultTimeout(60000)
   const page = await context.newPage()
   const problems = []
   page.on("pageerror", (error) => problems.push(`page error: ${error.message}`))
@@ -37,23 +40,21 @@ async function shoot(screen, size, theme) {
   if (screen.emptyWorkspace)
     await page.addInitScript(() => (globalThis.__fdeMockNoCompanies = true))
   try {
-    const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"), {
-      timeout: 60000,
-    })
+    const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"))
     if (response && response.status() >= 400) problems.push(`HTTP ${response.status()}`)
     if (!screen.signedOut) {
       // The mock's sign-in is one click and keeps the session for this tab. Either the app shows (a
       // session is there) or the sign-in card does; wait for whichever comes first.
       const canvas = page.locator(".app-canvas")
       const continueButton = page.getByRole("button", { name: "Continue" })
-      await canvas.or(continueButton).first().waitFor({ timeout: 60000 })
+      await canvas.or(continueButton).first().waitFor()
       if (await continueButton.isVisible()) {
         await continueButton.click()
-        await canvas.waitFor({ timeout: 30000 })
+        await canvas.waitFor()
       }
       await page.goto(url + screen.path)
     }
-    await screen.ready(page).waitFor({ state: "visible", timeout: 30000 })
+    await screen.ready(page).waitFor({ state: "visible" })
     await page.evaluate(() => document.fonts.ready)
     if (screen.failWrites) await page.evaluate(() => (globalThis.__fdeMockFailWrites = true))
     if (screen.act) await screen.act(page)

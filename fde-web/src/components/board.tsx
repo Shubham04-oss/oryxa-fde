@@ -126,7 +126,11 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   return (
     <Card
       title="Board"
-      className="mx-auto w-full max-w-[1600px]"
+      // Empty, it sits in the page column with the other cards; it widens once it has columns to show.
+      className={cn(
+        "mx-auto w-full",
+        tasks.length === 0 ? "max-w-[min(1040px,100%)]" : "max-w-[1600px]",
+      )}
       aside={
         <Button variant="outline" onClick={() => setDialog({ kind: "new", status: "todo" })}>
           New task

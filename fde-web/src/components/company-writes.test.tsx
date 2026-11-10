@@ -153,6 +153,21 @@ describe("a company's profile", () => {
     expect(await screen.findByText("A freight carrier with 14 depots.")).toBeInTheDocument()
   })
 
+  it("does not undo a teammate's change that arrives while the form is open", async () => {
+    const { queryClient } = renderWithRouter(<CompanyPage companyId={KESTREL} />)
+    await userEvent.click(await screen.findByRole("button", { name: "Edit company" }))
+    const box = await dialog("Edit company")
+    // A teammate changes the industry, and the page reads the company again behind the form.
+    await api.updateCompany(KESTREL, { industry: "Freight" })
+    await queryClient.refetchQueries({ queryKey: queries.company(KESTREL).queryKey })
+    wire.sent = []
+    await fill(box, "Summary", "A freight carrier with 14 depots.")
+    await userEvent.click(within(box).getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(wire.sent.map((w) => w.body)).toEqual([{ summary: "A freight carrier with 14 depots." }])
+    expect((await api.company(KESTREL)).industry).toBe("Freight")
+  })
+
   it("clears a field that is emptied, and sends nothing when nothing changed", async () => {
     renderWithRouter(<CompanyPage companyId={KESTREL} />)
     await userEvent.click(await screen.findByRole("button", { name: "Edit company" }))
@@ -378,7 +393,10 @@ describe("stakeholders", () => {
     let box = await dialog("Edit stakeholder")
     await userEvent.click(within(box).getByRole("button", { name: "Remove stakeholder" }))
     const ask = within(box).getByRole("group", { name: "Confirm the removal" })
-    await userEvent.click(within(ask).getByRole("button", { name: "Keep it" }))
+    // From the keyboard: the question takes focus on its safe answer, and Enter keeps them.
+    expect(within(ask).getByRole("button", { name: "Keep it" })).toHaveFocus()
+    await userEvent.keyboard("{Enter}")
+    expect(within(box).queryByRole("group", { name: "Confirm the removal" })).toBeNull()
     expect(writes()).toEqual([])
     await userEvent.click(within(box).getByRole("button", { name: "Remove stakeholder" }))
     await userEvent.click(
@@ -568,6 +586,44 @@ describe("the team", () => {
     expect(writes()).toEqual(["DELETE /companies/cmp_kestrel/members/usr_jonah"])
   })
 
+  it("never offers to remove or demote the only lead, and asks before a lead steps down", async () => {
+    renderWithRouter(<CompanyPage companyId={KESTREL} />)
+    const team = await screen.findByRole("region", { name: "Team" })
+    await within(team).findByText("You")
+    // You are Kestrel's only lead: the API would let you go, so the screen does not offer it.
+    expect(within(team).queryByLabelText("Role of you")).toBeNull()
+    expect(within(team).queryByRole("button", { name: "Remove yourself" })).toBeNull()
+    expect(within(team).getByText(/A company always has a lead/)).toBeInTheDocument()
+
+    await userEvent.selectOptions(within(team).getByLabelText(/Role of teammate/), "lead")
+    const mine = await within(team).findByLabelText("Role of you")
+    expect(within(team).queryByText(/A company always has a lead/)).toBeNull()
+    wire.sent = []
+    await userEvent.selectOptions(mine, "engineer")
+    const ask = within(team).getByRole("group", { name: "Confirm stepping down" })
+    await userEvent.click(within(ask).getByRole("button", { name: "Keep" }))
+    expect(writes()).toEqual([])
+    expect(within(team).getByLabelText("Role of you")).toHaveValue("lead")
+
+    await userEvent.selectOptions(within(team).getByLabelText("Role of you"), "engineer")
+    await userEvent.click(
+      within(within(team).getByRole("group", { name: "Confirm stepping down" })).getByRole(
+        "button",
+        { name: "Step down" },
+      ),
+    )
+    await waitFor(() => expect(within(team).getByLabelText("Role of you")).toHaveValue("engineer"))
+    expect(wire.sent).toEqual([
+      {
+        method: "PUT",
+        path: "/companies/cmp_kestrel/members/usr_riya",
+        body: { role: "engineer" },
+      },
+    ])
+    // Jonah is now the only lead.
+    expect(within(team).queryByLabelText(/Role of teammate/)).toBeNull()
+  })
+
   it("is read only for an engineer, who is told who changes it", async () => {
     renderWithRouter(<CompanyPage companyId={BRIGHTWATER} />, { engineer: true })
     const team = await screen.findByRole("region", { name: "Team" })
@@ -606,7 +662,7 @@ describe("who is assigned to a project", () => {
     expect(wire.sent[1]).toMatchObject({ method: "PUT" })
   })
 
-  it("is read only for an engineer", async () => {
+  it("is read only for an engineer, who may still edit the project itself", async () => {
     renderWithRouter(
       <ProjectPage
         scope={{ company: BRIGHTWATER, project: ProjectId.parse("prj_bw_referrals") }}
@@ -618,7 +674,17 @@ describe("who is assigned to a project", () => {
     const card = await screen.findByRole("region", { name: "Assigned" })
     await within(card).findByText("You")
     expect(within(card).queryByRole("button", { name: /Remove/ })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Edit project" })).toBeNull()
+    expect(within(card).queryByLabelText("Assign from the team")).toBeNull()
+    // The API's PATCH needs the project's `work`, not `manage`.
+    await userEvent.click(screen.getByRole("button", { name: "Edit project" }))
+    const box = await dialog("Edit project")
+    await fill(box, "Summary", "Referrals triaged in a day.")
+    await userEvent.click(within(box).getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(wire.sent[0]).toMatchObject({
+      method: "PATCH",
+      body: { summary: "Referrals triaged in a day." },
+    })
   })
 })
 

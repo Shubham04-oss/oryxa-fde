@@ -78,7 +78,8 @@ export function FormDialog({
             className="flex flex-wrap items-center gap-2 rounded-xl border bg-raised px-3.5 py-2.5"
           >
             <p className="mr-auto">{remove.ask}</p>
-            <Button type="button" variant="ghost" onClick={() => setDeleting(false)}>
+            {/* The button that asked is gone: focus lands on the safe answer. */}
+            <Button type="button" variant="ghost" autoFocus onClick={() => setDeleting(false)}>
               Keep it
             </Button>
             <Button type="button" disabled={busy} onClick={() => void run(remove.run)}>
