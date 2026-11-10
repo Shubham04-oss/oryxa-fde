@@ -29,7 +29,9 @@ definition fde_company {
 
     permission manage = lead + workspace->manage
     permission work = engineer + manage
-    permission govern = it_admin
+    // Anyone on the vendor's side. A customer role held by one of them counts for nothing.
+    permission staff = workspace->access
+    permission govern = it_admin - staff
 }
 
 definition fde_project {
@@ -39,7 +41,7 @@ definition fde_project {
     relation sponsor: user
 
     permission work = assignee + company->work
-    permission decide = sponsor
+    permission decide = sponsor - company->staff
     permission view = work + guest + sponsor
 }
 ```
@@ -47,6 +49,15 @@ definition fde_project {
 - **A customer role never implies `work`,** and `work` never implies `govern` or `decide`. An FDE may
   still record that access was granted, and the record says who recorded it. Only an IT admin's
   own action counts as the customer's approval. The same holds for a sponsor's sign-off.
+- **The vendor cannot stand in for the customer.** `govern` and `decide` exclude every admin and
+  member of the vendor's tenant, so holding both kinds of role gives the customer's powers to no
+  one. The API refuses to grant a customer role to a tenant admin or member, and refuses to make a
+  customer person one while they hold a customer role.
+- **Who may grant a customer role.** A tenant admin records the customer's email domain on the
+  company and invites the first IT admin at an address on that domain. After that, only an
+  existing IT admin of the company adds or removes IT admins and sponsors. Every grant, removal
+  and customer decision is in the audit log with its actor, and the customer's screens show who
+  decided what, so a decision made in the customer's name is visible to the customer.
 - **What the customer sees is an allowlist.** The customer screens read their own endpoints, which
   return named fields only, as the customer room does. Internal tasks, threads, notes, agent
   transcripts and Today are never reachable with `govern`, `decide` or `view`. The isolation suite
@@ -58,7 +69,12 @@ definition fde_project {
   offboarding follows their directory; and one customer identity across several vendors.
 
 ## Consequences
-- `schema/fde.zed` gains two relations and two permissions; the lead reviews that change.
+- `schema/fde.zed` gains two relations and three permissions; the lead reviews that change, and the
+  schema's validation file asserts that a tenant member with a customer relation has neither
+  `govern` nor `decide`.
+- A dishonest tenant admin can still invite an address they control on a domain they typed in.
+  The audit trail and the customer-visible record are the guard; proving ownership of the domain
+  comes with sign-in through the customer's identity provider.
 - Access requests gain a customer decision (who, when, expiry) distinct from the FDE's record.
 - Invites must carry a role, and the API must refuse a customer role any FDE endpoint.
 - Approvals for agent actions that touch the customer's systems can later route to the IT admin.

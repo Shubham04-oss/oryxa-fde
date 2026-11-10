@@ -47,7 +47,7 @@ are in ADR 0005.
 | Planning work | Order and move work | **Board**: tasks as a kanban, with mirrored issues from the customer's tracker beside ours | Tasks exist with five statuses; no board, no ordering |
 | After a call | Turn talk into commitments | **Notes**: a meeting note becomes tasks and decisions; a glossary of the customer's terms | Notes exist; they cannot create tasks |
 | Chasing | Get access and answers out of the customer | **Access** with owner, scope and days waiting; a nudge goes to the customer's channel or the IT admin's screen | Tracker exists; no nudge, no customer side |
-| Building | Use a coding agent with the project's context | **Agent runs**: in our sandbox on sample data, or the FDE's own agent on real systems through the MCP server, both recorded here | Sandbox runs and review screen exist; MCP server exists, not connected |
+| Building | Use a coding agent with the project's context | **Agent runs**: in our sandbox on sample data, recorded here; or the FDE's own agent on real systems, reading context from the MCP server | Sandbox runs and review screen exist; MCP server exists, not connected |
 | Proving | Show each criterion is met | **Proof**: each criterion with its baseline, current value, target and trend, from results run anywhere | Evals exist; no screen; results only from our sandbox or CSV |
 | Friday | Tell the customer and the manager where things stand | **Weekly update**: drafted from the week's activity, edited, sent to the customer's channel and digest | Drafting and sending exist; no screen |
 | At the end | Leave the customer able to run it | **Handoff**: a checklist that must be complete, a retro, follow-ups | A stage only |
@@ -103,12 +103,14 @@ upload) come first so a customer whose admins refuse to install anything is stil
 
 ## 6. The coding agent
 
-FDEs already build with coding agents; the product gives the agent the engagement's context and
-records what it did. Two modes, one record:
+FDEs already build with coding agents; the product gives the agent the engagement's context. Two
+modes:
 
-- **Hosted:** a run in the company's sandbox, on sample data only (ADR 0003).
-- **Own machine:** the FDE's agent works on real customer systems under the access the customer
-  granted, and reads context and reports results through our MCP server.
+- **Hosted:** a run in the company's sandbox, on sample data only (ADR 0003), recorded in full.
+- **Own machine:** the FDE's own agent works on real customer systems under the access the
+  customer granted. It reads the project's context from our MCP server, which stays read-only. We
+  record no transcript of it. What it produces comes back the way any work does: a pull request as
+  a code change, test and eval results as an upload.
 
 The founder's direction is that the embedded agent is mostly OpenCode, with the Claude Agent SDK as
 an option. ADR 0004 will be amended once the embedding study reports.
@@ -118,10 +120,13 @@ an option. ADR 0004 will be amended once the embedding study reports.
 | Milestone | Scope | Done when |
 | --- | --- | --- |
 | **M1. It runs** | Deploy dev; fix the seams between components (session on agent routes, the API's environment, worker deploys, gateway route and secrets) | One scripted pass in dev: sign in, company, project, scope, document search, agent run, eval, customer room |
-| **M2. The FDE's day** | Today as an inbox, the engagement page with checklists and next step, the board, notes to tasks, proof, the weekly update, capture from Jump to; the signal model with Slack inbound and the generic routes | The founder runs one real engagement in it for two weeks with no other tracker |
-| **M3. The customer side, and paying** | IT admin and sponsor screens, invites, per-company keys, billing, Jira and GitLab connectors, the admin console | A design partner's customer uses the portal, and the partner pays |
+| **M2. The FDE's day** | Today as an inbox, the engagement page with checklists and next step, the board, notes to tasks, proof, the weekly update, capture from Jump to; the signal model with Slack inbound, GitHub widened, the inbound webhook and results upload; per-company keys | With per-company keys in place, the founder runs one real engagement in it for two weeks with no other tracker |
+| **M3. The customer side, and paying** | IT admin and sponsor screens, invites, billing, Jira and GitLab connectors, the calendar feed and forwarded email, the admin console | A design partner's customer uses the portal, and the partner pays |
 
-Not yet: the canvas, the runner in customer clouds, versioned config, Teams and Azure DevOps
+No real customer data enters the product before per-company keys exist (ADR 0003). M2 is built and
+tried on sample data; the real engagement starts when the keys are in.
+
+Not yet: approvals that route to the customer's IT admin, the canvas, the runner in customer clouds, versioned config, Teams and Azure DevOps
 connectors, a trust-centre or questionnaire tool, session recording, an ROI calculator, new API
 surface that no screen uses.
 

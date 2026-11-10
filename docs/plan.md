@@ -113,10 +113,10 @@ waits until a screen uses it. The canvas, versioned config and billing move behi
 
 | Stream | M1. It runs | M2. The FDE's day | M3. The customer side, and paying |
 | --- | --- | --- | --- |
-| API | The session reaches agent and eval routes | Next step and stage checklists; scope as an agreement with baselines; task order and links; the signal model, Slack inbound, generic webhook and results upload; Today over signals | Customer roles (ADR 0005), invites, billing, Jira and GitLab |
+| API | The session reaches agent and eval routes | Next step and stage checklists; scope as an agreement with baselines; task order and links; the signal model, Slack inbound, GitHub widened, inbound webhook and results upload; Today over signals | Customer roles (ADR 0005), invites, billing, Jira and GitLab, calendar feed and forwarded email |
 | Web | Fixes found by the first deploy | Today as an inbox; the engagement page by stage; the board; notes to tasks; proof; the weekly update; create from Jump to | IT admin and sponsor screens; the admin console |
-| Agent | Production secret resolver; outbound policy written through the API; the GitHub token limited to checkout and delivery | The agent the founder chose (ADR 0004, amendment pending); runs on the FDE's own machine recorded through MCP | Approvals that route to the customer's IT admin |
-| Infra | The API's environment contract; deploys for the workers; reachable gateway and realtime | Inbound webhook and email routes | Per-company keys; a production environment |
+| Agent | Production secret resolver; outbound policy written through the API; the GitHub token limited to checkout and delivery | The agent the founder chose (ADR 0004, amendment pending); the MCP server connected for the FDE's own agent, read-only | Fixes from the first real engagement |
+| Infra | The API's environment contract; deploys for the workers; reachable gateway and realtime | Per-company keys (before any real customer data); the inbound webhook route | Inbound email; a production environment |
 
 ## 7. Open decisions
 
