@@ -94,9 +94,8 @@ AWS and WorkOS end-to-end tests (`e2e_`) need credentials and are run by the lea
 
 ## CI
 
-New CI jobs follow `docs/ci.md`: heavy Rust jobs use the `A1_RUNNERS` runner expression and the
-`./.github/actions/rust-cache` step; light jobs run on `ubuntu-latest`; every job works on both
-runner kinds and cleans up after itself.
+New CI jobs follow `docs/ci.md`: every job runs on `ubuntu-latest` (GitHub-hosted only, never
+self-hosted), Rust jobs use the `./.github/actions/rust-cache` step, and every job cleans up after itself.
 
 ## Commits and PRs
 
