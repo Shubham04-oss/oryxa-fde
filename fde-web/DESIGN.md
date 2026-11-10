@@ -86,13 +86,13 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   - **One action per row, the rest in a menu.** The button is the move most likely wanted for
     why the row is there; the row's menu (the round dots button) holds the rest and **Open project**.
     Due: **Done**. Blocked task: **Unblock** (to In progress: the blocker is gone, so work resumes).
-    Waiting task: **Got it** (to In progress: the customer answered). A due task that is not yet
+    Waiting task: **Received** (to In progress: the customer answered). A due task that is not yet
     started finds **Start** in its menu. The menu also has, for a task, **Mark done**, **Mark
     blocked…**, **Waiting on the customer…** and **Back to to do** (minus the status it is in).
     Those are the board's five moves, from the same code (`useTaskMover`, `MoveAsk`, `board.ts`).
   - **Access request rows** change status through `PUT .../access-requests/{id}`, which replaces the
     request, so everything but the status is sent as it was. The API puts no limit on which status
-    follows which. Open (requested, in progress): **Granted**, with **Mark in progress**,
+    follows which. Open (requested, in progress): **Mark granted**, with **Mark in progress**,
     **Mark denied** and **Back to requested** in the menu. Denied or revoked: **Ask again** (back to
     requested, which moves it under Waiting), with **Mark in progress** and **Mark granted**. A
     granted request leaves Today, and the API's rules put the tasks blocked on it back to do, so
@@ -103,7 +103,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     line saying "Moving to Done…" (the line count does not change, so nothing shifts) and its buttons
     off. It leaves or changes group only when the API answers, and a read of Today sent before the
     write cannot bring it back. A refused action leaves the row where it was and says why in the row,
-    in red, with Dismiss. A dialog that fails stays open with its reason.
+    in red, with Dismiss; if the row has gone (deleted elsewhere), the reason is said above the
+    groups instead. A dialog that fails stays open with its reason.
   - **Keys.** The row is one stop for Tab (its link, its button and its menu; every other row is
     skipped, so sixty rows are not sixty stops). **J** and **K**, or the arrows once a row has
     focus, move between rows; **Enter** on a row opens the project; **E** does the row's main action;

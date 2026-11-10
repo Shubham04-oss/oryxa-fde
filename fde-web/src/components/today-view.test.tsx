@@ -174,10 +174,10 @@ describe("Today as an inbox", () => {
       within(row(BLOCKED)).getByRole("button", { name: `Unblock: ${BLOCKED}` }),
     ).toBeInTheDocument()
     expect(
-      within(row(WAITING)).getByRole("button", { name: `Got it: ${WAITING}` }),
+      within(row(WAITING)).getByRole("button", { name: `Received: ${WAITING}` }),
     ).toBeInTheDocument()
     expect(
-      within(row(REQUESTED)).getByRole("button", { name: `Granted: ${REQUESTED}` }),
+      within(row(REQUESTED)).getByRole("button", { name: `Mark granted: ${REQUESTED}` }),
     ).toBeInTheDocument()
     expect(
       within(row(DENIED)).getByRole("button", { name: `Ask again: ${DENIED}` }),
@@ -217,7 +217,7 @@ describe("Today as an inbox", () => {
 
     await userEvent.click(screen.getByRole("button", { name: `Unblock: ${BLOCKED}` }))
     await waitFor(async () => expect(await titles("Blocked")).not.toContain(BLOCKED))
-    await userEvent.click(screen.getByRole("button", { name: `Got it: ${WAITING}` }))
+    await userEvent.click(screen.getByRole("button", { name: `Received: ${WAITING}` }))
     await waitFor(async () =>
       expect(await titles("Waiting on the customer")).not.toContain(WAITING),
     )
@@ -312,7 +312,7 @@ describe("Today as an inbox", () => {
     await today()
     ;(globalThis as Record<string, unknown>).__fdeMockFailWrites = true
     try {
-      await userEvent.click(screen.getByRole("button", { name: `Granted: ${REQUESTED}` }))
+      await userEvent.click(screen.getByRole("button", { name: `Mark granted: ${REQUESTED}` }))
       expect(await within(row(REQUESTED)).findByRole("alert")).toHaveTextContent(
         "Couldn't change it to Granted. The workspace is briefly unavailable.",
       )
@@ -330,6 +330,12 @@ describe("Today as an inbox", () => {
 
     await waitFor(async () => expect(await titles("Blocked")).not.toContain(BLOCKED))
     expect(screen.getByRole("status")).toHaveTextContent("")
+    // The row has gone, so the refusal is said above the groups rather than vanishing with it.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      `Couldn't move “${BLOCKED}” to In progress. The task is no longer there.`,
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+    expect(screen.queryByRole("alert")).toBeNull()
   })
 
   it("keeps a confirmed move when a read of Today taken before it arrives after it", async () => {
@@ -362,7 +368,7 @@ describe("Today as an inbox", () => {
       }
       expect(await titles("Blocked")).toContain("Staging credentials for the intake API")
 
-      await userEvent.click(screen.getByRole("button", { name: `Granted: ${REQUESTED}` }))
+      await userEvent.click(screen.getByRole("button", { name: `Mark granted: ${REQUESTED}` }))
 
       await waitFor(async () =>
         expect(await titles("Waiting on the customer")).not.toContain(REQUESTED),

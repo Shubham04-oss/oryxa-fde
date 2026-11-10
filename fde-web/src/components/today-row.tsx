@@ -101,7 +101,7 @@ export function TodayRow({
       )}
     >
       <div className="relative flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="min-w-0 flex-1 basis-40">
+        <div className="min-w-0 flex-1 basis-32">
           <Link
             to="/companies/$companyId/projects/$projectId"
             params={{ companyId: item.company.id, projectId: item.project.id }}

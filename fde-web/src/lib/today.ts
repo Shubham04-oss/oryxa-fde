@@ -118,7 +118,7 @@ function taskActions(task: { status: TaskState }, group: TodayGroup): RowActions
   const primary: RowAction =
     group === "due"
       ? { kind: "task", to: "done", label: "Done" }
-      : { kind: "task", to: "in_progress", label: group === "blocked" ? "Unblock" : "Got it" }
+      : { kind: "task", to: "in_progress", label: group === "blocked" ? "Unblock" : "Received" }
   const rest = TASK_MOVES.filter((m) => m.to !== task.status && m.to !== primary.to).map(
     (m): RowAction => ({ kind: "task", ...m }),
   )
@@ -129,7 +129,7 @@ function accessActions(status: AccessState): RowActions {
   const asked = status === "requested" || status === "in_progress"
   // Open: the customer has granted it. Refused or revoked: ask again, which puts it back under waiting.
   const primary: RowAction = asked
-    ? { kind: "access", to: "granted", label: "Granted" }
+    ? { kind: "access", to: "granted", label: "Mark granted" }
     : { kind: "access", to: "requested", label: "Ask again" }
   const all: Array<RowAction> = [
     { kind: "access", to: "in_progress", label: "Mark in progress" },

@@ -155,7 +155,7 @@ describe("actionsOf", () => {
     expect(blocked.primary).toMatchObject({ label: "Unblock", kind: "task", to: "in_progress" })
     expect(blocked.rest.map((a) => a.to)).toEqual(["done", "waiting_on_customer", "todo"])
     const waiting = actionsOf(task("t", { status: "waiting_on_customer" }), "waiting")
-    expect(waiting.primary).toMatchObject({ label: "Got it", to: "in_progress" })
+    expect(waiting.primary).toMatchObject({ label: "Received", to: "in_progress" })
     expect(waiting.rest.map((a) => a.to)).toEqual(["done", "blocked", "todo"])
   })
 
@@ -172,12 +172,12 @@ describe("actionsOf", () => {
 
   it("lets an open access request be granted, and asks again for a refused one", () => {
     expect(labels(access("a", "requested", "2026-10-01"), "waiting")).toEqual([
-      "Granted",
+      "Mark granted",
       "Mark in progress",
       "Mark denied",
     ])
     expect(labels(access("a", "in_progress", "2026-10-01"), "waiting")).toEqual([
-      "Granted",
+      "Mark granted",
       "Mark denied",
       "Back to requested",
     ])

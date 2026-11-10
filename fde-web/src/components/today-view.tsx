@@ -136,6 +136,17 @@ export function TodayView({ today = localDay() }: { today?: string }) {
   const groups = groupToday(items.data.items, today)
   const keys = TODAY_GROUPS.flatMap(({ key }) => groups[key].map(itemKey))
   const current = cursor && keys.includes(cursor) ? cursor : keys[0]
+  // A refusal whose row has left (deleted or settled elsewhere) is said above the groups instead.
+  const { refusal: lostTask } = mover
+  const { refusal: lostAccess } = access
+  const lost = [
+    lostTask &&
+      !keys.includes(`task:${lostTask.task.id}`) &&
+      `Couldn't move “${lostTask.task.title}” to ${STATUS_LABEL[lostTask.to]}. ${lostTask.why}`,
+    lostAccess &&
+      !keys.includes(`access:${lostAccess.access.id}`) &&
+      `Couldn't change “${lostAccess.access.description}” to ${ACCESS_LABEL[lostAccess.to]}. ${lostAccess.why}`,
+  ].filter((line): line is string => Boolean(line))
 
   function act(item: TodayItem, action: RowAction) {
     const from = itemKey(item)
@@ -201,6 +212,24 @@ export function TodayView({ today = localDay() }: { today?: string }) {
       <p role="status" className="sr-only">
         {mover.announcement || access.announcement}
       </p>
+      {lost.length > 0 && (
+        <p
+          role="alert"
+          className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-destructive"
+        >
+          {lost.join(" ")}
+          <button
+            type="button"
+            className="text-muted-foreground underline"
+            onClick={() => {
+              mover.dismiss()
+              access.dismiss()
+            }}
+          >
+            Dismiss
+          </button>
+        </p>
+      )}
       <div
         ref={list}
         className="grid gap-4 max-[800px]:gap-3.5"
