@@ -21,7 +21,7 @@ use oryxa_authz::SpiceDb;
 use oryxa_events::{EventBusPublisher, Signer};
 use std::sync::Arc;
 
-use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, router, run_reconciler};
+use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, router_with, run_reconciler};
 use oryxa_fde_context::Context;
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
@@ -81,6 +81,6 @@ async fn main() -> Result<(), Error> {
     let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "listening");
-    axum::serve(listener, router(app).merge(agent_runs)).await?;
+    axum::serve(listener, router_with(app, agent_runs)).await?;
     Ok(())
 }
