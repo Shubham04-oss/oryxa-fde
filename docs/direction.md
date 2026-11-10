@@ -43,7 +43,7 @@ are in ADR 0005.
 | --- | --- | --- | --- |
 | Morning | See what needs them across all customers and act on it | **Today**, an inbox: needs a reply, blocked, due, waiting on the customer, approvals, failing checks, engagements with no next step. Each row acts in place (reply, done, unblock, nudge, approve) | Lists our tasks and access requests; rows only link away |
 | Any time | Capture without leaving what they are doing | **Jump to** (Ctrl K) also creates: a task, a decision, an access request, a note | Navigates only |
-| In an engagement | Know what this stage needs and what is next | **Engagement page that follows the stage**: the stage's checklist, the next step with its owner and date, then the records behind it | A stack of read-only cards; a stage moves with no conditions |
+| In an engagement | Know what this stage needs and what is next | **Engagement page that follows the stage**: the stage's checklist, the next step with its owner and date, then the records behind it | A stack of read-only cards; a stage moves one step at a time, with no other conditions |
 | Planning work | Order and move work | **Board**: tasks as a kanban, with mirrored issues from the customer's tracker beside ours | Tasks exist with five statuses; no board, no ordering |
 | After a call | Turn talk into commitments | **Notes**: a meeting note becomes tasks and decisions; a glossary of the customer's terms | Notes exist; they cannot create tasks |
 | Chasing | Get access and answers out of the customer | **Access** with owner, scope and days waiting; a nudge goes to the customer's channel or the IT admin's screen | Tracker exists; no nudge, no customer side |
