@@ -5,10 +5,14 @@
 //! signed with; `DOCUMENTS_BUCKET` and `EMBEDDING_*` as `Context::from_env` reads them. It calls
 //! AWS only (S3, SQS, Bedrock). Each document's text is extracted by this same binary run as
 //! `extract <content-type>` in a child process with hard limits and no environment.
+//!
+//! On SIGTERM or SIGINT it stops receiving, finishes the document in hand, then exits 0. Past the
+//! container's stop timeout it is killed, and the message comes back after its visibility timeout.
 
 use oryxa_events::Verifier;
 use oryxa_fde_context::{Context, ingest};
 use oryxa_fde_events::inbox::sqs;
+use oryxa_fde_events::shutdown::on_signal;
 use oryxa_fde_store::Store;
 use tracing_subscriber::EnvFilter;
 
@@ -36,6 +40,7 @@ async fn run() -> Result<(), Error> {
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+    let stop = on_signal()?;
     let store = Store::from_env().await?;
     let ctx = Context::from_env().await?;
     let verifier = Verifier::default().trust(
@@ -46,10 +51,16 @@ async fn run() -> Result<(), Error> {
     let queue = env("INGEST_QUEUE_URL")?;
     let client = aws_sdk_sqs::Client::new(&aws_config::load_from_env().await);
     tracing::info!("ingesting");
-    sqs::run(client, queue, |msg| {
-        let (ctx, store, verifier) = (&ctx, &store, &verifier);
-        async move { ingest::handle(ctx, store, verifier, &msg).await }
-    })
+    sqs::run(
+        client,
+        queue,
+        |msg| {
+            let (ctx, store, verifier) = (&ctx, &store, &verifier);
+            async move { ingest::handle(ctx, store, verifier, &msg).await }
+        },
+        stop.cancelled_owned(),
+    )
     .await;
+    tracing::info!("stopped");
     Ok(())
 }

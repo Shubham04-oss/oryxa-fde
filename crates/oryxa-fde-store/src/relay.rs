@@ -166,8 +166,16 @@ pub async fn replay_dead(store: &Store, tenant: Option<&TenantId>) -> Result<u64
 }
 
 /// Relay loop: every second, and straight away while there is a backlog. Published rows older
-/// than seven days are pruned hourly.
-pub async fn run<P: Publisher>(store: Store, signer: Signer, publisher: P) {
+/// than seven days are pruned hourly. Returns once `stop` completes, between rounds: a round in
+/// progress commits first. A round cut short anyway (the process exits) rolls back, so the rows it
+/// sent go again with the same event ids: at least once, never lost.
+pub async fn run<P: Publisher>(
+    store: Store,
+    signer: Signer,
+    publisher: P,
+    stop: impl std::future::Future<Output = ()>,
+) {
+    let mut stop = std::pin::pin!(stop);
     let mut last_prune = tokio::time::Instant::now();
     loop {
         let busy = match dispatch_once(&store, &signer, &publisher, BATCH).await {
@@ -183,8 +191,14 @@ pub async fn run<P: Publisher>(store: Store, signer: Signer, publisher: P) {
             }
             last_prune = tokio::time::Instant::now();
         }
-        if !busy {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::select! {
+            biased;
+            () = &mut stop => return,
+            () = async {
+                if !busy {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            } => {}
         }
     }
 }

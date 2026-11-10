@@ -13,6 +13,10 @@
 //! ECS it signs in with RDS IAM tokens (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`; the RDS CA bundle is built in),
 //! locally with `DATABASE_URL`. Migrations run before a deploy as a one-off task
 //! (`oryxa-fde-ops migrate`) with the migrator's login.
+//!
+//! On SIGTERM or SIGINT it stops accepting connections and gives requests in flight, the relay and
+//! the reconciler `SHUTDOWN_GRACE_SECONDS` (default 20) to finish, then exits 0 (see `shutdown`).
+//! Agent runs are not drained: another task's sweep ends them once their lease lapses.
 
 use std::time::Duration;
 
@@ -21,7 +25,7 @@ use oryxa_authz::SpiceDb;
 use oryxa_events::{EventBusPublisher, Signer};
 use std::sync::Arc;
 
-use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, router_with, run_reconciler};
+use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, health, router_with, run_reconciler, shutdown};
 use oryxa_fde_context::Context;
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
@@ -40,6 +44,9 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    // First, so a signal during start-up is a clean stop rather than the default kill.
+    let stop = oryxa_fde_events::shutdown::on_signal()?;
+    let grace = shutdown::grace_from_env()?;
     let store = Store::from_env().await?;
     let authz = SpiceDb::connect_lazy(
         &env("SPICEDB_ENDPOINT")?,
@@ -71,16 +78,22 @@ async fn main() -> Result<(), Error> {
 
     let signer = Signer::from_pkcs8_pem(env("EVENT_SIGNING_KID")?, &env("EVENT_SIGNING_KEY")?)?;
     let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
-    tokio::spawn(relay::run(store.clone(), signer, publisher));
+    let relay = tokio::spawn(relay::run(
+        store.clone(),
+        signer,
+        publisher,
+        stop.clone().cancelled_owned(),
+    ));
 
     let context = Context::from_env().await?;
     let integrations = oryxa_fde_api::integrations::Integrations::from_env(&env("WEB_ORIGIN")?).await?;
     let app = App::with_integrations(store, authz, tokens, context, Some(sign_in), integrations);
-    tokio::spawn(run_reconciler(app.clone()));
+    let reconciler = tokio::spawn(run_reconciler(app.clone(), stop.clone().cancelled_owned()));
 
-    let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let addr = health::listen_addr();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "listening");
-    axum::serve(listener, router_with(app, agent_runs)).await?;
+    let router = router_with(app, agent_runs);
+    shutdown::serve(listener, router, stop, grace, vec![relay, reconciler]).await?;
     Ok(())
 }

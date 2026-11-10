@@ -20,7 +20,7 @@ aws-sdk-sqs.workspace = true
 oryxa-core.workspace = true
 oryxa-events.workspace = true
 oryxa-fde-core.workspace = true
-oryxa-fde-events = { workspace = true, features = ["sqs"] }
+oryxa-fde-events = { workspace = true, features = ["sqs", "shutdown"] }
 oryxa-fde-integrations.workspace = true
 oryxa-fde-store.workspace = true
 serde.workspace = true

@@ -143,15 +143,20 @@ fn unreachable(e: &AuthzError) -> bool {
     }
 }
 
-/// The reconciler loop, next to the relay in the API service.
-pub async fn run_reconciler(app: Arc<App>) {
+/// The reconciler loop, next to the relay in the API service. Returns once `stop` completes,
+/// between rounds. A round cut short anyway rolls back: its grants are touched again next round.
+pub async fn run_reconciler(app: Arc<App>, stop: impl std::future::Future<Output = ()>) {
+    let mut stop = std::pin::pin!(stop);
     loop {
         match reconcile_grants(&app).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(written = n, "reconciled pending grants"),
             Err(e) => tracing::warn!(error = %e, "grant reconciliation failed"),
         }
-        tokio::time::sleep(RECONCILE_EVERY).await;
+        tokio::select! {
+            () = &mut stop => return,
+            () = tokio::time::sleep(RECONCILE_EVERY) => {}
+        }
     }
 }
 
