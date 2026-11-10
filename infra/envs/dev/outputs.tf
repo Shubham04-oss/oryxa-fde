@@ -114,6 +114,24 @@ output "lifecycle_env_names" {
   } : null
 }
 
+output "mcp_env_names" {
+  description = "The same for the MCP server; null while enable_mcp is false and it is not deployed."
+  value = local.mcp_on ? {
+    plain  = module.mcp[0].plain_env_names
+    secret = module.mcp[0].secret_env_names
+  } : null
+}
+
+output "mcp_hostname" {
+  description = "Where an FDE's agent reaches the MCP server (https://<this>/mcp), at Cloudflare's edge; null while it is off."
+  value       = module.cloudflare.mcp_hostname
+}
+
+output "mcp_tunnel_id" {
+  description = "Copy this tunnel's token from the Cloudflare dashboard into the cloudflared/mcp-tunnel-token secret; null while the MCP server is off."
+  value       = module.cloudflare.mcp_tunnel_id
+}
+
 output "event_subscribers" {
   description = "What infra/scripts/create-subscriber.sh needs for each worker: the delivery role, and the queue each subscriber feeds. The lifecycle subscriber is created only once its worker is deployed."
   value = {

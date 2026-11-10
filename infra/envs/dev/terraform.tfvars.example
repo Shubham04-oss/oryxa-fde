@@ -47,3 +47,7 @@ start_services = false
 # read "Where prompts are processed" in infra/README.md, and ADR 0003, before setting it. No default.
 # update_model = "global.anthropic.claude-opus-5-5"
 # digest_from  = "updates@example.com" # a verified SES identity in aws_region, out of the SES sandbox
+
+# The MCP server for FDE agents (its own tunnel, at mcp.<domain>). Off until the lead decides how an agent signs in:
+# read "How the MCP server is reached" in infra/README.md first.
+# enable_mcp = true

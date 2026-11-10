@@ -1,7 +1,7 @@
 name: deploy-api
-# Builds oryxa-fde-api, oryxa-fde-ops and the two workers (ingest, lifecycle) for linux/arm64 into one image, pushes it to ECR, runs the
-# store's migrations as the one-off migrate task (oryxa-fde-ops migrate), then rolls the ECS service
-# onto the new image. Manual and dev only; AWS access is a
+# Builds oryxa-fde-api, oryxa-fde-ops, the two workers (ingest, lifecycle) and the MCP server for linux/arm64 into one image, pushes it to ECR, runs the
+# store's migrations as the one-off migrate task (oryxa-fde-ops migrate), then rolls the API and each deployed worker
+# onto the new image, in that order. Manual and dev only; AWS access is a
 # short-lived OIDC session for the deploy role (infra/envs/dev/deploy.tf). Setup: infra/README.md, Deploys.
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
           sudo apt-get install -yq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-      # The service, the one-off operations (migrations) and the workers ship in one image (infra/README.md, The image).
+      # The service, the one-off operations (migrations), the workers and the MCP server ship in one image (infra/README.md, The image).
       - name: Build
         env:
           CARGO_HOME: ${{ runner.temp }}/cargo # fresh: every crate comes from the registry for this build
@@ -44,11 +44,12 @@ jobs:
           cargo build --release --locked --target "$TARGET" \
             -p oryxa-fde-api --bin oryxa-fde-api --bin oryxa-fde-ops \
             -p oryxa-fde-context --bin oryxa-fde-ingest \
-            -p oryxa-fde-lifecycle --bin oryxa-fde-lifecycle
+            -p oryxa-fde-lifecycle --bin oryxa-fde-lifecycle \
+            -p oryxa-fde-mcp --bin oryxa-fde-mcp
       # The image's base is Debian 13 (glibc 2.41): refuse a binary that would not start on it.
       - name: Check the glibc the binaries need
         run: |
-          for bin in oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle; do
+          for bin in oryxa-fde-api oryxa-fde-ops oryxa-fde-ingest oryxa-fde-lifecycle oryxa-fde-mcp; do
             need=$(readelf --version-info "target/$TARGET/release/$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
             echo "$bin needs glibc $need"
             [ "$(printf '%s\n2.41\n' "$need" | sort -V | tail -1)" = "2.41" ]
@@ -61,6 +62,7 @@ jobs:
             target/${{ env.TARGET }}/release/oryxa-fde-ops
             target/${{ env.TARGET }}/release/oryxa-fde-ingest
             target/${{ env.TARGET }}/release/oryxa-fde-lifecycle
+            target/${{ env.TARGET }}/release/oryxa-fde-mcp
           if-no-files-found: error
           retention-days: 1
 
@@ -96,7 +98,8 @@ jobs:
           aws ssm get-parameter --name /oryxa-fde-dev/deploy --query Parameter.Value --output text > "$CONFIG"
           jq -e '.cluster and .service and .api_task_definition and .migrate_task_definition
             and .migrate_security_group and (.subnets | length > 0) and .ecr_repository_url
-            and .image_tag_parameter' "$CONFIG" > /dev/null
+            and .image_tag_parameter and (.workers | type == "array" and all(.[]; .name and .service and .task_definition))' "$CONFIG" > /dev/null \
+            || { echo "::error::the deploy parameter is incomplete or predates the worker deploys: run tofu apply first (infra/README.md, Deploys)"; exit 1; }
       # Tags are immutable: a sha already in ECR is reused, never overwritten.
       - name: Push the image
         run: |
@@ -109,7 +112,10 @@ jobs:
           aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
           docker build --platform linux/arm64 -f infra/docker/oryxa-fde-api.Dockerfile -t "$repo:$IMAGE_TAG" "$RUNNER_TEMP/image"
           docker push "$repo:$IMAGE_TAG"
-      # New revisions of the API and migrate task definitions: everything as OpenTofu last set it, but the image.
+      # New revisions of the migrate, API and worker task definitions: everything as OpenTofu last set it, but the image.
+      # All of them are registered before anything changes, so a family that does not fit the rule below stops the
+      # deploy before the migrations run. A worker that is not deployed (the lifecycle worker until update_model is set)
+      # is not in the config, so it is skipped here, not by catching an error.
       - name: Register task definitions
         run: |
           # Runs inside $(...), where set -e does not reach, so every step returns on failure itself.
@@ -127,7 +133,16 @@ jobs:
           }
           migrate=$(register "$(jq -r .migrate_task_definition "$CONFIG")")
           api=$(register "$(jq -r .api_task_definition "$CONFIG")")
-          { echo "MIGRATE_TASK_DEFINITION=$migrate"; echo "API_TASK_DEFINITION=$api"; } >> "$GITHUB_ENV"
+          # What rolls after the migrations, in order: the API first, then each worker (see the roll step for why).
+          ROLLS="$RUNNER_TEMP/rolls.json"
+          jq -n --arg service "$(jq -r .service "$CONFIG")" --arg td "$api" '[{name: "api", service: $service, task_definition: $td}]' > "$ROLLS"
+          mapfile -t workers < <(jq -c '.workers[]' "$CONFIG")
+          for worker in "${workers[@]}"; do
+            td=$(register "$(jq -r .task_definition <<< "$worker")")
+            jq --argjson w "$worker" --arg td "$td" '. + [{name: $w.name, service: $w.service, task_definition: $td}]' "$ROLLS" > "$ROLLS.next"
+            mv "$ROLLS.next" "$ROLLS"
+          done
+          { echo "ROLLS=$ROLLS"; echo "MIGRATE_TASK_DEFINITION=$migrate"; } >> "$GITHUB_ENV"
       - name: Run migrations
         run: |
           cluster=$(jq -r .cluster "$CONFIG")
@@ -145,18 +160,41 @@ jobs:
           read -r code reason < <(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
             --query 'tasks[0].[containers[0].exitCode, stoppedReason]' --output text)
           [ "$code" = "0" ] || { echo "::error::migrations failed (exit $code: $reason); logs: CloudWatch /ecs/$(jq -r .migrate_task_definition "$CONFIG")"; exit 1; }
-      - name: Roll the service onto the new image
+      # The API first, then each worker, one at a time: the API makes the events and the workers read them, and an event
+      # may gain a field but never lose one (infra/README.md, Deploys), so a worker that is still the old image reads
+      # what the new API writes. Each wait is bounded (the AWS CLI waiter polls every 15 s for at most 40 tries, 10 minutes)
+      # and a service that does not settle fails the deploy; the services already rolled stay on the new image.
+      - name: Roll the API and the workers onto the new image
         run: |
           cluster=$(jq -r .cluster "$CONFIG")
-          service=$(jq -r .service "$CONFIG")
-          aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$API_TASK_DEFINITION" > /dev/null
-          aws ecs wait services-stable --cluster "$cluster" --services "$service"
-          # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck.
-          aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
-            | jq -e --arg td "$API_TASK_DEFINITION" \
-                '.services[0].deployments[] | select(.status == "PRIMARY") | .taskDefinition == $td and .rolloutState == "COMPLETED"' \
-            > /dev/null || { echo "::error::the service did not settle on $API_TASK_DEFINITION"; exit 1; }
-      # OpenTofu reads this on every plan, so a later apply keeps this image instead of rolling back.
+          mapfile -t pending < <(jq -c '.[]' "$ROLLS")
+          rolled=""
+          # A stop partway leaves a mixed state that is safe but must be visible: name what runs which image.
+          stopped() {
+            local later msg
+            later=$(jq -r --argjson i "$i" '.[$i + 1:] | map(.name) | join(", ")' "$ROLLS")
+            msg="deploy stopped at $name ($service): $1. On the new image: ${rolled:-none}. Not rolled, still on the previous image: ${later:-none}. $name itself runs whichever revision ECS settles on. The image tag was not recorded: fix the cause and run deploy-api again (infra/README.md, Deploys)."
+            echo "::error::$msg"
+            { echo "### Deploy to dev stopped partway"; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          for i in "${!pending[@]}"; do
+            roll=${pending[$i]}
+            name=$(jq -r .name <<< "$roll") service=$(jq -r .service <<< "$roll") td=$(jq -r .task_definition <<< "$roll")
+            echo "rolling $name ($service) onto $td"
+            aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$td" > /dev/null \
+              || stopped "the update was refused"
+            aws ecs wait services-stable --cluster "$cluster" --services "$service" \
+              || stopped "it did not settle within the waiter's 10 minutes"
+            # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck.
+            aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
+              | jq -e --arg td "$td" \
+                  '.services[0].deployments[] | select(.status == "PRIMARY") | .taskDefinition == $td and .rolloutState == "COMPLETED"' \
+              > /dev/null || stopped "it did not settle on $td (the circuit breaker rolled it back?)"
+            rolled="${rolled:+$rolled, }$name"
+          done
+      # OpenTofu reads this on every plan, so a later apply keeps this image instead of rolling back. Only after the API and
+      # every worker settled on it: after a deploy that stopped partway an apply returns everything to the last complete one.
       - name: Record the deployed image
         run: |
           aws ssm put-parameter --name "$(jq -r .image_tag_parameter "$CONFIG")" --type String --value "$IMAGE_TAG" --overwrite > /dev/null
@@ -164,7 +202,7 @@ jobs:
             echo "### Deployed oryxa-fde-api to dev"
             echo "- image: \`$IMAGE\`"
             echo "- migrate: \`$MIGRATE_TASK_DEFINITION\`"
-            echo "- service: \`$API_TASK_DEFINITION\`"
+            jq -r '.[] | "- \(.name): `\(.task_definition)`"' "$ROLLS"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Log out of ECR
         if: always()
