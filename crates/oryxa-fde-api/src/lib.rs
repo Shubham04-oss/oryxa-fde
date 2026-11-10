@@ -255,17 +255,19 @@ fn routes() -> OpenApiRouter<Arc<App>> {
 }
 
 pub fn router(app: Arc<App>) -> Router {
+    router_with(app, Router::new())
+}
+
+/// [`router`] and `extra`, the agent run and eval routes from `oryxa-fde-agent`, as the binary serves them. `extra`
+/// is merged before the session layer, so a browser's cookie and its CSRF check apply to those routes as to ours.
+pub fn router_with(app: Arc<App>, extra: Router) -> Router {
     let (router, _) = routes().split_for_parts();
     // Load balancer health check; reads nothing, so it is not in the spec.
     router
         .route("/healthz", get(|| async { "ok" }))
-        .layer(middleware::from_fn_with_state(app.clone(), session::layer))
-        .with_state(app)
-}
-
-/// [`router`] and `extra`, the agent run and eval routes from `oryxa-fde-agent`, as the binary serves them.
-pub fn router_with(app: Arc<App>, extra: Router) -> Router {
-    router(app).merge(extra)
+        .with_state(app.clone())
+        .merge(extra)
+        .layer(middleware::from_fn_with_state(app, session::layer))
 }
 
 /// The spec of exactly the routes [`router`] serves.

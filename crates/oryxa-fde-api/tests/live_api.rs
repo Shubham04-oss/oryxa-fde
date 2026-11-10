@@ -2772,7 +2772,13 @@ async fn the_session_cookie_reaches_agent_and_eval_routes() {
     let org = new_id("org");
     let alice = user(&org, "alice", "member");
     let c = w
-        .ok(&alice, "POST", "/v1/companies", Some(json!({"name": "Acme"})), StatusCode::CREATED)
+        .ok(
+            &alice,
+            "POST",
+            "/v1/companies",
+            Some(json!({"name": "Acme"})),
+            StatusCode::CREATED,
+        )
         .await;
     let company = c["id"].as_str().unwrap();
     let p = w
@@ -2789,14 +2795,26 @@ async fn the_session_cookie_reaches_agent_and_eval_routes() {
     let budget = || Some(json!({"minutes": 30, "spend_usd_micros": 5_000_000}));
 
     // Reads with the cookie alone, as the web app sends them: agent runs, the budget, eval suites and criteria.
-    for path in ["agent-runs", "agent-budget", "eval-suites", "eval-runs", "eval-criteria"] {
-        let (status, _, body) = w.with_cookie(&session, "GET", &format!("{base}/{path}"), None, false).await;
+    for path in [
+        "agent-runs",
+        "agent-budget",
+        "eval-suites",
+        "eval-runs",
+        "eval-criteria",
+    ] {
+        let (status, _, body) = w
+            .with_cookie(&session, "GET", &format!("{base}/{path}"), None, false)
+            .await;
         assert_eq!(status, StatusCode::OK, "GET {path}: {body}");
     }
     // A change with the web app's headers works; without them, or from another origin, it is refused.
     let path = format!("{base}/agent-budget");
     let (status, _, body) = w.with_cookie(&session, "PUT", &path, budget(), true).await;
-    assert_eq!((status, body["budget"]["minutes"].as_u64()), (StatusCode::OK, Some(30)), "{body}");
+    assert_eq!(
+        (status, body["budget"]["minutes"].as_u64()),
+        (StatusCode::OK, Some(30)),
+        "{body}"
+    );
     let (status, _, body) = w.with_cookie(&session, "PUT", &path, budget(), false).await;
     assert_eq!((status, body["error"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")));
     let req = Request::post(format!("{base}/eval-suites"))
@@ -2804,7 +2822,9 @@ async fn the_session_cookie_reaches_agent_and_eval_routes() {
         .header("x-oryxa-request", "1")
         .header("origin", "https://evil.example")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"name": "pwned", "criteria": [], "graders": []}).to_string()))
+        .body(Body::from(
+            json!({"name": "pwned", "criteria": [], "graders": []}).to_string(),
+        ))
         .unwrap();
     let (status, _, body) = w.send(req).await;
     assert_eq!((status, body["error"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")));
@@ -2830,13 +2850,17 @@ async fn the_session_cookie_reaches_agent_and_eval_routes() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Bearer tokens still work, with no web headers, for callers that are not a browser.
-    w.ok(&alice, "GET", &format!("{base}/agent-runs"), None, StatusCode::OK).await;
+    w.ok(&alice, "GET", &format!("{base}/agent-runs"), None, StatusCode::OK)
+        .await;
     w.ok(&alice, "PUT", &path, budget(), StatusCode::OK).await;
-    w.ok(&alice, "GET", &format!("{base}/eval-runs"), None, StatusCode::OK).await;
+    w.ok(&alice, "GET", &format!("{base}/eval-runs"), None, StatusCode::OK)
+        .await;
     // Another member of the organisation, signed in, is still refused the project.
     let bob = user(&org, "bob", "member");
     let bob_session = w.session(&bob, &org).await;
-    let (status, _, _) = w.with_cookie(&bob_session, "GET", &format!("{base}/agent-runs"), None, false).await;
+    let (status, _, _) = w
+        .with_cookie(&bob_session, "GET", &format!("{base}/agent-runs"), None, false)
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
