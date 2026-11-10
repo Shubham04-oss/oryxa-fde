@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,7 +129,7 @@ describe("agent processes", () => {
     expect(stuck.kills).toBe(3);
   });
 
-  it("are found in /proc by any of their user ids, except zombies with no thread left running", async () => {
+  it("are found in /proc by any of their user ids, pid 1 included, except zombies with no thread left running", async () => {
     const proc = join(root, "proc");
     const status = async (pid: string, uid: string, state = "S (sleeping)", threads: string | null = "1") => {
       await mkdir(join(proc, pid), { recursive: true });
@@ -136,8 +137,7 @@ describe("agent processes", () => {
       await writeFile(join(proc, pid, "status"), `${lines.join("\n")}\nUid:\t${uid}\nGid:\t0\t0\t0\t0\n`);
     };
     const a = AGENT.uid;
-    // The container's init, the image's `sleep infinity` as `agent`: started before any run, and the kernel never
-    // lets kill(-1) or the agent's own processes signal it.
+    // The container's init as `agent`, as the image ran it before #156: no pid is exempt, so it is listed.
     await status("1", `${a}\t${a}\t${a}\t${a}`);
     await status("19", "0\t0\t0\t0");
     await status("20", `${a}\t${a}\t${a}\t${a}`);
@@ -155,7 +155,10 @@ describe("agent processes", () => {
     await mkdir(join(proc, "24"));
     await mkdir(join(proc, "net"));
     await writeFile(join(proc, "uptime"), "1 1");
-    expect((await agentPids(proc, a)).sort((x, y) => x - y)).toEqual([20, 21, 25, 26, 27]);
+    expect((await agentPids(proc, a)).sort((x, y) => x - y)).toEqual([1, 20, 21, 25, 26, 27]);
+    // The image's init user is not the agent.
+    await status("1", "1003\t1003\t1003\t1003");
+    expect(await agentPids(proc, a)).not.toContain(1);
     await writeFile(join(proc, "19", "status"), "Name:\tsample\n");
     await expect(agentPids(proc, a)).rejects.toThrow("status");
   });
@@ -203,6 +206,41 @@ describe("agent processes", () => {
     await stopAgentProcesses(lingering, { attempts: 3, waitMs: 50 });
     await gone;
     expect(await lingering.list()).toEqual([]);
+  });
+
+  it("stop the run when pid 1 runs as agent, since no kill(-1) reaches it", async () => {
+    const proc = join(root, "proc");
+    await mkdir(join(proc, "1"), { recursive: true });
+    const a = AGENT.uid;
+    await writeFile(
+      join(proc, "1", "status"),
+      `Name:\tsleep\nState:\tS (sleeping)\nThreads:\t1\nUid:\t${a}\t${a}\t${a}\t${a}\n`,
+    );
+    await mkdir(join(roots.run, "oryxa-opencode-AbC123"));
+    const init: AgentProcesses = { list: () => agentPids(proc, a), killAll: async () => {} };
+    await expect(startClean(init, roots, { attempts: 2, waitMs: 0 })).rejects.toThrow("1 agent processes");
+    expect(await exists(join(roots.run, "oryxa-opencode-AbC123"))).toBe(true);
+  });
+
+  it("are not waited on for ever when a process left running stops the killer", { timeout: 10_000 }, async () => {
+    // The killer, stopped by a leftover agent process before it could signal anything.
+    let exited: Promise<unknown[]> | undefined;
+    const procs = agentProcesses(
+      () => {
+        const killer = spawn("sleep", ["30"], { stdio: "ignore" });
+        exited = once(killer, "exit");
+        killer.kill("SIGSTOP");
+        return killer;
+      },
+      join(root, "proc"),
+      100,
+    );
+    const started = Date.now();
+    await procs.killAll();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // Root ends it, so it cannot run on after the scan.
+    const [, signal] = (await exited) ?? [];
+    expect(signal).toBe("SIGKILL");
   });
 
   it("are killed by one kill(-1) run as agent, so none can fork past it", async () => {

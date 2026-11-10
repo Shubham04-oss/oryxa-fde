@@ -49,8 +49,10 @@ into the system prompt as fenced data, not as instructions.
   thread exited alone is a zombie whose other threads still run. Only then does it remove every earlier run's
   directories (`/tmp/oryxa-claude-*`, `/tmp/oryxa-opencode-*`, `/etc/oryxa/opencode-*`), listing their parents and
   never following a link, and make this run's (`src/clean.ts`). So nothing an earlier run left running can race the
-  cleanup, with one exception: pid 1, the image's `sleep infinity`, runs as `agent`, cannot be killed and is
-  skipped; if the runtime lets the agent trace it, code injected there would survive (#156 moves it off `agent`).
+  cleanup. No process is exempt from the scan: pid 1, the image's `sleep infinity`, runs as `init`, so the agent
+  can neither trace it nor write its memory, and an image that ran it as `agent` could never start a run. The
+  killer is itself an agent process, so it is waited on for 2 seconds at most, then killed by root, and the scan
+  decides.
   Each run, on either backend, gets a fresh home with its own XDG and temp directories. With
   `settingSources: []` the CLI ignored user settings, hooks, MCP servers, `CLAUDE.md`, skills, agents and commands
   planted in its home, but its shell tool sources `~/.bashrc`, so a shared home would let one run change the
@@ -61,7 +63,9 @@ into the system prompt as fenced data, not as instructions.
   the command for `Bash`, or else over each string value in the input, never its key names) emits
   `approval_request` and waits. Key names differ between harnesses (`file_path` here, `path` on OpenCode), values
   do not, so one rule matches the same call on both. The request carries the tool and its full
-  input, so an engineer approves exactly what will run. An input over 256 KiB is refused, never truncated.
+  input, so an engineer approves exactly what will run. An input over 256 KiB is never matched: like one
+  nested too deep to walk, it is covered by any rule on its tool, whatever the pattern, and then refused, never
+  truncated.
   Approval lets the call run. Rejection denies it, aborts the SDK and ends the run with `result` `rejected`. An
   aborted run counts as a rejection. The gateway also holds the hosts behind an approval action
   until the FDE approves it, so the prompt is not the only gate.

@@ -25,9 +25,10 @@ type Spawn = (command: string, args: readonly string[], options: Parameters<type
 
 /**
  * The agent's processes in the sandbox. `killAll` runs one `kill(-1)` as `agent`: the kernel signals every process of
- * that user in one pass that no fork can slip past, and a pid reused by another user's process is never hit.
+ * that user in one pass that no fork can slip past, and a pid reused by another user's process is never hit. The
+ * killer is itself an agent process, so one left running can stop it; it is waited on for `killWaitMs` at most.
  */
-export function agentProcesses(spawn: Spawn = nodeSpawn, proc = "/proc"): AgentProcesses {
+export function agentProcesses(spawn: Spawn = nodeSpawn, proc = "/proc", killWaitMs = 2_000): AgentProcesses {
   return {
     list: () => agentPids(proc, AGENT.uid),
     killAll: async () => {
@@ -39,22 +40,31 @@ export function agentProcesses(spawn: Spawn = nodeSpawn, proc = "/proc"): AgentP
         stdio: "ignore",
       });
       // Whether it worked is decided by `list`, not by how it exits: an agent process may have killed it first.
-      await once(killer, "close").catch(() => {});
+      const wait = new AbortController();
+      const late = await Promise.race([
+        once(killer, "close", { signal: wait.signal }).then(
+          () => false,
+          () => false,
+        ),
+        sleep(killWaitMs, true, { signal: wait.signal }).catch(() => false),
+      ]);
+      wait.abort();
+      // A killer stopped or stuck counts as a failed kill: root ends it, and the scan decides.
+      if (late) killer.kill("SIGKILL");
     },
   };
 }
 
 /**
  * Pids in `proc` with `uid` among their real, effective, saved and file system user ids. A zombie with one thread runs
- * nothing; one with more is a leader whose main thread exited alone, and its other threads still run. Pid 1 is the
- * container's init, the image's `sleep infinity` (as `agent`, the image's user): the runtime starts it before any run,
- * nothing in the container can kill it, and kill(-1) never reaches it (#156 moves it off `agent`).
+ * nothing; one with more is a leader whose main thread exited alone, and its other threads still run. No pid is
+ * exempt: pid 1 runs as `init` in the image, and if it ever ran as `agent` it would be listed and, since kill(-1)
+ * never reaches it, the run would refuse to start.
  */
 export async function agentPids(proc: string, uid: number): Promise<number[]> {
   const pids: number[] = [];
   for (const name of await readdir(proc)) {
-    // ponytail: init is trusted to be the image's; the image could start it as another user than `agent`.
-    if (!/^[0-9]+$/.test(name) || name === "1") continue;
+    if (!/^[0-9]+$/.test(name)) continue;
     let status: string;
     try {
       status = await readFile(join(proc, name, "status"), "utf8");
@@ -113,8 +123,7 @@ export async function removeRunDirs(roots: { config: string; run: string } = RUN
 /**
  * Makes the sandbox clean for a run, as root, before the agent starts: first the agent's processes are killed and the
  * scan finds none left, then earlier runs' directories are removed. In that order nothing an earlier run left running
- * can race the removal or write into the fresh directories, with one exception: pid 1 runs as `agent`, is skipped and
- * cannot be killed, so code injected into it (if the runtime lets the agent trace it) would survive. #156 moves it.
+ * can race the removal or write into the fresh directories.
  */
 export async function startClean(
   procs: AgentProcesses = agentProcesses(),

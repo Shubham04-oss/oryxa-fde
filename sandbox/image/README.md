@@ -22,12 +22,16 @@ both parts of the reference.
 | --------- | ---- | ------------------------------------------------------------------------------ | --------------------------- |
 | `agent`   | 1001 | The agent and every command it starts; every `exec` and file call from the API | `/workspace`, `/home/agent` |
 | `harness` | 1002 | The harness, after it has started the agent as `agent`                         | `/home/harness` (0700)      |
+| `init`    | 1003 | Only pid 1, the image's `sleep infinity`; it cannot log in                     | Nothing                     |
 | `root`    | 0    | Only the gateway's pack write and the harness's first moments                  | `/etc/oryxa/runs` (0700)    |
 
-The image's default user is `agent`, but the gateway names the user on every call. The image holds no
-credentials and no CA. When the gateway intercepts HTTPS, it re-signs the traffic with an ephemeral CA that
-Cloudflare writes at `/etc/cloudflare/certs/cloudflare-containers-ca.crt` when the container starts. Every command
-the gateway runs gets `SSL_CERT_FILE` and the related variables pointing at that file.
+The image's default user is `init`, so pid 1 does not run as `agent`: an agent process can neither trace it nor
+write `/proc/1/mem`, and nothing it leaves there outlives the clean start of the next run. The gateway's
+compatibility date (2026-04-01 or later) gives the container its own pid namespace, in which the image's command
+is pid 1. The gateway names the user on every call; an exec that named none would run as `init`, which owns
+nothing. The image holds no credentials and no CA. When the gateway intercepts HTTPS, it re-signs the traffic with
+an ephemeral CA that Cloudflare writes at `/etc/cloudflare/certs/cloudflare-containers-ca.crt` when the container
+starts. Every command the gateway runs gets `SSL_CERT_FILE` and the related variables pointing at that file.
 
 ## Egress check
 
@@ -50,3 +54,33 @@ image carries no extra network tools.
 | 4 November 2026 | Local Docker, `--network none` (the check itself) | 17 of 17 passed                                            |
 | 4 November 2026 | Local Docker, host network (egress open)          | 4 failed: UDP DNS and both resolvers answered, as expected |
 | Pending         | First Cloudflare deploy                           | To run and record                                          |
+
+## Isolation check
+
+Nothing an agent run leaves behind may outlive the next run's clean start (ADR 0004, #156). `oryxa-isolation-check`
+has two modes. `pid1`, run as `agent`, checks that pid 1 runs as another user and that `PTRACE_ATTACH`,
+`PTRACE_SEIZE` and opening `/proc/1/mem` for writing are refused. A control on its own child shows the calls work
+where the kernel allows them. `no-agent`, run as root right after a clean start, checks that no live process has
+the agent's uid among its user ids, pid 1 included. It uses only Python's standard library.
+
+`test/real-image.sh <image>` runs both on Docker with no network, mounts or credentials. It leaves agent processes
+running (a detached session, a stopped process, a thread whose main thread exited), runs the harness's clean start
+as root, and checks again. A control container starts pid 1 as `agent`, as the image did before #156: the pid 1
+check must fail there, and the clean start must refuse to run. The CI job that runs it on the product image is a
+separate, lead-reviewed step.
+
+Docker is only a stand-in. Whether the agent can trace another process of its own user depends on the kernel's
+`kernel.yama.ptrace_scope`, its capabilities and seccomp, which the Cloudflare runtime does not document. With
+pid 1 under its own user the refusal no longer depends on them, but the first deployed sandbox runs the check and
+records the ptrace scope it prints:
+
+```bash
+curl -sS -H "authorization: Bearer $SERVICE_TOKEN" -X POST \
+  "$GATEWAY/v1/sandboxes/<tenant>/<company>/exec" -d '{"argv":["oryxa-isolation-check","pid1"],"timeoutMs":60000}'
+```
+
+| Date             | Environment                                         | Result                                             |
+| ---------------- | --------------------------------------------------- | -------------------------------------------------- |
+| 10 November 2026 | Local Docker, a build not for linux/amd64           | `real-image.sh`: 9 of 9 passed                     |
+| Pending          | `real-image.sh` on the linux/amd64 image in CI      | To add as a CI job (lead review) and record        |
+| Pending          | First Cloudflare deploy, `pid1` through the gateway | To run and record, with the ptrace scope it prints |

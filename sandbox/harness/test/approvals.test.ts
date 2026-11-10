@@ -98,12 +98,15 @@ describe("approval rules on input too deep to walk", () => {
     expect(ruleFor(rules, "Write", deep(100_000))).toBeUndefined();
   });
 
-  it("matches wide input, many values under one key, without throwing", async () => {
+  it("covers wide input, many values under one key, without throwing", async () => {
+    // About 1.2 MB as JSON: too large to show, so covered whatever the pattern.
     const wide = { items: [...Array.from({ length: 200_000 }, () => "x"), "deploy"] };
     expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^deploy$" }]), "Write", wide)?.action).toBe(
       "send",
     );
-    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^never$" }]), "Write", wide)).toBeUndefined();
+    expect(ruleFor(compileRules([{ action: "send", tool: "*", pattern: "^never$" }]), "Write", wide)?.action).toBe(
+      "send",
+    );
   });
 
   it("is refused, not passed and not thrown, when a rule covers it", async () => {
@@ -118,6 +121,42 @@ describe("approval rules on input too deep to walk", () => {
     );
     const describe = () => ({ toolCallId: "t1", title: "Send" });
     expect(await gate.decide("mcp__x__send", deep(100_000), new AbortController().signal, describe)).toBe("too_large");
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe("approval rules on input too large to show", () => {
+  const rules = compileRules([
+    { action: "other", tool: "Read", pattern: "x" },
+    { action: "deploy", tool: "Bash", pattern: "^never$" },
+    { action: "write", tool: "Write", pattern: "^never$" },
+  ]);
+  // 256 KiB as JSON, the most an engineer is shown, less the bytes around the value.
+  const fits = (key: string) => "x".repeat(256 * 1024 - `{"${key}":""}`.length);
+
+  it("needs approval from a rule on that tool, whatever its pattern, and is never matched", () => {
+    expect(ruleFor(rules, "Bash", { command: `${fits("command")}x` })?.action).toBe("deploy");
+    expect(ruleFor(rules, "Write", { content: `${fits("content")}x` })?.action).toBe("write");
+    // At the limit: matched on its values as usual.
+    expect(ruleFor(rules, "Bash", { command: fits("command") })).toBeUndefined();
+    expect(ruleFor(rules, "Write", { content: fits("content") })).toBeUndefined();
+    // No rule names the tool, so none could have matched.
+    expect(ruleFor(rules, "Edit", { content: `${fits("content")}x` })).toBeUndefined();
+  });
+
+  it("is refused, not passed, when a rule on its tool does not match", async () => {
+    const emitted: unknown[] = [];
+    const gate = new ApprovalGate(
+      rules,
+      { request: async () => "approved" },
+      (e) => emitted.push(e),
+      () => "apr_1",
+      new AbortController().signal,
+    );
+    const describe = () => ({ toolCallId: "t1", title: "Run" });
+    const signal = new AbortController().signal;
+    expect(await gate.decide("Bash", { command: `${fits("command")}x` }, signal, describe)).toBe("too_large");
+    expect(await gate.decide("Bash", { command: "npm test" }, signal, describe)).toBe("unlisted");
     expect(emitted).toEqual([]);
   });
 });
