@@ -1,17 +1,53 @@
 # 0004: The coding agent
 
-Status: accepted, 3 November 2026.
+Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes the main harness.
 
 ## Decision
 - The main way FDEs build is a coding agent in each company's sandbox, not a browser editor.
-- First harness: the Claude Agent SDK on Bedrock. It authenticates through AWS, never through a
-  claude.ai login, and the product never uses the name "Claude Code".
-- The harness adapter turns harness output into one internal event format shaped on the Agent
-  Client Protocol, so Codex, OpenCode and other agents plug in later.
+- **Two harnesses behind one adapter.** OpenCode (MIT-licensed, run headless in the sandbox) is the
+  main one, and the Claude Agent SDK is the second. A company's agent config chooses which a run
+  uses. Bedrock is the first model path for both. Neither authenticates through a personal login,
+  and the product never uses the name "Claude Code".
+- Each harness runs behind the adapter, which turns its output into one internal event format
+  shaped on the Agent Client Protocol. Adding a harness changes neither the format nor the API.
+  OpenCode is driven over ACP on pipes the adapter opens, never over a listening socket that any
+  process in the sandbox could reach.
 - Each run gets a context pack: the company's scope, success criteria, decisions, config and
   conventions, written into the sandbox before the agent starts.
 - Secrets and model credentials never enter the sandbox. The outbound handler adds them to allowed
-  requests only.
+  requests only. A harness that insists on a credential gets a fixed placeholder that is plainly
+  not a key (the same for every run, never shaped like a real one), sent where the outbound
+  handler replaces it, or drops it before signing. Model hosts are ones the policy signs for or
+  adds secrets to.
+- **A harness reads nothing from the repository it works on:** no settings, instructions, plugins,
+  skills or MCP servers. The run's configuration comes only from the adapter: passed in at start,
+  or written by root where the agent cannot write.
+- **A harness's own permission system is a convenience, not a boundary.** OpenCode says so of its
+  own. The adapter decides every approval against the company's list, an approval covers one call
+  and is never remembered, and the outbound handler's held hosts back it.
 - Actions on the company's approval list (deploys, new network hosts, anything sent to the
   customer) pause the run until an FDE approves.
-- Sample data only until the runner exists.
+- **A harness version is pinned exactly and checked by hash.** It is enabled only after it passes
+  the recorded-session, hostile-repository and egress tests. It becomes the default only after an
+  eval comparison against the current default. The lead enables a version, and changes the
+  default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
+  Agent SDK.
+- A run's budget uses the price of the model it runs.
+- Changes the agent makes to agent configuration files (`.opencode/`, `opencode.json*`, `AGENTS.md`,
+  `.claude/`) are held for review and never delivered silently: merged, they would run on the next
+  person's machine.
+- An FDE may also run their own agent on their own machine. It reads project context through the
+  read-only MCP server, and we record no transcript. Its output returns as a pull request or an
+  upload (ADR 0006).
+- Hosted sandboxes take sample data only; real data waits for the runner (ADR 0003).
+
+## Why OpenCode first
+Model choice: a run can use a cheap, fast model for routine work and a stronger one where it
+matters, and a customer's own model later. It is open source under a permissive licence, so we can
+pin, read and patch what runs in the sandbox. The cost is a fast-moving project whose current
+major version has experimental server routes and allows everything by default, which is why the
+gates above come before it is switched on.
+
+## Not decided here
+Vertex and other model hosts that need new signing in the outbound handler; sign-in to the MCP
+server from an FDE's own agent (today it takes a short-lived bearer token).
