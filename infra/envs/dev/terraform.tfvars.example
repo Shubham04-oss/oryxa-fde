@@ -28,6 +28,10 @@ company_key_operator_arns = ["arn:aws:iam::000000000000:user/<you>"]
 # Yearly rotation of each company key; off for now (cost, infra/README.md, Company keys).
 # company_key_rotation = false
 
+# The deploy role's OIDC subject (infra/README.md, Apply order step 4). With GitHub's immutable subject on, the sub_claim_prefix
+# from `gh api repos/<owner>/<name>/actions/oidc/customization/sub`; leave unset for repo:<github_repository>.
+# github_oidc_subject_prefix = "repo:<owner>@<owner id>/<name>@<repo id>"
+
 # Printed by `infra/scripts/create-event-bus.sh dev <account id> ap-south-1` (apply order step 2).
 event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/<id>"
 

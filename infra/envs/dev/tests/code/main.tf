@@ -126,3 +126,26 @@ output "company_key_prefix_rejects_the_wrong_shapes" {
     ] : can(regex(local.prefix_shape, v))
   ]
 }
+
+# infra/scripts/run-task.sh as text (#195): the size limit of its file override and the lines it drops from SQL, so
+# every file it sends is measured the way the script would send it.
+locals {
+  run_task       = file("${local.root}/infra/scripts/run-task.sh")
+  override_limit = tonumber(regex("\\(\\( \\$\\{#b64\\} < (\\d+) \\)\\)", local.run_task)[0])
+  sql_dropped    = regex("sql_lines\\(\\) \\{ grep -Ev '([^']+)' \"\\$1\" \\|\\| true; \\}", local.run_task)[0]
+  sql_files      = fileset("${local.root}/infra/sql", "*.sql")
+}
+
+output "task_override_limit" {
+  description = "run-task.sh: the largest base64 length (exclusive) a file override may have."
+  value       = local.override_limit
+}
+
+output "task_override_lengths" {
+  description = "Each infra/sql file's base64 length as run-task.sh sends it: without the lines its grep drops, each kept line ending in a newline."
+  value = {
+    for f in local.sql_files : "infra/sql/${f}" => length(base64encode(join("", [
+      for l in split("\n", file("${local.root}/infra/sql/${f}")) : "${l}\n" if !can(regex(local.sql_dropped, l))
+    ])))
+  }
+}

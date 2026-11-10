@@ -30,6 +30,7 @@ locals {
     [module.ingest.task_role_arn, module.ingest.execution_role_arn],
     flatten([for m in concat(module.lifecycle, module.mcp) : [m.task_role_arn, m.execution_role_arn]]),
   )
+  github_oidc_subject_prefix = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
   deploy_service_arns = [
     for s in concat([module.api.service_name], [for w in local.deploy_workers : w.service]) :
     "arn:aws:ecs:${local.region}:${local.account}:service/${aws_ecs_cluster.this.name}/${s}"
@@ -48,11 +49,12 @@ data "aws_iam_policy_document" "github_deploy_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # Exact match: only jobs that declare `environment: <env>`, so the environment's rules gate every deploy.
+    # Exact match: only jobs that declare `environment: <env>`, so the environment's rules gate every deploy. With
+    # GitHub's immutable subject on, the prefix names the owner and repository by id as well (README, Apply order step 4).
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.env}"]
+      values   = ["${local.github_oidc_subject_prefix}:environment:${var.env}"]
     }
     # And only the deploy workflow as it is on main, so no other workflow or branch gets in, even
     # before the environment's branch rule exists. STS validates this GitHub claim directly.

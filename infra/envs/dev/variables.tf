@@ -200,6 +200,26 @@ variable "github_repository" {
   }
 }
 
+variable "github_oidc_subject_prefix" {
+  description = "The repository's OIDC sub prefix, before `:environment:<env>`. Null is `repo:<github_repository>`; with GitHub's immutable subject on, `repo:<owner>@<owner id>/<name>@<repo id>` (the sub_claim_prefix of `gh api repos/<owner>/<name>/actions/oidc/customization/sub`)."
+  type        = string
+  default     = null
+  validation {
+    condition = var.github_oidc_subject_prefix == null || (
+      can(regex("^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+$", var.github_oidc_subject_prefix))
+      || can(regex("^repo:[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_oidc_subject_prefix))
+    )
+    error_message = "github_oidc_subject_prefix must be repo:<owner>@<id>/<name>@<id> or repo:<owner>/<name>, with no wildcard and no :environment."
+  }
+  # The names in the prefix are the repository's, so the sub and job_workflow_ref conditions name one repository.
+  validation {
+    condition = var.github_oidc_subject_prefix == null || (
+      replace(coalesce(var.github_oidc_subject_prefix, "-"), "/@[0-9]+/", "") == "repo:${var.github_repository}"
+    )
+    error_message = "github_oidc_subject_prefix must name github_repository's owner and name."
+  }
+}
+
 variable "github_oidc_provider_arn" {
   description = "The account's existing GitHub OIDC provider. Null creates one (an account holds only one)."
   type        = string

@@ -19,11 +19,18 @@ net=$(jq -c '.run_task_network.value' <<<"$out")
 subnets=$(jq -c '.subnets' <<<"$net")
 
 # The file travels base64-encoded in one env override (visible in the ECS API, so no secrets in
-# it); ECS caps all overrides at 8 KiB.
+# it); ECS caps all overrides at 8 KiB. tests/code checks every infra/sql file against the limit below.
+# SQL goes without its comment-only and blank lines (#195): they are for readers, and psql never needs them.
+# ponytail: a line inside a multi-line string literal that is blank or starts with -- would be dropped too; none do.
+sql_lines() { grep -Ev '^[[:space:]]*(--.*)?$' "$1" || true; }
 file_override() {
   local container="$1" var="$2" file="$3" b64
   [[ -f "$file" ]] || { echo "no such file: $file" >&2; exit 2; }
-  b64=$(base64 < "$file" | tr -d '\n')
+  if [[ "$container" == psql ]]; then
+    b64=$(sql_lines "$file" | base64 | tr -d '\n')
+  else
+    b64=$(base64 < "$file" | tr -d '\n')
+  fi
   (( ${#b64} < 7000 )) || { echo "$file is too large for a task override; split it" >&2; exit 2; }
   jq -cn --arg c "$container" --arg v "$var" --arg b "$b64" \
     '{containerOverrides: [{name: $c, environment: [{name: $v, value: $b}]}]}'

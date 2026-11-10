@@ -186,11 +186,20 @@ jobs:
               || stopped "the update was refused"
             aws ecs wait services-stable --cluster "$cluster" --services "$service" \
               || stopped "it did not settle within the waiter's 10 minutes"
-            # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck.
-            aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
-              | jq -e --arg td "$td" \
-                  '.services[0].deployments[] | select(.status == "PRIMARY") | .taskDefinition == $td and .rolloutState == "COMPLETED"' \
-              > /dev/null || stopped "it did not settle on $td (the circuit breaker rolled it back?)"
+            # The circuit breaker rolls a failed deployment back, which also reads as stable: check ours stuck. A service at
+            # 0 tasks reads as stable at once while its rollout is still IN_PROGRESS, so poll every 5 s for up to 2 minutes.
+            # Another revision as PRIMARY, FAILED, or anything unreadable stops at once.
+            state=""
+            for _ in $(seq 24); do
+              state=$(aws ecs describe-services --cluster "$cluster" --services "$service" --output json \
+                | jq -r --arg td "$td" '[.services[0].deployments[] | select(.status == "PRIMARY")]
+                    | if length != 1 then "no single primary" elif .[0].taskDefinition != $td then "another revision"
+                      else .[0].rolloutState end') || state=""
+              [ "$state" = "IN_PROGRESS" ] || break
+              sleep 5
+            done
+            [ "$state" != "IN_PROGRESS" ] || stopped "its rollout onto $td was still in progress after 2 minutes"
+            [ "$state" = "COMPLETED" ] || stopped "it did not settle on $td (the circuit breaker rolled it back?)"
             rolled="${rolled:+$rolled, }$name"
           done
       # OpenTofu reads this on every plan, so a later apply keeps this image instead of rolling back. Only after the API and
