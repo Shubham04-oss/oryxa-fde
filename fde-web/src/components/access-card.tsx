@@ -4,13 +4,17 @@ import { useQueryClient } from "@tanstack/react-query"
 import { Check, Ellipsis } from "lucide-react"
 import { useAccessMover } from "./access-move"
 import { FormDialog, SelectField, TextArea } from "./form-dialog"
+import { StaleNotice, useVersionedForm } from "./versioned-form"
 import { Card, Quiet, Row, Rows } from "./page"
+import { RefusalNote } from "./refusal-note"
+import type { Note } from "./refusal-note"
 import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu"
-import { api, queries } from "@/lib/api/client"
+import { api } from "@/lib/api/client"
 import {
   ACCESS_FIELD,
+  ACCESS_LABELS,
   accessBody,
   accessChanged,
   accessEditBody,
@@ -27,7 +31,6 @@ import {
   waitOf,
 } from "@/lib/access"
 import type { AccessRequestOut, Project, ProjectScope } from "@/lib/api/schemas"
-import { attemptAt } from "@/lib/records"
 import { dayOf, shortDate } from "@/lib/time"
 import { ACCESS_LABEL, accessActions } from "@/lib/today"
 import type { AccessAction } from "@/lib/today"
@@ -103,6 +106,7 @@ export function AccessCard({
   const lost = mover.refusal
   // A refusal whose row has gone (settled or removed elsewhere) is said above the rows instead.
   const lostHere = lost && !project.access.some((a) => a.id === lost.access.id)
+  const lostNote = lostHere ? mover.note(clip(lost.access.description)) : null
 
   return (
     <Card
@@ -121,16 +125,8 @@ export function AccessCard({
       <p role="status" className="sr-only">
         {mover.announcement}
       </p>
-      {lostHere && (
-        <p
-          role="alert"
-          className="mb-3 flex flex-wrap items-baseline gap-x-3 text-xs text-destructive"
-        >
-          Couldn't change “{clip(lost.access.description)}” to {ACCESS_LABEL[lost.to]}. {lost.why}
-          <button type="button" className="text-muted-foreground underline" onClick={mover.dismiss}>
-            Dismiss
-          </button>
-        </p>
+      {lostNote && (
+        <RefusalNote note={lostNote} onDismiss={mover.dismiss} className="mb-3 text-xs" />
       )}
       {rows.length === 0 ? (
         <Quiet>
@@ -149,11 +145,7 @@ export function AccessCard({
                 system={a.system ? (systems.get(a.system) ?? "a system no longer listed") : null}
                 blocking={blockedBy(a.id, project.tasks)}
                 moving={mover.saving[a.id]}
-                refused={
-                  lost && lost.access.id === a.id
-                    ? `Couldn't change it to ${ACCESS_LABEL[lost.to]}. ${lost.why}`
-                    : null
-                }
+                refused={lost && lost.access.id === a.id ? mover.note(null) : null}
                 onMove={(action) => {
                   mover.dismiss()
                   void mover.move(scope, a, action.to)
@@ -235,7 +227,7 @@ function AccessRow({
   blocking: Array<{ id: string; title: string }>
   /** Where it is on its way to, while the API has not answered. */
   moving: AccessRequestOut["status"] | undefined
-  refused: string | null
+  refused: Note | null
   onMove: (action: AccessAction) => void
   onEdit: () => void
   onDismiss: () => void
@@ -325,15 +317,7 @@ function AccessRow({
           </div>
         </div>
         {refused && (
-          <p
-            role="alert"
-            className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-destructive"
-          >
-            {refused}
-            <button type="button" className="text-muted-foreground underline" onClick={onDismiss}>
-              Dismiss
-            </button>
-          </p>
+          <RefusalNote note={refused} onDismiss={onDismiss} className="mt-1.5 text-[11px]" />
         )}
       </div>
     </Row>
@@ -353,34 +337,26 @@ function AccessDialog({
   onClose: () => void
 }) {
   const client = useQueryClient()
-  const [fields, setFields] = useState(accessFields(request))
-  const set = (patch: Partial<typeof fields>) => setFields({ ...fields, ...patch })
+  // A new request is a create and sends no version. An edit is based on the copy the form opened on:
+  // all four fields come from the form, and its version goes with them.
+  const form = useVersionedForm({
+    record: request,
+    snapshot: accessFields,
+    initial: accessFields(request),
+    labels: ACCESS_LABELS,
+    // Nothing changed: nothing is sent, so the request's status and clock are not touched.
+    changed: accessChanged,
+    send: async (base, f) => {
+      if (!base) return commitAccess(client, scope, await api.addAccess(scope, accessBody(f)))
+      const saved = await api.updateAccess(scope, base.id, accessEditBody(f), base.version)
+      return commitAccess(client, scope, saved, base.status)
+    },
+    adopt: (current) => commitAccess(client, scope, current, current.status),
+    what: "request",
+    fieldOf: ACCESS_FIELD,
+  })
+  const { fields, set } = form
   const { stakeholders, systems } = project
-
-  const save = () =>
-    attemptAt(
-      async () => {
-        if (!request) {
-          const saved = await api.addAccess(scope, accessBody(fields))
-          return commitAccess(client, scope, saved)
-        }
-        // Nothing changed: nothing is sent, so the request's status and clock are not touched.
-        if (!accessChanged(request, fields)) return
-        // The status is not in this form: it is the request as it is now, so a move made while
-        // the form was open is not undone.
-        const live = client
-          .getQueryData(queries.project(scope).queryKey)
-          ?.access.find((a) => a.id === request.id)
-        const saved = await api.updateAccess(
-          scope,
-          request.id,
-          accessEditBody(request, live, fields),
-        )
-        return commitAccess(client, scope, saved, live?.status ?? request.status)
-      },
-      "request",
-      ACCESS_FIELD,
-    )
 
   const ownerListed = fields.owner === null || stakeholders.some((s) => s.id === fields.owner)
   const systemListed = fields.system === null || systems.some((s) => s.id === fields.system)
@@ -393,9 +369,10 @@ function AccessDialog({
           ? "Change what was asked, from which system, or who owns it."
           : "Ask the customer for access to a system."
       }
-      save={request ? "Save" : "Request access"}
+      save={form.save(request ? "Save" : "Request access")}
       validate={() => accessProblem(fields)}
-      onSubmit={save}
+      onSubmit={form.submit}
+      notice={<StaleNotice stale={form.stale} noun="request" />}
       onClose={onClose}
     >
       <TextArea

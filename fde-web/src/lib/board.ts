@@ -1,10 +1,12 @@
 import type { components } from "./api/fde-api.gen"
 import type { TaskOut, TaskState } from "./api/schemas"
+import type { Labels } from "./stale"
 
 // The project board's rules (DESIGN.md §3): the columns, and what each save sends. The API's
 // `PUT .../tasks/{task}` replaces the whole task, so every save sends every field.
 
-export type TaskBody = components["schemas"]["TaskBody"]
+/** A save's fields. The `version` is not one of them: only the call that updates adds it, so a create cannot send one. */
+export type TaskBody = Omit<components["schemas"]["TaskBody"], "version">
 
 /** One column per status, in the order a task usually travels. */
 export const COLUMNS: ReadonlyArray<{ status: TaskState; label: string }> = [
@@ -34,6 +36,17 @@ export type Fields = {
   assignee: string | null
   /** The access request it is blocked on; kept, never chosen here. */
   blockedBy: string | null
+}
+
+/** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
+export const TASK_LABELS: Labels<Fields> = {
+  title: "title",
+  status: "status",
+  blocker: "blocker",
+  waitingOn: "person it waits on",
+  due: "due date",
+  assignee: "assignee",
+  blockedBy: "access request it is blocked on",
 }
 
 export const MAX_TITLE = 200

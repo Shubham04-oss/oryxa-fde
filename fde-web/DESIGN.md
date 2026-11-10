@@ -22,24 +22,24 @@ Every colour is written once, as a token in `src/styles.css`. Screens read token
 utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--token)` in
 `src/shell.css`. Do not write a hex, `rgb()` or `hsl()` anywhere else.
 
-| Token             | Light     | Dark      | Use                                                                                                                                                                                     |
-| ----------------- | --------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                             |
-| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                   |
-| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                     |
-| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                              |
-| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                          |
-| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                         |
-| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                         |
-| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                              |
-| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                     |
-| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                        |
-| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                   |
-| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                      |
-| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                              |
-| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                             |
-| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items. Nothing else. |
-| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                           |
+| Token             | Light     | Dark      | Use                                                                                                                                                                                                                                  |
+| ----------------- | --------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                                                                          |
+| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                                                                |
+| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                                                                  |
+| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                                                                           |
+| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                                                                       |
+| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                                                                      |
+| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                                                                      |
+| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                                                                           |
+| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                                                                  |
+| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                                                                     |
+| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                                                                |
+| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                                                                   |
+| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                                                                           |
+| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                                                                          |
+| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items, a save held back because the record changed. Nothing else. |
+| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                                                                        |
 
 - Every grey is neutral (R=G=B). No decorative accent.
 - A status is a dot and words, never colour alone.
@@ -108,7 +108,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     line saying "Moving to Done…" (the line count does not change, so nothing shifts) and its buttons
     off. It leaves or changes group only when the API answers, and a read of Today sent before the
     write cannot bring it back. A refused action leaves the row where it was and says why in the row,
-    in red, with Dismiss; if the row has gone (deleted elsewhere), the reason is said above the
+    in red, with Dismiss; a move held back because the task had changed says so with the amber dot and offers
+    the move again on the current task (see **A stale save**); if the row has gone (deleted elsewhere), the reason is said above the
     groups instead. A dialog that fails stays open with its reason.
   - **Keys.** The row is one stop for Tab (its link, its button and its menu; every other row is
     skipped, so sixty rows are not sixty stops). **J** and **K**, or the arrows once a row has
@@ -162,7 +163,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   - **What is sent.** A company or project edit is a `PATCH` of the fields that changed, a blank
     field sent as `null` to clear it, nothing sent when nothing changed. A stakeholder or a system
     is a whole-record `PUT`: the form holds every field the record has (name, part, job title and
-    email; name, kind and description), so what is not changed goes back as it was. A new project
+    email; name, kind and description), so what is not changed goes back as it was, with the version of the copy
+    the form opened on (see **A stale save**). A new project
     starts at Discover; the caller leads a new company.
   - **Removing** a stakeholder or a system asks first, in the dialog. A stakeholder who has signed
     off a scope cannot be removed (the API answers 409) and the dialog says so. Access requests and
@@ -175,6 +177,61 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     change of role (the API would allow it): their row says "A company always has a lead. Make
     someone else lead first." A lead who makes themselves an engineer is asked first, in the row. There is no way to add someone to a company yet: the
     API only takes the id of a user, and has no list of the organisation's people to choose from.
+- **A stale save.** The API versions six records (a task, an access request, a stakeholder, a system, a scope
+  item, a criterion; and the scope as a whole, for a sign-off), and a save that names a version the record has
+  left is refused with a 409 `stale_version` and the record as it stands (`current`). Nothing was changed. The
+  shared saving code owns all of it, so every screen behaves the same (`api.update*` in `client.ts`,
+  `useTaskMover`, `useAccessMover`, `useVersionedForm`); a screen does not handle it by itself.
+  - **The rule: a save is based on one copy, and sends that copy's version.** For a one-click move it is the
+    record as the page has it at the click (a Today row, a board card, an Access row); for a prompt (into Blocked
+    or Waiting) the record as it was when the prompt opened; for a form the copy taken when the form opened. Every
+    field comes from that copy plus what the person changed, the version of that copy goes with it, and nothing is
+    taken from a newer copy the page has read meanwhile. So a form opened on an old copy is refused when the record
+    has moved on, instead of quietly putting a teammate's change back or leaving it out. A create sends no
+    version (the API answers 400 `invalid_version`); the update calls take it as an argument and the create
+    calls cannot (`TaskBody` and its kin leave `version` out). A response schema refuses a record without a
+    version: the API always sends one, and a record without it could only be saved unchecked, so the page fails
+    loudly instead of going back to the last writer wins (the spec still marks it optional until the API makes
+    it required).
+  - **Never retried, never forced.** The page puts `current` into its caches first (reads sent before are
+    cancelled, as for every write), so what it shows is true, and tells the person plainly. Only the person's next
+    action sends anything, and it names the version of `current`, so it can be refused again, and is told again.
+    The three 409s of a task save and a sign-off are told apart by `error === "stale_version"`; the others keep
+    their words (`rejected_blocker_required`, `rejected_empty_scope`, `conflict`).
+  - **A one-click move** (a card's Move to, a Today row, an Access row): the page shows the record as it now is,
+    and says so where the move was made, in a note with the amber dot (it is not an error, so it is not red): "This
+    task changed since you last read it, so it was not moved. It is now In progress." (the title is named when the
+    note is above the board or Today's groups, because the row is not there to show it), with **Move to Done** to do
+    the same move on the current record, and **Dismiss**. If someone already made the move, there is nothing to offer,
+    and the note only says so: "Someone already moved “Replay last month's orders” to Done." Access says "Mark
+    granted" or "Ask again", the move's own words. A move into Blocked or Waiting is made from its prompt, which is
+    a form (below).
+  - **A form** (the task, stakeholder, system, scope item, criterion and access request forms, and the prompt into
+    Blocked or Waiting) stays open with every word in it. A notice above the buttons, with the amber dot, says "This
+    task changed after you opened it, so nothing was saved." and names the fields that differ between what the
+    person started from and `current` ("Someone changed the status and due date. What you typed is still here."),
+    and, where the person also changed one of those, "You also changed the status, so yours replaces theirs."
+    The page behind it already shows `current`. The form now holds what the person typed on top of `current`: the
+    fields they changed keep their value, every other field takes the current one, so what the next save would send
+    is what the form shows (`staleness` in `lib/stale.ts`). The button says **Save on the current version** and sends
+    that, with `current`'s version; Cancel leaves the record as it is now. It names fields, not values: a value is an
+    id for several of them (a person, a system), and the form does not show a status that the Access form does not
+    hold, so the notice names it and nothing more.
+  - **A sign-off** is on the scope's version as the person read it (`ScopeOut.version`), sent as `version`. If the
+    scope has moved on, nothing is signed, and the dialog stays open and says so: "The scope changed while this was
+    open, so nothing was signed." It lists what changed (Added, Changed, Removed, each with its words), shows the scope
+    as it is now (in scope, out of scope, criteria), takes that as what is being signed (the sentence at the top counts
+    it), and asks for a tick, "I have read the scope as it is now, and Kestrel agreed to this version.", before
+    **Record sign-off** will send anything. The re-read before the sign-off stays as a courtesy: a scope that moved
+    while the dialog was open is told the same way without a sign-off being attempted. The version is the protection:
+    the API checks it under the scope's lock, which a re-read cannot.
+  - **A delete** names no version (the API takes none yet), so it is never held back: it removes the record
+    whatever was changed since. A form still open on that record keeps what was typed, and its Save says
+    "The task is no longer there." in the form's alert; a one-click move on it says the same, and the page reads
+    it again.
+  - **An identical save** is answered by the API as it is, with the record's version unchanged, so the form closes and
+    nothing moved. The access, scope item and criterion forms still send nothing when nothing changed (as before), which
+    saves the round trip; the stakeholder, system and task forms send it and the API says nothing changed.
 - **Scope and success criteria.** Where an FDE and the customer agree what "done" means, and what the
   customer will later read. Everything here needs only `work` on the project, which anyone who can
   open the page has: the API guards every scope route, read and write, with it alone, so an engineer
@@ -201,15 +258,16 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     bumps the scope's version, and the last sign-off stays on record but no longer covers it
     (`signed_off` turns false). Nothing is cleared and nothing is refused. So the form of a signed-off
     scope says so before it saves, "This scope is signed off. Saving a change means it needs signing
-    off again.", and the removal question adds it. A save that changes nothing is not sent, because
-    the API would still count it as a change. A removal is never refused, even for a criterion that
-    has results.
+    off again.", and the removal question adds it. A save that changes nothing is not sent (the API
+    answers an identical save as it is and counts no change, so it would be a round trip for nothing). Each
+    save carries the item's or criterion's own version, not the scope's. A removal is never refused, even for a
+    criterion that has results.
   - **Recording a sign-off** asks who at the customer signed (any stakeholder of the company; sponsors
     are listed first; the person who signed before, or else the company's only sponsor, is chosen in
     advance, and nothing is recorded until **Record sign-off** is pressed). It says what is being signed, in numbers, and what is missing without refusing it:
-    nothing listed as out of scope, no success criteria. The API signs whatever the scope is when the
-    request arrives, so the dialog reads the scope again first and, if it moved while the dialog was
-    open, refuses and keeps nothing signed. One version is signed once: a second sign-off of it is a
+    nothing listed as out of scope, no success criteria. The sign-off names the scope's version as it was read, and a scope that moved on is refused
+    (see **A stale save**); the dialog also reads the scope again first, as a courtesy, and says the same if it moved while the
+    dialog was open. One version is signed once: a second sign-off of it is a
     409; the dialog says so, and the scope is read again so the card behind it shows who signed instead of staying on "Not signed off". The API refuses an empty scope (409), and a person who is not a
     stakeholder at the company (400).
   - **Focus.** When a dialog closes, focus goes back to the row that opened it, or to the section's
@@ -277,11 +335,11 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     yet), and starts the request as requested: the API takes a new request as requested or in
     progress only (409 otherwise). **Edit request** changes those three fields. Its status is not in
     the form: it is changed from the row.
-  - **Edits are whole-record `PUT`s** (the API replaces the request): all four fields are sent, the
-    form's changes compared with the copy taken when it opened, and the rest, status included, taken
-    from the request as the page has it now, so a status moved while the form was open is not undone
-    by saving it. A save that changes nothing sends nothing. There is no way to remove a request: the
-    API has no delete.
+  - **Edits are whole-record `PUT`s** (the API replaces the request): all four fields are sent, from the
+    copy taken when the form opened with the person's changes, and the status is that copy's. The copy's version goes
+    with them, so a status moved while the form was open is refused, not undone: the form says the status changed and
+    offers to save on the current version (see **A stale save**). A save that changes nothing sends nothing. There is no
+    way to remove a request: the API has no delete.
   - **Tasks blocked by a request.** `blocked_by` takes one of this project's access requests (any
     status), only while the task is blocked; when the request is granted the API puts the tasks
     blocked on it back to do, by an event. The blocked prompt, on the board and on Today, and the task
@@ -566,6 +624,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - Notes are `api.notes`, `addNote`, `updateNote` and `removeNote`, each taking a place (`{ company }` or
   `{ company, project }`) and choosing the company's or the project's routes (`queries.notes`, under the
   project's own key). A note's body is never rendered as markup anywhere.
+- Records with a version (a task, an access request, a stakeholder, a system, a scope item, a criterion) carry it in
+  every response; `schemas.ts` refuses one without it. `api.updateTask`, `updateAccess`, `updateStakeholder`,
+  `updateSystem`, `updateScopeItem` and `updateCriterion` take the version of the copy the save is based on as their last
+  argument, as does `signOffScope` (the scope's); a 409 `stale_version` throws a `StaleSaveError` carrying `current`.
 - Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
   `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
   `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
@@ -608,6 +670,12 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   their stems), "phrases" and -exclusions in the passages of ingested documents only, with the API's checks on `q` and
   `limit`. `globalThis.__fdeMockStallUpload = true` sends 60% of a file and waits, so the progress bar can be seen. The
   mock cannot take an upload through `fetch` in a jsdom test, so `Transport.upload` hands it the file.
+  The mock versions its records as the API does: a version from 1, moved on by every change, the engine-style ones the
+  mock simulates included (an unblocked task, a removed stakeholder's tasks and requests), an identical save answered as it
+  is, a stale `version` a 409 `stale_version` with `current` (the whole scope for a sign-off), and a `version` on a
+  create a 400 `invalid_version`. `globalThis.__fdeMockSomeoneElse = true` makes someone else change the record the next
+  versioned save is about, once, just before it is checked (an object is the change to make, such as `{ status: "done" }`),
+  so a stale save can be seen and tested.
   `resetMockApi({ engineer: true })` signs in as an engineer, `{ empty: true }` leaves no company,
   and `globalThis.__fdeMockNoCompanies = true` before the app loads does the same in the browser. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
@@ -632,7 +700,7 @@ render, and leaves a `-FAILED.png` of it.
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
   `failWrites: true` makes the mock refuse every write, to see the failed-save states;
   `emptyWorkspace: true` starts a workspace with no company; `staleChecklist: true` makes the project's
-  checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). `sizes` and
+  checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). A screen that shows a stale save sets the mock's `__fdeMockSomeoneElse` from its `act`, between opening a form and saving it (`someoneElse` in `screens.mjs`). `sizes` and
   `themes` narrow an entry. The file's header lists every option.
 - Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you
   checked and what you changed because of it.

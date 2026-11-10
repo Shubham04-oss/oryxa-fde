@@ -336,12 +336,17 @@ describe("stakeholders", () => {
     // Give one an address first, so there is something to lose.
     resetMockApi()
     const [mara] = (await api.company(KESTREL)).stakeholders
-    await api.updateStakeholder(KESTREL, mara!.id, {
-      name: mara!.name,
-      role: mara!.role,
-      title: mara!.title,
-      email: "mara@example.com",
-    })
+    await api.updateStakeholder(
+      KESTREL,
+      mara!.id,
+      {
+        name: mara!.name,
+        role: mara!.role,
+        title: mara!.title,
+        email: "mara@example.com",
+      },
+      mara!.version,
+    )
     resetWire()
     renderWithRouter(<CompanyPage companyId={KESTREL} />, { keep: true })
     await userEvent.click(await screen.findByRole("button", { name: "Edit Mara Lindqvist" }))
@@ -731,7 +736,7 @@ describe("the API mock", () => {
     })
     // The whole-record replace says nothing for a record that is not there.
     expect(
-      await refused(api.updateSystem(KESTREL, "sys_nope" as never, { name: "A" })),
+      await refused(api.updateSystem(KESTREL, "sys_nope" as never, { name: "A" }, 1)),
     ).toMatchObject({ status: 404 })
   })
 

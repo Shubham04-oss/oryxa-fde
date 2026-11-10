@@ -34,7 +34,12 @@ async function clientBundle(nodeEnv: "production" | "development") {
   }
 }
 
-const SWITCHES = ["__fdeMockFailWrites", "__fdeMockNoCompanies", "__fdeMockStaleChecklist"]
+const SWITCHES = [
+  "__fdeMockFailWrites",
+  "__fdeMockNoCompanies",
+  "__fdeMockStaleChecklist",
+  "__fdeMockSomeoneElse",
+]
 
 describe("the mock API", () => {
   it("is left out of a production build, even with its flag set", async () => {

@@ -19,6 +19,7 @@ const task = (over: Partial<TaskOut> = {}): TaskOut => ({
   status: "todo",
   created_at: "2026-11-01T09:00:00Z",
   updated_at: "2026-11-01T09:00:00Z",
+  version: 1,
   ...over,
 })
 

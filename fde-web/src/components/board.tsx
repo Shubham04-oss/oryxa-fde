@@ -5,6 +5,8 @@ import { ChevronDown, ChevronRight, Ellipsis } from "lucide-react"
 import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
 import { FormDialog } from "./form-dialog"
+import { RefusalNote } from "./refusal-note"
+import { StaleNotice, useVersionedForm } from "./versioned-form"
 import { Dialog } from "./ui/dialog"
 import { BlockedBy, FIELD, Labelled, MoveAsk, WaitingOn, useTaskMover } from "./task-move"
 import {
@@ -29,6 +31,7 @@ import {
   COLUMNS,
   DONE_SHOWN,
   STATUS_LABEL,
+  TASK_LABELS,
   fieldsOf,
   inColumn,
   isOverdue,
@@ -37,7 +40,7 @@ import {
   summarise,
 } from "@/lib/board"
 import type { Fields } from "@/lib/board"
-import { commitRemoved, reason } from "@/lib/task-move"
+import { commitRemoved, reason, refusalNote } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
 
@@ -78,9 +81,6 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const people = new Map(project.stakeholders.map((s) => [s.id as string, s.name]))
   const today = localDay()
   const refused = mover.refusal
-  const error =
-    refused &&
-    `Couldn't move “${refused.task.title}” to ${STATUS_LABEL[refused.to]}. ${refused.why}`
 
   const requestMove = (task: TaskOut, to: TaskState) => mover.request(scope, task, to)
 
@@ -147,16 +147,12 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
       <p role="status" className="sr-only">
         {mover.announcement}
       </p>
-      {error && (
-        <p
-          role="alert"
-          className="mb-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-destructive"
-        >
-          {error}
-          <button type="button" className="text-muted-foreground underline" onClick={mover.dismiss}>
-            Dismiss
-          </button>
-        </p>
+      {refused && (
+        <RefusalNote
+          note={refusalNote(refused, true, mover.again)}
+          onDismiss={mover.dismiss}
+          className="mb-3 text-xs"
+        />
       )}
       {tasks.length === 0 ? (
         <Quiet>No tasks yet. Add the first one.</Quiet>
@@ -273,9 +269,8 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
             people={project.stakeholders}
             requests={project.access}
             me={me.data?.user.id}
-            onSave={(fields) =>
-              mover.submit(scope, dialog.kind === "edit" ? dialog.task : null, fields)
-            }
+            send={(base, fields) => mover.send(scope, base, fields)}
+            adopt={(current) => mover.adopt(scope, current)}
             onDelete={dialog.kind === "edit" ? () => discard(dialog.task) : undefined}
             onClose={() => setDialog(null)}
           />
@@ -586,7 +581,8 @@ export function TaskDialog({
   people,
   requests,
   me,
-  onSave,
+  send,
+  adopt,
   onDelete,
   onClose,
 }: {
@@ -596,12 +592,18 @@ export function TaskDialog({
   people: Array<StakeholderOut>
   requests: ReadonlyArray<AccessRequestOut>
   me: string | undefined
-  onSave: (fields: Fields) => Promise<string | null>
+  /** Saves over the copy the form opened on (null for a new task): throws what the API refused with. */
+  send: (base: TaskOut | null, fields: Fields) => Promise<unknown>
+  /** Puts the task a stale save was answered with where the page shows it. */
+  adopt: (current: TaskOut) => Promise<void>
   onDelete: (() => Promise<string | null>) | undefined
   onClose: () => void
 }) {
-  const [fields, setFields] = useState<Fields>(
-    task
+  // The form is based on the task as it was when it opened, and says so if it has moved on.
+  const form = useVersionedForm({
+    record: task ?? undefined,
+    snapshot: fieldsOf,
+    initial: task
       ? fieldsOf(task)
       : {
           title: title ?? "",
@@ -612,8 +614,12 @@ export function TaskDialog({
           assignee: null,
           blockedBy: null,
         },
-  )
-  const set = (patch: Partial<Fields>) => setFields({ ...fields, ...patch })
+    labels: TASK_LABELS,
+    send: (base, fields) => send(base ?? null, fields),
+    adopt,
+    what: "task",
+  })
+  const { fields, set } = form
 
   // A teammate has no name here yet, only an id, so they are kept as "a teammate".
   const teammate = fields.assignee !== null && fields.assignee !== me
@@ -622,9 +628,10 @@ export function TaskDialog({
     <FormDialog
       title={task ? "Edit task" : "New task"}
       description={task ? "Change this task, or delete it." : "Add a task to the board."}
-      save={task ? "Save" : "Add task"}
+      save={form.save(task ? "Save" : "Add task")}
       validate={() => problem(fields)}
-      onSubmit={() => onSave(fields)}
+      onSubmit={form.submit}
+      notice={<StaleNotice stale={form.stale} noun="task" />}
       remove={
         onDelete && {
           label: "Delete task",

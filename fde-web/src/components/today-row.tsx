@@ -4,6 +4,8 @@ import { Ellipsis } from "lucide-react"
 import { Button } from "./ui/button"
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu"
 import type { Tone } from "./page"
+import { RefusalNote } from "./refusal-note"
+import type { Note } from "./refusal-note"
 import type { TodayItem } from "@/lib/api/schemas"
 import { dayOf, daysBetween, dueLabel, waitingLabel } from "@/lib/time"
 import { actionsOf, itemKey } from "@/lib/today"
@@ -67,8 +69,8 @@ export function TodayRow({
   current: boolean
   /** The words for where it is on its way to, while the API has not answered. */
   moving: string | undefined
-  /** Why the API refused the last action on this row. */
-  refused: string | null
+  /** Why the last action on this row did not happen: refused, or held back because the record had changed. */
+  refused: Note | null
   onAct: (action: RowAction) => void
   onOpen: () => void
   onDismiss: () => void
@@ -169,15 +171,11 @@ export function TodayRow({
         </div>
       </div>
       {refused && (
-        <p
-          role="alert"
-          className="relative z-10 mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-destructive"
-        >
-          {refused}
-          <button type="button" className="text-muted-foreground underline" onClick={onDismiss}>
-            Dismiss
-          </button>
-        </p>
+        <RefusalNote
+          note={refused}
+          onDismiss={onDismiss}
+          className="relative z-10 mt-1.5 text-[11px]"
+        />
       )}
     </li>
   )

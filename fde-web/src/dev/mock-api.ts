@@ -45,14 +45,14 @@ const person = (
   name: string,
   title: string | null,
   role: S["StakeholderPart"],
-): S["StakeholderOut"] => ({ id, name, title, role, updated_at: ago(30) })
+): S["StakeholderOut"] => ({ id, name, title, role, updated_at: ago(30), version: 1 })
 
 const system = (
   id: string,
   name: string,
   kind: string | null,
   description: string | null,
-): S["SystemOut"] => ({ id, name, kind, description, updated_at: ago(30) })
+): S["SystemOut"] => ({ id, name, kind, description, updated_at: ago(30), version: 1 })
 
 const member = (user: string, role: S["MemberRole"]): S["MemberOut"] => ({
   user,
@@ -87,6 +87,7 @@ function task(
     blocked_by: extra.blockedBy ?? null,
     created_at: ago(daysAgo + 10),
     updated_at: ago(daysAgo),
+    version: 1,
   }
 }
 
@@ -112,6 +113,7 @@ function access(
     // A revoked request had been granted: the API counts its days to that grant, a few days after it was asked.
     granted_at: status === "granted" ? ago(settled) : status === "revoked" ? ago(asked - 3) : null,
     days_waiting: open ? asked : status === "revoked" ? 3 : asked - settled,
+    version: 1,
   }
 }
 
@@ -138,12 +140,14 @@ const inScope = (id: string, description: string): S["ScopeItemOut"] => ({
   kind: "in",
   description,
   updated_at: ago(30),
+  version: 1,
 })
 const outOfScope = (id: string, description: string): S["ScopeItemOut"] => ({
   id,
   kind: "out",
   description,
   updated_at: ago(30),
+  version: 1,
 })
 
 function criterion(
@@ -154,7 +158,7 @@ function criterion(
   target: number,
   unit: string | null,
 ): S["CriterionOut"] {
-  return { id, description, metric, comparator, target, unit, updated_at: ago(30) }
+  return { id, description, metric, comparator, target, unit, updated_at: ago(30), version: 1 }
 }
 
 /** A scope; `signedOff` names who signed it, and whether it changed since (`current: false`). */
@@ -965,6 +969,55 @@ const LATENCY_MS = import.meta.env.MODE === "test" ? 0 : 150
 const json = (body: unknown, status = 200) => Response.json(structuredClone(body), { status })
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
 
+// ── Versions ───────────────────────────────────────────────────────────────
+// What the API does with the `version` of a whole-record save (#172): every change moves a record's
+// version on, whoever makes it (the API's trigger, so an engine-style change such as unblocking
+// counts); a save that names a version the record has left is a 409 `stale_version` with the record
+// as it stands; one that changes nothing answers with the record unchanged; and a create names none.
+
+type Versioned = { version?: number }
+
+/**
+ * The version a save names: none, a number, or the 400 for a bad one. A create names none, and a
+ * version is a whole number from 0.
+ */
+function claimed(body: { version?: unknown }, adding: boolean): number | undefined | Response {
+  const v = body.version
+  if (v === undefined || v === null) return undefined
+  if (adding || typeof v !== "number" || !Number.isInteger(v) || v < 0)
+    return refuse(400, "invalid_version")
+  return v
+}
+
+/** The same record, changed by something: one version on. */
+const bump = <T extends Versioned>(record: T, change: Partial<T>): T => ({
+  ...record,
+  ...change,
+  version: (record.version ?? 0) + 1,
+})
+
+/** The 409 for a save made on a version the record has left, with the record as it stands. */
+const refuseStale = (current: unknown) => json({ error: "stale_version", current }, 409)
+
+/** Whether the fields named are the same on both: a missing one is none. */
+const sameFields = <T>(a: T, b: T, keys: ReadonlyArray<keyof T>) =>
+  keys.every((key) => (a[key] ?? null) === (b[key] ?? null))
+
+/**
+ * Dev and test only, like everything here: `globalThis.__fdeMockSomeoneElse = true` makes someone
+ * else change the record a versioned save is about, once, just before that save is checked, so the
+ * save finds it moved on and is refused as stale. An object is the change to make (fields of the
+ * record, or for a sign-off the item they add); `true` makes a small default one. Not set in a
+ * production build, which has no mock.
+ */
+function someoneElse(): Record<string, unknown> | null {
+  const g = globalThis as Record<string, unknown>
+  const wanted = g.__fdeMockSomeoneElse
+  if (!wanted) return null
+  delete g.__fdeMockSomeoneElse
+  return wanted === true ? {} : (wanted as Record<string, unknown>)
+}
+
 const projectsOf = (companyId: string) =>
   state.projects.filter((p) => p.project.company === companyId)
 
@@ -1023,6 +1076,15 @@ function today(): S["TodayOut"] {
   return { items }
 }
 
+const TASK_FIELDS = [
+  "title",
+  "status",
+  "blocker",
+  "due_on",
+  "assignee",
+  "waiting_on",
+  "blocked_by",
+] as const
 const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
 let taskCount = 0
 
@@ -1053,6 +1115,8 @@ async function taskRoutes(
   if (!adding && !(method === "PUT" && taskId !== undefined)) return null
   const body = (await request.json().catch(() => null)) as Partial<S["TaskBody"]> | null
   if (!body) return refuse(400, "invalid")
+  const version = claimed(body, adding)
+  if (version instanceof Response) return version
   const status = TASK_STATES.find((one) => one === body.status)
   if (!plain(body.title, 200, false)) return refuse(400, "invalid_title")
   if (!status) return refuse(400, "invalid_status")
@@ -1076,7 +1140,26 @@ async function taskRoutes(
   if (!adding && at < 0) return refuse(404, "not_found")
 
   const now = new Date().toISOString()
-  const before = adding ? undefined : tasks[at]
+  let before = adding ? undefined : tasks[at]
+  if (before && version !== undefined) {
+    const other = someoneElse()
+    if (other) {
+      const to =
+        (other.status as S["TaskState"] | undefined) ??
+        (before.status === "in_progress" ? "todo" : "in_progress")
+      // Someone moved it: what the old status held (a blocker, a person it waited on) goes with it.
+      before = tasks[at] = bump(before, {
+        blocker: to === "blocked" ? (before.blocker ?? "Blocked by a teammate") : null,
+        blocked_by: null,
+        waiting_on: to === "waiting_on_customer" ? before.waiting_on : null,
+        waiting_since: to === "waiting_on_customer" ? (before.waiting_since ?? now) : null,
+        ...other,
+        status: to,
+        updated_at: now,
+      })
+    }
+    if (version !== before.version) return refuseStale(before)
+  }
   const saved: S["TaskOut"] = {
     id: before?.id ?? `tsk_new${++taskCount}`,
     title: body.title!.trim(),
@@ -1090,12 +1173,16 @@ async function taskRoutes(
     blocked_by: blockedBy,
     created_at: before?.created_at ?? now,
     updated_at: now,
+    version: (before?.version ?? 0) + 1,
   }
+  // A save that changes nothing is not a change: the task is answered as it is, version and all.
+  if (before && sameFields(before, saved, TASK_FIELDS)) return json(before)
   if (before) tasks[at] = saved
   else tasks.push(saved)
   return json(saved, adding ? 201 : 200)
 }
 
+const ACCESS_FIELDS = ["description", "system", "owner", "status"] as const
 let accessCount = 0
 let decisionCount = 0
 const ACCESS_STATES = ["requested", "in_progress", "granted", "denied", "revoked"] as const
@@ -1112,6 +1199,8 @@ async function accessRoutes(
   if (!adding && !(method === "PUT" && id !== undefined)) return null
   const body = (await request.json().catch(() => null)) as Partial<S["AccessRequestBody"]> | null
   if (!body) return refuse(400, "invalid")
+  const version = claimed(body, adding)
+  if (version instanceof Response) return version
   const status = ACCESS_STATES.find((one) => one === body.status)
   if (!status) return refuse(400, "invalid_status")
   if (!plain(body.description, 4000, true)) return refuse(400, "invalid_description")
@@ -1136,46 +1225,77 @@ async function accessRoutes(
       status_changed_at: now,
       granted_at: null,
       days_waiting: 0,
+      version: 1,
     }
     records.access.push(created)
     return json(created, 201)
   }
   if (id === undefined) return null
   const at = records.access.findIndex((a) => a.id === id)
-  const before = records.access[at]
+  let before = records.access[at]
   if (!before) return refuse(404, "not_found")
 
   const now = new Date().toISOString()
-  const changed = before.status !== status
-  const open = status === "requested" || status === "in_progress"
-  const changedAt = changed ? now : before.status_changed_at
-  const grantedAt = !changed
-    ? before.granted_at
-    : status === "granted"
-      ? now
-      : open
-        ? null
-        : before.granted_at
-  const saved: S["AccessRequestOut"] = {
-    id,
+  /** The request replaced by `content`: a status change stamps the clock and sets or clears `granted_at`. */
+  const replaced = (
+    from: S["AccessRequestOut"],
+    content: Pick<S["AccessRequestOut"], "description" | "system" | "owner" | "status">,
+  ): S["AccessRequestOut"] => {
+    const changed = from.status !== content.status
+    const open = content.status === "requested" || content.status === "in_progress"
+    const changedAt = changed ? now : from.status_changed_at
+    const grantedAt = !changed
+      ? from.granted_at
+      : content.status === "granted"
+        ? now
+        : open
+          ? null
+          : from.granted_at
+    return {
+      id,
+      ...content,
+      requested_at: from.requested_at,
+      status_changed_at: changedAt,
+      granted_at: grantedAt,
+      days_waiting: Math.floor(
+        (Date.parse(open ? now : (grantedAt ?? changedAt)) - Date.parse(from.requested_at)) /
+          86_400_000,
+      ),
+      version: (from.version ?? 0) + 1,
+    }
+  }
+  if (version !== undefined) {
+    const other = someoneElse()
+    if (other) {
+      const to =
+        (other.status as S["AccessState"] | undefined) ??
+        (before.status === "in_progress" ? "requested" : "in_progress")
+      before = records.access[at] = replaced(before, { ...before, ...other, status: to })
+    }
+    if (version !== before.version) return refuseStale(before)
+  }
+  const content = {
     description: body.description!.trim(),
     system: systemId,
     owner,
     status,
-    requested_at: before.requested_at,
-    status_changed_at: changedAt,
-    granted_at: grantedAt,
-    days_waiting: Math.floor(
-      (Date.parse(open ? now : (grantedAt ?? changedAt)) - Date.parse(before.requested_at)) /
-        86_400_000,
-    ),
   }
+  const saved = replaced(before, content)
+  // A save that changes nothing is not a change: the request is answered as it is, version and all.
+  if (sameFields(before, saved, ACCESS_FIELDS)) return json(before)
+  const changed = before.status !== status
   records.access[at] = saved
   // The API's rules put the tasks blocked on a request that is granted back to do, a moment later.
+  // Each is a change to the task, so its version moves on.
   if (changed && status === "granted")
     records.tasks.forEach((t, i) => {
       if (t.blocked_by !== id) return
-      records.tasks[i] = { ...t, status: "todo", blocker: null, blocked_by: null, updated_at: now }
+      records.tasks[i] = bump(t, {
+        status: "todo",
+        blocker: null,
+        blocked_by: null,
+        updated_at: now,
+      })
     })
   return json(saved)
 }
@@ -1313,6 +1433,8 @@ const validEmail = (value: unknown) =>
   (typeof value === "string" &&
     value.trim().length <= 254 &&
     /^[^\s@]{1,64}@[^\s@.]+(\.[^\s@.]+)+$/.test(value.trim()))
+const STAKEHOLDER_FIELDS = ["name", "role", "title", "email"] as const
+const SYSTEM_FIELDS = ["name", "kind", "description"] as const
 const PARTS = ["sponsor", "champion", "user", "it", "security", "other"] as const
 let recordCount = 0
 
@@ -1410,6 +1532,8 @@ async function projectWrites(
 
 let scopeCount = 0
 const KINDS = ["in", "out"] as const
+const ITEM_FIELDS = ["kind", "description"] as const
+const CRITERION_FIELDS = ["description", "metric", "comparator", "target", "unit"] as const
 const COMPARATORS = ["at_least", "at_most"] as const
 
 /** Every change to the items or criteria moves the version on, and the last sign-off no longer covers it. */
@@ -1420,8 +1544,8 @@ function bumped(current: S["ScopeOut"]) {
 
 /**
  * A project's scope writes, with the API's rules: each item and criterion on its own, a `PUT` that
- * replaces it, a version bumped by every change (even one that changes nothing), one sign-off per
- * version, and no sign-off of an empty scope. All of them need `work`, which the caller has here.
+ * replaces it, the record's version and the scope's bumped by every change (a save that changes nothing
+ * is not one), a stale record version refused, one sign-off per version, and no sign-off of an empty scope. All of them need `work`, which the caller has here.
  */
 async function scopeRoutes(
   method: string,
@@ -1435,6 +1559,26 @@ async function scopeRoutes(
   if (collection === "sign-offs" && method === "POST" && id === undefined) {
     const body = await readBody(request)
     if (!body || typeof body.stakeholder !== "string") return refuse(400, "invalid")
+    const version = claimed(body, false)
+    if (version instanceof Response) return version
+    // The version is checked first: a scope that moved on since it was read is never signed.
+    if (version !== undefined) {
+      const other = someoneElse()
+      if (other) {
+        current.items.push({
+          id: `itm_new${++scopeCount}`,
+          kind: "in",
+          description:
+            typeof other.description === "string"
+              ? other.description
+              : "Added by a teammate while this was open.",
+          updated_at: now,
+          version: 1,
+        })
+        bumped(current)
+      }
+      if (version !== current.version) return refuseStale(current)
+    }
     if (current.items.length === 0 && current.criteria.length === 0)
       return refuse(409, "rejected_empty_scope")
     if (!found.stakeholders.some((x) => x.id === body.stakeholder))
@@ -1463,6 +1607,8 @@ async function scopeRoutes(
   if (!adding && !(method === "PUT" && id !== undefined)) return null
   const body = await readBody(request)
   if (!body) return refuse(400, "invalid")
+  const version = claimed(body, adding)
+  if (version instanceof Response) return version
   if (!plain(body.description, 4000, true)) return refuse(400, "invalid_description")
   let saved: S["ScopeItemOut"] | S["CriterionOut"]
   if (collection === "items") {
@@ -1473,6 +1619,7 @@ async function scopeRoutes(
       kind,
       description: (body.description as string).trim(),
       updated_at: now,
+      version: 1,
     }
   } else {
     const comparator = COMPARATORS.find((c) => c === body.comparator)
@@ -1490,9 +1637,37 @@ async function scopeRoutes(
       target: body.target,
       unit: typeof body.unit === "string" ? body.unit.trim() : null,
       updated_at: now,
+      version: 1,
     }
   }
   if (!adding && at < 0) return refuse(404, "not_found")
+  if (!adding) {
+    let before = list[at] as S["ScopeItemOut"] & S["CriterionOut"]
+    if (version !== undefined) {
+      const other = someoneElse()
+      if (other) {
+        // Someone else's change moves the record's version and the scope's.
+        const change: Partial<typeof before> =
+          collection === "items"
+            ? { description: `${before.description} (edited by a teammate)` }
+            : { target: before.target + 5 }
+        before = list[at] = { ...bump(before, change), ...other, updated_at: now } as typeof before
+        bumped(current)
+      }
+      if (version !== before.version) return refuseStale(before)
+    }
+    saved.version = (before.version ?? 0) + 1
+    // A save that changes nothing is not a change: the record is answered as it is, and the scope's
+    // version and its sign-off stand.
+    if (
+      sameFields(
+        before,
+        saved as typeof before,
+        collection === "items" ? ITEM_FIELDS : CRITERION_FIELDS,
+      )
+    )
+      return json(before)
+  }
   if (adding) list.push(saved)
   else list[at] = saved
   bumped(current)
@@ -1515,12 +1690,13 @@ async function stakeholderRoutes(
       return refuse(409, "conflict")
     found.stakeholders.splice(at, 1)
     // What named them is left naming no one.
+    // (An `on delete set null` is a change to the record, so its version moves on.)
     for (const { records } of projectsOf(found.company.id)) {
       records.access.forEach((a, i) => {
-        if (a.owner === id) records.access[i] = { ...a, owner: null }
+        if (a.owner === id) records.access[i] = bump(a, { owner: null })
       })
       records.tasks.forEach((t, i) => {
-        if (t.waiting_on === id) records.tasks[i] = { ...t, waiting_on: null }
+        if (t.waiting_on === id) records.tasks[i] = bump(t, { waiting_on: null })
       })
     }
     return noContent()
@@ -1529,13 +1705,25 @@ async function stakeholderRoutes(
   if (!adding && !(method === "PUT" && id !== undefined)) return null
   const b = await readBody(request)
   if (!b) return refuse(400, "invalid")
+  const version = claimed(b, adding)
+  if (version instanceof Response) return version
   if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
   if (badOptional(b.title, 200, false)) return refuse(400, "invalid_title")
   if (!validEmail(b.email)) return refuse(400, "invalid_email")
   const role = b.role === undefined ? "other" : PARTS.find((one) => one === b.role)
   if (!role) return refuse(400, "invalid_role")
-  const before = adding ? undefined : found.stakeholders[at]
+  let before = adding ? undefined : found.stakeholders[at]
   if (!adding && !before) return refuse(404, "not_found")
+  if (before && version !== undefined) {
+    const other = someoneElse()
+    if (other)
+      before = found.stakeholders[at] = bump(before, {
+        title: "Changed by a teammate",
+        ...other,
+        updated_at: new Date().toISOString(),
+      })
+    if (version !== before.version) return refuseStale(before)
+  }
   const email = trimmed(b.email)
   const saved: S["StakeholderOut"] = {
     id: before?.id ?? `stk_new${++recordCount}`,
@@ -1547,7 +1735,10 @@ async function stakeholderRoutes(
     digest_unsubscribed_at:
       email === (before?.email ?? null) ? (before?.digest_unsubscribed_at ?? null) : null,
     updated_at: new Date().toISOString(),
+    version: (before?.version ?? 0) + 1,
   }
+  // A save that changes nothing is not a change: the stakeholder is answered as it is, version and all.
+  if (before && sameFields(before, saved, STAKEHOLDER_FIELDS)) return json(before)
   if (before) found.stakeholders[at] = saved
   else found.stakeholders.push(saved)
   return json(saved, adding ? 201 : 200)
@@ -1567,7 +1758,7 @@ async function systemRoutes(
     found.systems.splice(at, 1)
     for (const { records } of projectsOf(found.company.id))
       records.access.forEach((a, i) => {
-        if (a.system === id) records.access[i] = { ...a, system: null }
+        if (a.system === id) records.access[i] = bump(a, { system: null })
       })
     return noContent()
   }
@@ -1575,18 +1766,33 @@ async function systemRoutes(
   if (!adding && !(method === "PUT" && id !== undefined)) return null
   const b = await readBody(request)
   if (!b) return refuse(400, "invalid")
+  const version = claimed(b, adding)
+  if (version instanceof Response) return version
   if (!plain(b.name, 200, false)) return refuse(400, "invalid_name")
   if (badOptional(b.kind, 200, false)) return refuse(400, "invalid_kind")
   if (badOptional(b.description, 4000, true)) return refuse(400, "invalid_description")
-  const before = adding ? undefined : found.systems[at]
+  let before = adding ? undefined : found.systems[at]
   if (!adding && !before) return refuse(404, "not_found")
+  if (before && version !== undefined) {
+    const other = someoneElse()
+    if (other)
+      before = found.systems[at] = bump(before, {
+        description: "Changed by a teammate.",
+        ...other,
+        updated_at: new Date().toISOString(),
+      })
+    if (version !== before.version) return refuseStale(before)
+  }
   const saved: S["SystemOut"] = {
     id: before?.id ?? `sys_new${++recordCount}`,
     name: (b.name as string).trim(),
     kind: trimmed(b.kind),
     description: trimmed(b.description),
     updated_at: new Date().toISOString(),
+    version: (before?.version ?? 0) + 1,
   }
+  // A save that changes nothing is not a change: the system is answered as it is, version and all.
+  if (before && sameFields(before, saved, SYSTEM_FIELDS)) return json(before)
   if (before) found.systems[at] = saved
   else found.systems.push(saved)
   return json(saved, adding ? 201 : 200)

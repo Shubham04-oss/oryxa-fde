@@ -133,10 +133,12 @@ describe("scope items", () => {
     await userEvent.click(await screen.findByRole("button", { name: /^Edit: Fraud scoring/ }))
     const box = await dialog("Edit scope item")
     // A teammate rewrites it, and the page reads it again behind the form.
-    await api.updateScopeItem(FNOL, "itm_a4" as never, {
-      kind: "out",
-      description: "Fraud scoring and referral",
-    })
+    await api.updateScopeItem(
+      FNOL,
+      "itm_a4" as never,
+      { kind: "out", description: "Fraud scoring and referral" },
+      1,
+    )
     wire.sent = []
     await click(box, "Save")
     await closed()
@@ -579,7 +581,7 @@ describe("recording a sign-off", () => {
     const box = await dialog("Record sign-off")
     await userEvent.selectOptions(field(box, "Signed off by"), "stk_a2")
     // A teammate signs this version while the dialog is open: the version does not move.
-    await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"))
+    await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"), (await api.scope(FNOL)).version)
     await click(box, "Record sign-off")
     expect(await within(box).findByRole("alert")).toHaveTextContent(
       "This version of the scope has already been signed off",
@@ -660,7 +662,7 @@ describe("the API mock's scope routes", () => {
       status: 400,
     })
     // Not there: 404, after the body has been checked.
-    expect(await refused(api.updateScopeItem(FNOL, "itm_nope" as never, item))).toMatchObject({
+    expect(await refused(api.updateScopeItem(FNOL, "itm_nope" as never, item, 1))).toMatchObject({
       status: 404,
     })
     expect(await refused(api.removeCriterion(FNOL, "crt_nope" as never))).toMatchObject({
@@ -668,15 +670,30 @@ describe("the API mock's scope routes", () => {
     })
   })
 
-  it("counts every save as a change, even one that says the same, and clears nothing it should keep", async () => {
+  it("does not count a save that says the same as a change, and moves the version of one that does", async () => {
     resetMockApi()
     const before = (await api.project(DISPATCH)).scope
     expect(before).toMatchObject({ signed_off: true })
     const first = before.items[0]!
-    await api.updateScopeItem(DISPATCH, first.id, {
-      kind: first.kind,
-      description: first.description,
+    const same = await api.updateScopeItem(
+      DISPATCH,
+      first.id,
+      { kind: first.kind, description: first.description },
+      first.version,
+    )
+    // Answered as it is: the item's version, the scope's and the sign-off all stand.
+    expect(same).toEqual(first)
+    expect((await api.project(DISPATCH)).scope).toMatchObject({
+      version: before.version,
+      signed_off: true,
     })
+    const changed = await api.updateScopeItem(
+      DISPATCH,
+      first.id,
+      { kind: first.kind, description: `${first.description}, in full` },
+      first.version,
+    )
+    expect(changed.version).toBe(first.version + 1)
     const after = (await api.project(DISPATCH)).scope
     expect(after.version).toBe(before.version + 1)
     expect(after).toMatchObject({ signed_off: false, sign_off: { version: before.version } })
@@ -684,21 +701,28 @@ describe("the API mock's scope routes", () => {
 
   it("signs one version once, refuses an empty scope and a stranger, and covers the version it signed", async () => {
     resetMockApi()
-    expect(await refused(api.signOffScope(CLAIMS, StakeholderId.parse("stk_k1")))).toMatchObject({
-      status: 409,
-      code: "rejected_empty_scope",
-    })
-    expect(await refused(api.signOffScope(FNOL, StakeholderId.parse("stk_k1")))).toMatchObject({
+    expect(await refused(api.signOffScope(CLAIMS, StakeholderId.parse("stk_k1"), 0))).toMatchObject(
+      {
+        status: 409,
+        code: "rejected_empty_scope",
+      },
+    )
+    const read = (await api.scope(FNOL)).version
+    expect(
+      await refused(api.signOffScope(FNOL, StakeholderId.parse("stk_k1"), read)),
+    ).toMatchObject({
       status: 400,
       code: "invalid_stakeholder",
     })
-    const signed = await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"))
+    const signed = await api.signOffScope(FNOL, StakeholderId.parse("stk_a1"), read)
     expect(signed).toMatchObject({ stakeholder: "stk_a1", recorded_by: "usr_riya" })
     expect((await api.project(FNOL)).scope).toMatchObject({
       signed_off: true,
       sign_off: { version: signed.version },
     })
-    expect(await refused(api.signOffScope(FNOL, StakeholderId.parse("stk_a2")))).toMatchObject({
+    expect(
+      await refused(api.signOffScope(FNOL, StakeholderId.parse("stk_a2"), read)),
+    ).toMatchObject({
       status: 409,
       message: expect.stringContaining("already been signed off") as string,
     })

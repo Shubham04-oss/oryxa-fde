@@ -12,15 +12,16 @@ import type {
 } from "./api/schemas"
 import { at, checkName, checkText } from "./records"
 import type { Problem } from "./records"
+import type { Labels } from "./stale"
 import { dayOf, localDay, shortDate, waitingLabel } from "./time"
-import { ACCESS_LABEL } from "./today"
+import { ACCESS_LABEL, accessActions } from "./today"
 import type { Tone } from "@/components/page"
 
 // What the Access and Decisions cards say and send (DESIGN.md §3): what is still not granted, who at
 // the customer holds it up and for how long; the whole-record bodies the API takes; and how a saved
 // request reaches the page, Today and the stage checklist. Today's row actions share `commitAccess`.
 
-export type AccessBody = components["schemas"]["AccessRequestBody"]
+export type AccessBody = Omit<components["schemas"]["AccessRequestBody"], "version">
 export type DecisionBody = components["schemas"]["DecisionBody"]
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
@@ -47,13 +48,24 @@ export type AccessFields = {
   system: string | null
   /** A stakeholder id of the company, or none. */
   owner: string | null
+  /** Not in the form: moved from the row. It is here so a stale save can say it changed. */
+  status: AccessState
 }
 
 export const accessFields = (a?: AccessRequestOut): AccessFields => ({
   description: a?.description ?? "",
   system: a?.system ?? null,
   owner: a?.owner ?? null,
+  status: a?.status ?? "requested",
 })
+
+/** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
+export const ACCESS_LABELS: Labels<AccessFields> = {
+  description: "description",
+  system: "system",
+  owner: "owner",
+  status: "status",
+}
 
 export const accessProblem = (f: AccessFields): Problem | null =>
   at(
@@ -87,23 +99,54 @@ export function accessChanged(opened: AccessRequestOut, f: AccessFields) {
 }
 
 /**
- * An edit's body, every field, because the API's `PUT` replaces the request. What the form
- * changed (against the copy taken when it opened) is the form's; everything else, the status
- * included, is the request as it is now (`now`), so a status moved while the form was open is
- * not undone by saving it.
+ * An edit's body, every field, because the API's `PUT` replaces the request. The form holds them all:
+ * the copy it opened on (or, after a stale save, the current request) with the person's changes. The
+ * status is the copy's: the form does not change it. It is sent with that copy's version, so a
+ * request that has moved on since is refused rather than overwritten.
  */
-export function accessEditBody(
-  opened: AccessRequestOut,
-  now: AccessRequestOut | undefined,
-  f: AccessFields,
-): AccessBody {
-  const was = accessFields(opened)
-  const live = now ?? opened
+export const accessEditBody = (f: AccessFields): AccessBody => ({
+  description: f.description.trim(),
+  system: f.system,
+  owner: f.owner,
+  status: f.status,
+})
+
+// ── A move that did not happen ─────────────────────────────────────────────
+
+/**
+ * A status change that did not happen: the API refused it (`refused`), the request had changed since
+ * the page read it (`stale`: `access` is then the request as it now stands), or someone had already
+ * made the change (`already`). Only a stale change is offered again.
+ */
+export type AccessRefusal = {
+  scope: ProjectScope
+  access: AccessRequestOut
+  to: AccessState
+  why: string
+  kind: "refused" | "stale" | "already"
+}
+
+/** What the refusal says. `name` says which request, for a place that is not the request's own row. */
+export function accessRefusalNote(
+  { access, to, why, kind }: AccessRefusal,
+  name: string | null,
+  again: () => void,
+) {
+  const it = name ? `“${name}”` : "it"
+  const text =
+    kind === "already"
+      ? `Someone already changed ${it} to ${ACCESS_LABEL[to]}.`
+      : kind === "stale"
+        ? `${name ? `“${name}”` : "This request"} changed since you last read it, so it was not changed. It is now ${ACCESS_LABEL[access.status]}.`
+        : `Couldn't change ${it} to ${ACCESS_LABEL[to]}. ${why}`
+  // The offer is the move's own words on the request as it now stands: "Mark granted", "Ask again".
+  // A move the request's row would not offer now (marking a granted request denied) is not offered.
+  const { primary, rest } = accessActions(access.status)
+  const label = [primary, ...rest].find((action) => action.to === to)?.label
   return {
-    description: f.description.trim() !== was.description ? f.description.trim() : live.description,
-    system: f.system !== was.system ? f.system : (live.system ?? null),
-    owner: f.owner !== was.owner ? f.owner : (live.owner ?? null),
-    status: live.status,
+    text,
+    held: kind !== "refused",
+    again: kind === "stale" && label ? { label, run: again } : undefined,
   }
 }
 

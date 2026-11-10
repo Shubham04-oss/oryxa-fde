@@ -3,7 +3,8 @@ import type { FormEvent, ReactNode, Ref } from "react"
 import { Button } from "./ui/button"
 import { DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
 import { FIELD, Footer, Labelled } from "./task-move"
-import type { Problem } from "@/lib/records"
+import { isHeld } from "@/lib/records"
+import type { HELD, Problem } from "@/lib/records"
 
 // The form every create and edit in the workspace opens (DESIGN.md §2, Dialogs): a centred dialog
 // with its fields, the API's answer to Save, and, on an edit, a delete that asks first. Nothing is
@@ -52,6 +53,7 @@ export function FormDialog({
   onCancel,
   wide,
   after,
+  notice,
   children,
 }: {
   title: string
@@ -61,8 +63,11 @@ export function FormDialog({
   save: string
   /** What is wrong before anything is sent, in words, or null. The API checks again. */
   validate?: () => Problem | null
-  /** Null when the API confirmed the save, or why it did not. A problem that names a field marks it. */
-  onSubmit: () => Promise<Problem | null>
+  /**
+   * Null when the API confirmed the save, or why it did not. A problem that names a field marks it.
+   * `HELD` when nothing was saved and the form (`notice`) says why.
+   */
+  onSubmit: () => Promise<Problem | typeof HELD | null>
   remove?: Removal
   /** Closes the dialog: after a save the API confirmed, and by default for Cancel. */
   onClose: () => void
@@ -76,6 +81,8 @@ export function FormDialog({
    * `<form>`, because a submit in a nested form would otherwise reach this one.
    */
   after?: ReactNode
+  /** Said above the buttons, in the form: a save the API held back because the record moved on. */
+  notice?: ReactNode
   children: ReactNode
 }) {
   const [error, setError] = useState<{ message: string; field?: string } | null>(null)
@@ -96,11 +103,12 @@ export function FormDialog({
     }
   }
 
-  async function run(work: () => Promise<Problem | null>) {
+  async function run(work: () => Promise<Problem | typeof HELD | null>) {
     setBusy(true)
     const failed = await work()
     setBusy(false)
-    if (failed) show(failed)
+    if (isHeld(failed)) setError(null)
+    else if (failed) show(failed)
     else onClose()
   }
 
@@ -119,7 +127,11 @@ export function FormDialog({
       <form ref={form} noValidate onSubmit={submit} className="grid gap-3.5 text-xs">
         <DialogTitle className="text-[13px] font-semibold">{title}</DialogTitle>
         <DialogDescription className="sr-only">{description}</DialogDescription>
-        <FormProblem value={{ field: error?.field, id: errorId }}>{children}</FormProblem>
+        {/* The notice is in the problem's reach too: a sign-off's confirmation is a field in it. */}
+        <FormProblem value={{ field: error?.field, id: errorId }}>
+          {children}
+          {notice}
+        </FormProblem>
         {remove && deleting ? (
           <div
             role="group"

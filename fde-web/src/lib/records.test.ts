@@ -98,6 +98,7 @@ describe("project and record forms", () => {
       email: "mara@example.com",
       digest_unsubscribed_at: at,
       updated_at: at,
+      version: 1,
     }
     // Change one field: the others go back as they were.
     const fields = { ...stakeholderFields(person), title: "COO" }
