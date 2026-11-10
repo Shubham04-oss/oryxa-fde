@@ -22,24 +22,24 @@ Every colour is written once, as a token in `src/styles.css`. Screens read token
 utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--token)` in
 `src/shell.css`. Do not write a hex, `rgb()` or `hsl()` anywhere else.
 
-| Token             | Light     | Dark      | Use                                                                                                                                 |
-| ----------------- | --------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                         |
-| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                               |
-| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                 |
-| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                          |
-| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                      |
-| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                     |
-| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                     |
-| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                          |
-| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                 |
-| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                    |
-| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                               |
-| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                  |
-| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                          |
-| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                         |
-| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, a signed-off scope that has changed, a stage move held up by open checklist items. Nothing else. |
-| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                       |
+| Token             | Light     | Dark      | Use                                                                                                                                                                                     |
+| ----------------- | --------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                             |
+| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                   |
+| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                     |
+| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                              |
+| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                          |
+| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                         |
+| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                         |
+| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                              |
+| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                     |
+| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                        |
+| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                   |
+| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                      |
+| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                              |
+| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                             |
+| `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items. Nothing else. |
+| `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                           |
 
 - Every grey is neutral (R=G=B). No decorative accent.
 - A status is a dot and words, never colour alone.
@@ -64,7 +64,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   or the project's name.
 - **Dialogs.** A launcher (**Jump to**) sits 12vh from the top, like a command palette. A form or a
   prompt (New task, Edit task, the Blocked and Waiting questions, and the company, project, stakeholder,
-  system and scope forms) is centred on the screen: 560px
+  system, scope, access request and decision forms) is centred on the screen: 560px
   wide at most, 16px from every edge, scrolling inside itself when it is taller than the screen.
   Both sit on a scrim and close with Escape.
 - **Jump to** is a Base UI dialog: type to filter companies and projects (every word must match the
@@ -94,7 +94,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     blocked…**, **Waiting on the customer…** and **Back to to do** (minus the status it is in).
     Those are the board's five moves, from the same code (`useTaskMover`, `MoveAsk`, `board.ts`).
   - **Access request rows** change status through `PUT .../access-requests/{id}`, which replaces the
-    request, so everything but the status is sent as it was. The API puts no limit on which status
+    request (the project page's Access card uses the same mover, `useAccessMover`, and the same moves,
+    `accessActions`), so everything but the status is sent as it was. The API puts no limit on which status
     follows which. Open (requested, in progress): **Mark granted**, with **Mark in progress**,
     **Mark denied** and **Back to requested** in the menu. Denied or revoked: **Ask again** (back to
     requested, which moves it under Waiting), with **Mark in progress** and **Mark granted**. A
@@ -137,9 +138,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   checklist** (see **The stage checklist** below), the **Board** (the one card that
   takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
   with the others), Scope beside Success
-  criteria, then Access, Agent runs and Decisions, then **Assigned**. Both are written in place
-  (see **Scope and success criteria** below). Access and waiting tasks
-  name people and systems from the company's records. A project with nothing written in it yet
+  criteria, then Access, Agent runs and Decisions, then **Assigned**. Scope and criteria are written
+  in place (see **Scope and success criteria** below), Access and Decisions too (see **Access and
+  decisions** below). Access and waiting tasks name people and systems from the company's records. A project with nothing written in it yet
   starts with a dashed note, **A new project. Start here.**, that says to name the people at the
   customer, agree the scope, and add tasks as the work takes shape.
 - **Writes: companies, projects and what they hold.** One form, `FormDialog` (`form-dialog.tsx`), is
@@ -226,7 +227,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     one at the customer is named, and **Add to scope** first when the scope is empty. Out of scope
     listed: **Add out of scope** (the scope dialog, on that side). Criteria set: **Add criterion**
     (the criterion dialog). Access granted: **Go to Access**, which scrolls to the Access card and
-    focuses it (access is changed from Today, not here). An eval suite on every criterion, and every
+    focuses it, or **Request access** (the Access card's form) when no request exists. The API counts
+    no request as met ("a project may need no access"), so that button only shows to a view that has
+    not caught up. An eval suite on every criterion, and every
     criterion met: **Go to criteria** (the Success criteria card, focused), or **Add criterion** when
     there are none. A meeting note on the project: nothing to press, and the line says notes are not
     written in this app yet. A key the page does not know shows the API's label and nothing to press.
@@ -240,6 +243,60 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     change to the company's people all read it again, with in-flight reads cancelled first, as every
     other write on this page does. It is shown only for the stage it names, so the old stage's list is
     never shown under the new stage. A task is not a checklist input, so a task move does not read it.
+- **Access and decisions.** Where engagements stall, and what was agreed. Both cards sit under the
+  scope cards, in the page column, and need only `work` on the project like the scope does.
+  - **Access answers three things first.** A quiet well above the rows says **Not granted** ("2 of 3"),
+    **Held up by** (the owners of what is not granted, most requests first, "Tomas Becker (2), Ines
+    Moreau"; "No one named" for a request nobody owns) and **Longest wait** (the oldest open request,
+    in days, with the amber dot from a week, `LONG_WAIT_DAYS`). With everything granted it is one line
+    with a green check instead. Amber is for denied, revoked and a long wait only.
+  - **Rows** are in the order the FDE chases: denied or revoked first, then open (requested, in
+    progress), then granted, the oldest request first in each. A row has what is asked, **Owner:** the
+    stakeholder (or "No one at the customer is named to grant it"), the system and the day it was
+    requested, one line for its state (**In progress, waiting 11 days**; **Denied 5 Nov 2026, after 4
+    days**; **Granted 3 Nov 2026, after 3 days**) and, when tasks name it as their blocker, **Blocks 2
+    tasks:** with their titles. The days come from the API's `days_waiting` (from the request until it
+    was settled, or until now while it is open), so a settled request's number stops.
+  - **Moves.** The first button is the move most likely wanted, as on Today (**Mark granted** for an
+    open request, **Ask again** for a denied or revoked one); the round dots menu holds the rest and
+    **Edit request**. A granted request has no button, only the menu (**Mark revoked**, **Ask again**),
+    so it is not undone by accident. The API puts no limit on which status follows which. A moving row
+    stays where it is, dimmed, its state line saying "Moving to Granted…", and moves to where its new
+    status sorts only when the API answers; a refusal is said in the row, in red, with Dismiss. When
+    the move was a grant, the checklist is read again at once and the project once more a few seconds
+    later, because the API puts the tasks blocked on it back to do by an event.
+  - **Request access** (header button, or the checklist's) asks **What access is needed**, **Which
+    system** (the company's, or none) and **Who at the customer owns it** (a stakeholder, or no one
+    yet), and starts the request as requested: the API takes a new request as requested or in
+    progress only (409 otherwise). **Edit request** changes those three fields. Its status is not in
+    the form: it is changed from the row.
+  - **Edits are whole-record `PUT`s** (the API replaces the request): all four fields are sent, the
+    form's changes compared with the copy taken when it opened, and the rest, status included, taken
+    from the request as the page has it now, so a status moved while the form was open is not undone
+    by saving it. A save that changes nothing sends nothing. There is no way to remove a request: the
+    API has no delete.
+  - **Tasks blocked by a request.** `blocked_by` takes one of this project's access requests (any
+    status), only while the task is blocked; when the request is granted the API puts the tasks
+    blocked on it back to do, by an event. The blocked prompt, on the board and on Today, and the task
+    form of a blocked task offer **Blocked by an access request** under the blocker: the project's
+    requests that are not granted (requested, in progress, denied, revoked), or "None, something
+    else"; a task that already names a granted one keeps it. With no request, no field. Today reads
+    the project's requests when its prompt opens.
+  - **Decisions** are a log: newest first by the day they were made, each with what was decided, why,
+    who decided (a name, often someone at the customer) and when. **Log a decision** asks all four
+    (the day defaults to today and cannot be a day to come; today is left to the API's own timestamp,
+    an earlier day is sent as noon where the FDE is). The API's log is append-only, so a decision
+    cannot be edited or removed, and the form says so before it saves. A decision that was promoted
+    from a discussion says **Promoted from a discussion about the access request "Telematics
+    export"**: the API names the decision on the thread, not the thread on the decision, so the page
+    reads the project's threads and matches them; the subject is named from the records the page has,
+    never by id, and nothing is said when the threads cannot be read.
+  - **Field problems.** `FormDialog` marks the field a problem is about (`aria-invalid`, described by
+    the alert) and moves focus to it; a refusal from the API that names a field (`invalid_owner`,
+    `invalid_rationale`, …) does the same, and nothing typed is lost. A problem about no field stays
+    the dialog's alert.
+  - **Focus.** When a dialog closes, focus goes back to the row that opened it, or to **Request
+    access** or **Log a decision**. After a move is confirmed it stays on the row, wherever that now sorts.
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
@@ -344,7 +401,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   available", so it cannot tell "not yours" from "does not exist".
 - Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
   `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
-  `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
+  `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
+  remove), `accessRequests` and `threads` (read when a prompt or the decisions need them), `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
   `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`, and `moveStage(scope, to, reason?)`
   with `stageChecklist(scope)`. A forward move that the API refuses for open items throws a
   `ChecklistOpenError`, which carries the items the API found open. The API's refusals carry a
@@ -362,7 +420,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   invented sample data only. Setting `globalThis.__fdeMockFailWrites = true` there (in the console,
   or a test) makes every write answer 503, so the failed-save states can be seen; the switch lives
   in the mock and ships nowhere. The mock answers every write route of this page with the API's
-  validation and permissions (the scope's too: the version bump on every save, one sign-off per
+  validation and permissions (an access request starts requested or in progress, `blocked_by` is one of
+  the project's, the decisions log takes no edit, and a decision's day is parsed as RFC 3339) (the scope's too: the version bump on every save, one sign-off per
   version, no sign-off of an empty scope) (a lead or admin manages, any member works, anything else is a 403):
   The mock answers the stage checklist and the stage move with the API's rules
   (`CHECKS` in `mock-api.ts`: the same keys, words and tests as `oryxa-fde-store`'s `checklist.rs`,

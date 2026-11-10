@@ -243,6 +243,35 @@ export const DecisionOut = z.object({
 })
 export type DecisionOut = z.infer<typeof DecisionOut>
 
+/** What a thread is about (`SubjectKind`): a record of the project or company, or a canvas shape. */
+export const SubjectKind = z.enum([
+  "stakeholder",
+  "system",
+  "document",
+  "task",
+  "decision",
+  "access_request",
+  "scope_item",
+  "criterion",
+  "meeting_note",
+  "shape",
+])
+export type SubjectKind = z.infer<typeof SubjectKind>
+
+/** A discussion on the project. The web only reads where a thread ended: `decision` is the one it was promoted to. */
+export const ThreadOut = z.object({
+  id: z.string(),
+  subject: z.object({ kind: SubjectKind, id: z.string() }),
+  created_by: z.string(),
+  created_at: instant,
+  last_comment_at: instant,
+  comments: z.int().min(0),
+  asked_at: instant.nullish(),
+  customer_question: optionalText,
+  decision: DecisionId.nullish(),
+})
+export type ThreadOut = z.infer<typeof ThreadOut>
+
 const Named = <T extends z.ZodType<string>>(ref: T) => z.object({ id: ref, name: z.string() })
 
 /** Open work across every project the FDE is on (`GET /v1/today`), tagged by `kind`. */

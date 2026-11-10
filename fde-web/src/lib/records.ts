@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query"
-import { SAFE_TEXT, queries } from "./api/client"
+import { ApiError, SAFE_TEXT, queries } from "./api/client"
 import type { components } from "./api/fde-api.gen"
 import type {
   CompanyId,
@@ -195,6 +195,13 @@ export const canManage = (me: Me | undefined, role: CompanyRole | null | undefin
 
 // ── Saving ─────────────────────────────────────────────────────────────────
 
+/** What is wrong, in words; `field` names the field it is about, so a form can mark it and move focus there. */
+export type Problem = string | { message: string; field: string }
+
+/** `message` is about `field`, or there is no problem. */
+export const at = (field: string, message: string | null): Problem | null =>
+  message === null ? null : { message, field }
+
 /** What a dialog's Save does: null when the API confirmed it, or why it did not, in words. */
 export async function attempt(work: () => Promise<unknown>, what: string) {
   try {
@@ -202,6 +209,22 @@ export async function attempt(work: () => Promise<unknown>, what: string) {
     return null
   } catch (e) {
     return reason(e, what)
+  }
+}
+
+/** `attempt`, for a form whose refusals are about a field: the API's code says which one (`fieldOf`). */
+export async function attemptAt(
+  work: () => Promise<unknown>,
+  what: string,
+  fieldOf: Record<string, string>,
+): Promise<Problem | null> {
+  try {
+    await work()
+    return null
+  } catch (e) {
+    const message = reason(e, what)
+    const field = e instanceof ApiError ? fieldOf[e.code] : undefined
+    return field ? { message, field } : message
   }
 }
 

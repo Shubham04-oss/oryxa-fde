@@ -182,6 +182,176 @@ function checklistScreens() {
 const FINE = ["1440", "1024"]
 const ONE = { sizes: ["1440", "390"], themes: ["light"] }
 
+// Access and decisions (DESIGN.md §3). Each state scrolls its card to the top of the viewport, as a person
+// who went to it would see it. Kestrel's dispatch project has a denied request that blocks a task, one in
+// progress and one granted; Brightwater's referrals has two open requests, one for 11 days (a long wait).
+const COBALT_OUTAGE = "/companies/cmp_cobalt/projects/prj_cobalt_outage"
+const accessCard = (page) => page.getByRole("region", { name: "Access", exact: true })
+const decisionsCard = (page) => page.getByRole("region", { name: "Decisions", exact: true })
+const toCard = (find) => (page) =>
+  find(page).evaluate((el) => {
+    el.scrollIntoView({ block: "start" })
+    document.querySelector(".app-canvas")?.scrollBy(0, -16)
+  })
+const accessRow = (page, text) => accessCard(page).getByRole("listitem").filter({ hasText: text })
+async function openAccessForm(page) {
+  await toCard(accessCard)(page)
+  await accessCard(page).getByRole("button", { name: "Request access", exact: true }).click()
+  await dialog(page, "Request access").waitFor()
+}
+async function openDecisionForm(page) {
+  await toCard(decisionsCard)(page)
+  await decisionsCard(page).getByRole("button", { name: "Log a decision", exact: true }).click()
+  await dialog(page, "Log a decision").waitFor()
+}
+async function fillAccessForm(page) {
+  const box = dialog(page, "Request access")
+  await box.getByLabel("What access is needed").fill("Driver hours, read only")
+  await box.getByLabel("Which system").selectOption({ label: "Planning database" })
+  await box
+    .getByLabel("Who at the customer owns it")
+    .selectOption({ label: "Ines Moreau, Dispatch lead, Ghent" })
+  return box
+}
+async function fillDecisionForm(page) {
+  const box = dialog(page, "Log a decision")
+  await box.getByLabel("What was decided").fill("Start with the Ghent depot only")
+  await box
+    .getByLabel("Why")
+    .fill("It has the cleanest order data.\nThe rest follow once plans are accepted.")
+  await box.getByLabel("Who decided").fill("Mara Lindqvist")
+  return box
+}
+const ACCESS = { ready: (page) => accessCard(page), full: false }
+const DECISIONS = { ready: (page) => decisionsCard(page), full: false }
+
+function accessScreens() {
+  return [
+    // Denied first, with the task it blocks; the glance says what is left, who holds it and for how long.
+    { name: "access-chasing", path: DISPATCH, ...ACCESS, act: toCard(accessCard) },
+    // Two open requests, one waiting 11 days: the long wait is amber.
+    { name: "access-long-wait", path: BW_REFERRALS, ...ACCESS, act: toCard(accessCard) },
+    // Everything granted is one quiet line.
+    { name: "access-all-granted", path: COBALT_OUTAGE, ...ACCESS, act: toCard(accessCard) },
+    { name: "access-empty", path: KESTREL_CLAIMS, ...ACCESS, act: toCard(accessCard) },
+    {
+      name: "access-menu",
+      path: DISPATCH,
+      ...ACCESS,
+      act: async (page) => {
+        await toCard(accessCard)(page)
+        await accessRow(page, "Depot rules")
+          .getByRole("button", { name: /^Actions for/ })
+          .click()
+        await page.getByRole("menu").waitFor()
+      },
+    },
+    {
+      name: "access-request-form",
+      path: DISPATCH,
+      ...ACCESS,
+      act: async (page) => {
+        await openAccessForm(page)
+        await fillAccessForm(page)
+      },
+    },
+    // Nothing typed: the problem is at its field, which has the keyboard.
+    {
+      name: "access-request-problem",
+      path: DISPATCH,
+      ...ACCESS,
+      act: async (page) => {
+        await openAccessForm(page)
+        const box = dialog(page, "Request access")
+        await box.getByRole("button", { name: "Request access", exact: true }).click()
+        await box.getByRole("alert").waitFor()
+      },
+    },
+    // The API refuses: what was typed stays, and the refusal is said in the dialog.
+    {
+      name: "access-request-refused",
+      path: DISPATCH,
+      ...ACCESS,
+      failWrites: true,
+      act: async (page) => {
+        await openAccessForm(page)
+        const box = await fillAccessForm(page)
+        await box.getByRole("button", { name: "Request access", exact: true }).click()
+        await box.getByRole("alert").waitFor()
+      },
+    },
+    {
+      name: "access-edit-form",
+      path: DISPATCH,
+      ...ACCESS,
+      act: async (page) => {
+        await toCard(accessCard)(page)
+        await accessRow(page, "Depot rules")
+          .getByRole("button", { name: /^Actions for/ })
+          .click()
+        await page.getByRole("menuitem", { name: "Edit request" }).click()
+        await dialog(page, "Edit access request").waitFor()
+      },
+    },
+    // A move the API refuses stays where it was, and says why in the row.
+    {
+      name: "access-move-refused",
+      path: DISPATCH,
+      ...ACCESS,
+      failWrites: true,
+      act: async (page) => {
+        await toCard(accessCard)(page)
+        await accessRow(page, "Depot rules")
+          .getByRole("button", { name: /^Mark granted/ })
+          .click()
+        await accessRow(page, "Depot rules").getByRole("alert").waitFor()
+      },
+    },
+    // The blocked prompt offers the project's requests that are not granted.
+    {
+      name: "blocked-prompt-access",
+      path: DISPATCH,
+      ready: (page) => board(page),
+      full: false,
+      act: async (page) => {
+        await openMenu(page, REPLAY)
+        await page.getByRole("menuitem", { name: "Blocked" }).click()
+        await dialog(page, "What is blocking this?").waitFor()
+        await dialog(page, "What is blocking this?")
+          .getByLabel("The blocker")
+          .fill("Needs the depot rules")
+        await dialog(page, "What is blocking this?")
+          .getByLabel("Blocked by an access request")
+          .selectOption({ label: "Depot rules, read only (in progress)" })
+      },
+    },
+    // The log, newest first, with a decision promoted from a discussion.
+    { name: "decisions-card", path: DISPATCH, ...DECISIONS, act: toCard(decisionsCard) },
+    { name: "decisions-empty", path: KESTREL_CLAIMS, ...DECISIONS, act: toCard(decisionsCard) },
+    {
+      name: "decision-form",
+      path: DISPATCH,
+      ...DECISIONS,
+      act: async (page) => {
+        await openDecisionForm(page)
+        await fillDecisionForm(page)
+      },
+    },
+    {
+      name: "decision-problem",
+      path: DISPATCH,
+      ...DECISIONS,
+      act: async (page) => {
+        await openDecisionForm(page)
+        const box = await fillDecisionForm(page)
+        await box.getByLabel("Why").fill("")
+        await box.getByRole("button", { name: "Log decision", exact: true }).click()
+        await box.getByRole("alert").waitFor()
+      },
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -684,6 +854,9 @@ export const screens = [
       await box.getByRole("alert").waitFor()
     },
   },
+
+  // Access requests and decisions on the project page.
+  ...accessScreens(),
 
   // The stage checklist and the move that asks for a reason. The checklist sits under the stage
   // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.

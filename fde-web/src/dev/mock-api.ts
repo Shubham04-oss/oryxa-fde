@@ -113,6 +113,24 @@ function access(
   }
 }
 
+/** A discussion about `subject`, promoted to `decisionId`. */
+function thread(
+  id: string,
+  subject: S["SubjectRef"],
+  decisionId: string,
+  daysAgo: number,
+): S["ThreadOut"] {
+  return {
+    id,
+    subject,
+    created_by: RIYA,
+    created_at: ago(daysAgo + 2),
+    last_comment_at: ago(daysAgo),
+    comments: 3,
+    decision: decisionId,
+  }
+}
+
 const inScope = (id: string, description: string): S["ScopeItemOut"] => ({
   id,
   kind: "in",
@@ -183,6 +201,8 @@ type Records = {
   access: Array<S["AccessRequestOut"]>
   tasks: Array<S["TaskOut"]>
   decisions: Array<S["DecisionOut"]>
+  /** Discussions that were promoted to a decision, by the decision they ended in. */
+  threads?: Array<S["ThreadOut"]>
   /** Meeting notes on the project. The web has no screen for them, so the mock only counts them. */
   notes: number
   /** The criteria an eval suite measures. */
@@ -415,6 +435,7 @@ function seed() {
             due: -1,
             assignee: RIYA,
             blocker: "Telematics export refused by the customer's security team",
+            blockedBy: "acc_k3",
           }),
           task("tsk_k5", "Dispatcher feedback session", "waiting_on_customer", 4, {
             due: 3,
@@ -453,7 +474,15 @@ function seed() {
             "Riya Kapoor",
             20,
           ),
+          decision(
+            "dec_k3",
+            "Leave the telematics export out of the pilot",
+            "Security refused it for now. The pilot works from the planning database alone.\nRevisit when the vendor API is approved.",
+            "Tomas Becker",
+            4,
+          ),
         ],
+        threads: [thread("thr_k1", { kind: "access_request", id: "acc_k3" }, "dec_k3", 4)],
       },
     },
     {
@@ -785,6 +814,7 @@ function seed() {
             due: -4,
             assignee: JONAH,
             blocker: "Mobile device management access still in progress",
+            blockedBy: "acc_f1",
           }),
           task("tsk_f2", "Crew training video", "in_progress", 1, { due: 7, assignee: JONAH }),
         ],
@@ -984,6 +1014,8 @@ async function taskRoutes(
   return json(saved, adding ? 201 : 200)
 }
 
+let accessCount = 0
+let decisionCount = 0
 const ACCESS_STATES = ["requested", "in_progress", "granted", "denied", "revoked"] as const
 
 /** `PUT` on an access request: the API replaces it, stamps a status change and sets or clears `granted_at`. */
@@ -994,7 +1026,8 @@ async function accessRoutes(
   records: Records,
   request: Request,
 ) {
-  if (method !== "PUT" || id === undefined) return null
+  const adding = method === "POST" && id === undefined
+  if (!adding && !(method === "PUT" && id !== undefined)) return null
   const body = (await request.json().catch(() => null)) as Partial<S["AccessRequestBody"]> | null
   if (!body) return refuse(400, "invalid")
   const status = ACCESS_STATES.find((one) => one === body.status)
@@ -1006,6 +1039,26 @@ async function accessRoutes(
   const systemId = body.system ?? null
   if (systemId !== null && !found.systems.some((x) => x.id === systemId))
     return refuse(400, "invalid_system")
+  if (adding) {
+    // A request starts as requested or in progress: a status change is what reports it settled.
+    if (status !== "requested" && status !== "in_progress")
+      return refuse(409, "rejected_initial_status")
+    const now = new Date().toISOString()
+    const created: S["AccessRequestOut"] = {
+      id: `acc_new${++accessCount}`,
+      description: body.description!.trim(),
+      system: systemId,
+      owner,
+      status,
+      requested_at: now,
+      status_changed_at: now,
+      granted_at: null,
+      days_waiting: 0,
+    }
+    records.access.push(created)
+    return json(created, 201)
+  }
+  if (id === undefined) return null
   const at = records.access.findIndex((a) => a.id === id)
   const before = records.access[at]
   if (!before) return refuse(404, "not_found")
@@ -1044,6 +1097,43 @@ async function accessRoutes(
     })
   return json(saved)
 }
+
+/** `POST` on a project's decisions: the log is append-only, so there is no `PUT` or `DELETE`. */
+async function decisionRoutes(
+  method: string,
+  id: string | undefined,
+  records: Records,
+  request: Request,
+) {
+  if (method !== "POST" || id !== undefined) return null
+  const body = (await request.json().catch(() => null)) as Partial<S["DecisionBody"]> | null
+  if (!body) return refuse(400, "invalid")
+  if (!plain(body.title, 200, false)) return refuse(400, "invalid_title")
+  if (!plain(body.rationale, 4000, true)) return refuse(400, "invalid_rationale")
+  if (!plain(body.decided_by, 200, false)) return refuse(400, "invalid_decided_by")
+  const at = body.decided_at ?? null
+  // RFC 3339, as the API parses it.
+  if (at !== null && !(/^\d{4}-\d{2}-\d{2}T/.test(at) && !Number.isNaN(Date.parse(at))))
+    return refuse(400, "invalid_decided_at")
+  const now = new Date().toISOString()
+  const saved: S["DecisionOut"] = {
+    id: `dec_new${++decisionCount}`,
+    title: body.title!.trim(),
+    rationale: body.rationale!.trim(),
+    decided_by: body.decided_by!.trim(),
+    decided_at: at === null ? now : new Date(at).toISOString(),
+    recorded_by: state.me.user.id,
+    created_at: now,
+  }
+  records.decisions.push(saved)
+  return json(saved, 201)
+}
+
+/** The log as the API lists it: the newest decision first. */
+const newestFirst = (list: Array<S["DecisionOut"]>) =>
+  [...list].sort(
+    (a, b) => Date.parse(b.decided_at) - Date.parse(a.decided_at) || a.id.localeCompare(b.id),
+  )
 
 const noContent = () => new Response(null, { status: 204 })
 const readBody = async (request: Request) =>
@@ -1566,7 +1656,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "scope") return json(p.records.scope)
     if (record === "access-requests") return json(p.records.access)
     if (record === "tasks") return json(p.records.tasks)
-    if (record === "decisions") return json(p.records.decisions)
+    if (record === "decisions") return json(newestFirst(p.records.decisions))
+    if (record === "threads") return json(p.records.threads ?? [])
     // The company's lists, read through the project, as assignees do.
     if (record === "stakeholders") return json(found.stakeholders)
     if (record === "systems") return json(found.systems)
@@ -1575,6 +1666,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (record === "scope") return scopeRoutes(method, rest, found, p.records.scope, request)
   if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
   if (record === "access-requests") return accessRoutes(method, rest[0], found, p.records, request)
+  if (record === "decisions") return decisionRoutes(method, rest[0], p.records, request)
   if (method === "PUT" && record === "stage") return stageMove(p, found, request)
   return null
 }
