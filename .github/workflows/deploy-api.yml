@@ -17,8 +17,8 @@ env:
 
 jobs:
   build:
-    # A release build: only on a clean GitHub-hosted runner, with no sccache, no restored cache and a
-    # fresh CARGO_HOME (docs/ci.md). The a1 runners share CARGO_HOME and sccache with every PR's CI.
+    # A release build: no sccache, no restored cache and a fresh CARGO_HOME (docs/ci.md), so nothing
+    # a PR's CI cached can reach a release.
     # Only main deploys; the deploy role trusts this workflow on main only.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

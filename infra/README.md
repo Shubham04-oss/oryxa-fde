@@ -228,7 +228,7 @@ definitions that run as the API's or the migrate task's roles only, run the migr
 `oryxa-fde-api` service, and read its deploy parameters (`tests/plan.tftest.hcl` pins all of it).
 
 **deploy-api, step by step**
-1. `build`, a release build, so never on a1 and never with shared caches (`docs/ci.md`): on a clean
+1. `build`, a release build, so never with shared caches (`docs/ci.md`): on a clean
    GitHub-hosted runner, with the toolchain `rust-toolchain.toml` pins, no sccache and a fresh
    `CARGO_HOME`, it cross-compiles `oryxa-fde-api` and `oryxa-fde-ops` for
    `aarch64-unknown-linux-gnu`. It fails if either needs a newer glibc than the image's base (2.41).
