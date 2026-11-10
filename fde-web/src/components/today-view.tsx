@@ -3,6 +3,8 @@ import { skipToken, useQuery } from "@tanstack/react-query"
 import { useNavigate } from "@tanstack/react-router"
 import { Card, Failed, Loading, Page, Quiet, Rows } from "./page"
 import { ActiveRunsCard } from "./runs"
+import { RefusalNote } from "./refusal-note"
+import type { Note } from "./refusal-note"
 import { MoveAsk, useTaskMover } from "./task-move"
 import { useAccessMover } from "./access-move"
 import { Key, TodayRow } from "./today-row"
@@ -12,6 +14,7 @@ import { STATUS_LABEL } from "@/lib/board"
 import { localDay } from "@/lib/time"
 import { ACCESS_LABEL, TODAY_GROUPS, groupToday, itemKey, summaryLine } from "@/lib/today"
 import type { RowAction } from "@/lib/today"
+import { refusalNote } from "@/lib/task-move"
 
 const scopeOf = (item: TodayItem): ProjectScope => ({
   company: item.company.id,
@@ -146,14 +149,11 @@ export function TodayView({ today = localDay() }: { today?: string }) {
   // A refusal whose row has left (deleted or settled elsewhere) is said above the groups instead.
   const { refusal: lostTask } = mover
   const { refusal: lostAccess } = access
-  const lost = [
-    lostTask &&
-      !keys.includes(`task:${lostTask.task.id}`) &&
-      `Couldn't move “${lostTask.task.title}” to ${STATUS_LABEL[lostTask.to]}. ${lostTask.why}`,
-    lostAccess &&
-      !keys.includes(`access:${lostAccess.access.id}`) &&
-      `Couldn't change “${lostAccess.access.description}” to ${ACCESS_LABEL[lostAccess.to]}. ${lostAccess.why}`,
-  ].filter((line): line is string => Boolean(line))
+  const lost: Array<Note> = []
+  if (lostTask && !keys.includes(`task:${lostTask.task.id}`))
+    lost.push(refusalNote(lostTask, true, mover.again))
+  if (lostAccess && !keys.includes(`access:${lostAccess.access.id}`))
+    lost.push(access.note(lostAccess.access.description)!)
 
   function act(item: TodayItem, action: RowAction) {
     const from = itemKey(item)
@@ -181,14 +181,14 @@ export function TodayView({ today = localDay() }: { today?: string }) {
       const r = mover.refusal?.task.id === item.task.id ? mover.refusal : null
       return {
         moving: to && `Moving to ${STATUS_LABEL[to]}…`,
-        refused: r && `Couldn't move it to ${STATUS_LABEL[r.to]}. ${r.why}`,
+        refused: r && refusalNote(r, false, mover.again),
       }
     }
     const to = access.saving[item.access.id]
-    const r = access.refusal?.access.id === item.access.id ? access.refusal : null
+    const r = access.refusal?.access.id === item.access.id
     return {
       moving: to && `Changing to ${ACCESS_LABEL[to]}…`,
-      refused: r && `Couldn't change it to ${ACCESS_LABEL[r.to]}. ${r.why}`,
+      refused: r ? access.note(null) : null,
     }
   }
 
@@ -219,24 +219,17 @@ export function TodayView({ today = localDay() }: { today?: string }) {
       <p role="status" className="sr-only">
         {mover.announcement || access.announcement}
       </p>
-      {lost.length > 0 && (
-        <p
-          role="alert"
-          className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-destructive"
-        >
-          {lost.join(" ")}
-          <button
-            type="button"
-            className="text-muted-foreground underline"
-            onClick={() => {
-              mover.dismiss()
-              access.dismiss()
-            }}
-          >
-            Dismiss
-          </button>
-        </p>
-      )}
+      {lost.map((note) => (
+        <RefusalNote
+          key={note.text}
+          note={note}
+          className="text-xs"
+          onDismiss={() => {
+            mover.dismiss()
+            access.dismiss()
+          }}
+        />
+      ))}
       <div
         ref={list}
         className="grid gap-4 max-[800px]:gap-3.5"

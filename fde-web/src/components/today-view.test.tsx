@@ -610,6 +610,7 @@ describe("Today as an inbox", () => {
               due_on: "2000-01-01",
               created_at: "2026-10-01T09:00:00Z",
               updated_at: "2026-10-01T09:00:00Z",
+              version: 1,
             },
             company: { id: "cmp_kestrel", name: "Kestrel Freight" },
             project: { id: "prj_kestrel_dispatch", name: "Dispatch copilot" },
@@ -633,7 +634,7 @@ describe("the API mock", () => {
     const body = { description: "x", status: "requested" as const }
     const acc = AccessRequestId.parse("acc_k3")
     const refused = (b: object, id = acc) =>
-      api.updateAccess(scope, id, b as never).catch((e: unknown) => e)
+      api.updateAccess(scope, id, b as never, 1).catch((e: unknown) => e)
 
     expect(await refused({ ...body, status: "nope" })).toMatchObject({ status: 400 })
     expect(await refused({ ...body, description: " " })).toMatchObject({ status: 400 })
@@ -645,12 +646,13 @@ describe("the API mock", () => {
   it("stamps a status change and sets or clears granted_at, as the API does", async () => {
     renderWithRouter(<TodayView />)
     const acc = AccessRequestId.parse("acc_k3")
-    const send = (status: "granted" | "requested") =>
-      api.updateAccess(scope, acc, { description: "Telematics export", status })
+    // Each save names the version of what it is based on: the answer's is the next one's.
+    const send = (status: "granted" | "requested", version: number) =>
+      api.updateAccess(scope, acc, { description: "Telematics export", status }, version)
 
-    const granted = await send("granted")
+    const granted = await send("granted", 1)
     expect(granted.granted_at).toBeTruthy()
     expect(granted.status_changed_at >= granted.requested_at).toBe(true)
-    expect((await send("requested")).granted_at).toBeNull()
+    expect((await send("requested", granted.version)).granted_at).toBeNull()
   })
 })

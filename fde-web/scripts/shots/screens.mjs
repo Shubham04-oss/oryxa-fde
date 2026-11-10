@@ -13,6 +13,8 @@
 //   emptyWorkspace  true: a workspace with no company yet (the mock's `__fdeMockNoCompanies`, set before the app loads)
 //   staleChecklist true: reads of a project's stage checklist say everything is met (the mock's
 //             `__fdeMockStaleChecklist`, set before the app loads), so the stale-view refusal can be shown
+//   (a screen can make someone else change a record between its open and its save with the mock's
+//   `__fdeMockSomeoneElse`, set from `act`, to show a stale save)
 //   signedOut true: no sign-in first (the sign-in screen itself)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
@@ -678,6 +680,168 @@ function documentsScreens() {
   ]
 }
 
+// A save refused because the record had moved on (DESIGN.md §3, A stale save). `someoneElse` makes the
+// mock change the record between the open and the save (its `__fdeMockSomeoneElse`, once), so each state
+// is what a person sees when the record they were working on has been changed by someone else.
+const someoneElse = (page, change = true) =>
+  page.evaluate((c) => (globalThis.__fdeMockSomeoneElse = c), change)
+const STALE_FORM = { full: false }
+const staleNotice = (page, name) => dialog(page, name).locator("[data-stale]")
+
+function staleScreens() {
+  return [
+    // A one-click move on the board: the task is shown as it now is, with the move offered again.
+    {
+      name: "stale-move-board",
+      path: DISPATCH,
+      ready: (page) => board(page),
+      full: false,
+      act: async (page) => {
+        await toCard(board)(page)
+        await someoneElse(page)
+        await openMenu(page, REPLAY)
+        await page.getByRole("menuitem", { name: "Done", exact: true }).click()
+        await board(page).getByRole("alert").waitFor()
+      },
+    },
+    // Someone made the same move first: only the state is shown, nothing to offer.
+    {
+      name: "stale-move-already",
+      path: DISPATCH,
+      ready: (page) => board(page),
+      full: false,
+      act: async (page) => {
+        await toCard(board)(page)
+        await someoneElse(page, { status: "done" })
+        await openMenu(page, REPLAY)
+        await page.getByRole("menuitem", { name: "Done", exact: true }).click()
+        await board(page).getByRole("alert").waitFor()
+      },
+    },
+    {
+      name: "stale-move-today",
+      path: "/today",
+      ready: todayReady,
+      full: false,
+      act: async (page) => {
+        await someoneElse(page)
+        await page.getByRole("button", { name: `Done: ${DUE_ROW}` }).click()
+        await page.getByRole("alert").waitFor()
+      },
+    },
+    {
+      name: "stale-move-access",
+      path: BW_REFERRALS,
+      ...ACCESS,
+      act: async (page) => {
+        await toCard(accessCard)(page)
+        await someoneElse(page)
+        await accessRow(page, "Intake form API")
+          .getByRole("button", { name: /^Mark granted/ })
+          .click()
+        await accessRow(page, "Intake form API").getByRole("alert").waitFor()
+      },
+    },
+    // A form keeps what was typed, names the fields that differ, and offers to save on the current version.
+    {
+      name: "stale-form-task",
+      path: DISPATCH,
+      ready: (page) => board(page),
+      ...STALE_FORM,
+      act: async (page) => {
+        await card(page, REPLAY).click()
+        const box = dialog(page, "Edit task")
+        await box.getByLabel("Title").fill(`${REPLAY}, with the March orders`)
+        await someoneElse(page)
+        await box.getByRole("button", { name: "Save", exact: true }).click()
+        await staleNotice(page, "Edit task").waitFor()
+      },
+    },
+    {
+      name: "stale-form-stakeholder",
+      path: KESTREL,
+      ready: company,
+      ...STALE_FORM,
+      act: async (page) => {
+        await button(page, "Edit Mara Lindqvist").click()
+        const box = dialog(page, "Edit stakeholder")
+        await box.getByLabel("Name", { exact: true }).fill("Mara L. Lindqvist")
+        await someoneElse(page)
+        await box.getByRole("button", { name: "Save", exact: true }).click()
+        await staleNotice(page, "Edit stakeholder").waitFor()
+      },
+    },
+    // Both changed the description: the notice says that saving again replaces theirs.
+    {
+      name: "stale-form-system-both",
+      path: KESTREL,
+      ready: company,
+      ...STALE_FORM,
+      act: async (page) => {
+        await button(page, "Edit Planning database").click()
+        const box = dialog(page, "Edit system")
+        await box.getByLabel("Description").fill("The read replica, refreshed nightly at 02:00.")
+        await someoneElse(page)
+        await box.getByRole("button", { name: "Save", exact: true }).click()
+        await staleNotice(page, "Edit system").waitFor()
+      },
+    },
+    {
+      name: "stale-form-criterion",
+      path: ATLAS_FNOL,
+      ...SCOPE,
+      ...STALE_FORM,
+      act: async (page) => {
+        await toScope(page)
+        await button(page, "Edit: Calls with every required field").click()
+        const box = dialog(page, "Edit success criterion")
+        await box.getByLabel("What must be true").fill("Calls captured with every required field")
+        await someoneElse(page)
+        await box.getByRole("button", { name: "Save", exact: true }).click()
+        await staleNotice(page, "Edit success criterion").waitFor()
+      },
+    },
+    // The access form does not show the status, and the notice says it moved.
+    {
+      name: "stale-form-access",
+      path: BW_REFERRALS,
+      ...ACCESS,
+      ...STALE_FORM,
+      act: async (page) => {
+        await toCard(accessCard)(page)
+        await accessRow(page, "Intake form API")
+          .getByRole("button", { name: /^Actions for/ })
+          .click()
+        await page.getByRole("menuitem", { name: "Edit request" }).click()
+        const box = dialog(page, "Edit access request")
+        await box
+          .getByLabel("What access is needed")
+          .fill("Intake form API, staging and production")
+        await someoneElse(page)
+        await box.getByRole("button", { name: "Save", exact: true }).click()
+        await staleNotice(page, "Edit access request").waitFor()
+      },
+    },
+    // A sign-off of a scope that changed after it was read: what changed, the scope as it is now, and a
+    // confirmation to read again before anything is signed.
+    {
+      name: "stale-signoff",
+      path: ATLAS_FNOL,
+      ...SCOPE,
+      ...STALE_FORM,
+      act: async (page) => {
+        await toScope(page)
+        await scopeCard(page).getByRole("button", { name: "Record sign-off", exact: true }).click()
+        const box = dialog(page, "Record sign-off")
+        await box.getByLabel("Signed off by").selectOption({ label: "Daniel Osei, Champion" })
+        await someoneElse(page, { description: "Windscreen and glass claims" })
+        await box.getByRole("button", { name: "Record sign-off", exact: true }).click()
+        await staleNotice(page, "Record sign-off").waitFor()
+      },
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -1187,6 +1351,9 @@ export const screens = [
 
   // A company's documents and search over them.
   ...documentsScreens(),
+
+  // A save refused because the record had moved on: a move, each kind of form, a sign-off.
+  ...staleScreens(),
 
   // The stage checklist and the move that asks for a reason. The checklist sits under the stage
   // bar, so each state is the viewport at the top of the page; the move states keep the confirmation in view.

@@ -3,7 +3,7 @@ import type { FormEvent, ReactNode } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "./ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog"
-import { ApiError, api, queries } from "@/lib/api/client"
+import { ApiError, StaleSaveError, api, queries } from "@/lib/api/client"
 import type {
   AccessRequestOut,
   ProjectScope,
@@ -12,10 +12,13 @@ import type {
   TaskState,
 } from "@/lib/api/schemas"
 import { blockers, clip } from "@/lib/access"
-import { STATUS_LABEL, asksFirst, fieldsOf, problem, toBody } from "@/lib/board"
+import { STATUS_LABEL, TASK_LABELS, asksFirst, fieldsOf, problem, toBody } from "@/lib/board"
 import type { Fields } from "@/lib/board"
+import { isHeld } from "@/lib/records"
 import { commitTask, reason } from "@/lib/task-move"
+import type { Refusal } from "@/lib/task-move"
 import { ACCESS_LABEL } from "@/lib/today"
+import { StaleNotice, useVersionedForm } from "./versioned-form"
 
 // What the board and Today share when a task moves (DESIGN.md §3): the two prompts, saving that
 // shows nothing as done until the API confirms it, and a refused move that stays put and says why.
@@ -25,9 +28,6 @@ export const FIELD =
 
 /** The question a move into Blocked or Waiting on the customer asks first. */
 export type Ask = { scope: ProjectScope; task: TaskOut; to: "blocked" | "waiting_on_customer" }
-/** A move the API refused, and why. */
-export type Refusal = { task: TaskOut; to: TaskState; why: string }
-
 export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } = {}) {
   const queryClient = useQueryClient()
   // The status each task is on its way to, until the API answers.
@@ -36,41 +36,67 @@ export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } 
   const [announcement, say] = useState("")
   const [ask, setAsk] = useState<Ask | null>(null)
 
+  // An edit is based on a copy of the task, and sends that copy's version (DESIGN.md §3, A stale save).
   const save = useMutation({
     mutationFn: ({
       scope,
-      task,
+      base,
       fields,
     }: {
       scope: ProjectScope
-      task: TaskOut | null
+      base: TaskOut | null
       fields: Fields
     }) =>
-      task ? api.updateTask(scope, task.id, toBody(fields)) : api.addTask(scope, toBody(fields)),
+      base
+        ? api.updateTask(scope, base.id, toBody(fields), base.version)
+        : api.addTask(scope, toBody(fields)),
     async onSuccess(saved, { scope }) {
       await commitTask(queryClient, scope, saved)
       onSaved?.(saved)
     },
   })
 
-  /** Moves a task that needs no answer, or one whose answer is in `fields`. */
+  /**
+   * Moves a task that needs no answer, or one whose answer is in `fields`, as a copy of the task
+   * the page had when the person acted. If the task has moved on since, nothing is saved: the
+   * current task goes into the page and the person is told, with the move offered again.
+   */
   async function move(scope: ProjectScope, task: TaskOut, fields: Fields) {
     setRefusal(null)
     setSaving((s) => ({ ...s, [task.id]: fields.status }))
     try {
-      await save.mutateAsync({ scope, task, fields })
+      await save.mutateAsync({ scope, base: task, fields })
       say(`Moved “${task.title}” to ${STATUS_LABEL[fields.status]}.`)
     } catch (e) {
       say("")
-      setRefusal({ task, to: fields.status, why: reason(e) })
-      // The task may have changed or gone elsewhere: read it again.
-      if (e instanceof ApiError && e.status === 404) {
-        void queryClient.invalidateQueries({ queryKey: queries.project(scope).queryKey })
-        void queryClient.invalidateQueries({ queryKey: queries.today().queryKey })
+      if (e instanceof StaleSaveError) {
+        const now = e.current as TaskOut
+        await commitTask(queryClient, scope, now)
+        setRefusal({
+          scope,
+          task: now,
+          to: fields.status,
+          why: e.message,
+          kind: now.status === fields.status ? "already" : "stale",
+        })
+      } else {
+        setRefusal({ scope, task, to: fields.status, why: reason(e), kind: "refused" })
+        // The task may have changed or gone elsewhere: read it again.
+        if (e instanceof ApiError && e.status === 404) {
+          void queryClient.invalidateQueries({ queryKey: queries.project(scope).queryKey })
+          void queryClient.invalidateQueries({ queryKey: queries.today().queryKey })
+        }
       }
     } finally {
       setSaving(({ [task.id]: _, ...rest }) => rest)
     }
+  }
+
+  /** A move to `to`: straight through, or after asking first. */
+  function request(scope: ProjectScope, task: TaskOut, to: TaskState) {
+    if (to === task.status || saving[task.id]) return
+    if (asksFirst(to)) setAsk({ scope, task, to })
+    else void move(scope, task, { ...fieldsOf(task), status: to })
   }
 
   return {
@@ -81,23 +107,24 @@ export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } 
     say,
     dismiss: () => setRefusal(null),
     cancelAsk: () => setAsk(null),
-    /** A move to `to`: straight through, or after asking first. */
-    request(scope: ProjectScope, task: TaskOut, to: TaskState) {
-      if (to === task.status || saving[task.id]) return
-      if (asksFirst(to)) setAsk({ scope, task, to })
-      else void move(scope, task, { ...fieldsOf(task), status: to })
+    request,
+    /** The move a stale refusal offers again, on the task as it now stands. */
+    again() {
+      if (!refusal || refusal.kind !== "stale") return
+      setRefusal(null)
+      request(refusal.scope, refusal.task, refusal.to)
     },
-    /** What a dialog's Save does: null when the API confirmed it, or why it did not. */
-    async submit(scope: ProjectScope, task: TaskOut | null, fields: Fields) {
-      try {
-        await save.mutateAsync({ scope, task, fields })
-        say(task ? `Saved “${fields.title.trim()}”.` : `Added “${fields.title.trim()}”.`)
-        setRefusal(null)
-        return null
-      } catch (e) {
-        return reason(e)
-      }
+    /**
+     * A dialog's save, as a copy of the task the dialog opened on (null for a new task). Throws what
+     * the API refused with, a `StaleSaveError` among it: the dialog says what to do about it.
+     */
+    async send(scope: ProjectScope, base: TaskOut | null, fields: Fields) {
+      await save.mutateAsync({ scope, base, fields })
+      say(base ? `Saved “${fields.title.trim()}”.` : `Added “${fields.title.trim()}”.`)
+      setRefusal(null)
     },
+    /** A task the API answered a stale save with, in the page. */
+    adopt: (scope: ProjectScope, current: TaskOut) => commitTask(queryClient, scope, current),
   }
 }
 
@@ -131,7 +158,8 @@ export function MoveAsk({
           peopleNote={peopleNote}
           requests={requests}
           requestsNote={requestsNote}
-          onSave={(fields) => mover.submit(ask.scope, ask.task, fields)}
+          onSave={(base, fields) => mover.send(ask.scope, base ?? null, fields)}
+          onAdopt={(current) => mover.adopt(ask.scope, current)}
           onClose={mover.cancelAsk}
         />
       )}
@@ -266,6 +294,7 @@ function AskDialog({
   requests,
   requestsNote,
   onSave,
+  onAdopt,
   onClose,
 }: {
   task: TaskOut
@@ -274,10 +303,22 @@ function AskDialog({
   peopleNote?: string
   requests: ReadonlyArray<AccessRequestOut>
   requestsNote?: string
-  onSave: (fields: Fields) => Promise<string | null>
+  onSave: (base: TaskOut | undefined, fields: Fields) => Promise<unknown>
+  onAdopt: (current: TaskOut) => Promise<void>
   onClose: () => void
 }) {
-  const [fields, setFields] = useState<Fields>({ ...fieldsOf(task), status: to, blocker: "" })
+  // The task as it was when the prompt opened is what the move is based on: if it has changed by the
+  // time of Save, the person is told, and what they typed stays.
+  const form = useVersionedForm({
+    record: task,
+    snapshot: fieldsOf,
+    initial: { ...fieldsOf(task), status: to, blocker: "" },
+    labels: TASK_LABELS,
+    send: onSave,
+    adopt: onAdopt,
+    what: "task",
+  })
+  const { fields, set } = form
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const blocked = to === "blocked"
@@ -287,9 +328,10 @@ function AskDialog({
     const bad = problem(fields)
     if (bad) return setError(bad)
     setBusy(true)
-    const failed = await onSave(fields)
+    const failed = await form.submit()
     setBusy(false)
-    if (failed) setError(failed)
+    if (isHeld(failed)) setError(null)
+    else if (failed) setError(typeof failed === "string" ? failed : failed.message)
     else onClose()
   }
 
@@ -311,14 +353,14 @@ function AskDialog({
                 autoFocus
                 className={`${FIELD} min-h-20`}
                 value={fields.blocker}
-                onChange={(e) => setFields({ ...fields, blocker: e.target.value })}
+                onChange={(e) => set({ blocker: e.target.value })}
               />
             </Labelled>
             <BlockedBy
               value={fields.blockedBy}
               requests={requests}
               note={requestsNote}
-              onChange={(blockedBy) => setFields({ ...fields, blockedBy })}
+              onChange={(blockedBy) => set({ blockedBy })}
             />
           </>
         ) : (
@@ -327,13 +369,19 @@ function AskDialog({
               <WaitingOn
                 value={fields.waitingOn}
                 people={people}
-                onChange={(waitingOn) => setFields({ ...fields, waitingOn })}
+                onChange={(waitingOn) => set({ waitingOn })}
               />
             </Labelled>
             {peopleNote && <p className="text-[11px] text-muted-foreground">{peopleNote}</p>}
           </div>
         )}
-        <Footer busy={busy} error={error} save={`Move to ${STATUS_LABEL[to]}`} onClose={onClose} />
+        <StaleNotice stale={form.stale} noun="task" />
+        <Footer
+          busy={busy}
+          error={error}
+          save={form.save(`Move to ${STATUS_LABEL[to]}`)}
+          onClose={onClose}
+        />
       </form>
     </DialogContent>
   )

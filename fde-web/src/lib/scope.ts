@@ -10,14 +10,15 @@ import type {
   StakeholderOut,
 } from "./api/schemas"
 import { checkName, checkText, say } from "./records"
+import type { Labels } from "./stale"
 
 // What the scope forms hold and send, the checks the API makes, and how a saved change reaches the
 // project page (DESIGN.md §3, Scope and Success criteria). The API takes each item and criterion
 // on its own; every change to one bumps the scope's version, which is what "changed since sign-off"
 // is: the latest sign-off covers one version, and the scope has moved on.
 
-export type ScopeItemBody = components["schemas"]["ScopeItemBody"]
-export type CriterionBody = components["schemas"]["CriterionBody"]
+export type ScopeItemBody = Omit<components["schemas"]["ScopeItemBody"], "version">
+export type CriterionBody = Omit<components["schemas"]["CriterionBody"], "version">
 
 export type ItemKind = ScopeItemOut["kind"]
 export type Comparator = CriterionOut["comparator"]
@@ -36,6 +37,12 @@ export const itemFields = (item?: ScopeItemOut, kind: ItemKind = "in"): ItemFiel
   kind: item?.kind ?? kind,
   description: item?.description ?? "",
 })
+
+/** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
+export const ITEM_LABELS: Labels<ItemFields> = {
+  kind: "side it is listed on",
+  description: "description",
+}
 
 export const itemProblem = (f: ItemFields) =>
   f.description.trim()
@@ -106,6 +113,14 @@ export function criterionBody(f: CriterionFields): CriterionBody {
   }
 }
 
+export const CRITERION_LABELS: Labels<CriterionFields> = {
+  description: "sentence",
+  metric: "measure",
+  comparator: "comparison",
+  target: "target",
+  unit: "unit",
+}
+
 export const criterionChanged = (before: CriterionOut, f: CriterionFields) => {
   const was = criterionFields(before)
   return (
@@ -134,6 +149,39 @@ export const signOffState = (s: Pick<ScopeOut, "sign_off" | "signed_off">): Sign
 /** Changes saved since the sign-off: the version moves by one for each. */
 export const changesSince = (s: Pick<ScopeOut, "version" | "sign_off">) =>
   s.sign_off ? Math.max(0, s.version - s.sign_off.version) : 0
+
+/** One change to the scope since it was read: a record added, changed or removed. */
+export type ScopeChange = { change: "added" | "changed" | "removed"; text: string }
+
+const clip = (text: string, max = 80) => {
+  const t = text.trim().replace(/\s+/g, " ")
+  return [...t].length > max ? `${[...t].slice(0, max - 1).join("")}…` : t
+}
+
+/**
+ * What changed between the scope a person read (`read`) and the scope as it stands (`now`), record
+ * by record: a record whose version moved, or that was not there, or that is gone. It is how a stale
+ * sign-off tells them what they had not read.
+ */
+export function scopeChanges(read: ScopeOut, now: ScopeOut): Array<ScopeChange> {
+  const describe = (r: ScopeItemOut | CriterionOut) =>
+    "kind" in r
+      ? `${KIND_LABEL[r.kind]}: ${clip(r.description)}`
+      : `Criterion: ${clip(r.description)}`
+  const diff = (before: ReadonlyArray<ScopeItemOut | CriterionOut>, after: typeof before) => {
+    const was = new Map(before.map((r) => [r.id, r]))
+    const out: Array<ScopeChange> = []
+    for (const r of after) {
+      const old = was.get(r.id)
+      if (!old) out.push({ change: "added", text: describe(r) })
+      else if (old.version !== r.version) out.push({ change: "changed", text: describe(r) })
+    }
+    for (const r of before)
+      if (!after.some((x) => x.id === r.id)) out.push({ change: "removed", text: describe(r) })
+    return out
+  }
+  return [...diff(read.items, now.items), ...diff(read.criteria, now.criteria)]
+}
 
 /** Sponsors first, then the rest by name: the person who signs is usually the sponsor. */
 export const signers = (people: ReadonlyArray<StakeholderOut>) =>
@@ -181,6 +229,29 @@ const upsert = <T extends { id: string }>(list: Array<T>, saved: T) =>
   list.some((x) => x.id === saved.id)
     ? list.map((x) => (x.id === saved.id ? saved : x))
     : [...list, saved]
+
+/**
+ * A record the API answered a stale save with, in the project's scope. It is the record as it stands,
+ * not a change of ours, so the scope's version is not moved on here: the project is read again for it.
+ */
+async function adopt(
+  client: QueryClient,
+  scope: ProjectScope,
+  edit: (old: ScopeOut) => Pick<ScopeOut, "items" | "criteria">,
+) {
+  await client.cancelQueries({ queryKey: projectKey(scope) })
+  client.setQueryData(
+    projectKey(scope),
+    (old) => old && { ...old, scope: { ...old.scope, ...edit(old.scope) } },
+  )
+  void client.invalidateQueries({ queryKey: projectKey(scope) })
+}
+
+export const adoptItem = (client: QueryClient, scope: ProjectScope, current: ScopeItemOut) =>
+  adopt(client, scope, (s) => ({ items: upsert(s.items, current), criteria: s.criteria }))
+
+export const adoptCriterion = (client: QueryClient, scope: ProjectScope, current: CriterionOut) =>
+  adopt(client, scope, (s) => ({ items: s.items, criteria: upsert(s.criteria, current) }))
 
 export const commitItem = (client: QueryClient, scope: ProjectScope, saved: ScopeItemOut) =>
   commitScope(client, scope, (s) => ({ items: upsert(s.items, saved), criteria: s.criteria }))

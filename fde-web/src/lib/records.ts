@@ -12,6 +12,7 @@ import type {
   StakeholderPart,
   SystemOut,
 } from "./api/schemas"
+import type { Labels } from "./stale"
 import { reason } from "./task-move"
 
 // What the company and project forms share (DESIGN.md §3): what each form holds and sends, the
@@ -22,8 +23,8 @@ export type CompanyBody = components["schemas"]["CompanyBody"]
 export type CompanyPatch = components["schemas"]["CompanyPatch"]
 export type ProjectBody = components["schemas"]["ProjectBody"]
 export type ProjectPatch = components["schemas"]["ProjectPatch"]
-export type StakeholderBody = components["schemas"]["StakeholderBody"]
-export type SystemBody = components["schemas"]["SystemBody"]
+export type StakeholderBody = Omit<components["schemas"]["StakeholderBody"], "version">
+export type SystemBody = Omit<components["schemas"]["SystemBody"], "version">
 
 export const MAX_NAME = 200
 export const MAX_TEXT = 4000
@@ -154,6 +155,14 @@ export const stakeholderFields = (s?: StakeholderOut): StakeholderFields => ({
   email: s?.email ?? "",
 })
 
+/** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
+export const STAKEHOLDER_LABELS: Labels<StakeholderFields> = {
+  name: "name",
+  role: "part",
+  title: "job title",
+  email: "email",
+}
+
 export const stakeholderProblem = (f: StakeholderFields) =>
   named(f.name, "stakeholder") ?? checkName(f.title, "invalid_title", false) ?? checkEmail(f.email)
 
@@ -172,6 +181,12 @@ export const systemFields = (s?: SystemOut): SystemFields => ({
   kind: s?.kind ?? "",
   description: s?.description ?? "",
 })
+
+export const SYSTEM_LABELS: Labels<SystemFields> = {
+  name: "name",
+  kind: "kind",
+  description: "description",
+}
 
 export const systemProblem = (f: SystemFields) =>
   named(f.name, "system") ??
@@ -198,6 +213,15 @@ export const canManage = (me: Me | undefined, role: CompanyRole | null | undefin
 /** What is wrong, in words; `field` names the field it is about, so a form can mark it and move focus there. */
 export type Problem = string | { message: string; field: string }
 
+/**
+ * What a save answers when the record moved on: nothing was saved and the form stays open, but there
+ * is no error to show, because the form has said what happened in a notice of its own.
+ */
+export const HELD = { held: true } as const
+
+export const isHeld = (result: Problem | typeof HELD | null): result is typeof HELD =>
+  typeof result === "object" && result !== null && "held" in result
+
 /** `message` is about `field`, or there is no problem. */
 export const at = (field: string, message: string | null): Problem | null =>
   message === null ? null : { message, field }
@@ -212,6 +236,13 @@ export async function attempt(work: () => Promise<unknown>, what: string) {
   }
 }
 
+/** A refusal in words, tied to a field when the API's code says which one (`fieldOf`). */
+export function problemOf(error: unknown, what: string, fieldOf: Record<string, string>): Problem {
+  const message = reason(error, what)
+  const field = error instanceof ApiError ? fieldOf[error.code] : undefined
+  return field ? { message, field } : message
+}
+
 /** `attempt`, for a form whose refusals are about a field: the API's code says which one (`fieldOf`). */
 export async function attemptAt(
   work: () => Promise<unknown>,
@@ -222,9 +253,7 @@ export async function attemptAt(
     await work()
     return null
   } catch (e) {
-    const message = reason(e, what)
-    const field = e instanceof ApiError ? fieldOf[e.code] : undefined
-    return field ? { message, field } : message
+    return problemOf(e, what, fieldOf)
   }
 }
 

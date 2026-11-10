@@ -23,6 +23,7 @@ const item: ScopeItemOut = {
   kind: "in",
   description: "Draft next-day load plans",
   updated_at: at,
+  version: 1,
 }
 const criterion: CriterionOut = {
   id: CriterionId.parse("crt_1"),
@@ -32,6 +33,7 @@ const criterion: CriterionOut = {
   target: 70,
   unit: "%",
   updated_at: at,
+  version: 1,
 }
 const person = (id: string, name: string, role: StakeholderOut["role"]): StakeholderOut => ({
   id: StakeholderId.parse(id),
@@ -40,6 +42,7 @@ const person = (id: string, name: string, role: StakeholderOut["role"]): Stakeho
   title: null,
   email: null,
   updated_at: at,
+  version: 1,
 })
 
 describe("scope items", () => {
