@@ -35,7 +35,7 @@ Browser -> Cloudflare (DNS, WAF, Turnstile) -> fde-web on Workers
   -> outbox -> EventBridge v2 bus oryxa-fde-<env> -> FIFO subscribers -> SQS FIFO + DLQ -> consumers
 
 Agent run: oryxa-fde-api -> sandbox gateway Worker -> Cloudflare Sandbox for the company
-  -> Claude Agent SDK harness with the context pack; every outbound request through the outbound
+  -> the harness (OpenCode or the Claude Agent SDK, ADR 0004) with the context pack; every outbound request through the outbound
      handler (allowlist, secrets added there) -> branch, PR, eval run -> events -> lifecycle engine
 Live updates: Durable Objects (presence, agent output, notifications)
 ```
@@ -75,11 +75,11 @@ vendor/oryxa-platform/       the platform base, synced by script only
 | Lifecycle engine | Rules on approvals, eval results, merged PRs and agent runs; drafted weekly updates | Most weekly updates go out with light edits |
 | Planning | Canvas with templates and linked shapes, live sessions, comments, meeting notes | A partner runs a discovery workshop on it with a customer |
 | Customer room | Share link, guest view, status, eval trends, weekly digest, export | A sponsor reads it without a call to explain it |
-| Agent | Sandbox per company on sample data, Claude Agent SDK harness, context pack, background runs, review screen, approvals, hidden secrets, allowlist, budgets | An FDE runs tasks at three companies at once and merges the results |
+| Agent | Sandbox per company on sample data, the harness adapter with the Claude Agent SDK and then OpenCode (ADR 0004), context pack, background runs, review screen, approvals, hidden secrets, allowlist, budgets | An FDE runs tasks at three companies at once and merges the results |
 | Evals | Suite format, runner in the sandbox, graders, links to criteria, CSV import | Each criterion shows a pass rate the customer can see |
 | Billing | Free and Pro, agent-hour and AI-credit meters, Stripe | The first design partners pay |
 
-Not in P0: the runner in customer clouds, real customer data in a sandbox, more harnesses, handoff pack and
+Not in P0: the runner in customer clouds, real customer data in a sandbox, harnesses beyond those in ADR 0004, handoff pack and
 ownership transfer, Team plan, enterprise sign-on and regions, self-efficiency.
 
 ## 6. Workstreams

@@ -19,8 +19,9 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   not a key (the same for every run, never shaped like a real one), sent where the outbound
   handler replaces it, or drops it before signing. Model hosts are ones the policy signs for or
   adds secrets to.
-- **A harness reads nothing from the repository it works on:** no settings, instructions, plugins,
-  skills or MCP servers. The run's configuration comes only from the adapter: passed in at start,
+- **A harness reads nothing from the repository it works on, or from anywhere else the agent can
+  write:** no settings, instructions, plugins, skills or MCP servers. That includes the agent's
+  home directory, which must not carry anything from one run into the next. The run's configuration comes only from the adapter: passed in at start,
   or written by root where the agent cannot write.
 - **A harness's own permission system is a convenience, not a boundary.** OpenCode says so of its
   own. The adapter decides every approval against the company's list, an approval covers one call
@@ -33,13 +34,30 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
   Agent SDK.
 - A run's budget uses the price of the model it runs.
-- Changes the agent makes to agent configuration files (`.opencode/`, `opencode.json*`, `AGENTS.md`,
-  `.claude/`) are held for review and never delivered silently: merged, they would run on the next
-  person's machine.
+- Changes the agent makes to files that run code or steer an agent on someone else's machine are
+  held for review and never delivered silently. That covers agent configuration (`.opencode/`,
+  `opencode.json*`, `AGENTS.md` and `CLAUDE.md` at any depth, `.claude/`, `.cursor/`, `.mcp.json`),
+  CI workflows (`.github/workflows/`), git hooks (`.husky/`, `.githooks/`,
+  `.pre-commit-config.yaml`, `lefthook.yml`) and editor or container setup (`.vscode/`,
+  `.devcontainer/`). The list is kept in one place in the code and grows as tools appear.
 - An FDE may also run their own agent on their own machine. It reads project context through the
   read-only MCP server, and we record no transcript. Its output returns as a pull request or an
   upload (ADR 0006).
 - Hosted sandboxes take sample data only; real data waits for the runner (ADR 0003).
+
+## The gate's tests
+- **Recorded session:** the backend replays a session recorded from the pinned version and
+  produces exactly the expected internal events, including an approval that is asked, answered
+  once and not remembered.
+- **Hostile repository:** a repository and a home directory seeded with harness configuration,
+  plugins, a local MCP server, skills and instruction files that try to redirect the agent change
+  nothing about the run: same tools, same permissions, same hosts.
+- **Egress:** with the outbound handler recording, a run contacts only the model host and the hosts
+  the company's policy allows. A catalogue fetch, update check, share, plugin install or telemetry
+  call fails the test. It runs in CI against a recorded or stubbed model, not by hand.
+- **Eval comparison:** on the sample tasks, the candidate's pass rate is not lower than the current
+  default's by more than the run-to-run spread of the default, and its cost per passed task is
+  stated. The lead PR that changes the default records both.
 
 ## Why OpenCode first
 Model choice: a run can use a cheap, fast model for routine work and a stronger one where it
