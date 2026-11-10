@@ -117,12 +117,13 @@ variable "consumers" {
 }
 
 variable "api_port" {
-  type    = number
-  default = 8080
+  description = "Port oryxa-fde-api listens on, on the task's loopback (LISTEN_ADDR). The health check and the Workers VPC service use it; nothing else can reach it."
+  type        = number
+  default     = 8080
 }
 
 variable "api_health_check_path" {
-  description = "Path the ALB polls; must answer 200 without auth."
+  description = "Path the API container's health check polls; must answer 200 without auth."
   type        = string
   default     = "/healthz"
 }

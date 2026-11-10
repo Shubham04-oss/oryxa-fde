@@ -33,6 +33,7 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::000000000000:role/mock" }
   }
+  # Only the internal_alb module test below uses these (dev has no load balancer since #145).
   mock_resource "aws_lb" {
     defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
@@ -156,6 +157,68 @@ run "api_task_with_every_feature_off" {
   assert {
     condition     = !contains(module.migrate.env_names, "DATABASE_URL") && length(setsubtract(["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "AWS_REGION"], module.migrate.env_names)) == 0
     error_message = "oryxa-fde-ops migrate takes DB_* and AWS_REGION"
+  }
+}
+
+# The shorter path (#145): web Worker, Workers VPC service, tunnel, API. The tunnel's connector is a
+# sidecar in the API task, so there is no load balancer and nothing is admitted to the API.
+run "the_api_task_carries_its_own_tunnel_and_admits_nothing" {
+  command = plan
+
+  assert {
+    condition     = length(module.api.ingress_sources) == 0
+    error_message = "no security group admits anything to the API task: the tunnel reaches it on the task's loopback"
+  }
+  assert {
+    condition     = local.api_environment.LISTEN_ADDR == "127.0.0.1:8080" && alltrue([for c in module.api.containers : length(try(c.portMappings, [])) == 0])
+    error_message = "the API listens on the task's loopback and publishes no port"
+  }
+  assert {
+    condition     = [for c in module.api.containers : c.name] == ["api", "cloudflared"]
+    error_message = "the API task is the API and the cloudflared sidecar, in that order (the deploy workflow swaps the image by prefix, not by position)"
+  }
+  assert {
+    condition = (
+      module.api.containers[0].healthCheck.command[0] == "CMD"
+      && endswith(join(" ", module.api.containers[0].healthCheck.command), "http://127.0.0.1:8080/healthz")
+      && module.api.containers[0].healthCheck.retries >= 2
+    )
+    error_message = "the API container has its own health check on /healthz, on the loopback"
+  }
+  assert {
+    condition = (
+      module.api.containers[1].dependsOn == [{ containerName = "api", condition = "HEALTHY" }]
+      && module.api.containers[1].essential && module.api.containers[0].essential
+    )
+    error_message = "the tunnel starts only once the API is healthy, and a task that loses either container is replaced"
+  }
+  assert {
+    condition     = module.api.containers[1].stopTimeout > 30
+    error_message = "cloudflared's 30 second drain must finish before ECS kills it"
+  }
+  assert {
+    condition = (
+      module.api.containers[1].secrets == [{ name = "TUNNEL_TOKEN", valueFrom = local.secret_arn["cloudflared/tunnel-token"] }]
+      && length(module.api.containers[1].environment) == 0
+      && contains(module.api.secret_arns, local.secret_arn["cloudflared/tunnel-token"])
+    )
+    error_message = "the tunnel token is a Secrets Manager reference, injected into the sidecar only, and the execution role may read it"
+  }
+  assert {
+    condition     = module.api.deployment.minimum_healthy_percent == 100 && module.api.deployment.maximum_percent == 200
+    error_message = "a rollout starts the new task and waits for it to be healthy before it stops the old one: never zero healthy tasks"
+  }
+  assert {
+    condition     = contains(module.api.egress_names, "tunnel-tcp") && contains(module.api.egress_names, "tunnel-udp") && !contains(module.api.egress_names, "alb")
+    error_message = "the API task dials the tunnel out and talks to no load balancer"
+  }
+  assert {
+    condition     = module.spicedb.ingress_sources == toset(["api", "zed"])
+    error_message = "SpiceDB is its own service: the API and the zed task call it, it calls nothing back"
+  }
+  assert {
+    condition     = module.api.deployment.minimum_healthy_percent == 100 && module.spicedb.deployment.minimum_healthy_percent == 0
+    error_message = "only SpiceDB replaces its single task in place"
   }
 }
 
@@ -599,6 +662,7 @@ run "rejects_another_envs_bus" {
   expect_failures = [data.aws_iam_policy_document.publish]
 }
 
+# Not used by dev since #145; kept for an environment that wants a load balancer in front of a service.
 run "alb_is_internal_and_reached_only_by_named_groups" {
   command = plan
   module {
@@ -736,6 +800,51 @@ run "one_off_task_has_no_service" {
   }
 }
 
+run "a_sidecar_waits_for_a_healthy_main_container_and_shares_its_log_group" {
+  command = plan
+  module {
+    source = "../../modules/fargate_service"
+  }
+  providers = {
+    aws = aws
+  }
+  variables {
+    name           = "oryxa-fde-test-api"
+    cluster_arn    = "arn:aws:ecs:ap-south-1:000000000000:cluster/mock"
+    container_name = "api"
+    image          = "example/api:1"
+    kms_key_arn    = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+    vpc_id         = "vpc-mock"
+    subnet_ids     = ["subnet-a"]
+    egress         = {}
+    health_check   = { command = ["/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"] }
+    sidecars = {
+      tunnel = { image = "example/tunnel:1", secrets = { TOKEN = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:tunnel" } } }
+    }
+    desired_count = 0
+  }
+
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.this.container_definitions)[1].dependsOn == [{ containerName = "api", condition = "HEALTHY" }]
+    error_message = "a sidecar starts after the main container passes its health check"
+  }
+  assert {
+    condition = jsondecode(aws_ecs_task_definition.this.container_definitions)[0].healthCheck == {
+      command  = ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval = 10, timeout = 5, retries = 3, startPeriod = 30
+    }
+    error_message = "the health check runs as CMD (no shell in the image) with the defaults"
+  }
+  assert {
+    condition     = contains(local.all_secrets[*].arn, "arn:aws:secretsmanager:ap-south-1:000000000000:secret:tunnel")
+    error_message = "the execution role may read the sidecar's secret"
+  }
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.this) == 0
+    error_message = "a sidecar needs no ingress rule: it shares the main container's network"
+  }
+}
+
 run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
   command = plan
   module {
@@ -745,20 +854,21 @@ run "the_api_is_reached_through_the_tunnel_not_a_public_hostname" {
     cloudflare = cloudflare
   }
   variables {
-    account_id          = "mock"
-    zone_id             = "mock"
-    name                = "oryxa-fde-test"
-    domain              = "fde-dev.example.com"
-    api_origin_hostname = "internal-oryxa-fde-test-api.ap-south-1.elb.amazonaws.com"
-    admin_emails        = ["owner@example.com"]
+    account_id   = "mock"
+    zone_id      = "mock"
+    name         = "oryxa-fde-test"
+    domain       = "fde-dev.example.com"
+    api_port     = 8080
+    admin_emails = ["owner@example.com"]
   }
 
   assert {
     condition = (
-      cloudflare_connectivity_directory_service.api.host.hostname == var.api_origin_hostname
-      && cloudflare_connectivity_directory_service.api.host.resolver_network.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
+      cloudflare_connectivity_directory_service.api.host.ipv4 == "127.0.0.1"
+      && cloudflare_connectivity_directory_service.api.http_port == var.api_port
+      && cloudflare_connectivity_directory_service.api.host.network.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
     )
-    error_message = "the Workers VPC service targets the internal ALB"
+    error_message = "the Workers VPC service targets the API on the loopback of the tunnel's connector (the sidecar in the API task)"
   }
   assert {
     condition = toset(keys(cloudflare_dns_record.worker)) == toset([
