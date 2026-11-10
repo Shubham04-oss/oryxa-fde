@@ -1,6 +1,7 @@
 # 0004: The coding agent
 
-Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes the main harness.
+Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes the main harness;
+amended again the same day with what the spike found (`sandbox/harness/OPENCODE.md`).
 
 ## Decision
 - The main way FDEs build is a coding agent in each company's sandbox, not a browser editor.
@@ -10,8 +11,14 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   and the product never uses the name "Claude Code".
 - Each harness runs behind the adapter, which turns its output into one internal event format
   shaped on the Agent Client Protocol. Adding a harness changes neither the format nor the API.
-  OpenCode is driven over ACP on pipes the adapter opens, never over a listening socket that any
-  process in the sandbox could reach.
+  OpenCode is driven over ACP on pipes the adapter opens. The pinned version also opens a loopback
+  listener of its own, guarded by a password in its environment, which any process in the sandbox
+  can reach. The image makes that password unreadable to what the agent starts (the binary is
+  execute-only, so its process cannot be inspected), and the gate proves it on the real sandbox
+  image. If that protection cannot be shown there, OpenCode is not enabled.
+- **An approval is enforced for real only where the outbound handler can hold the request.** Every
+  action on a company's approval list must be one the handler can hold. The adapter's approval is
+  the prompt in front of that hold, not the hold itself.
 - Each run gets a context pack: the company's scope, success criteria, decisions, config and
   conventions, written into the sandbox before the agent starts.
 - Secrets and model credentials never enter the sandbox. The outbound handler adds them to allowed
@@ -35,7 +42,11 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
   eval comparison against the current default. The lead enables a version, and changes the
   default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
   Agent SDK.
-- A run's budget uses the price of the model it runs.
+- A run's budget uses the price of the model it runs. A harness may report usage only at the end
+  of a turn, and a turn can be a whole run, so the outbound handler meters the model's responses
+  and stops a run that passes its budget. Usage a harness reports is for display.
+- Each run starts with a fresh home, config, data, cache and temp directory, and the harness's
+  configuration lives in a directory root owns.
 - Changes the agent makes to files that run code or steer an agent on someone else's machine are
   held for review and never delivered silently. That covers agent configuration (`.opencode/`,
   `opencode.json*`, `AGENTS.md` and `CLAUDE.md` at any depth, `.claude/`, `.cursor/`, `.mcp.json`),
@@ -54,6 +65,8 @@ Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes th
 - **Hostile repository:** a repository and a home directory seeded with harness configuration,
   plugins, a local MCP server, skills and instruction files that try to redirect the agent change
   nothing about the run: same tools, same permissions, same hosts.
+- **Forged answer:** on the real sandbox image, a process the agent starts cannot read the
+  harness's credentials or answer a permission request on its own behalf.
 - **Egress:** with the outbound handler recording, a run contacts only the model host and the hosts
   the company's policy allows. A catalogue fetch, update check, share, plugin install or telemetry
   call fails the test. It runs in CI against a recorded or stubbed model, not by hand.
