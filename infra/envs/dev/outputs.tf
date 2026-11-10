@@ -82,3 +82,8 @@ output "api_env_names" {
     secret = module.api.secret_env_names
   }
 }
+
+output "agent_model_target" {
+  description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
+  value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null
+}

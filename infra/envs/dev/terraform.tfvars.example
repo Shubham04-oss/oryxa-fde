@@ -3,7 +3,7 @@
 # CLOUDFLARE_API_TOKEN in the environment.
 
 aws_account_id         = "000000000000"
-aws_region             = "us-west-2"
+aws_region             = "ap-south-1" # Mumbai; the default (infra/README.md, Mumbai)
 cloudflare_account_id  = "<cloudflare account id>"
 cloudflare_zone_id     = "<zone id>"
 domain                 = "<dev base hostname, e.g. fde-dev.example.com>"
@@ -12,11 +12,17 @@ workos_client_id       = "<WorkOS client id (public)>"
 data_bucket_name       = "oryxa-fde-dev-data-<unique suffix>"
 cloudtrail_bucket_name = "oryxa-fde-dev-cloudtrail-<unique suffix>"
 
-# Printed by `infra/scripts/create-event-bus.sh dev <account id>` (apply order step 2).
-event_bus_arn = "arn:aws:events:us-west-2:000000000000:event-busv2/oryxa-fde-dev/<id>"
+# Printed by `infra/scripts/create-event-bus.sh dev <account id> ap-south-1` (apply order step 2).
+event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/<id>"
 
 # The git sha of an image pushed to the ECR repository (output ecr_repository_url).
 api_image_tag = "<git sha>"
 
 # false until the image is pushed and every secret has a value (apply order step 7).
 start_services = false
+
+# Agent routes (after deploy-workers). In ap-south-1 the Claude models run only through a cross-Region
+# inference profile, so prompts may be processed outside India: read "Where prompts are processed" in
+# infra/README.md before choosing. agent_region is where the calls start from; null means aws_region.
+# agent_model  = "global.anthropic.claude-opus-5-5"
+# agent_region = null
