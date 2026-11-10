@@ -50,10 +50,10 @@ amended again the same day with what the spike found (`sandbox/harness/OPENCODE.
   customer) pause the run until an FDE approves.
 - **A harness version is pinned exactly and checked by hash.** It is enabled only after it passes
   the recorded-session, hostile-repository, forged-answer and egress tests. It becomes the default
-  only after an eval comparison against the current default. The lead enables a version, and changes the
-  default, in a lead PR that records those results. Until OpenCode passes, runs use the Claude
-  Agent SDK. The image carries the tools a harness would otherwise download (ripgrep for
-  OpenCode), since nothing may be fetched at run time.
+  only after an eval comparison against the current default. The lead enables a version, and
+  changes the default, in a lead PR that records those results. Until OpenCode passes, runs use
+  the Claude Agent SDK. The image carries the tools a harness would otherwise download (ripgrep
+  for OpenCode), since nothing may be fetched at run time.
 - A run's budget uses the price of the model it runs. OpenCode reports usage once per turn, so the
   adapter checks the budget between turns, and every run also has a turn limit and a time limit,
   after which the adapter cancels it. A turn is a whole prompt, so a single long turn can overrun
