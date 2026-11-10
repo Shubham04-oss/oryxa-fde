@@ -15,19 +15,16 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
-# Runners (docs/ci.md): heavy Rust jobs run on the oryxa-a1 self-hosted runners when the repository
-# variable A1_RUNNERS is "true", and on GitHub-hosted runners otherwise. Light jobs always run hosted.
-
 jobs:
   check:
-    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: oryxa
           POSTGRES_DB: oryxa_fde
-        ports: ["5432"]  # random host port: two a1 runners may run this job at once
+        ports: ["5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
@@ -51,14 +48,13 @@ jobs:
           DATABASE_URL: postgres://postgres:oryxa@localhost:${{ job.services.postgres.ports['5432'] }}/oryxa_fde
           SPICEDB_ENDPOINT: http://localhost:${{ env.SPICEDB_PORT }}
         run: cargo test --workspace -- --ignored --skip e2e_ --test-threads=1
-      # Self-hosted runners keep containers between runs.
       - name: Stop SpiceDB
         if: always()
         run: docker rm -f "spicedb-${{ github.run_id }}-${{ github.run_attempt }}" || true
 
   platform-base:
     # The vendored base must still build and pass its own unit tests at the pinned commit.
-    runs-on: ${{ vars.A1_RUNNERS == 'true' && fromJSON('["self-hosted","oryxa-a1"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
@@ -68,8 +64,8 @@ jobs:
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
   sandbox:
-    # Light: the npm Workers and the agent harness (TypeScript): the sandbox gateway, the harness and the realtime
-    # Worker (live run output), always hosted (docs/ci.md).
+    # The npm Workers and the agent harness (TypeScript): the sandbox gateway, the harness and the realtime
+    # Worker (live run output).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -98,7 +94,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD/schema:/schema" authzed/zed:v1.2.1 validate /schema/fde.validation.yaml
 
-  # Light: the web app (fde-web/, TanStack Start on Cloudflare Workers), always hosted (docs/ci.md). Never deploys.
+  # The web app (fde-web/, TanStack Start on Cloudflare Workers). Never deploys.
   web:
     runs-on: ubuntu-latest
     defaults:
