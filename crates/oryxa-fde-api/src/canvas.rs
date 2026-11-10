@@ -231,7 +231,7 @@ async fn save(app: &App, who: &Principal, at: Place, body: CanvasBody) -> Result
         let key = canvas_key(at.scope(), &v.id);
         // ponytail: a save that loses the race after its upload leaves its object behind.
         app.context.blobs.put(&key, bytes, "application/json").await?;
-        v.body = SnapshotBody::Blob(key);
+        v.body = SnapshotBody::Blob(key.key().to_owned());
         tx = at.open(app).await?;
     } else {
         v.body = SnapshotBody::Inline(bytes);
