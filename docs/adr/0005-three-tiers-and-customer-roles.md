@@ -29,8 +29,9 @@ definition fde_company {
 
     permission manage = lead + workspace->manage
     permission work = engineer + manage
-    // Anyone on the vendor's side. A customer role held by one of them counts for nothing.
-    permission staff = workspace->access
+    // Anyone on the vendor's side: a tenant admin or member, or anyone who works on the company,
+    // whatever their tenant role. A customer role held by one of them counts for nothing.
+    permission staff = workspace->access + work
     permission govern = it_admin - staff
 }
 
@@ -41,7 +42,7 @@ definition fde_project {
     relation sponsor: user
 
     permission work = assignee + company->work
-    permission decide = sponsor - company->staff
+    permission decide = sponsor - work - company->staff
     permission view = work + guest + sponsor
 }
 ```
@@ -50,12 +51,15 @@ definition fde_project {
   still record that access was granted, and the record says who recorded it. Only an IT admin's
   own action counts as the customer's approval. The same holds for a sponsor's sign-off.
 - **The vendor cannot stand in for the customer.** `govern` and `decide` exclude every admin and
-  member of the vendor's tenant, so holding both kinds of role gives the customer's powers to no
-  one. The API refuses to grant a customer role to a tenant admin or member, and refuses to make a
-  customer person one while they hold a customer role.
+  member of the vendor's tenant and everyone who works on the company or the project (lead,
+  engineer, assignee), whatever their tenant role. Holding both kinds of role gives the customer's
+  powers to no one. The API refuses both directions: a customer role for someone on the vendor's
+  side, and a vendor role for someone who holds a customer role.
 - **Who may grant a customer role.** A tenant admin records the customer's email domain on the
-  company and invites the first IT admin at an address on that domain. After that, only an
-  existing IT admin of the company adds or removes IT admins and sponsors. Every grant, removal
+  company and invites the first IT admin at an address on that domain. A tenant admin may do this
+  only while the company has no IT admin, so again if the last one leaves. Otherwise only an
+  existing IT admin of the company adds or removes IT admins and sponsors. A change to the
+  recorded domain is audited and shown to the customer. `guest` stays as the read-only role. Every grant, removal
   and customer decision is in the audit log with its actor, and the customer's screens show who
   decided what, so a decision made in the customer's name is visible to the customer.
 - **What the customer sees is an allowlist.** The customer screens read their own endpoints, which

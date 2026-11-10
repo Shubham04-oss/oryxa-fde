@@ -79,7 +79,7 @@ vendor/oryxa-platform/       the platform base, synced by script only
 | Evals | Suite format, runner in the sandbox, graders, links to criteria, CSV import | Each criterion shows a pass rate the customer can see |
 | Billing | Free and Pro, agent-hour and AI-credit meters, Stripe | The first design partners pay |
 
-Not in P0: the runner in customer clouds and real customer data, more harnesses, handoff pack and
+Not in P0: the runner in customer clouds, real customer data in a sandbox, more harnesses, handoff pack and
 ownership transfer, Team plan, enterprise sign-on and regions, self-efficiency.
 
 ## 6. Workstreams
