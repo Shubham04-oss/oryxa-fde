@@ -72,7 +72,8 @@ export function AuthFrame({
             <div className="mt-2.5 text-[13px] leading-normal text-muted-foreground">{lead}</div>
           )}
           <div className="mt-6">{children}</div>
-          {onMock && mockNote && (
+          {/* `import.meta.env.DEV` is false in a production build, which drops this note. */}
+          {import.meta.env.DEV && onMock && mockNote && (
             <p className="mt-5 border-t pt-4 text-[11px] leading-normal text-muted-foreground">
               Mock API, sample data. {mockNote}
             </p>

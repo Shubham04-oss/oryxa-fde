@@ -163,6 +163,7 @@ export function ResetScreen({ returnTo, token }: Props & { token: string }) {
     setPassword("")
     if (ok) {
       carried.token = ""
+      carried.tokenFor = null
       setDone(true)
     } else field.current?.focus()
   }

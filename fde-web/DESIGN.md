@@ -88,8 +88,10 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
   with what to do next and **Back to sign in**. Rules: one wording for a wrong password and an
   unknown address, and "if an account uses this address" for codes and resets; refusals in our own
   words, never the API's; the password only in the screen's state (cleared after a refusal), sent in
-  a POST body, never in the address, storage, a log or an error; an emailed link's token is taken
-  out of the address bar once read and the page sends no `Referer`; `autocomplete` set for password
+  a POST body to the API's sign-in routes only, never in the address, storage, a log or an error;
+  every Submit is disabled until the page's script runs, so a form cannot be sent natively; an
+  emailed link's token is taken out of the address bar once read, offered only to the step it was
+  read for, and the page sends no `Referer`; `autocomplete` set for password
   managers (`username`, `current-password`, `new-password`, `one-time-code`, `name`); every field
   labelled, its error read with it, and focus moved to the new step's title or the field to fix.
   The calls are the hand-written assumed contract in `lib/api/sign-in-api.ts`, until the API's spec

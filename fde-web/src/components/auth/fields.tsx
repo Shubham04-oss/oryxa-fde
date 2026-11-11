@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router"
-import { useId, useState } from "react"
+import { useId, useState, useSyncExternalStore } from "react"
 import type { FormEvent, ReactNode, Ref } from "react"
 import { Button, buttonVariants } from "../ui/button"
 import type { Step } from "./flow"
@@ -123,8 +123,9 @@ export function PasswordField(props: Omit<FieldProps, "type" | "after" | "inputM
 }
 
 /**
- * A sign-in form. `method="post"` so that a submit before the page's script runs sends the fields in
- * a body to this app, never in the address; once it runs, `onSubmit` handles it and nothing is posted.
+ * A sign-in form. It cannot be sent before the page's script has run: `Submit` is disabled until
+ * then, so a password never goes anywhere but the API's sign-in routes (ADR 0007). `method="post"`
+ * is a second guard: were it ever sent natively, the fields would go in a body, never the address.
  */
 export function AuthForm({
   label,
@@ -151,7 +152,25 @@ export function AuthForm({
   )
 }
 
-/** The form's main button. While working it says so and cannot be pressed twice. */
+const noSubscribe = () => () => {}
+
+/**
+ * False in the server's markup and while React hydrates it, true once the page's script runs. The
+ * server snapshot is what hydration uses, so the first client render matches the server's.
+ */
+export function useHydrated(): boolean {
+  return useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  )
+}
+
+/**
+ * The form's main button. Disabled until the page's script runs, so the form cannot be sent natively
+ * before `onSubmit` handles it (pressing Enter in a field does nothing while the default button is
+ * disabled). While working it says so and cannot be pressed twice.
+ */
 export function Submit({
   working,
   children,
@@ -162,8 +181,9 @@ export function Submit({
   /** What it says while working: "Signing in…". */
   busy: string
 }) {
+  const hydrated = useHydrated()
   return (
-    <Button type="submit" className="h-11 w-full text-[13px]" disabled={working}>
+    <Button type="submit" className="h-11 w-full text-[13px]" disabled={working || !hydrated}>
       {working ? busy : children}
     </Button>
   )

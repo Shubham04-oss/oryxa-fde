@@ -26,7 +26,11 @@ export function stepOf(value: unknown): Step {
  * What one step hands the next, in memory only: the address typed, and an emailed link's token once
  * it is out of the address bar. A reload forgets them. Never the password.
  */
-export const carried: { email: string; token: string } = { email: "", token: "" }
+export const carried: { email: string; token: string; tokenFor: Step | null } = {
+  email: "",
+  token: "",
+  tokenFor: null,
+}
 
 /** Moves between steps and finishes sign-in, keeping where the person was going. */
 export function useFlow(returnTo: string) {
@@ -56,6 +60,7 @@ export function useFlow(returnTo: string) {
         queryClient.clear()
         carried.email = ""
         carried.token = ""
+        carried.tokenFor = null
         router.history.push(safeReturnTo(returnTo))
       } else if (next.next === "verify_email") go("verify-email")
       else if (next.next === "choose_organisation") go("organisation")
@@ -112,7 +117,7 @@ export function waitText(error: SignInError): string {
 /**
  * An emailed link's token (reset, invite): read once from the address, kept in memory and taken out
  * of the address bar, so it is not left in history or on screen. It reaches the API only in a body.
- * Returns the token to use.
+ * Returns the token to use: the one read for this step, or "".
  */
 export function useLinkToken(
   token: string | undefined,
@@ -124,11 +129,13 @@ export function useLinkToken(
   useEffect(() => {
     if (!token || !enabled) return
     carried.token = token
+    carried.tokenFor = step ?? null
     void router.navigate({
       to: "/sign-in",
       search: { return_to: returnTo, ...(step ? { step } : {}) },
       replace: true,
     })
   }, [token, step, returnTo, router, enabled])
-  return token ?? carried.token
+  // A token read for one step is never offered to another (a reset link's token to an invite).
+  return token ?? (carried.tokenFor === step ? carried.token : "")
 }

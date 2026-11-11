@@ -50,6 +50,7 @@ const where = (router: ReturnType<typeof open>["router"]) => router.state.locati
 beforeEach(() => {
   carried.email = ""
   carried.token = ""
+  carried.tokenFor = null
 })
 afterEach(() => vi.restoreAllMocks())
 
