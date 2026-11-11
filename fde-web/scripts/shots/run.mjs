@@ -4,7 +4,7 @@
 //   pnpm shots [--out DIR] [--only NAME[,NAME]] [--url URL]
 //
 // It uses a `pnpm dev:mock` already running at --url (default http://127.0.0.1:3000), or starts one
-// and stops it afterwards. The browser is Playwright's official Docker image, pinned below, run
+// with our own sign-in screens on (VITE_FDE_OWN_SIGN_IN=1) and stops it afterwards. The browser is Playwright's official Docker image, pinned below, run
 // on the host network and thrown away afterwards: nothing is installed on the host, the repo has no
 // Playwright dependency, and none of this is in the production build. PNGs go to --out (default
 // `<tmpdir>/fde-shots`). Exits non-zero when a screen fails to render.
@@ -100,7 +100,8 @@ async function main() {
       path.join(here, "../../node_modules/.bin/vite"),
       ["dev", "--host", hostname, "--port", port || "3000", "--strictPort"],
       {
-        env: { ...process.env, VITE_FDE_MOCK_API: "1" },
+        // Our own sign-in screens (ADR 0007) are photographed too, so the dev mock it starts has them on.
+        env: { ...process.env, VITE_FDE_MOCK_API: "1", VITE_FDE_OWN_SIGN_IN: "1" },
         stdio: "ignore",
         detached: true,
       },

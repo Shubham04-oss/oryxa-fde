@@ -30,4 +30,19 @@ describe("SignIn", () => {
 
     await waitFor(() => expect(router.state.location.href).toBe("/"))
   })
+
+  it("explains a sign-in refused for no organisation, and still offers sign-in", async () => {
+    renderWithRouter(<SignIn returnTo="/" outcome="no_organisation" />, {
+      at: "/sign-in?error=no_organisation",
+      signedIn: false,
+    })
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your account is not part of an organisation yet",
+    )
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Ask an admin at your organisation to invite you",
+    )
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled()
+  })
 })

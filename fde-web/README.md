@@ -18,6 +18,11 @@ pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm
   redirect URI in WorkOS, so AuthKit brings you back here signed in.
 - When the API's `openapi.json` changes, run `pnpm api:generate` and make `schemas.ts` follow it:
   `pnpm typecheck` says where.
+- Our own sign-in screens (ADR 0007) are off by default, and `/sign-in` keeps today's redirect to
+  `/auth/login`. Turn them on at build time with `VITE_FDE_OWN_SIGN_IN=1`
+  (`VITE_FDE_OWN_SIGN_IN=1 pnpm dev:mock`, or the same variable for `pnpm build`). On the mock, sign in as `riya@example.com` with
+  `sample-password`; the other sample accounts are listed in `src/dev/mock-sign-in.ts`. Turn it on in
+  a deployed build only once the API's sign-in routes are there.
 - On the mock, sign-in is simulated and kept for the browser tab. To see sign-in again, sign out
   from the profile menu.
 - Do not run `wrangler deploy`: deployment comes with the infra stream.

@@ -76,7 +76,24 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - **Sign-in.** The one expressive screen: the full canvas, a compact card inset right, and the
   eight stages beside it, each a little stronger than the last. Continue goes to AuthKit's hosted
   page through the API (`/auth/login`), which brings the FDE back to where they were. On the mock
-  it says that no account is checked.
+  it says that no account is checked. `/sign-in?error=no_organisation` (from `/auth/callback`) says
+  the account is not part of an organisation yet and to ask an admin for an invite, above Continue.
+- **Our own sign-in (ADR 0007),** behind the build flag `VITE_FDE_OWN_SIGN_IN=1`, off until the API's
+  sign-in routes are deployed. Every step is `/sign-in?step=…` in the same frame
+  (`components/auth/frame.tsx`; fields in `fields.tsx`, so a restyle starts in those two): email and
+  password with "Email me a code instead" and "Continue with Google"; the code (ask, then enter);
+  verify your email; choose an organisation (the API's list, from the pending step, so Google's
+  callback lands on it too); forgotten and reset password; accept an invite. An end with no session
+  is `/sign-in?error=…`: not in an organisation yet, or a step we cannot take yet (MFA, SSO), each
+  with what to do next and **Back to sign in**. Rules: one wording for a wrong password and an
+  unknown address, and "if an account uses this address" for codes and resets; refusals in our own
+  words, never the API's; the password only in the screen's state (cleared after a refusal), sent in
+  a POST body, never in the address, storage, a log or an error; an emailed link's token is taken
+  out of the address bar once read and the page sends no `Referer`; `autocomplete` set for password
+  managers (`username`, `current-password`, `new-password`, `one-time-code`, `name`); every field
+  labelled, its error read with it, and focus moved to the new step's title or the field to fix.
+  The calls are the hand-written assumed contract in `lib/api/sign-in-api.ts`, until the API's spec
+  has them.
 - **Companies (home).** **New company** above two cards per row (one below 960px): name, industry
   and the FDE's part (Lead, Engineer, or Organisation admin when they reach it as one), each project
   with its stage, and what needs the FDE there today. With no company it is the first minute of an
@@ -796,7 +813,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 
 Every PR that changes a screen is looked at before it goes to review, and lists its screenshots in
 the PR text. `pnpm shots` does it in one command: it renders the screens in `scripts/shots/screens.mjs`
-on `pnpm dev:mock` (it uses one already running at `http://127.0.0.1:3000`, or starts and stops its own)
+on `pnpm dev:mock` (it uses one already running at `http://127.0.0.1:3000`, or starts and stops its own,
+with our own sign-in screens on; start yours with `VITE_FDE_OWN_SIGN_IN=1` to photograph them)
 at 1440, 1024 and 390 wide, light and dark, and writes PNGs to `<tmpdir>/fde-shots` (`--out DIR` to
 choose; `--only NAME[,NAME]` to take some; `--url` for another address). The browser is Playwright's
 official Docker image, pinned in `scripts/shots/run.mjs`, run on the host network and removed after; nothing
@@ -810,7 +828,8 @@ render, and leaves a `-FAILED.png` of it.
 - To add a screen, add an entry to `screens.mjs`: a `name`, a `path`, a `ready` locator that is visible
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
   `failWrites: true` makes the mock refuse every write, to see the failed-save states;
-  `emptyWorkspace: true` starts a workspace with no company; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `staleChecklist: true` makes the project's
+  `emptyWorkspace: true` starts a workspace with no company; `pendingStep` starts a sign-in waiting at
+  that step, as Google's callback leaves it; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `staleChecklist: true` makes the project's
   checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). A screen that shows a stale save sets the mock's `__fdeMockSomeoneElse` from its `act`, between opening a form and saving it (`someoneElse` in `screens.mjs`). `sizes` and
   `themes` narrow an entry. The file's header lists every option.
 - Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you

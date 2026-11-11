@@ -5,6 +5,8 @@ import { Button } from "./ui/button"
 import { ApiError, api, onMock, safeReturnTo } from "@/lib/api/client"
 import { STAGES } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
+import { OUTCOMES } from "@/lib/sign-in-outcome"
+import type { Outcome } from "@/lib/sign-in-outcome"
 import { cn } from "@/lib/utils"
 
 // Each stage a little stronger than the last, drawn in --text: the screen's one expressive touch.
@@ -22,8 +24,9 @@ const FADE = [
 /**
  * Sign-in (DESIGN.md §3): the one expressive screen. The full canvas, a compact card inset right,
  * and the eight stages behind it. The account check itself belongs to the API (WorkOS AuthKit).
+ * `outcome` is how the last sign-in ended with no session (`/sign-in?error=…` from `/auth/callback`).
  */
-export function SignIn({ returnTo }: { returnTo: string }) {
+export function SignIn({ returnTo, outcome }: { returnTo: string; outcome?: Outcome }) {
   const router = useRouter()
   const queryClient = useQueryClient()
   const [working, setWorking] = useState(false)
@@ -69,6 +72,12 @@ export function SignIn({ returnTo }: { returnTo: string }) {
           <p className="mt-2.5 mb-7 text-[13px] leading-normal text-muted-foreground">
             Use your work account. Your companies and projects open next.
           </p>
+          {outcome && (
+            <div role="alert" className="mb-5 rounded-lg border p-3 text-[12px] leading-normal">
+              <p className="font-medium">{OUTCOMES[outcome].title}</p>
+              <p className="mt-1 text-muted-foreground">{OUTCOMES[outcome].text}</p>
+            </div>
+          )}
           <Button
             className="h-11 w-full text-[13px]"
             disabled={working}

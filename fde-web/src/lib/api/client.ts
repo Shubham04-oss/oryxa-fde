@@ -199,6 +199,11 @@ export type Transport = {
   upload: (request: UploadRequest) => Promise<Response>
   /** Starts sign-in, to come back to `returnTo`, a path `safeReturnTo` has checked. */
   signIn: (returnTo: string) => Promise<void>
+  /**
+   * Leaves the app for `url`, a same-origin `/auth/*` path that redirects to a sign-in provider and
+   * comes back through `/auth/callback` (Google, `sign-in-api.ts`). Settles only on the mock.
+   */
+  leave: (url: string) => Promise<void>
 }
 
 /** The real API, through the Worker, and AuthKit's hosted sign-in through the API. */
@@ -232,6 +237,10 @@ export const network: Transport = {
     // The page is leaving for AuthKit, so this never settles.
     return new Promise<void>(() => {})
   },
+  leave(url) {
+    window.location.assign(url)
+    return new Promise<void>(() => {})
+  },
 }
 
 /** Whether this build answers from the dev mock. Never true in a production build. */
@@ -239,7 +248,8 @@ export function mockApiOn(env: { DEV: boolean; VITE_FDE_MOCK_API?: string }) {
   return env.DEV && env.VITE_FDE_MOCK_API === "1"
 }
 
-function selected(): Promise<Transport> {
+/** The transport this build uses: the network, or the dev mock in `pnpm dev:mock` and tests. */
+export function selected(): Promise<Transport> {
   // `import.meta.env.DEV` is the literal `false` in a production build, so this branch and the
   // mock module are dropped from it (mock-excluded.test.ts proves it).
   return import.meta.env.DEV && mockApiOn(import.meta.env)
@@ -248,7 +258,7 @@ function selected(): Promise<Transport> {
 }
 
 /** CSRF: the API refuses a write without it, and the Worker refuses one from another origin. */
-const HEADERS = { "X-Oryxa-Request": "1" }
+export const HEADERS = { "X-Oryxa-Request": "1" }
 
 /** The most passages one search asks for (the API's cap is 50, its default 10). */
 export const SEARCH_LIMIT = 20
