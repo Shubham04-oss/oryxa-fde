@@ -39,6 +39,19 @@ pub enum ApiError {
     /// (ADR 0003). Nothing was stored; a retry fails the same way until the key is provisioned.
     #[error("company key missing")]
     CompanyKeyMissing,
+    /// A sign-in refused: wrong password or no such account, which answer alike.
+    #[error("sign-in refused")]
+    InvalidCredentials,
+    /// A sign-in code that is wrong, spent or expired.
+    #[error("code refused")]
+    InvalidCode,
+    /// A sign-in limit is reached; try again after this long. Answers alike for every address.
+    #[error("too many attempts")]
+    TooManyAttempts(std::time::Duration),
+    /// WorkOS wants a step our screens do not handle yet (MFA, SSO, a Radar challenge): the sign-in
+    /// ends with no session.
+    #[error("sign-in method unsupported")]
+    SignInUnsupported,
     /// A dependency (SpiceDB, WorkOS keys) failed; the request is denied, never allowed.
     #[error("unavailable")]
     Unavailable,
@@ -105,6 +118,10 @@ impl ApiError {
             ApiError::Rejected(_) => (StatusCode::CONFLICT, "rejected"),
             ApiError::CompanyKeyMissing => (StatusCode::CONFLICT, "company_key_missing"),
             ApiError::NeedsAction(what) => (StatusCode::BAD_REQUEST, *what),
+            ApiError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
+            ApiError::InvalidCode => (StatusCode::UNAUTHORIZED, "invalid_code"),
+            ApiError::TooManyAttempts(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many_attempts"),
+            ApiError::SignInUnsupported => (StatusCode::FORBIDDEN, "sign_in_unsupported"),
             ApiError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -141,7 +158,13 @@ impl IntoResponse for ApiError {
             error: self.code(),
             message: self.message().map(str::to_owned),
         };
-        (status, Json(body)).into_response()
+        let mut resp = (status, Json(body)).into_response();
+        if let ApiError::TooManyAttempts(wait) = self {
+            let secs = wait.as_secs().max(1);
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from(secs));
+        }
+        resp
     }
 }
 

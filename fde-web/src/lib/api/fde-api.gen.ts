@@ -58,6 +58,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/sign-in/organisation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Continue a sign-in into one of the organisations the last step offered. */
+        post: operations["sign_in_choose_organisation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/sign-in/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign in with an email address and password. A wrong password and an unknown address get the
+         *     same 401 `invalid_credentials`; a limit reached gets 429 `too_many_attempts` with `Retry-After`,
+         *     alike for every address.
+         */
+        post: operations["sign_in_with_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/sign-in/verify-email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Continue a sign-in that waits on email verification, with the code WorkOS emailed. */
+        post: operations["sign_in_verify_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies": {
         parameters: {
             query?: never;
@@ -1723,6 +1778,10 @@ export interface components {
             label: string;
             met: boolean;
         };
+        ChooseOrganisationIn: {
+            /** @description One of the organisations the last step offered. */
+            organisation: string;
+        };
         CommentBody: {
             body: string;
         };
@@ -1983,6 +2042,17 @@ export interface components {
         };
         /** @enum {string} */
         OrgRole: "admin" | "member";
+        OrganisationOut: {
+            id: string;
+            name: string;
+        };
+        PasswordSignInIn: {
+            email: string;
+            /** Format: password */
+            password: string;
+            /** @description Where to go once signed in: a path on the web app. Defaults to `/`. */
+            return_to?: string | null;
+        };
         PersonOut: {
             /** @description WorkOS user id. */
             id: string;
@@ -2204,6 +2274,19 @@ export interface components {
             guests: number;
             id: string;
             revoked_at?: string | null;
+        };
+        /** @description Where a sign-in stands after a step that worked. */
+        SignInStep: {
+            /** @enum {string} */
+            next: "done";
+            return_to: string;
+        } | {
+            /** @enum {string} */
+            next: "verify_email";
+        } | {
+            /** @enum {string} */
+            next: "choose_organisation";
+            organisations: components["schemas"]["OrganisationOut"][];
         };
         SignOffBody: {
             /** @description The person at the customer who signed off. */
@@ -2644,6 +2727,10 @@ export interface components {
         };
         /** @enum {string} */
         UpdateState: "draft" | "approved" | "discarded";
+        VerifyEmailIn: {
+            /** @description The code WorkOS emailed to the address. */
+            code: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -2758,6 +2845,204 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in_choose_organisation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChooseOrganisationIn"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description `invalid_sign_in`: no pending choice (start again); `invalid_organisation`: not one offered */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in_with_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordSignInIn"];
+            };
+        };
+        responses: {
+            /** @description Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `invalid_credentials` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf`; `no_organisation` (the person is in no organisation: show the page for it, no session is set); `sign_in_unsupported` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in_verify_email: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyEmailIn"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description `invalid_sign_in`: no pending verification (start again); `invalid_code`: not a code */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `invalid_code`: wrong or expired; the step stays open */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -1,0 +1,1234 @@
+//! Our own sign-in routes (ADR 0007): the web's screens post here and WorkOS stays behind the API.
+//! Each route is unauthenticated, so each is guarded the same way:
+//!
+//! - the web app's origin and `X-Oryxa-Request: 1`, whether or not a cookie is present; a session
+//!   cookie the browser brings is never read, refreshed or reused (the session layer skips these
+//!   paths), and success always sets a new one;
+//! - limits per address, per client and one ceiling across all sign-in calls, counted in Postgres
+//!   before WorkOS is asked, so a limit reached answers alike for every address; a counter that
+//!   cannot be counted refuses the attempt;
+//! - one answer for a wrong password and an unknown address, every answer padded to
+//!   [`ANSWER_FLOOR`] so its timing says no more than its body;
+//! - a pending step (verify the email, choose an organisation) travels in the short-lived sealed
+//!   [`PENDING_COOKIE`], which names its step and holds WorkOS's pending token, the organisations
+//!   offered and the address's keyed hash, never the password or the address.
+//!
+//! The password goes to WorkOS and nowhere else: it is never logged, stored, put in a cookie or an
+//! event, or returned. Bodies are parsed here, never echoed in an error, and logs carry ids only.
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::header::{SET_COOKIE, USER_AGENT};
+use axum::response::{IntoResponse, Response};
+use oryxa_fde_store::{EmailAddress, SignInHit, Store};
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+use utoipa::ToSchema;
+
+use crate::session::{
+    Attempt, Client, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie, set_cookie,
+};
+use crate::{ApiError, App, BoxFuture, ErrorBody, VerifyToken};
+
+pub const PASSWORD_PATH: &str = "/auth/sign-in/password";
+pub const VERIFY_EMAIL_PATH: &str = "/auth/sign-in/verify-email";
+pub const ORGANISATION_PATH: &str = "/auth/sign-in/organisation";
+const PATHS: [&str; 3] = [PASSWORD_PATH, VERIFY_EMAIL_PATH, ORGANISATION_PATH];
+
+/// Whether the session layer leaves `path` to its own checks.
+pub(crate) fn is_sign_in_path(path: &str) -> bool {
+    PATHS.contains(&path)
+}
+
+pub const PENDING_COOKIE: &str = "__Host-fde_pending";
+const PENDING_PURPOSE: &str = "fde_pending";
+/// How long a pending step may wait; WorkOS's own pending token lasts about as long.
+const PENDING_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// No answer to these routes leaves sooner than this after the request arrived, so a refusal takes
+/// as long whether or not WorkOS knew the address.
+pub const ANSWER_FLOOR: Duration = Duration::from_millis(800);
+
+const MAX_PASSWORD_BYTES: usize = 1024;
+const MAX_CODE_CHARS: usize = 16;
+const MAX_USER_AGENT_CHARS: usize = 512;
+
+/// One limit: what it counts, over how long, and how many it lets through.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limit {
+    pub kind: &'static str,
+    pub window: Duration,
+    pub limit: u32,
+}
+
+const MINUTES_5: Duration = Duration::from_secs(5 * 60);
+/// Password attempts for one address; WorkOS's own is 10 a minute per address.
+pub(crate) const PASSWORD_ADDRESS: Limit = Limit {
+    kind: "password_address",
+    window: MINUTES_5,
+    limit: 10,
+};
+pub(crate) const PASSWORD_CLIENT: Limit = Limit {
+    kind: "password_client",
+    window: MINUTES_5,
+    limit: 30,
+};
+/// Guesses at an emailed code, for one address.
+pub(crate) const CODE_ADDRESS: Limit = Limit {
+    kind: "code_address",
+    window: MINUTES_5,
+    limit: 10,
+};
+pub(crate) const CODE_CLIENT: Limit = Limit {
+    kind: "code_client",
+    window: MINUTES_5,
+    limit: 30,
+};
+/// Organisation choices from one client.
+pub(crate) const STEP_CLIENT: Limit = Limit {
+    kind: "step_client",
+    window: MINUTES_5,
+    limit: 30,
+};
+/// Every sign-in call to WorkOS, from everyone: a fifth of WorkOS's environment-wide write limit
+/// (500 per 10 seconds), so a flood never uses up what session refresh needs.
+pub(crate) const CEILING: Limit = Limit {
+    kind: "all",
+    window: Duration::from_secs(10),
+    limit: 100,
+};
+
+/// Counts sign-in attempts; Postgres in the service.
+pub(crate) trait Limiter: Send + Sync {
+    /// Counts one attempt in each bucket; how long to wait when any is over its limit.
+    fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>>;
+}
+
+impl Limiter for Store {
+    fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>> {
+        Box::pin(async move { self.sign_in_hits(hits).await.map_err(|e| e.to_string()) })
+    }
+}
+
+/// What a sign-in route needs, apart from the request.
+pub(crate) struct Ctx<'a> {
+    pub sign_in: &'a SignIn,
+    pub tokens: &'a dyn VerifyToken,
+    pub limits: &'a dyn Limiter,
+}
+
+fn ctx(app: &App) -> Result<Ctx<'_>, ApiError> {
+    Ok(Ctx {
+        sign_in: app.sign_in.as_ref().ok_or(ApiError::Unavailable)?,
+        tokens: app.tokens.as_ref(),
+        limits: &app.store,
+    })
+}
+
+/// A password, which only ever goes on to WorkOS: no `Serialize`, and `Debug` hides it.
+#[derive(Deserialize, Clone)]
+#[serde(transparent)]
+pub struct Password(String);
+
+impl fmt::Debug for Password {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Password(<hidden>)")
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordSignInIn {
+    pub email: String,
+    #[schema(value_type = String, format = Password)]
+    pub password: Password,
+    /// Where to go once signed in: a path on the web app. Defaults to `/`.
+    pub return_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyEmailIn {
+    /// The code WorkOS emailed to the address.
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChooseOrganisationIn {
+    /// One of the organisations the last step offered.
+    pub organisation: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct OrganisationOut {
+    pub id: String,
+    pub name: String,
+}
+
+/// Where a sign-in stands after a step that worked.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(tag = "next", rename_all = "snake_case")]
+pub enum SignInStep {
+    /// Signed in: the session cookie is set. Go to `return_to`.
+    Done { return_to: String },
+    /// A code was emailed to the address; post it to `/auth/sign-in/verify-email`.
+    VerifyEmail,
+    /// Post one of these to `/auth/sign-in/organisation`.
+    ChooseOrganisation { organisations: Vec<OrganisationOut> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Step {
+    VerifyEmail,
+    ChooseOrganisation,
+}
+
+/// A sign-in waiting on its next step, sealed in [`PENDING_COOKIE`].
+#[derive(Serialize, Deserialize)]
+struct Pending {
+    purpose: String,
+    step: Step,
+    /// WorkOS's pending authentication token.
+    token: String,
+    /// The organisations offered, by id, when the step is to choose one.
+    organisations: Vec<String>,
+    /// The address's keyed hash, for its limits; never the address.
+    address: [u8; 32],
+    return_to: String,
+    expires: u64,
+}
+
+/// The client as the Worker forwards it: the first `X-Forwarded-For` entry, which the Worker sets
+/// from Cloudflare's view of the peer after dropping the browser's own (`fde-web/src/forward.ts`);
+/// anything after it was added by the load balancer. Not an IP address: no client.
+pub(crate) fn client_of(headers: &HeaderMap) -> Client {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string());
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_USER_AGENT_CHARS)
+                .collect::<String>()
+        })
+        .filter(|v| !v.is_empty());
+    Client { ip, user_agent }
+}
+
+/// A JSON body, refused without saying why: a parse error can quote the value it choked on.
+fn body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ApiError> {
+    serde_json::from_slice(bytes).map_err(|_| ApiError::Invalid("body"))
+}
+
+fn hit(limit: Limit, key: Option<[u8; 32]>) -> Result<SignInHit, ApiError> {
+    SignInHit::new(limit.kind, key.as_ref(), limit.window, limit.limit).map_err(|_| ApiError::Internal)
+}
+
+/// Counts the attempt, before WorkOS is asked; refuses it over a limit or when it cannot be counted.
+async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits: &[Limit]) -> Result<(), ApiError> {
+    let client_key = ctx
+        .sign_in
+        .limit_hash("client", client.ip.as_deref().unwrap_or("unknown"));
+    let mut hits = vec![hit(CEILING, None)?];
+    for l in limits {
+        let key = if l.kind.ends_with("_address") {
+            address
+        } else {
+            Some(client_key)
+        };
+        hits.push(hit(*l, key)?);
+    }
+    match ctx.limits.hit(&hits).await {
+        Ok(None) => Ok(()),
+        Ok(Some(wait)) => {
+            tracing::info!(wait_secs = wait.as_secs(), "sign-in limit reached");
+            Err(ApiError::TooManyAttempts(wait))
+        }
+        Err(e) => {
+            // Fail closed: an attempt that cannot be counted is not made.
+            tracing::error!(error = %e, "sign-in limits could not be counted");
+            Err(ApiError::Unavailable)
+        }
+    }
+}
+
+/// The address's keyed hash, from its lowercased form.
+fn address_key(sign_in: &SignIn, email: &EmailAddress) -> [u8; 32] {
+    sign_in.limit_hash("address", &email.as_str().to_lowercase())
+}
+
+/// The answer to an attempt. `refused` is what a refusal says on this route; whether the pending
+/// cookie is kept on one is `keep_on_refusal`.
+async fn conclude(
+    ctx: &Ctx<'_>,
+    attempt: Attempt,
+    address: [u8; 32],
+    return_to: String,
+    refused: ApiError,
+    keep_on_refusal: bool,
+) -> Response {
+    let pending = |step, token, organisations| Pending {
+        purpose: PENDING_PURPOSE.into(),
+        step,
+        token,
+        organisations,
+        address,
+        return_to: return_to.clone(),
+        expires: now() + PENDING_TTL.as_secs(),
+    };
+    let result = match attempt {
+        Attempt::SignedIn(tokens) => match session_cookie(ctx.tokens, ctx.sign_in, tokens).await {
+            Ok(session) => {
+                let mut resp = Json(SignInStep::Done {
+                    return_to: return_to.clone(),
+                })
+                .into_response();
+                let h = resp.headers_mut();
+                h.append(SET_COOKIE, session);
+                h.append(SET_COOKIE, clear_cookie(PENDING_COOKIE));
+                Ok(resp)
+            }
+            Err(e) => Err((e, false)),
+        },
+        Attempt::VerifyEmail { pending: token } => {
+            tracing::info!("sign-in waits on email verification");
+            with_pending(ctx, &pending(Step::VerifyEmail, token, vec![]), SignInStep::VerifyEmail)
+        }
+        Attempt::ChooseOrganisation {
+            pending: token,
+            organisations,
+        } => {
+            tracing::info!(offered = organisations.len(), "sign-in waits on an organisation choice");
+            let ids = organisations.iter().map(|(id, _)| id.clone()).collect();
+            let step = SignInStep::ChooseOrganisation {
+                organisations: organisations
+                    .into_iter()
+                    .map(|(id, name)| OrganisationOut { id, name })
+                    .collect(),
+            };
+            with_pending(ctx, &pending(Step::ChooseOrganisation, token, ids), step)
+        }
+        Attempt::Refused => {
+            tracing::info!("sign-in refused");
+            Err((refused, keep_on_refusal))
+        }
+        Attempt::Unsupported(code) => {
+            tracing::info!(step = %code, "sign-in needs a step the screens do not handle");
+            Err((ApiError::SignInUnsupported, false))
+        }
+        Attempt::Unavailable(why) => {
+            tracing::warn!(error = %why, "workos could not answer a sign-in");
+            Err((ApiError::Unavailable, true))
+        }
+    };
+    match result {
+        Ok(resp) => resp,
+        Err((e, keep)) => {
+            let mut resp = e.into_response();
+            if !keep {
+                resp.headers_mut().append(SET_COOKIE, clear_cookie(PENDING_COOKIE));
+            }
+            resp
+        }
+    }
+}
+
+/// `step`'s answer, with the pending cookie that carries the sign-in to it.
+fn with_pending(ctx: &Ctx<'_>, pending: &Pending, step: SignInStep) -> Result<Response, (ApiError, bool)> {
+    let sealed = ctx.sign_in.seal(pending).map_err(|e| (e, false))?;
+    let mut resp = Json(step).into_response();
+    resp.headers_mut()
+        .append(SET_COOKIE, set_cookie(PENDING_COOKIE, &sealed, PENDING_TTL));
+    Ok(resp)
+}
+
+/// `resp` once at least [`ANSWER_FLOOR`] has passed since `start`.
+async fn padded(start: Instant, resp: Response) -> Response {
+    tokio::time::sleep_until(start + ANSWER_FLOOR).await;
+    resp
+}
+
+fn refuse(e: ApiError) -> Response {
+    e.into_response()
+}
+
+/// The pending sign-in the cookie carries, at `step` and not expired.
+fn pending_of(ctx: &Ctx<'_>, headers: &HeaderMap, step: Step) -> Option<Pending> {
+    let (p, _): (Pending, bool) = ctx.sign_in.unseal(cookie_value(headers, PENDING_COOKIE)?)?;
+    (p.purpose == PENDING_PURPOSE && p.step == step && p.expires > now()).then_some(p)
+}
+
+/// A refusal of the pending cookie itself, which also clears it.
+fn no_pending() -> Response {
+    let mut resp = ApiError::Invalid("sign_in").into_response();
+    resp.headers_mut().append(SET_COOKIE, clear_cookie(PENDING_COOKIE));
+    resp
+}
+
+pub(crate) async fn password_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: PasswordSignInIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Ok(email) = EmailAddress::new(&input.email) else {
+        return refuse(ApiError::Invalid("email"));
+    };
+    if input.password.0.is_empty() || input.password.0.len() > MAX_PASSWORD_BYTES {
+        return refuse(ApiError::Invalid("password"));
+    }
+    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+        return refuse(ApiError::Invalid("return_to"));
+    };
+    let client = client_of(headers);
+    let address = address_key(ctx.sign_in, &email);
+    if let Err(e) = count(ctx, &client, Some(address), &[PASSWORD_ADDRESS, PASSWORD_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let attempt = ctx
+        .sign_in
+        .authkit()
+        .sign_in_with_password(email.as_str(), &input.password.0, &client)
+        .await;
+    // The pending cookie of an earlier attempt means nothing now: a refusal clears it.
+    let resp = conclude(ctx, attempt, address, return_to, ApiError::InvalidCredentials, false).await;
+    padded(start, resp).await
+}
+
+pub(crate) async fn verify_email_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: VerifyEmailIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let code = input.code.trim();
+    if code.is_empty() || code.chars().count() > MAX_CODE_CHARS || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return refuse(ApiError::Invalid("code"));
+    }
+    let Some(pending) = pending_of(ctx, headers, Step::VerifyEmail) else {
+        return no_pending();
+    };
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, Some(pending.address), &[CODE_ADDRESS, CODE_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let attempt = ctx.sign_in.authkit().verify_email(&pending.token, code, &client).await;
+    // A mistyped code may be tried again on the same step, within the code limits.
+    let resp = conclude(
+        ctx,
+        attempt,
+        pending.address,
+        pending.return_to,
+        ApiError::InvalidCode,
+        true,
+    )
+    .await;
+    padded(start, resp).await
+}
+
+pub(crate) async fn choose_organisation_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: ChooseOrganisationIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Some(pending) = pending_of(ctx, headers, Step::ChooseOrganisation) else {
+        return no_pending();
+    };
+    // Only an organisation WorkOS offered this sign-in.
+    if !pending.organisations.contains(&input.organisation) {
+        return refuse(ApiError::Invalid("organisation"));
+    }
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, None, &[STEP_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let attempt = ctx
+        .sign_in
+        .authkit()
+        .choose_organisation(&pending.token, &input.organisation, &client)
+        .await;
+    let resp = conclude(
+        ctx,
+        attempt,
+        pending.address,
+        pending.return_to,
+        ApiError::Invalid("sign_in"),
+        false,
+    )
+    .await;
+    padded(start, resp).await
+}
+
+/// Sign in with an email address and password. A wrong password and an unknown address get the
+/// same 401 `invalid_credentials`; a limit reached gets 429 `too_many_attempts` with `Retry-After`,
+/// alike for every address.
+#[utoipa::path(post, operation_id = "sign_in_with_password", path = "/auth/sign-in/password", tag = "auth",
+    security(()), request_body = PasswordSignInIn,
+    responses((status = 200, body = SignInStep, description = "Signed in (`done`, with the session cookie), or the \
+        next step, with a short-lived pending cookie"),
+        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody, description = "`invalid_credentials`"),
+        (status = 403, body = ErrorBody, description = "`csrf`; `no_organisation` (the person is in no \
+            organisation: show the page for it, no session is set); `sign_in_unsupported`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn password(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => password_sign_in(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Continue a sign-in that waits on email verification, with the code WorkOS emailed.
+#[utoipa::path(post, operation_id = "sign_in_verify_email", path = "/auth/sign-in/verify-email", tag = "auth",
+    security(()), request_body = VerifyEmailIn,
+    responses((status = 200, body = SignInStep),
+        (status = 400, body = ErrorBody, description = "`invalid_sign_in`: no pending verification (start again); \
+            `invalid_code`: not a code"),
+        (status = 401, body = ErrorBody, description = "`invalid_code`: wrong or expired; the step stays open"),
+        (status = 403, body = ErrorBody), (status = 429, body = ErrorBody), (status = 503, body = ErrorBody)))]
+pub(crate) async fn verify_email(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => verify_email_sign_in(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Continue a sign-in into one of the organisations the last step offered.
+#[utoipa::path(post, operation_id = "sign_in_choose_organisation", path = "/auth/sign-in/organisation", tag = "auth",
+    security(()), request_body = ChooseOrganisationIn,
+    responses((status = 200, body = SignInStep),
+        (status = 400, body = ErrorBody, description = "`invalid_sign_in`: no pending choice (start again); \
+            `invalid_organisation`: not one offered"),
+        (status = 403, body = ErrorBody), (status = 429, body = ErrorBody), (status = 503, body = ErrorBody)))]
+pub(crate) async fn choose_organisation(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => choose_organisation_sign_in(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use axum::http::header::{COOKIE, ORIGIN, RETRY_AFTER};
+    use axum::http::{HeaderValue, StatusCode};
+    use oryxa_authn::{JwtError, SessionClaims};
+    use tracing::instrument::WithSubscriber;
+
+    use super::*;
+    use crate::Person;
+    use crate::session::{AuthKit, RefreshError, SESSION_COOKIE, Tokens, session_of};
+
+    const WEB: &str = "https://fde.test";
+    const KNOWN: &str = "Known.Person@Example.com";
+    const PASSWORD: &str = "correct horse battery staple";
+
+    /// Tokens are `tok|user|organisation|session`; an empty organisation is none.
+    struct Verifier;
+    impl VerifyToken for Verifier {
+        fn claims<'a>(
+            &'a self,
+            token: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SessionClaims, JwtError>> + Send + 'a>> {
+            Box::pin(async move {
+                let parts: Vec<&str> = token.split('|').collect();
+                let ["tok", user, org, sid] = parts[..] else {
+                    return Err(JwtError::Malformed);
+                };
+                Ok(SessionClaims {
+                    sub: user.into(),
+                    sid: sid.into(),
+                    org_id: (!org.is_empty()).then(|| org.to_owned()),
+                    role: Some("member".into()),
+                    exp: u64::MAX,
+                })
+            })
+        }
+    }
+
+    fn signed_in(user: &str, org: &str) -> Attempt {
+        Attempt::SignedIn(Tokens {
+            access_token: format!("tok|{user}|{org}|session_{user}"),
+            refresh_token: format!("refresh-secret-{user}"),
+        })
+    }
+
+    /// WorkOS without WorkOS: `KNOWN` with `PASSWORD` gets `on_password`; any other pair is refused,
+    /// a known address more slowly than an unknown one, as a real lookup might be.
+    struct Kit {
+        on_password: Mutex<Attempt>,
+        on_code: Mutex<Attempt>,
+        calls: Mutex<Vec<(String, Client)>>,
+    }
+
+    impl Kit {
+        fn new(on_password: Attempt) -> Arc<Self> {
+            Arc::new(Self {
+                on_password: Mutex::new(on_password),
+                on_code: Mutex::new(signed_in("user_1", "org_01A")),
+                calls: Mutex::new(vec![]),
+            })
+        }
+        fn calls(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl AuthKit for Kit {
+        fn authorization_url(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
+            Err("unused".into())
+        }
+        fn exchange_code<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn refresh<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, RefreshError>> {
+            Box::pin(async { Err(RefreshError::Refused("unused".into())) })
+        }
+        fn revoke<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn user_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn organisation_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn people<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn sign_in_with_password<'a>(
+            &'a self,
+            email: &'a str,
+            password: &'a str,
+            client: &'a Client,
+        ) -> BoxFuture<'a, Attempt> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("password".into(), client.clone()));
+                if email == KNOWN && password == PASSWORD {
+                    return self.on_password.lock().unwrap().clone();
+                }
+                let lookup = if email == KNOWN { 300 } else { 5 };
+                tokio::time::sleep(Duration::from_millis(lookup)).await;
+                Attempt::Refused
+            })
+        }
+        fn verify_email<'a>(&'a self, pending: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("verify".into(), client.clone()));
+                if pending == "pt_verify" && code == "123456" {
+                    self.on_code.lock().unwrap().clone()
+                } else {
+                    Attempt::Refused
+                }
+            })
+        }
+        fn choose_organisation<'a>(
+            &'a self,
+            pending: &'a str,
+            organisation: &'a str,
+            client: &'a Client,
+        ) -> BoxFuture<'a, Attempt> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("organisation".into(), client.clone()));
+                if pending == "pt_choose" {
+                    signed_in("user_1", organisation)
+                } else {
+                    Attempt::Refused
+                }
+            })
+        }
+    }
+
+    /// Records each attempt's buckets and answers as told.
+    struct Limits {
+        answer: Mutex<Result<Option<Duration>, String>>,
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Limits {
+        fn new() -> Self {
+            Self {
+                answer: Mutex::new(Ok(None)),
+                seen: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    impl Limiter for Limits {
+        fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>> {
+            Box::pin(async move {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(hits.iter().map(|h| h.bucket().to_owned()).collect());
+                self.answer.lock().unwrap().clone()
+            })
+        }
+    }
+
+    struct World {
+        sign_in: SignIn,
+        kit: Arc<Kit>,
+        limits: Limits,
+    }
+
+    impl World {
+        fn new(on_password: Attempt) -> Self {
+            let kit = Kit::new(on_password);
+            Self {
+                sign_in: SignIn::new(WEB, "a".repeat(64), kit.clone()).unwrap(),
+                kit,
+                limits: Limits::new(),
+            }
+        }
+        fn ctx(&self) -> Ctx<'_> {
+            Ctx {
+                sign_in: &self.sign_in,
+                tokens: &Verifier,
+                limits: &self.limits,
+            }
+        }
+    }
+
+    /// The web app's own headers, a forwarded client, and `cookies`.
+    fn headers(cookies: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(ORIGIN, HeaderValue::from_static(WEB));
+        h.insert("x-oryxa-request", HeaderValue::from_static("1"));
+        h.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7, 10.0.0.2"));
+        h.insert(USER_AGENT, HeaderValue::from_static("Browser/1.0"));
+        if !cookies.is_empty() {
+            h.insert(COOKIE, HeaderValue::from_str(&cookies.join("; ")).unwrap());
+        }
+        h
+    }
+
+    fn password_body(email: &str, password: &str) -> Vec<u8> {
+        serde_json::json!({ "email": email, "password": password, "return_to": "/companies" })
+            .to_string()
+            .into_bytes()
+    }
+
+    struct Answer {
+        status: StatusCode,
+        body: String,
+        cookies: Vec<String>,
+        retry_after: Option<String>,
+    }
+
+    impl Answer {
+        fn cookie(&self, name: &str) -> Option<&str> {
+            self.cookies.iter().find_map(|c| {
+                let v = c.strip_prefix(name)?.strip_prefix('=')?;
+                Some(v.split(';').next().unwrap_or_default())
+            })
+        }
+        /// Every byte the browser sees, apart from the sealed cookie values.
+        fn visible(&self) -> String {
+            let cookies: Vec<String> = self
+                .cookies
+                .iter()
+                .map(|c| {
+                    c.split_once('=')
+                        .map(|(n, rest)| format!("{n}={}", &rest[rest.find(';').unwrap_or(0)..]))
+                        .unwrap_or_default()
+                })
+                .collect();
+            format!("{} {} {:?} {:?}", self.status, self.body, cookies, self.retry_after)
+        }
+    }
+
+    async fn read(resp: Response) -> Answer {
+        let status = resp.status();
+        let cookies = resp
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect();
+        let retry_after = resp.headers().get(RETRY_AFTER).map(|v| v.to_str().unwrap().to_owned());
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        Answer {
+            status,
+            body: String::from_utf8(bytes.to_vec()).unwrap(),
+            cookies,
+            retry_after,
+        }
+    }
+
+    fn cleared(a: &Answer, name: &str) -> bool {
+        a.cookies
+            .iter()
+            .any(|c| c.starts_with(&format!("{name}=;")) && c.contains("Max-Age=0"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_password_sign_in_sets_a_fresh_session_whatever_the_browser_brought() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let stale = "__Host-fde_session=stale-or-someone-elses; __Host-fde_pending=old";
+        let a = read(password_sign_in(&w.ctx(), &headers(&[stale]), &password_body(KNOWN, PASSWORD)).await).await;
+        assert_eq!(a.status, StatusCode::OK, "{}", a.body);
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+        let session = a.cookie(SESSION_COOKIE).expect("a session cookie");
+        assert_eq!(
+            session_of(&w.sign_in, session),
+            Some(("user_1".into(), "org_01A".into())),
+            "the new session is the one WorkOS just signed in"
+        );
+        assert!(cleared(&a, PENDING_COOKIE));
+        let calls = w.kit.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            [(
+                "password".to_owned(),
+                Client {
+                    ip: Some("203.0.113.7".into()),
+                    user_agent: Some("Browser/1.0".into()),
+                }
+            )],
+            "WorkOS is told the forwarded client and its user agent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wrong_password_and_an_unknown_address_answer_alike_and_take_as_long() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let mut answers = vec![];
+        for (email, password) in [(KNOWN, "wrong password"), ("nobody@example.com", "wrong password")] {
+            let start = Instant::now();
+            let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(email, password)).await).await;
+            answers.push((a.status, a.body.clone(), a.cookies.clone(), start.elapsed()));
+        }
+        assert_eq!(answers[0].0, StatusCode::UNAUTHORIZED);
+        assert_eq!(answers[0].1, r#"{"error":"invalid_credentials"}"#);
+        assert_eq!(answers[0], answers[1], "status, body, cookies and time are the same");
+        assert_eq!(answers[0].3, ANSWER_FLOOR);
+        assert!(
+            answers[0].2.iter().all(|c| !c.starts_with(SESSION_COOKIE)),
+            "no session"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn limits_count_before_workos_answer_alike_for_any_address_and_fail_closed() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        *w.limits.answer.lock().unwrap() = Ok(Some(Duration::from_secs(42)));
+        let mut answers = vec![];
+        for email in [KNOWN, "nobody@example.com"] {
+            let start = Instant::now();
+            let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(email, PASSWORD)).await).await;
+            assert_eq!(a.status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(a.retry_after.as_deref(), Some("42"));
+            answers.push((a.body, start.elapsed()));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[0].0, r#"{"error":"too_many_attempts"}"#);
+        assert_eq!(w.kit.calls(), 0, "WorkOS is not asked over a limit");
+
+        // Counters that cannot be counted refuse.
+        *w.limits.answer.lock().unwrap() = Err("database down".into());
+        let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+        assert_eq!(a.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(w.kit.calls(), 0);
+
+        // Each attempt counts per address (case aside), per client and in the ceiling, by keyed hash.
+        let seen = w.limits.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().all(|b| b.len() == 3 && b.contains(&"all:".to_owned())),
+            "{seen:?}"
+        );
+        let address = |b: &Vec<String>| b.iter().find(|x| x.starts_with("password_address:")).cloned().unwrap();
+        assert_eq!(address(&seen[0]), address(&seen[2]));
+        assert_ne!(address(&seen[0]), address(&seen[1]));
+        let again = World::new(Attempt::Refused);
+        read(password_sign_in(&again.ctx(), &headers(&[]), &password_body(&KNOWN.to_lowercase(), "x")).await).await;
+        assert_eq!(
+            address(&again.limits.seen.lock().unwrap()[0]),
+            address(&seen[0]),
+            "lowercased"
+        );
+        let all = format!("{seen:?}").to_lowercase();
+        assert!(!all.contains("example.com") && !all.contains("known") && !all.contains("203.0.113.7"));
+        assert!(seen[0].iter().any(|b| b.starts_with("password_client:")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_route_checks_the_origin_first_cookie_or_not() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let mut bad = vec![];
+        let mut no_header = headers(&[]);
+        no_header.remove("x-oryxa-request");
+        bad.push(no_header);
+        let mut other = headers(&[]);
+        other.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
+        bad.push(other);
+        let mut none = headers(&[]);
+        none.remove(ORIGIN);
+        bad.push(none);
+        for h in bad {
+            for resp in [
+                password_sign_in(&w.ctx(), &h, &password_body(KNOWN, PASSWORD)).await,
+                verify_email_sign_in(&w.ctx(), &h, br#"{"code":"123456"}"#).await,
+                choose_organisation_sign_in(&w.ctx(), &h, br#"{"organisation":"org_01A"}"#).await,
+            ] {
+                let a = read(resp).await;
+                assert_eq!(
+                    (a.status, a.body.as_str()),
+                    (StatusCode::FORBIDDEN, r#"{"error":"csrf"}"#)
+                );
+            }
+        }
+        assert_eq!(w.kit.calls(), 0);
+        assert!(w.limits.seen.lock().unwrap().is_empty());
+    }
+
+    fn pending_cookie(a: &Answer) -> String {
+        format!(
+            "{PENDING_COOKIE}={}",
+            a.cookie(PENDING_COOKIE).expect("a pending cookie")
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn email_verification_waits_in_a_sealed_cookie_and_a_mistyped_code_may_be_tried_again() {
+        let w = World::new(Attempt::VerifyEmail {
+            pending: "pt_verify".into(),
+        });
+        let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::OK, r#"{"next":"verify_email"}"#)
+        );
+        let pending = pending_cookie(&a);
+        assert!(
+            a.cookies.iter().all(|c| !c.starts_with(SESSION_COOKIE)),
+            "no session yet"
+        );
+        let c = a.cookies.iter().find(|c| c.starts_with(PENDING_COOKIE)).unwrap();
+        assert!(
+            c.contains("Max-Age=600") && c.contains("Secure") && c.contains("HttpOnly"),
+            "{c}"
+        );
+        // What it holds: the step, WorkOS's token and the address's hash, never the password or address.
+        let (held, _): (Pending, bool) = w.sign_in.unseal(a.cookie(PENDING_COOKIE).unwrap()).unwrap();
+        let held = serde_json::to_string(&held).unwrap();
+        assert!(held.contains("pt_verify") && held.contains("verify_email"), "{held}");
+        assert!(
+            !held.contains(PASSWORD) && !held.to_lowercase().contains("example.com"),
+            "{held}"
+        );
+
+        // Without its cookie, or with one for another step, there is nothing to continue.
+        let a = read(verify_email_sign_in(&w.ctx(), &headers(&[]), br#"{"code":"123456"}"#).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::BAD_REQUEST, r#"{"error":"invalid_sign_in"}"#)
+        );
+        assert!(cleared(&a, PENDING_COOKIE));
+        let a =
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&pending]), br#"{"organisation":"org_01A"}"#).await)
+                .await;
+        assert_eq!(a.body, r#"{"error":"invalid_sign_in"}"#);
+
+        // A wrong code keeps the step; it counts as a code guess for that address.
+        let a = read(verify_email_sign_in(&w.ctx(), &headers(&[&pending]), br#"{"code":"654321"}"#).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::UNAUTHORIZED, r#"{"error":"invalid_code"}"#)
+        );
+        assert!(a.cookies.is_empty(), "{:?}", a.cookies);
+        let seen = w.limits.seen.lock().unwrap().clone();
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter().any(|b| b.starts_with("code_address:")) && last.iter().any(|b| b.starts_with("code_client:"))
+        );
+        let first_address = seen[0].iter().find(|b| b.starts_with("password_address:")).unwrap();
+        let code_address = last.iter().find(|b| b.starts_with("code_address:")).unwrap();
+        assert_eq!(
+            first_address.split_once(':').unwrap().1,
+            code_address.split_once(':').unwrap().1
+        );
+
+        let a = read(verify_email_sign_in(&w.ctx(), &headers(&[&pending]), br#"{"code":"123456"}"#).await).await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+        assert!(a.cookie(SESSION_COOKIE).is_some() && cleared(&a, PENDING_COOKIE));
+
+        for bad in [
+            r#"{"code":""}"#,
+            r#"{"code":"12 34"}"#,
+            r#"{"code":"12345678901234567"}"#,
+        ] {
+            let a = read(verify_email_sign_in(&w.ctx(), &headers(&[&pending]), bad.as_bytes()).await).await;
+            assert_eq!(a.body, r#"{"error":"invalid_code"}"#, "{bad}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_an_organisation_offered_can_be_chosen() {
+        let w = World::new(Attempt::ChooseOrganisation {
+            pending: "pt_choose".into(),
+            organisations: vec![("org_01A".into(), "Acme".into()), ("org_01B".into(), "Beta".into())],
+        });
+        let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+        assert_eq!(
+            a.body,
+            r#"{"next":"choose_organisation","organisations":[{"id":"org_01A","name":"Acme"},{"id":"org_01B","name":"Beta"}]}"#
+        );
+        let pending = pending_cookie(&a);
+        let a =
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&pending]), br#"{"organisation":"org_01C"}"#).await)
+                .await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::BAD_REQUEST, r#"{"error":"invalid_organisation"}"#)
+        );
+        let calls = w.kit.calls();
+        let a =
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&pending]), br#"{"organisation":"org_01B"}"#).await)
+                .await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_1".into(), "org_01B".into()))
+        );
+        assert!(cleared(&a, PENDING_COOKIE));
+        assert_eq!(w.kit.calls(), calls + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_step_lapses() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let stale = Pending {
+            purpose: PENDING_PURPOSE.into(),
+            step: Step::VerifyEmail,
+            token: "pt_verify".into(),
+            organisations: vec![],
+            address: [0; 32],
+            return_to: "/".into(),
+            expires: now() - 1,
+        };
+        let cookie = format!("{PENDING_COOKIE}={}", w.sign_in.seal(&stale).unwrap());
+        let a = read(verify_email_sign_in(&w.ctx(), &headers(&[&cookie]), br#"{"code":"123456"}"#).await).await;
+        assert_eq!(a.body, r#"{"error":"invalid_sign_in"}"#);
+        assert_eq!(w.kit.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_organisation_and_steps_we_cannot_show_end_with_no_session() {
+        for (attempt, status, body) in [
+            (
+                signed_in("user_1", ""),
+                StatusCode::FORBIDDEN,
+                r#"{"error":"no_organisation"}"#,
+            ),
+            (
+                Attempt::Unsupported("mfa_challenge".into()),
+                StatusCode::FORBIDDEN,
+                r#"{"error":"sign_in_unsupported"}"#,
+            ),
+            (
+                Attempt::Unavailable("status 503".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"unavailable"}"#,
+            ),
+        ] {
+            let w = World::new(attempt);
+            let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+            assert_eq!((a.status, a.body.as_str()), (status, body));
+            assert!(
+                a.cookies.iter().all(|c| !c.starts_with(SESSION_COOKIE)),
+                "{:?}",
+                a.cookies
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bad_input_is_refused_without_echoing_it() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        for (body, code) in [
+            (
+                r#"{"email":"known@example.com","password":31415926535}"#.to_owned(),
+                "invalid_body",
+            ),
+            (
+                r#"{"email":"known@example.com","password":"x","extra":"31415926535"}"#.to_owned(),
+                "invalid_body",
+            ),
+            (r#"{"email":"31415926535","password":"x"}"#.to_owned(), "invalid_email"),
+            (
+                r#"{"email":"known@example.com","password":""}"#.to_owned(),
+                "invalid_password",
+            ),
+            (
+                format!(r#"{{"email":"known@example.com","password":"{}"}}"#, "p".repeat(1025)),
+                "invalid_password",
+            ),
+            (
+                r#"{"email":"known@example.com","password":"x","return_to":"//evil.example"}"#.to_owned(),
+                "invalid_return_to",
+            ),
+            (
+                r#"{"email":"known@example.com","password":"x","return_to":"https://evil.example/"}"#.to_owned(),
+                "invalid_return_to",
+            ),
+        ] {
+            let a = read(password_sign_in(&w.ctx(), &headers(&[]), body.as_bytes()).await).await;
+            assert_eq!(a.status, StatusCode::BAD_REQUEST);
+            assert_eq!(a.body, format!(r#"{{"error":"{code}"}}"#), "{body}");
+            assert!(!a.body.contains("31415926535"));
+        }
+        assert_eq!(w.kit.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_password_and_address_never_reach_a_log_or_an_answer_and_no_workos_secret_leaves() {
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let out = buf.clone();
+        let sub = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || Writer(out.clone()))
+                .finish(),
+        );
+        let mut visible = String::new();
+        for attempt in [
+            signed_in("user_1", "org_01A"),
+            signed_in("user_1", ""),
+            Attempt::VerifyEmail {
+                pending: "pt_verify".into(),
+            },
+            Attempt::ChooseOrganisation {
+                pending: "pt_choose".into(),
+                organisations: vec![("org_01A".into(), "Acme".into())],
+            },
+            Attempt::Unsupported("mfa_challenge".into()),
+            Attempt::Unavailable("status 503".into()),
+            Attempt::Refused,
+        ] {
+            let w = World::new(attempt);
+            let ctx = w.ctx();
+            let flow = async {
+                let mut answers = vec![];
+                for password in [PASSWORD, "wrong password"] {
+                    let a = read(password_sign_in(&ctx, &headers(&[]), &password_body(KNOWN, password)).await).await;
+                    if let Some(p) = a.cookie(PENDING_COOKIE) {
+                        let cookie = format!("{PENDING_COOKIE}={p}");
+                        for resp in [
+                            verify_email_sign_in(&ctx, &headers(&[&cookie]), br#"{"code":"123456"}"#).await,
+                            choose_organisation_sign_in(&ctx, &headers(&[&cookie]), br#"{"organisation":"org_01A"}"#)
+                                .await,
+                        ] {
+                            answers.push(read(resp).await);
+                        }
+                    }
+                    answers.push(a);
+                }
+                answers
+            };
+            for a in flow.with_subscriber(sub.clone()).await {
+                visible.push_str(&a.visible());
+            }
+        }
+        let log = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("sign-in refused"), "the flows did log: {log}");
+        for secret in [
+            PASSWORD,
+            "wrong password",
+            "example.com",
+            "refresh-secret",
+            "tok|",
+            "pt_verify",
+            "pt_choose",
+        ] {
+            assert!(
+                !log.to_lowercase().contains(&secret.to_lowercase()),
+                "{secret} in the log: {log}"
+            );
+            assert!(
+                !visible.to_lowercase().contains(&secret.to_lowercase()),
+                "{secret} in an answer: {visible}"
+            );
+        }
+        assert!(!visible.to_lowercase().contains("workos"), "{visible}");
+    }
+
+    #[derive(Clone)]
+    struct Writer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Writer {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_client_is_the_first_forwarded_address_and_a_tidy_user_agent() {
+        let mut h = HeaderMap::new();
+        assert_eq!(client_of(&h), Client::default());
+        h.insert("x-forwarded-for", HeaderValue::from_static(" 2001:db8::1 , 10.0.0.2"));
+        h.insert(
+            USER_AGENT,
+            HeaderValue::from_str(&format!("A\tB{}", "x".repeat(600))).unwrap(),
+        );
+        let c = client_of(&h);
+        assert_eq!(c.ip.as_deref(), Some("2001:db8::1"));
+        let ua = c.user_agent.unwrap();
+        assert!(
+            ua.starts_with("AB") && ua.chars().count() == MAX_USER_AGENT_CHARS,
+            "{ua}"
+        );
+        for bad in ["not-an-ip", "", "203.0.113.7:443", "unknown, 203.0.113.7"] {
+            h.insert("x-forwarded-for", HeaderValue::from_str(bad).unwrap());
+            assert_eq!(client_of(&h).ip, None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn sign_in_routes_are_left_to_their_own_checks() {
+        for p in PATHS {
+            assert!(is_sign_in_path(p));
+        }
+        for p in [
+            "/auth/login",
+            "/auth/callback",
+            "/auth/logout",
+            "/v1/me",
+            "/auth/sign-in/password/x",
+        ] {
+            assert!(!is_sign_in_path(p), "{p}");
+        }
+    }
+}

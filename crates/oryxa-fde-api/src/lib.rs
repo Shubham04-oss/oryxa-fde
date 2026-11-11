@@ -41,6 +41,7 @@ pub mod reads;
 mod records;
 pub mod session;
 pub mod shutdown;
+mod signin;
 mod threads;
 
 mod share;
@@ -52,7 +53,7 @@ pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use people::Person;
-pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit, workos_issuer};
+pub use session::{Attempt, AuthKit, Client, RefreshError, SignIn, Tokens, WorkOsAuthKit, workos_issuer};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -185,6 +186,9 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(session::login))
         .routes(routes!(session::callback))
         .routes(routes!(session::logout))
+        .routes(routes!(signin::password))
+        .routes(routes!(signin::verify_email))
+        .routes(routes!(signin::choose_organisation))
         .routes(routes!(documents::list))
         .routes(routes!(documents::get))
         .routes(routes!(documents::search))

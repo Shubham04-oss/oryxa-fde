@@ -91,6 +91,35 @@ fn jittered(base: Duration) -> Duration {
     base.mul_f64(rand::Rng::gen_range(&mut rand::thread_rng(), 0.5..1.5))
 }
 
+/// Who is attempting a sign-in, as WorkOS is told on each attempt: the address the Worker forwards
+/// from Cloudflare and the browser's user agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Client {
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+/// What one sign-in attempt came to, in our terms rather than WorkOS's.
+#[derive(Clone)]
+pub enum Attempt {
+    SignedIn(Tokens),
+    /// The address must be verified first: WorkOS has emailed a code, and `pending` continues.
+    VerifyEmail {
+        pending: String,
+    },
+    /// The person belongs to several organisations: they choose one, and `pending` continues.
+    ChooseOrganisation {
+        pending: String,
+        organisations: Vec<(String, String)>,
+    },
+    /// Wrong or unknown credentials, a wrong or spent code, or a pending step WorkOS no longer has.
+    Refused,
+    /// A step our screens do not handle yet (MFA, SSO required, a Radar challenge): the code, for the log.
+    Unsupported(String),
+    /// WorkOS could not answer (timeout, 5xx, rate limited, our own credentials refused): why, for the log.
+    Unavailable(String),
+}
+
 /// WorkOS as sign-in needs it. A trait so tests run without WorkOS.
 pub trait AuthKit: Send + Sync + 'static {
     /// Where to send the browser to sign in.
@@ -107,6 +136,106 @@ pub trait AuthKit: Send + Sync + 'static {
     fn organisation_name<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<String, String>>;
     /// Everyone with an active membership of the organisation, whatever their role.
     fn people<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>>;
+    /// Signs in with an address and password, which go to WorkOS and nowhere else.
+    fn sign_in_with_password<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt>;
+    /// Continues a pending sign-in with the code WorkOS emailed to verify the address.
+    fn verify_email<'a>(&'a self, pending: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt>;
+    /// Continues a pending sign-in into the organisation the person chose.
+    fn choose_organisation<'a>(
+        &'a self,
+        pending: &'a str,
+        organisation: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt>;
+}
+
+/// WorkOS answers that need a screen we do not have yet; each ends the sign-in with no session.
+const UNSUPPORTED_STEPS: [&str; 6] = [
+    "mfa_enrollment",
+    "mfa_challenge",
+    "sso_required",
+    "organization_authentication_methods_required",
+    "radar_email_challenge",
+    "radar_sms_challenge",
+];
+
+/// Longest organisation name passed on to the screen.
+const MAX_ORGANISATION_NAME: usize = 200;
+
+/// What a refused WorkOS authenticate call means for the sign-in, from its status and body. Every
+/// refusal that is not a known step is one `Refused`, so a wrong password and an unknown address
+/// look the same whatever WorkOS calls them. Nothing of the body but the step's own fields is kept.
+fn attempt_of(status: u16, body: &[u8]) -> Attempt {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let code = v.get("code").or_else(|| v.get("error")).and_then(|c| c.as_str());
+    let pending = v
+        .get("pending_authentication_token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty() && t.len() <= 4096)
+        .map(str::to_owned);
+    match (code, pending) {
+        (Some("email_verification_required"), Some(pending)) => return Attempt::VerifyEmail { pending },
+        (Some("organization_selection_required"), Some(pending)) => {
+            let organisations: Vec<(String, String)> = v
+                .get("organizations")
+                .and_then(|o| o.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|o| {
+                    let id = oryxa_core::TenantId::new(o.get("id")?.as_str()?).ok()?;
+                    let name: String = o.get("name")?.as_str()?.chars().take(MAX_ORGANISATION_NAME).collect();
+                    Some((id.to_string(), name))
+                })
+                .collect();
+            if organisations.is_empty() {
+                return Attempt::Unsupported("organization_selection_required without organisations".into());
+            }
+            return Attempt::ChooseOrganisation { pending, organisations };
+        }
+        (Some(c), _) if UNSUPPORTED_STEPS.contains(&c) => return Attempt::Unsupported(c.to_owned()),
+        _ => {}
+    }
+    match (status, code) {
+        // Our own credentials or a fault of ours: not the person's doing, and never a session.
+        (401, Some("invalid_client" | "unauthorized_client")) | (429, _) | (500.., _) | (0, _) => {
+            // WorkOS's code is logged, so only a code's own charset of it.
+            let code: String = code
+                .unwrap_or("none")
+                .chars()
+                .filter(|c| c.is_ascii_lowercase() || *c == '_')
+                .take(64)
+                .collect();
+            Attempt::Unavailable(format!("status {status}, code {code}"))
+        }
+        _ => Attempt::Refused,
+    }
+}
+
+/// An authenticate call's answer as an [`Attempt`]. Its error text is never kept: WorkOS's
+/// message can carry the address.
+fn attempt_from(r: Result<workos::models::AuthenticateResponse, workos::Error>) -> Attempt {
+    match r {
+        Ok(r) => Attempt::SignedIn(Tokens {
+            access_token: r.access_token.expose().to_owned(),
+            refresh_token: r.refresh_token.expose().to_owned(),
+        }),
+        Err(e) => match e.api() {
+            Some(a) => attempt_of(a.status, &a.raw_body),
+            None => Attempt::Unavailable(
+                match e {
+                    workos::Error::Network(_) => "network",
+                    workos::Error::Decode(_) => "decode",
+                    _ => "sdk",
+                }
+                .into(),
+            ),
+        },
+    }
 }
 
 /// WorkOS's largest page of memberships.
@@ -266,6 +395,49 @@ impl AuthKit for WorkOsAuthKit {
             Err("the organisation has too many people to list".into())
         })
     }
+
+    fn sign_in_with_password<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt> {
+        Box::pin(async move {
+            let mut p = workos::user_management::AuthenticateWithPasswordParams::new(email, password);
+            p.ip_address = client.ip.clone();
+            p.user_agent = client.user_agent.clone();
+            attempt_from(self.0.user_management().authenticate_with_password(p).await)
+        })
+    }
+
+    fn verify_email<'a>(&'a self, pending: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt> {
+        Box::pin(async move {
+            let mut p = workos::user_management::AuthenticateWithEmailVerificationParams::new(code, pending);
+            p.ip_address = client.ip.clone();
+            p.user_agent = client.user_agent.clone();
+            attempt_from(self.0.user_management().authenticate_with_email_verification(p).await)
+        })
+    }
+
+    fn choose_organisation<'a>(
+        &'a self,
+        pending: &'a str,
+        organisation: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt> {
+        Box::pin(async move {
+            let mut p =
+                workos::user_management::AuthenticateWithOrganizationSelectionParams::new(pending, organisation);
+            p.ip_address = client.ip.clone();
+            p.user_agent = client.user_agent.clone();
+            attempt_from(
+                self.0
+                    .user_management()
+                    .authenticate_with_organization_selection(p)
+                    .await,
+            )
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -315,6 +487,8 @@ pub struct SignIn {
     /// Sessions whose refresh WorkOS could not answer, by hash of refresh token: not asked again
     /// before then.
     waits: Mutex<HashMap<String, Instant>>,
+    /// Keys the sign-in limits' hashes of addresses and clients, derived from `SESSION_PASSWORD`.
+    limit_key: [u8; 32],
 }
 
 /// The issuer AuthKit access tokens carry, which the verifier pins exactly: `configured`
@@ -333,6 +507,18 @@ pub fn workos_issuer(client_id: &str, configured: Option<&str>) -> Result<String
         Some(issuer) => Ok(issuer.to_owned()),
         None => Ok(format!("https://api.workos.com/user_management/{client_id}")),
     }
+}
+
+/// HMAC-SHA256 of `message` under `key`.
+fn keyed(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use hmac::Mac;
+    // HMAC takes a key of any length, so this never fails; if it did, every value would share one
+    // bucket, which limits more, never less.
+    let Ok(mut mac) = hmac::Hmac::<Sha256>::new_from_slice(key) else {
+        return [0; 32];
+    };
+    mac.update(message);
+    mac.finalize().into_bytes().into()
 }
 
 fn check_password(password: &str) -> Result<(), String> {
@@ -358,6 +544,7 @@ impl SignIn {
             return Err("WEB_ORIGIN must be an origin, with no path".into());
         }
         check_password(&password)?;
+        let limit_key = keyed(password.as_bytes(), b"oryxa-fde sign-in limits v1");
         Ok(Self {
             web_origin,
             password,
@@ -366,6 +553,7 @@ impl SignIn {
             names: Mutex::new(HashMap::new()),
             people: People::default(),
             waits: Mutex::new(HashMap::new()),
+            limit_key,
         })
     }
 
@@ -377,24 +565,34 @@ impl SignIn {
         Ok(self)
     }
 
+    /// A keyed hash for a sign-in limit's bucket: `what` names the kind of value, so an address and
+    /// a client never share one.
+    pub(crate) fn limit_hash(&self, what: &str, value: &str) -> [u8; 32] {
+        keyed(&self.limit_key, format!("{what}\0{value}").as_bytes())
+    }
+
+    pub(crate) fn authkit(&self) -> &dyn AuthKit {
+        self.authkit.as_ref()
+    }
+
     fn redirect_uri(&self) -> String {
         format!("{}/auth/callback", self.web_origin)
     }
 
     /// A cookie request that changes something must come from the web app itself.
-    fn same_site(&self, headers: &HeaderMap) -> bool {
+    pub(crate) fn same_site(&self, headers: &HeaderMap) -> bool {
         headers.get(CSRF_HEADER).is_some_and(|v| v == "1")
             && headers
                 .get(ORIGIN)
                 .is_some_and(|v| v.as_bytes() == self.web_origin.as_bytes())
     }
 
-    fn seal<T: Serialize>(&self, data: &T) -> Result<String, ApiError> {
+    pub(crate) fn seal<T: Serialize>(&self, data: &T) -> Result<String, ApiError> {
         workos::helpers::session::seal(data, &self.password).map_err(|_| ApiError::Internal)
     }
 
     /// The sealed value, and whether it was sealed with the previous key.
-    fn unseal<T: for<'de> Deserialize<'de>>(&self, sealed: &str) -> Option<(T, bool)> {
+    pub(crate) fn unseal<T: for<'de> Deserialize<'de>>(&self, sealed: &str) -> Option<(T, bool)> {
         if let Ok(v) = workos::helpers::session::unseal(sealed, &self.password) {
             return Some((v, false));
         }
@@ -478,14 +676,14 @@ pub(crate) struct Session {
 const SIGN_IN_PURPOSE: &str = "fde_sign_in";
 const SESSION_PURPOSE: &str = "fde_session";
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
 
-fn cookie_value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
+pub(crate) fn cookie_value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
     headers
         .get_all(COOKIE)
         .iter()
@@ -494,7 +692,7 @@ fn cookie_value<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
         .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
 }
 
-fn set_cookie(name: &str, value: &str, max_age: Duration) -> HeaderValue {
+pub(crate) fn set_cookie(name: &str, value: &str, max_age: Duration) -> HeaderValue {
     let v = format!(
         "{name}={value}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
         max_age.as_secs()
@@ -503,7 +701,7 @@ fn set_cookie(name: &str, value: &str, max_age: Duration) -> HeaderValue {
     HeaderValue::from_str(&v).unwrap_or_else(|_| HeaderValue::from_static("invalid=; Max-Age=0"))
 }
 
-fn clear_cookie(name: &str) -> HeaderValue {
+pub(crate) fn clear_cookie(name: &str) -> HeaderValue {
     set_cookie(name, "", Duration::ZERO)
 }
 
@@ -526,6 +724,11 @@ pub(crate) fn safe_return_to(raw: &str) -> Option<String> {
 /// Authenticates a request from its session cookie when it carries no bearer token. See the
 /// module docs; a cookie that cannot be used is cleared.
 pub(crate) async fn layer(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
+    // Sign-in routes check the origin themselves and never use the session they replace, so a
+    // stale cookie cannot refuse a sign-in.
+    if crate::signin::is_sign_in_path(req.uri().path()) {
+        return next.run(req).await;
+    }
     if req.headers().contains_key(AUTHORIZATION) {
         return next.run(req).await;
     }
@@ -624,7 +827,7 @@ async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, Op
 }
 
 /// Maps a token the verifier refused to the answer, and logs why: the error kind, never the token.
-fn refused_token(e: JwtError) -> ApiError {
+pub(crate) fn refused_token(e: JwtError) -> ApiError {
     if let JwtError::Keys(e) = e {
         tracing::error!(error = %e, "could not load WorkOS signing keys");
         return ApiError::Unavailable;
@@ -646,7 +849,7 @@ fn token_error_kind(e: &JwtError) -> String {
 }
 
 /// The organisation a sign-in is for; a person in none is refused, and logged by user id only.
-fn organisation_of(user: &str, org_id: Option<String>) -> Result<String, ApiError> {
+pub(crate) fn organisation_of(user: &str, org_id: Option<String>) -> Result<String, ApiError> {
     org_id.ok_or_else(|| {
         match UserId::new(user) {
             Ok(user) => tracing::info!(%user, "sign-in refused: the user is in no organisation"),
@@ -765,7 +968,24 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
             tracing::info!(error = %e, "code exchange refused");
             ApiError::Unauthorized
         })?;
-    let claims = app.tokens.claims(&tokens.access_token).await.map_err(refused_token)?;
+    let cookie = session_cookie(app.tokens.as_ref(), sign_in, tokens).await?;
+    let location = HeaderValue::from_str(&return_to).map_err(|_| ApiError::Internal)?;
+    let mut resp = (StatusCode::FOUND, [(LOCATION, location)]).into_response();
+    let h = resp.headers_mut();
+    h.append(SET_COOKIE, cookie);
+    h.append(SET_COOKIE, clear_cookie(SIGN_IN_COOKIE));
+    Ok(resp)
+}
+
+/// A new session cookie for the tokens a sign-in just got, whatever method it used: the tokens are
+/// verified, and a person in no organisation is refused. Nothing the browser brought becomes part
+/// of it.
+pub(crate) async fn session_cookie(
+    verifier: &dyn crate::VerifyToken,
+    sign_in: &SignIn,
+    tokens: Tokens,
+) -> Result<HeaderValue, ApiError> {
+    let claims = verifier.claims(&tokens.access_token).await.map_err(refused_token)?;
     let organisation = organisation_of(&claims.sub, claims.org_id)?;
     let session = Session {
         purpose: SESSION_PURPOSE.into(),
@@ -776,15 +996,7 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
         session_id: claims.sid,
         signed_in: now(),
     };
-    let location = HeaderValue::from_str(&return_to).map_err(|_| ApiError::Internal)?;
-    let mut resp = (StatusCode::FOUND, [(LOCATION, location)]).into_response();
-    let h = resp.headers_mut();
-    h.append(
-        SET_COOKIE,
-        set_cookie(SESSION_COOKIE, &sign_in.seal(&session)?, SESSION_TTL),
-    );
-    h.append(SET_COOKIE, clear_cookie(SIGN_IN_COOKIE));
-    Ok(resp)
+    Ok(set_cookie(SESSION_COOKIE, &sign_in.seal(&session)?, SESSION_TTL))
 }
 
 /// Sign out: clears the session cookie, always, and ends the WorkOS session if WorkOS answers.
@@ -850,6 +1062,13 @@ pub(crate) async fn me(State(app): State<Arc<App>>, who: Principal) -> Result<Js
     }))
 }
 
+/// The user and organisation a sealed session cookie holds, for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) fn session_of(sign_in: &SignIn, sealed: &str) -> Option<(String, String)> {
+    let (s, _): (Session, bool) = sign_in.unseal(sealed)?;
+    (s.purpose == SESSION_PURPOSE).then_some((s.user, s.organisation))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +1096,93 @@ mod tests {
         }
         fn people<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
             Box::pin(async { Err("unused".into()) })
+        }
+        fn sign_in_with_password<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+        fn verify_email<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+        fn choose_organisation<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+    }
+
+    fn kind(a: &Attempt) -> &'static str {
+        match a {
+            Attempt::SignedIn(_) => "signed_in",
+            Attempt::VerifyEmail { .. } => "verify_email",
+            Attempt::ChooseOrganisation { .. } => "choose_organisation",
+            Attempt::Refused => "refused",
+            Attempt::Unsupported(_) => "unsupported",
+            Attempt::Unavailable(_) => "unavailable",
+        }
+    }
+
+    #[test]
+    fn every_refusal_that_is_not_a_step_is_one_answer() {
+        // Whatever WorkOS calls a wrong password or an unknown address, it is the same `Refused`.
+        for (status, body) in [
+            (
+                401,
+                r#"{"code":"invalid_credentials","message":"Invalid credentials for someone@example.com"}"#,
+            ),
+            (400, r#"{"code":"user_not_found","message":"no such user"}"#),
+            (404, r#"{"error":"user_not_found"}"#),
+            (400, r#"{"code":"invalid_one_time_code"}"#),
+            (400, "not json"),
+            (422, r#"{"code":"email_verification_required"}"#), // no pending token: not a step
+            (403, ""),
+        ] {
+            assert_eq!(kind(&attempt_of(status, body.as_bytes())), "refused", "{status} {body}");
+        }
+        for (status, body) in [
+            (429, r#"{"code":"rate_limit_exceeded"}"#),
+            (500, ""),
+            (503, r#"{"message":"down"}"#),
+            (401, r#"{"error":"invalid_client"}"#),
+        ] {
+            assert_eq!(
+                kind(&attempt_of(status, body.as_bytes())),
+                "unavailable",
+                "{status} {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_steps_keep_only_their_token_and_the_organisations_offered() {
+        let body = r#"{"code":"email_verification_required","message":"verify","pending_authentication_token":"pt_1",
+            "email":"someone@example.com","email_verification_id":"email_verification_1"}"#;
+        let Attempt::VerifyEmail { pending } = attempt_of(403, body.as_bytes()) else {
+            panic!("a verification step")
+        };
+        assert_eq!(pending, "pt_1");
+
+        let body = r#"{"code":"organization_selection_required","pending_authentication_token":"pt_2",
+            "organizations":[{"id":"org_01A","name":"Acme"},{"id":"bad id; drop","name":"x"},{"id":"org_01B","name":"Beta"}],
+            "user":{"id":"user_1","email":"someone@example.com"}}"#;
+        let Attempt::ChooseOrganisation { pending, organisations } = attempt_of(403, body.as_bytes()) else {
+            panic!("an organisation step")
+        };
+        assert_eq!(pending, "pt_2");
+        assert_eq!(
+            organisations,
+            [
+                ("org_01A".to_owned(), "Acme".to_owned()),
+                ("org_01B".to_owned(), "Beta".to_owned())
+            ],
+            "only valid ids are offered"
+        );
+        let none =
+            r#"{"code":"organization_selection_required","pending_authentication_token":"pt","organizations":[]}"#;
+        assert_eq!(kind(&attempt_of(403, none.as_bytes())), "unsupported");
+
+        for code in UNSUPPORTED_STEPS {
+            let body = format!(r#"{{"code":"{code}","pending_authentication_token":"pt"}}"#);
+            assert_eq!(kind(&attempt_of(403, body.as_bytes())), "unsupported", "{code}");
+            let body = format!(r#"{{"error":"{code}","error_description":"x"}}"#);
+            assert_eq!(kind(&attempt_of(403, body.as_bytes())), "unsupported", "{code}");
         }
     }
 

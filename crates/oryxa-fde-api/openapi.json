@@ -152,6 +152,248 @@
         ]
       }
     },
+    "/auth/sign-in/organisation": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Continue a sign-in into one of the organisations the last step offered.",
+        "operationId": "sign_in_choose_organisation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChooseOrganisationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_sign_in`: no pending choice (start again); `invalid_organisation`: not one offered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/sign-in/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign in with an email address and password. A wrong password and an unknown address get the\nsame 401 `invalid_credentials`; a limit reached gets 429 `too_many_attempts` with `Retry-After`,\nalike for every address.",
+        "operationId": "sign_in_with_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordSignInIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`invalid_credentials`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`; `no_organisation` (the person is in no organisation: show the page for it, no session is set); `sign_in_unsupported`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/sign-in/verify-email": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Continue a sign-in that waits on email verification, with the code WorkOS emailed.",
+        "operationId": "sign_in_verify_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyEmailIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_sign_in`: no pending verification (start again); `invalid_code`: not a code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`invalid_code`: wrong or expired; the step stays open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/v1/companies": {
       "get": {
         "tags": [
@@ -8792,6 +9034,19 @@
           }
         }
       },
+      "ChooseOrganisationIn": {
+        "type": "object",
+        "required": [
+          "organisation"
+        ],
+        "properties": {
+          "organisation": {
+            "type": "string",
+            "description": "One of the organisations the last step offered."
+          }
+        },
+        "additionalProperties": false
+      },
       "CommentBody": {
         "type": "object",
         "required": [
@@ -9660,6 +9915,45 @@
           "member"
         ]
       },
+      "OrganisationOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PasswordSignInIn": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          },
+          "return_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to go once signed in: a path on the web app. Defaults to `/`."
+          }
+        },
+        "additionalProperties": false
+      },
       "PersonOut": {
         "type": "object",
         "required": [
@@ -10353,6 +10647,67 @@
             ]
           }
         }
+      },
+      "SignInStep": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Signed in: the session cookie is set. Go to `return_to`.",
+            "required": [
+              "return_to",
+              "next"
+            ],
+            "properties": {
+              "next": {
+                "type": "string",
+                "enum": [
+                  "done"
+                ]
+              },
+              "return_to": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A code was emailed to the address; post it to `/auth/sign-in/verify-email`.",
+            "required": [
+              "next"
+            ],
+            "properties": {
+              "next": {
+                "type": "string",
+                "enum": [
+                  "verify_email"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Post one of these to `/auth/sign-in/organisation`.",
+            "required": [
+              "organisations",
+              "next"
+            ],
+            "properties": {
+              "next": {
+                "type": "string",
+                "enum": [
+                  "choose_organisation"
+                ]
+              },
+              "organisations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/OrganisationOut"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Where a sign-in stands after a step that worked."
       },
       "SignOffBody": {
         "type": "object",
@@ -11636,6 +11991,19 @@
           "approved",
           "discarded"
         ]
+      },
+      "VerifyEmailIn": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The code WorkOS emailed to the address."
+          }
+        },
+        "additionalProperties": false
       }
     },
     "securitySchemes": {

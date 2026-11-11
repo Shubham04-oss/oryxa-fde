@@ -833,6 +833,10 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
     ("POST", "/auth/logout"),
+    // No sign-in yet: WorkOS decides who, and a pending step only continues its own sign-in.
+    ("POST", "/auth/sign-in/password"),
+    ("POST", "/auth/sign-in/verify-email"),
+    ("POST", "/auth/sign-in/organisation"),
     // The organisation's own: installs and workspace, under its admins or members.
     ("POST", "/v1/github/install"),
     ("GET", "/v1/github/installations"),
@@ -2283,6 +2287,10 @@ async fn every_documented_route_is_served() {
             "/auth/login" => StatusCode::FOUND,
             "/auth/callback" => StatusCode::BAD_REQUEST,
             "/auth/logout" => StatusCode::NO_CONTENT,
+            // Not from the web app's origin: refused before anything else.
+            "/auth/sign-in/password" | "/auth/sign-in/verify-email" | "/auth/sign-in/organisation" => {
+                StatusCode::FORBIDDEN
+            }
             // Needs no sign-in, only a token, which `{}` lacks.
             "/v1/digest/unsubscribe" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::UNAUTHORIZED,
@@ -2540,6 +2548,96 @@ fn set_cookies(headers: &axum::http::HeaderMap) -> Vec<String> {
         .iter()
         .map(|v| v.to_str().unwrap().to_owned())
         .collect()
+}
+
+/// A password sign-in from the web app, as `client` (the address the Worker forwards).
+fn password_sign_in(email: &str, password: &str, client: &str, cookie: Option<&str>) -> Request<Body> {
+    let mut req = Request::post("/auth/sign-in/password")
+        .header("origin", WEB)
+        .header("x-oryxa-request", "1")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", format!("{client}, 10.0.0.2"))
+        .header("user-agent", "Browser/1.0");
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    req.body(Body::from(
+        json!({ "email": email, "password": password, "return_to": "/companies" }).to_string(),
+    ))
+    .unwrap()
+}
+
+/// A client address no earlier run has used.
+fn fresh_client() -> String {
+    let n: u64 = rand::random();
+    format!("2001:db8::{:x}:{:x}", n >> 48, n & 0xffff)
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_password_sign_in_works_past_a_stale_session_and_is_limited_in_postgres() {
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    *w.authkit.who.lock().unwrap() = (Some(org.clone()), alice.id.clone(), "member".into());
+    let email = format!("{}@example.com", new_id("someone"));
+    let client = fresh_client();
+
+    // A cookie the session layer cannot use would answer 401 on any other POST; not here.
+    let stale = "__Host-fde_session=not-a-session-any-more";
+    let (status, headers, body) = w
+        .send(password_sign_in(&email, "right password", &client, Some(stale)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "next": "done", "return_to": "/companies" }));
+    let session = set_cookie(&headers, "__Host-fde_session").unwrap();
+    assert_ne!(session, "not-a-session-any-more");
+    let (status, _, me) = w.with_cookie(&session, "GET", "/v1/me", None, false).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["user"]["id"], alice.id.as_str());
+    let seen = w.authkit.clients.lock().unwrap().clone();
+    assert_eq!(seen.last().unwrap().ip.as_deref(), Some(client.as_str()));
+
+    // Not from the web app: refused before anything else, with or without a cookie.
+    let mut cross = password_sign_in(&email, "right password", &client, None);
+    cross.headers_mut().remove("origin");
+    assert_eq!(w.send(cross).await.0, StatusCode::FORBIDDEN);
+
+    // Wrong passwords for one address: refused alike, then slowed for a window.
+    for _ in 0..9 {
+        let (status, _, body) = w.send(password_sign_in(&email, "wrong", &client, None)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::UNAUTHORIZED, json!({ "error": "invalid_credentials" }))
+        );
+    }
+    let tries = w.authkit.clients.lock().unwrap().len();
+    let (status, headers, body) = w.send(password_sign_in(&email, "right password", &client, None)).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "too_many_attempts" }))
+    );
+    let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=300).contains(&wait), "{wait}");
+    assert_eq!(w.authkit.clients.lock().unwrap().len(), tries, "WorkOS was not asked");
+
+    // Another address is not slowed by it.
+    let other = format!("{}@example.com", new_id("other"));
+    let (status, _, _) = w
+        .send(password_sign_in(&other, "right password", &fresh_client(), None))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // What the counters hold: a kind and a keyed hash, never the address or the client.
+    let admin = testing::admin().await;
+    let rows: Vec<String> = sqlx::query_scalar("select bucket from sign_in_limits")
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    for b in &rows {
+        assert!(!b.contains('@') && !b.contains(&email) && !b.contains(&client), "{b}");
+    }
 }
 
 #[tokio::test]
