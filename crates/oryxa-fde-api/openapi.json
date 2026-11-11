@@ -5187,6 +5187,7 @@
         "tags": [
           "lifecycle"
         ],
+        "summary": "The project's tasks in its order: the board's columns read top to bottom.",
         "operationId": "list_tasks",
         "parameters": [
           {
@@ -5206,6 +5207,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "criterion",
+            "in": "query",
+            "description": "Only the tasks linked to this success criterion.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5218,6 +5228,16 @@
                   "items": {
                     "$ref": "#/components/schemas/TaskOut"
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -11005,6 +11025,13 @@
               "created_at": {
                 "type": "string"
               },
+              "criterion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The success criterion it works towards."
+              },
               "due_on": {
                 "type": [
                   "string",
@@ -11193,12 +11220,26 @@
           "status"
         ],
         "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Put it just after this task, which must have the status this task will have."
+          },
           "assignee": {
             "type": [
               "string",
               "null"
             ],
             "description": "The WorkOS user who works it."
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Put it just before this task, which must have the status this task will have. At most one\nof `before` and `after`; with neither, a new task or one whose status changes goes to the end\nof its column, and any other task keeps its place."
           },
           "blocked_by": {
             "type": [
@@ -11213,6 +11254,13 @@
               "null"
             ],
             "description": "What blocks the task; required when the status is `blocked`."
+          },
+          "criterion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project's success criterion it works towards. Removing the criterion unlinks it."
           },
           "due_on": {
             "type": [
@@ -11277,6 +11325,13 @@
           },
           "created_at": {
             "type": "string"
+          },
+          "criterion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The success criterion it works towards."
           },
           "due_on": {
             "type": [

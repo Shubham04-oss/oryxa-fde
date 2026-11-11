@@ -254,6 +254,8 @@ export const TaskOut = z.object({
   waiting_since: instant.nullish(),
   /** The access request it is blocked on, while blocked on one. */
   blocked_by: AccessRequestId.nullish(),
+  /** The success criterion it works towards. */
+  criterion: CriterionId.nullish(),
   created_at: instant,
   updated_at: instant,
   version: recordVersion,

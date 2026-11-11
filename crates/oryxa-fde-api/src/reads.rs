@@ -47,7 +47,7 @@ pub async fn decisions(
     })
 }
 
-/// One page of the project's tasks, oldest first, after task `after`.
+/// One page of the project's tasks, in the project's order, after task `after`.
 pub async fn tasks(
     app: &App,
     who: &Principal,

@@ -970,6 +970,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** The project's tasks in its order: the board's columns read top to bottom. */
         get: operations["list_tasks"];
         put?: never;
         post: operations["add_task"];
@@ -2453,6 +2454,8 @@ export interface components {
                 blocked_by?: string | null;
                 blocker?: string | null;
                 created_at: string;
+                /** @description The success criterion it works towards. */
+                criterion?: string | null;
                 /** @description `YYYY-MM-DD`. */
                 due_on?: string | null;
                 id: string;
@@ -2514,8 +2517,16 @@ export interface components {
         /** @enum {string} */
         TargetComparator: "at_least" | "at_most";
         TaskBody: {
+            /** @description Put it just after this task, which must have the status this task will have. */
+            after?: string | null;
             /** @description The WorkOS user who works it. */
             assignee?: string | null;
+            /**
+             * @description Put it just before this task, which must have the status this task will have. At most one
+             *     of `before` and `after`; with neither, a new task or one whose status changes goes to the end
+             *     of its column, and any other task keeps its place.
+             */
+            before?: string | null;
             /**
              * @description The project's access request it is blocked on, only while `blocked`: once the request is
              *     granted, the task goes back to `todo`.
@@ -2523,6 +2534,8 @@ export interface components {
             blocked_by?: string | null;
             /** @description What blocks the task; required when the status is `blocked`. */
             blocker?: string | null;
+            /** @description The project's success criterion it works towards. Removing the criterion unlinks it. */
+            criterion?: string | null;
             /** @description Due date, `YYYY-MM-DD`. */
             due_on?: string | null;
             status: components["schemas"]["TaskState"];
@@ -2543,6 +2556,8 @@ export interface components {
             blocked_by?: string | null;
             blocker?: string | null;
             created_at: string;
+            /** @description The success criterion it works towards. */
+            criterion?: string | null;
             /** @description `YYYY-MM-DD`. */
             due_on?: string | null;
             id: string;
@@ -6312,7 +6327,10 @@ export interface operations {
     };
     list_tasks: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Only the tasks linked to this success criterion. */
+                criterion?: string;
+            };
             header?: never;
             path: {
                 /** @description Company id */
@@ -6331,6 +6349,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Forbidden */
