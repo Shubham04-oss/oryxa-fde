@@ -19,6 +19,7 @@ import { readText } from "../lib/eval-csv"
 import { emptyEvals, evalRoutes, seedEvals, settle, valueOf, measured } from "./mock-evals"
 import type { MockEvals } from "./mock-evals"
 import { runRoutes, seedRuns } from "./mock-runs"
+import { resetMockSignIn, signInRoutes } from "./mock-sign-in"
 
 type S = components["schemas"]
 
@@ -947,6 +948,7 @@ export function resetMockApi({
   }
   if (engineer) state.me = { ...state.me, role: "member" }
   setSession(signedIn)
+  resetMockSignIn()
 }
 
 function setSession(on: boolean) {
@@ -2072,8 +2074,11 @@ async function answer(request: Request): Promise<Response> {
   const { method } = request
   if (pathname === "/auth/logout" && method === "POST") {
     setSession(false)
+    resetMockSignIn()
     return new Response(null, { status: 204 })
   }
+  const signedIn = await signInRoutes(pathname, method, request, setSession)
+  if (signedIn) return signedIn
   if (!pathname.startsWith("/api/v1/")) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
   // Dev and test only, like everything here: `globalThis.__fdeMockFailWrites = true` makes every write
@@ -2210,6 +2215,10 @@ export const mockApi: Transport = {
     return uploadAnswer(request)
   },
   async signIn() {
+    setSession(true)
+  },
+  /** Google, on the mock: it comes back at once, signed in. */
+  async leave() {
     setSession(true)
   },
 }

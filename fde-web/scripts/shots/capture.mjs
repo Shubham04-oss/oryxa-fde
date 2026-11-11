@@ -44,17 +44,27 @@ async function shoot(screen, size, theme) {
     await page.addInitScript(() => (globalThis.__fdeMockStaleChecklist = true))
   // The API serves no eval routes (no sandbox gateway): they answer 404, so the Proof card says so.
   if (screen.evalsOff) await page.addInitScript(() => (globalThis.__fdeMockEvalsOff = true))
+  // A sign-in waiting at a step, as Google's callback leaves it.
+  if (screen.pendingStep)
+    await page.addInitScript((step) => (globalThis.__fdeMockPendingStep = step), screen.pendingStep)
   try {
     const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"))
     if (response && response.status() >= 400) problems.push(`HTTP ${response.status()}`)
     if (!screen.signedOut) {
       // The mock's sign-in is one click and keeps the session for this tab. Either the app shows (a
       // session is there) or the sign-in card does; wait for whichever comes first.
+      // With our own sign-in screens on (VITE_FDE_OWN_SIGN_IN=1), the mock's sample account signs in.
       const canvas = page.locator(".app-canvas")
       const continueButton = page.getByRole("button", { name: "Continue" })
-      await canvas.or(continueButton).first().waitFor()
+      const email = page.getByLabel("Email", { exact: true })
+      await canvas.or(continueButton).or(email).first().waitFor()
       if (await continueButton.isVisible()) {
         await continueButton.click()
+        await canvas.waitFor()
+      } else if (await email.isVisible()) {
+        await email.fill("riya@example.com")
+        await page.getByLabel("Password", { exact: true }).fill("sample-password")
+        await page.getByRole("button", { name: "Sign in", exact: true }).click()
         await canvas.waitFor()
       }
       await page.goto(url + screen.path)

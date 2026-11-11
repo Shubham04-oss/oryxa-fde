@@ -25,6 +25,15 @@ describe("securityHeaders", () => {
     expect(headers["X-Frame-Options"]).toBe("DENY")
   })
 
+  it("sends no Referer from sign-in pages, which may carry an emailed link's token", () => {
+    for (const path of ["/sign-in", "/sign-in?step=reset&token=t", "/sign-in/x"])
+      expect(securityHeaders(new URL(path, page))["Referrer-Policy"]).toBe("no-referrer")
+    for (const path of ["/", "/sign-inx", "/today?next=/sign-in"])
+      expect(securityHeaders(new URL(path, page))["Referrer-Policy"]).toBe(
+        "strict-origin-when-cross-origin",
+      )
+  })
+
   it("enforces a strict policy: this origin only, no eval, no framing, no plugins", () => {
     const policy = directives(headers["Content-Security-Policy"]!)
 

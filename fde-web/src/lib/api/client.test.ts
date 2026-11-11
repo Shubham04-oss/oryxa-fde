@@ -116,6 +116,7 @@ describe("api over the network", () => {
         )
       },
       signIn: async () => {},
+      leave: async () => {},
     }
     return { seen, uploads, net: apiOver(async () => transport) }
   }

@@ -44,6 +44,11 @@ function policy(socketOrigin: string, nonce: string | undefined): string {
 export const ASSET_POLICY =
   "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'"
 
+/** Whether `url` is a sign-in page (ADR 0007), which may carry an emailed link's token. */
+export function signInPage(url: URL): boolean {
+  return url.pathname === "/sign-in" || url.pathname.startsWith("/sign-in/")
+}
+
 /** The headers for a response to a request for `url`, whose scripts carry `nonce` if any. */
 export function securityHeaders(url: URL, nonce?: string): Record<string, string> {
   const secure = url.protocol === "https:"
@@ -51,7 +56,8 @@ export function securityHeaders(url: URL, nonce?: string): Record<string, string
     // RFC 6797 §7.2: never over plain http, as `vite dev` serves.
     ...(secure && { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" }),
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
+    // Sign-in pages may read a reset or invite token from their address: they send no Referer at all.
+    "Referrer-Policy": signInPage(url) ? "no-referrer" : "strict-origin-when-cross-origin",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": policy(`${secure ? "wss" : "ws"}://${url.host}`, nonce),
   }

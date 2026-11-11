@@ -39,6 +39,9 @@ const SWITCHES = [
   "__fdeMockNoCompanies",
   "__fdeMockStaleChecklist",
   "__fdeMockSomeoneElse",
+  "__fdeMockPendingStep",
+  // The sample sign-in accounts' password (src/dev/mock-sign-in.ts).
+  "sample-password",
 ]
 
 describe("the mock API", () => {
