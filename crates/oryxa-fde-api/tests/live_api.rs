@@ -2676,11 +2676,11 @@ async fn sign_in_refuses_bad_return_paths_states_and_codes() {
         assert!(status.is_client_error(), "{want}: {status}");
         assert_eq!(body["error"], want);
     }
-    // A user who signed in without picking an organisation gets no session.
-    let (status, headers, body) = w.sign_in_as(None, "user_y", "member").await;
+    // A user in no organisation gets no session, and goes to the page that tells them so.
+    let (status, headers, _) = w.sign_in_as(None, "user_y", "member").await;
     assert_eq!(
-        (status, body["error"].as_str()),
-        (StatusCode::FORBIDDEN, Some("no_organisation"))
+        (status, headers.get("location").and_then(|l| l.to_str().ok())),
+        (StatusCode::FOUND, Some("/sign-in?error=no_organisation"))
     );
     assert_eq!(set_cookie(&headers, "__Host-fde_session"), None);
 }

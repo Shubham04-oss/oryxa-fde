@@ -25,7 +25,7 @@ use oryxa_authz::SpiceDb;
 use oryxa_events::{EventBusPublisher, Signer};
 use std::sync::Arc;
 
-use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, health, router_with, run_reconciler, shutdown};
+use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, health, router_with, run_reconciler, shutdown, workos_issuer};
 use oryxa_fde_context::Context;
 use oryxa_fde_store::{Store, relay};
 use tracing_subscriber::EnvFilter;
@@ -53,13 +53,14 @@ async fn main() -> Result<(), Error> {
         &env("SPICEDB_PRESHARED_KEY")?,
         Duration::from_secs(2),
     )?;
+    let client_id = env("WORKOS_CLIENT_ID")?;
+    let issuer = workos_issuer(&client_id, std::env::var("WORKOS_ISSUER").ok().as_deref())?;
     let workos = workos::Client::builder()
         .api_key(env("WORKOS_API_KEY")?)
-        .client_id(env("WORKOS_CLIENT_ID")?)
+        .client_id(client_id)
         // A request waiting on a refresh answers 503 within this, not after the SDK's 30 s default.
         .timeout(Duration::from_secs(10))
         .build();
-    let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
     let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer.clone());
     // Agent runs (crates/oryxa-fde-agent): off unless SANDBOX_GATEWAY_URL is set.
     let agent_runs = oryxa_fde_agent::prod::router_from_env(

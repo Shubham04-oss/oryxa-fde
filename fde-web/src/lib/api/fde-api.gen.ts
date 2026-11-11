@@ -2665,7 +2665,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Signed in; to the page sign-in started from */
+            /** @description Signed in, to the page sign-in started from; or refused because the person is in no WorkOS organisation, to `/sign-in?error=no_organisation` with no session */
             302: {
                 headers: {
                     [name: string]: unknown;
@@ -2690,8 +2690,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Forbidden */
-            403: {
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

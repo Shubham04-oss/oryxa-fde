@@ -52,7 +52,7 @@ pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use people::Person;
-pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit};
+pub use session::{AuthKit, RefreshError, SignIn, Tokens, WorkOsAuthKit, workos_issuer};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

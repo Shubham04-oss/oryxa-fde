@@ -38,6 +38,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use oryxa_authn::JwtError;
+use oryxa_core::UserId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::{IntoParams, ToSchema};
@@ -316,6 +317,24 @@ pub struct SignIn {
     waits: Mutex<HashMap<String, Instant>>,
 }
 
+/// The issuer AuthKit access tokens carry, which the verifier pins exactly: `configured`
+/// (`WORKOS_ISSUER`, for a custom auth domain) when set, else WorkOS's own issuer for this client.
+pub fn workos_issuer(client_id: &str, configured: Option<&str>) -> Result<String, String> {
+    // The client id goes into the issuer URL, so it keeps to an id's safe charset.
+    let valid = !client_id.is_empty()
+        && client_id.len() <= 64
+        && client_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !valid {
+        return Err("WORKOS_CLIENT_ID must be 1..=64 characters of [A-Za-z0-9_-]".into());
+    }
+    match configured.map(str::trim).filter(|i| !i.is_empty()) {
+        Some(issuer) => Ok(issuer.to_owned()),
+        None => Ok(format!("https://api.workos.com/user_management/{client_id}")),
+    }
+}
+
 fn check_password(password: &str) -> Result<(), String> {
     if password.len() != 64 || !password.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("SESSION_PASSWORD must be 64 hex characters".into());
@@ -588,11 +607,7 @@ async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, Op
                 }
             };
             sign_in.refreshed(&key);
-            let c = app
-                .tokens
-                .claims(&t.access_token)
-                .await
-                .map_err(|_| ApiError::Unauthorized)?;
+            let c = app.tokens.claims(&t.access_token).await.map_err(refused_token)?;
             if c.sub != s.user || c.org_id.as_deref() != Some(s.organisation.as_str()) {
                 return Err(ApiError::Unauthorized);
             }
@@ -604,12 +619,60 @@ async fn resume(app: &App, sign_in: &SignIn, sealed: &str) -> Result<(String, Op
             let cookie = set_cookie(SESSION_COOKIE, &sign_in.seal(&renewed)?, left(&renewed));
             Ok((t.access_token, Some(cookie)))
         }
-        Err(JwtError::Keys(e)) => {
-            tracing::error!(error = %e, "could not load WorkOS signing keys");
-            Err(ApiError::Unavailable)
-        }
-        Err(_) => Err(ApiError::Unauthorized),
+        Err(e) => Err(refused_token(e)),
     }
+}
+
+/// Maps a token the verifier refused to the answer, and logs why: the error kind, never the token.
+fn refused_token(e: JwtError) -> ApiError {
+    if let JwtError::Keys(e) = e {
+        tracing::error!(error = %e, "could not load WorkOS signing keys");
+        return ApiError::Unavailable;
+    }
+    tracing::warn!(kind = token_error_kind(&e), "access token refused");
+    ApiError::Unauthorized
+}
+
+/// The kind of a refusal, without the data some kinds carry (claim values, key material).
+fn token_error_kind(e: &JwtError) -> String {
+    match e {
+        JwtError::Malformed => "malformed".into(),
+        JwtError::WrongAlgorithm => "wrong_algorithm".into(),
+        JwtError::UnknownKey => "unknown_key".into(),
+        // jsonwebtoken's ErrorKind is not re-exported by oryxa-authn; its Debug name is stable.
+        JwtError::Rejected(kind) => format!("{kind:?}").split('(').next().unwrap_or_default().to_owned(),
+        JwtError::Keys(_) => "keys".into(),
+    }
+}
+
+/// The organisation a sign-in is for; a person in none is refused, and logged by user id only.
+fn organisation_of(user: &str, org_id: Option<String>) -> Result<String, ApiError> {
+    org_id.ok_or_else(|| {
+        match UserId::new(user) {
+            Ok(user) => tracing::info!(%user, "sign-in refused: the user is in no organisation"),
+            Err(_) => tracing::info!("sign-in refused: the user is in no organisation (user id not valid)"),
+        }
+        ApiError::NoOrganisation
+    })
+}
+
+/// Where the web app tells a person refused for having no organisation what to do next.
+pub const NO_ORGANISATION_PAGE: &str = "/sign-in?error=no_organisation";
+
+/// The browser's answer to a failed callback, which also ends that sign-in: the browser starts
+/// again from /auth/login. A person in no organisation reached it by navigating, so they go to a
+/// page that explains it rather than a bare error.
+fn refused_sign_in(e: ApiError) -> Response {
+    let mut resp = match e {
+        ApiError::NoOrganisation => (
+            StatusCode::FOUND,
+            [(LOCATION, HeaderValue::from_static(NO_ORGANISATION_PAGE))],
+        )
+            .into_response(),
+        e => e.into_response(),
+    };
+    resp.headers_mut().append(SET_COOKIE, clear_cookie(SIGN_IN_COOKIE));
+    resp
 }
 
 fn is_expiry(kind: &impl std::fmt::Debug) -> bool {
@@ -663,22 +726,15 @@ pub(crate) async fn login(State(app): State<Arc<App>>, Query(p): Query<LoginPara
 /// Finish sign-in: sets the session cookie and redirects to where sign-in started.
 #[utoipa::path(get, operation_id = "sign_in_callback", path = "/auth/callback", tag = "auth", params(CallbackParams),
     security(()),
-    responses((status = 302, description = "Signed in; to the page sign-in started from"),
-        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 302, description = "Signed in, to the page sign-in started from; or refused because the \
+        person is in no WorkOS organisation, to `/sign-in?error=no_organisation` with no session"),
+        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 503, body = ErrorBody)))]
 pub(crate) async fn callback(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     Query(p): Query<CallbackParams>,
 ) -> Response {
-    match finish_sign_in(&app, &headers, &p).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            // A failed callback ends that sign-in; the browser starts again from /auth/login.
-            let mut resp = e.into_response();
-            resp.headers_mut().append(SET_COOKIE, clear_cookie(SIGN_IN_COOKIE));
-            resp
-        }
-    }
+    finish_sign_in(&app, &headers, &p).await.unwrap_or_else(refused_sign_in)
 }
 
 async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> Result<Response, ApiError> {
@@ -709,12 +765,8 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
             tracing::info!(error = %e, "code exchange refused");
             ApiError::Unauthorized
         })?;
-    let claims = app
-        .tokens
-        .claims(&tokens.access_token)
-        .await
-        .map_err(|_| ApiError::Unauthorized)?;
-    let organisation = claims.org_id.ok_or(ApiError::NoOrganisation)?;
+    let claims = app.tokens.claims(&tokens.access_token).await.map_err(refused_token)?;
+    let organisation = organisation_of(&claims.sub, claims.org_id)?;
     let session = Session {
         purpose: SESSION_PURPOSE.into(),
         access_token: tokens.access_token,
@@ -926,6 +978,124 @@ mod tests {
             "__Host-fde_session=v; Path=/; Max-Age=604800; Secure; HttpOnly; SameSite=Lax"
         );
         assert!(clear_cookie(SESSION_COOKIE).to_str().unwrap().contains("Max-Age=0"));
+    }
+
+    /// What `f` logs, as plain text.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let out = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || out.clone())
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn the_issuer_defaults_to_the_clients_workos_issuer() {
+        assert_eq!(
+            workos_issuer("client_01ABC", None).unwrap(),
+            "https://api.workos.com/user_management/client_01ABC"
+        );
+        // Unset in all but name: Terraform may pass an empty variable.
+        assert_eq!(
+            workos_issuer("client_01ABC", Some(" ")).unwrap(),
+            "https://api.workos.com/user_management/client_01ABC"
+        );
+        assert_eq!(
+            workos_issuer("client_01ABC", Some("https://auth.example.com")).unwrap(),
+            "https://auth.example.com",
+            "WORKOS_ISSUER overrides it, for a custom auth domain"
+        );
+        for bad in ["", "client/../x", "client 1", "client_1?x=y", &"c".repeat(65)] {
+            assert!(workos_issuer(bad, None).is_err(), "{bad:?}");
+            assert!(workos_issuer(bad, Some("https://auth.example.com")).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_token_is_logged_by_kind_never_by_content() {
+        use jsonwebtoken::errors::ErrorKind;
+        let mut answer = None;
+        let log = logged(|| answer = Some(refused_token(JwtError::Rejected(ErrorKind::InvalidIssuer))));
+        assert!(matches!(answer, Some(ApiError::Unauthorized)));
+        assert!(
+            log.contains("access token refused") && log.contains("kind=\"InvalidIssuer\""),
+            "{log}"
+        );
+
+        // A kind that carries data logs its name only.
+        let log = logged(|| {
+            refused_token(JwtError::Rejected(ErrorKind::MissingRequiredClaim(
+                "secret-claim".into(),
+            )));
+        });
+        assert!(
+            log.contains("MissingRequiredClaim") && !log.contains("secret-claim"),
+            "{log}"
+        );
+        for (e, kind) in [
+            (JwtError::Malformed, "malformed"),
+            (JwtError::WrongAlgorithm, "wrong_algorithm"),
+            (JwtError::UnknownKey, "unknown_key"),
+        ] {
+            assert_eq!(token_error_kind(&e), kind);
+        }
+
+        // Keys WorkOS could not serve: a dependency failure, still refused.
+        assert!(matches!(
+            refused_token(JwtError::Keys("down".into())),
+            ApiError::Unavailable
+        ));
+    }
+
+    #[test]
+    fn a_sign_in_with_no_organisation_is_refused_and_logged_by_user_id() {
+        let mut answer = None;
+        let log = logged(|| answer = Some(organisation_of("user_01ABC", None)));
+        assert!(matches!(answer, Some(Err(ApiError::NoOrganisation))));
+        assert!(log.contains("no organisation") && log.contains("user_01ABC"), "{log}");
+
+        // A user id that is not a valid id stays out of the log.
+        let log = logged(|| {
+            let _ = organisation_of("someone@example.com", None);
+        });
+        assert!(log.contains("no organisation") && !log.contains("example.com"), "{log}");
+
+        let log = logged(|| assert_eq!(organisation_of("user_01ABC", Some("org_1".into())).unwrap(), "org_1"));
+        assert!(log.is_empty(), "{log}");
+    }
+
+    #[test]
+    fn a_callback_refused_for_no_organisation_goes_to_a_page_that_says_so() {
+        let resp = refused_sign_in(ApiError::NoOrganisation);
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.headers()[LOCATION], NO_ORGANISATION_PAGE);
+        let cookies: Vec<_> = resp.headers().get_all(SET_COOKIE).iter().collect();
+        assert_eq!(
+            cookies,
+            [clear_cookie(SIGN_IN_COOKIE)],
+            "the sign-in ends and no session is set"
+        );
+
+        // Other refusals keep their status and code.
+        let resp = refused_sign_in(ApiError::Unauthorized);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().get(LOCATION).is_none());
+        assert_eq!(resp.headers()[SET_COOKIE], clear_cookie(SIGN_IN_COOKIE));
     }
 
     #[test]
