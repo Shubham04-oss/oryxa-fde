@@ -385,12 +385,16 @@ variable "slack_client_id" {
 }
 
 variable "workos_issuer" {
-  description = "The WorkOS token issuer (WORKOS_ISSUER), only for an environment with a custom auth domain: the API pins every token's `iss` to it. Null: the API's default, https://api.workos.com/."
+  description = "The WorkOS token issuer (WORKOS_ISSUER): the API pins every token's `iss` to it. Without a custom auth domain it is https://api.workos.com/user_management/<client id>, and must be set until the API derives it (#199); with one, it is that domain. Null: the API's default, https://api.workos.com/."
   type        = string
   default     = null
   validation {
-    condition     = var.workos_issuer == null || can(regex("^https://[a-z0-9.-]+/?$", var.workos_issuer))
-    error_message = "workos_issuer must be an https origin, such as https://auth.example.com/."
+    # An https host and an optional path of safe segments: no port, query, fragment, userinfo, wildcard or dot segment.
+    condition = var.workos_issuer == null || (
+      can(regex("^https://[a-z0-9.-]+(/[A-Za-z0-9_.-]+)*/?$", var.workos_issuer)) &&
+      !can(regex("/\\.\\.?(/|$)", var.workos_issuer))
+    )
+    error_message = "workos_issuer must be an https URL with an optional path of letters, digits, _, - and ., such as https://api.workos.com/user_management/<client id> or https://auth.example.com/."
   }
 }
 

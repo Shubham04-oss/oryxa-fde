@@ -1871,6 +1871,87 @@ run "rejects_a_workos_issuer_that_is_not_https" {
   expect_failures = [var.workos_issuer]
 }
 
+# A WorkOS environment without a custom auth domain issues tokens with a path: the client's own issuer.
+run "workos_issuer_accepts_the_workos_user_management_issuer" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com/user_management/client_01EXAMPLE"
+  }
+
+  assert {
+    condition     = local.api_environment.WORKOS_ISSUER == "https://api.workos.com/user_management/client_01EXAMPLE"
+    error_message = "WorkOS's own issuer, which has a path, is passed to the API unchanged"
+  }
+}
+
+run "workos_issuer_accepts_a_custom_domain_without_a_trailing_slash" {
+  command = plan
+  variables {
+    workos_issuer = "https://auth.example.com"
+  }
+
+  assert {
+    condition     = local.api_environment.WORKOS_ISSUER == "https://auth.example.com"
+    error_message = "a custom auth domain is an origin, with or without the slash"
+  }
+}
+
+run "rejects_a_workos_issuer_with_a_query" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com/user_management/client_01EXAMPLE?x=1"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_with_a_fragment" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com/user_management#client_01EXAMPLE"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_with_userinfo" {
+  command = plan
+  variables {
+    workos_issuer = "https://user@api.workos.com/user_management/client_01EXAMPLE"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_with_a_wildcard" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com/user_management/*"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_with_a_dot_segment" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com/user_management/../client_01EXAMPLE"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_with_an_empty_segment" {
+  command = plan
+  variables {
+    workos_issuer = "https://api.workos.com//user_management"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
+run "rejects_a_workos_issuer_path_that_is_not_https" {
+  command = plan
+  variables {
+    workos_issuer = "http://api.workos.com/user_management/client_01EXAMPLE"
+  }
+  expect_failures = [var.workos_issuer]
+}
+
 run "a_drafting_model_must_be_a_global_profile" {
   command = plan
   variables {
