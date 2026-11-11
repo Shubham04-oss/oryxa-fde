@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use oryxa_authn::AccessTokenVerifier;
 use oryxa_authz::SpiceDb;
-use oryxa_fde_api::App;
+use oryxa_fde_api::{App, workos_issuer};
 use oryxa_fde_context::Context;
 use oryxa_fde_store::Store;
 use tracing_subscriber::EnvFilter;
@@ -31,11 +31,12 @@ async fn main() -> Result<(), Error> {
         &env("SPICEDB_PRESHARED_KEY")?,
         Duration::from_secs(2),
     )?;
+    let client_id = env("WORKOS_CLIENT_ID")?;
+    let issuer = workos_issuer(&client_id, std::env::var("WORKOS_ISSUER").ok().as_deref())?;
     let workos = workos::Client::builder()
         .api_key(env("WORKOS_API_KEY")?)
-        .client_id(env("WORKOS_CLIENT_ID")?)
+        .client_id(client_id)
         .build();
-    let issuer = std::env::var("WORKOS_ISSUER").unwrap_or_else(|_| "https://api.workos.com/".into());
     let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
     let app = App::new(store, authz, tokens, Context::from_env().await?);
     let hosts = env("MCP_ALLOWED_HOSTS")?

@@ -37,7 +37,7 @@
         ],
         "responses": {
           "302": {
-            "description": "Signed in; to the page sign-in started from"
+            "description": "Signed in, to the page sign-in started from; or refused because the person is in no WorkOS organisation, to `/sign-in?error=no_organisation` with no session"
           },
           "400": {
             "description": "Bad Request",
@@ -59,8 +59,8 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
