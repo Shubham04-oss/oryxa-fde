@@ -1,7 +1,6 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
-import { ChevronLeft } from "lucide-react"
 import { Card, Failed, Loading, NotFound, Page, Quiet, Row, Rows, Status, isNotFound } from "./page"
 import type { Tone } from "./page"
 import { RUN_STATE, failureText, repoName } from "./runs"
@@ -19,6 +18,7 @@ import type {
 } from "@/lib/api/runs"
 import { useLiveEvents } from "@/lib/live"
 import { dayOf, shortDate } from "@/lib/time"
+import { Icon } from "@/components/ui/icon"
 
 const STEP: Record<RunSummary["plan"][number]["status"], { label: string; tone: Tone }> = {
   pending: { label: "To do", tone: "neutral" },
@@ -205,7 +205,7 @@ export function RunPage({ scope, runId }: { scope: ProjectScope; runId: AgentRun
         params={{ companyId: scope.company, projectId: scope.project }}
         className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
       >
-        <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
+        <Icon name="chevron-left" size={14} strokeWidth={1.7} aria-hidden="true" />
         {projectName}
       </Link>
 

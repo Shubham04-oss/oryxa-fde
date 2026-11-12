@@ -1,5 +1,4 @@
 import { Link } from "@tanstack/react-router"
-import { Check } from "lucide-react"
 import { Card, Quiet, Row, Rows, Status } from "./page"
 import { Button, buttonVariants } from "./ui/button"
 import type { CompanyId, Project, StageChecklist as Checklist } from "@/lib/api/schemas"
@@ -7,6 +6,7 @@ import { hintFor, metSummary, openCount } from "@/lib/checklist"
 import type { Fix } from "@/lib/checklist"
 import { STAGE_LABEL } from "@/lib/stage"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 const BUTTON = cn(buttonVariants({ variant: "outline", size: "sm" }), "max-[800px]:h-9")
 
@@ -35,7 +35,13 @@ export function StageChecklist({
     return (
       <section aria-label={name}>
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Check size={14} strokeWidth={2} aria-hidden="true" className="flex-none text-success" />
+          <Icon
+            name="check"
+            size={14}
+            strokeWidth={2}
+            aria-hidden="true"
+            className="flex-none text-success"
+          />
           Ready to leave {STAGE_LABEL[stage]}. Everything it needs is in place.
         </p>
       </section>
@@ -52,7 +58,8 @@ export function StageChecklist({
               <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
                 <div className="flex min-w-0 flex-1 basis-60 items-start gap-2.5">
                   {item.met ? (
-                    <Check
+                    <Icon
+                      name="check"
                       size={14}
                       strokeWidth={2}
                       aria-hidden="true"

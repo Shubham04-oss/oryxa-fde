@@ -2,7 +2,6 @@ import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
-import { ChevronLeft } from "lucide-react"
 import { Failed, Loading, NotFound, Page, Quiet, isNotFound } from "./page"
 import { Board } from "./board"
 import { ProjectDialog } from "./company-forms"
@@ -27,6 +26,7 @@ import type { ProjectOut, ProjectScope, Stage } from "@/lib/api/schemas"
 import type { Fix } from "@/lib/checklist"
 import { canManage } from "@/lib/records"
 import { reason as said } from "@/lib/task-move"
+import { Icon } from "@/components/ui/icon"
 
 /** The page column (1040px) the cards sit in; the board alone breaks out to the canvas. */
 function Column({ children }: { children: ReactNode }) {
@@ -137,7 +137,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
               params={{ companyId: p.company.id }}
               className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
             >
-              <ChevronLeft size={14} strokeWidth={1.7} aria-hidden="true" />
+              <Icon name="chevron-left" size={14} strokeWidth={1.7} aria-hidden="true" />
               {p.company.name}
             </Link>
             <Button variant="outline" size="sm" onClick={() => setEditing(true)}>

@@ -1,7 +1,6 @@
 import { useImperativeHandle, useRef, useState } from "react"
 import type { Ref } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Check, Ellipsis } from "lucide-react"
 import { useAccessMover } from "./access-move"
 import { FormDialog, SelectField, TextArea } from "./form-dialog"
 import { StaleNotice, useVersionedForm } from "./versioned-form"
@@ -35,6 +34,7 @@ import { dayOf, shortDate } from "@/lib/time"
 import { ACCESS_LABEL, accessActions } from "@/lib/today"
 import type { AccessAction } from "@/lib/today"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 // The project's access requests (DESIGN.md §3, Access): where engagements stall, so the card answers
 // three things first: what is still not granted, who at the customer holds it up, and for how long.
@@ -177,7 +177,13 @@ function Glance({ g }: { g: ReturnType<typeof glance> }) {
   if (g.notGranted === 0)
     return (
       <p className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
-        <Check size={14} strokeWidth={2} aria-hidden="true" className="flex-none text-success" />
+        <Icon
+          name="check"
+          size={14}
+          strokeWidth={2}
+          aria-hidden="true"
+          className="flex-none text-success"
+        />
         {g.total === 1 ? "The request is granted." : `All ${g.total} requests are granted.`}
       </p>
     )
@@ -302,7 +308,7 @@ function AccessRow({
                 aria-label={`Actions for ${clip(a.description, 60)}`}
                 className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-selected hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-45 data-popup-open:bg-selected max-[800px]:size-9 pointer-coarse:size-9"
               >
-                <Ellipsis size={15} strokeWidth={1.7} aria-hidden="true" />
+                <Icon name="more" size={15} strokeWidth={1.7} aria-hidden="true" />
               </MenuTrigger>
               <MenuContent label={`Actions for ${clip(a.description, 60)}`}>
                 {menu.map((action) => (
