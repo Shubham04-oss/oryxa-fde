@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, expectTypeOf, it } from "vitest"
 import {
   ApiError,
   ChecklistOpenError,
@@ -11,6 +11,7 @@ import {
 import type { Transport, UploadRequest } from "./client"
 import { CompanyId, ProjectId } from "./schemas"
 import { resetMockApi } from "@/dev/mock-api"
+import type { TaskSave } from "@/lib/board"
 
 const company = CompanyId.parse("cmp_kestrel")
 const project = ProjectId.parse("prj_kestrel_dispatch")
@@ -447,6 +448,19 @@ describe("safeReturnTo", () => {
     expect(safeReturnTo("/%2F%2Fevil.example")).toBe("/%2F%2Fevil.example")
   })
 
+  it("refuses an encoded dot that resolves to another host, and keeps an encoded backslash local", () => {
+    expect(safeReturnTo("/%2e//evil.example")).toBe("/")
+    expect(safeReturnTo("/%2E%2E//evil.example")).toBe("/")
+    expect(safeReturnTo("/%5Cevil.example")).toBe("/%5Cevil.example")
+  })
+
+  it("handles a very long value without leaving the app", () => {
+    const long = `/${"a".repeat(5000)}`
+    expect(safeReturnTo(long)).toBe(long)
+    expect(safeReturnTo(`/.//evil.example/${"a".repeat(5000)}`)).toBe("/")
+    expect(safeReturnTo(`${"/".repeat(5000)}evil.example`)).toBe("/")
+  })
+
   it("feeds the sign-in address only checked, encoded paths", () => {
     expect(signInUrl("/companies/cmp_1?x=1")).toBe(
       "/auth/login?return_to=%2Fcompanies%2Fcmp_1%3Fx%3D1",
@@ -461,5 +475,12 @@ describe("mockApiOn", () => {
     expect(mockApiOn({ DEV: true })).toBe(false)
     expect(mockApiOn({ DEV: true, VITE_FDE_MOCK_API: "true" })).toBe(false)
     expect(mockApiOn({ DEV: false, VITE_FDE_MOCK_API: "1" })).toBe(false)
+  })
+})
+
+describe("task saves", () => {
+  it("take only a full save, so the compiler sees that every one sends its criterion", () => {
+    expectTypeOf<Parameters<typeof api.addTask>[1]>().toEqualTypeOf<TaskSave>()
+    expectTypeOf<Parameters<typeof api.updateTask>[2]>().toEqualTypeOf<TaskSave>()
   })
 })

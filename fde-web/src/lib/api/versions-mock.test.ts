@@ -4,6 +4,7 @@ import { AccessRequestId, CompanyId, ProjectId, StakeholderId, TaskId } from "./
 import type { TaskOut } from "./schemas"
 import { resetMockApi } from "@/dev/mock-api"
 import { fieldsOf, toBody } from "@/lib/board"
+import { saveOf } from "@/test/task-save"
 
 // The dev mock versions its records the way the API does (#172): every change moves a record's
 // version on, whoever makes it; a stale version is a 409 with the record as it stands; an identical
@@ -67,7 +68,7 @@ describe("the mock's versions", () => {
   it("tells a task's other 409 from a stale one by its code", async () => {
     const t = await task(REPLAY)
     const e = await failure(
-      api.updateTask(place, t.id, { title: "x", status: "blocked" }, t.version),
+      api.updateTask(place, t.id, saveOf({ title: "x", status: "blocked" }), t.version),
     )
     expect(e).not.toBeInstanceOf(StaleSaveError)
     expect(e).toMatchObject({ status: 409, code: "rejected_blocker_required" })
@@ -138,11 +139,10 @@ describe("the mock's versions", () => {
 
     // Removing a stakeholder leaves a task that waited on them naming no one: a change too.
     const person = await api.addStakeholder(company, { name: "Ines Moreau" })
-    const waiting = await api.addTask(place, {
-      title: "Wait for Ines",
-      status: "waiting_on_customer",
-      waiting_on: person.id,
-    })
+    const waiting = await api.addTask(
+      place,
+      saveOf({ title: "Wait for Ines", status: "waiting_on_customer", waiting_on: person.id }),
+    )
     expect(waiting.version).toBe(1)
     await api.removeStakeholder(company, person.id)
     expect(await task("Wait for Ines")).toMatchObject({ waiting_on: null, version: 2 })

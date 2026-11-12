@@ -8,6 +8,7 @@ import type { ApiError } from "@/lib/api/client"
 import { CompanyId, ProjectId, TaskId } from "@/lib/api/schemas"
 import { fieldsOf, toBody } from "@/lib/board"
 import { renderWithRouter } from "@/test/render"
+import { saveOf } from "@/test/task-save"
 
 // Lets a test hold a write on the wire, or have it refused, before the mock answers. The client
 // reads `mockApi.fetch` when it first connects, so this wrapper is in place before any call.
@@ -317,6 +318,10 @@ describe("Board", () => {
     expect(within(cardOf(REPLAY)).getByText(/^Towards:/)).toHaveTextContent(
       "Towards: Plans dispatchers accept with no changes",
     )
+    // The whole sentence is on the card, wrapped, not cut short behind a tooltip that keyboard and touch cannot reach.
+    const towards = within(cardOf(REPLAY)).getByText(/^Towards:/)
+    expect(towards).not.toHaveAttribute("title")
+    expect(towards).not.toHaveClass("truncate")
     expect(within(cardOf(TELEMATICS)).queryByText(/^Towards:/)).toBeNull()
 
     await userEvent.click(screen.getByRole("button", { name: `Edit ${TELEMATICS}` }))
@@ -541,13 +546,13 @@ describe("Board", () => {
     await api.updateTask(
       scope,
       blocked.id,
-      {
+      saveOf({
         title: TELEMATICS,
         status: "blocked",
         blocker: blocked.blocker,
         assignee: "usr_jonah",
         blocked_by: "acc_k1",
-      },
+      }),
       blocked.version,
     )
     await queryClient.invalidateQueries()
@@ -576,7 +581,12 @@ describe("Board", () => {
 
     // The API's own rule, if the form ever let it through.
     await expect(
-      api.updateTask(scope, TaskId.parse("tsk_k2"), { title: REPLAY, status: "blocked" }, 1),
+      api.updateTask(
+        scope,
+        TaskId.parse("tsk_k2"),
+        saveOf({ title: REPLAY, status: "blocked" }),
+        1,
+      ),
     ).rejects.toMatchObject({ status: 409, message: "Say what is blocking it." })
   })
 
@@ -630,7 +640,7 @@ describe("Board", () => {
 
 describe("the API mock", () => {
   const put = (id: string, body: object) =>
-    api.updateTask(scope, TaskId.parse(id), { title: "x", status: "todo", ...body }, 1)
+    api.updateTask(scope, TaskId.parse(id), saveOf({ title: "x", status: "todo", ...body }), 1)
 
   it("orders tasks as the API does, and a repeated move changes nothing", async () => {
     renderWithRouter(<p />)
@@ -649,7 +659,12 @@ describe("the API mock", () => {
     // A save with no place keeps the place; a change of status with none goes to the end.
     await api.updateTask(scope, replay.id, toBody({ ...fields, title: "Renamed" }), 2)
     expect(await todo()).toEqual(["tsk_k3", "tsk_k2"])
-    await api.updateTask(scope, TaskId.parse("tsk_k1"), { title: "Back", status: "todo" }, 1)
+    await api.updateTask(
+      scope,
+      TaskId.parse("tsk_k1"),
+      saveOf({ title: "Back", status: "todo" }),
+      1,
+    )
     expect(await todo()).toEqual(["tsk_k3", "tsk_k2", "tsk_k1"])
   })
 
@@ -687,7 +702,7 @@ describe("the API mock", () => {
     renderWithRouter(<p />)
     const body = { title: "x", status: "todo" as const }
     const refused = (over: object) =>
-      api.addTask(scope, { ...body, ...over }).catch((e: unknown) => e as ApiError)
+      api.addTask(scope, saveOf({ ...body, ...over })).catch((e: unknown) => e as ApiError)
 
     expect(await refused({ title: " " })).toMatchObject({ status: 400, code: "invalid_title" })
     expect(await refused({ due_on: "soon" })).toMatchObject({ code: "invalid_due_on" })

@@ -636,7 +636,8 @@ function TaskCard({
         </span>
         {who && <span className="text-[11px] text-muted-foreground">{who}</span>}
         {criterion && (
-          <span className="truncate text-[11px] text-muted-foreground" title={criterion}>
+          // Whole and wrapped: a tooltip would hide the rest from keyboard and touch.
+          <span className="text-[11px] leading-normal [overflow-wrap:anywhere] text-muted-foreground">
             Towards: {criterion}
           </span>
         )}

@@ -7,7 +7,7 @@ import { OwnSignIn } from "./own-sign-in"
 import { resetMockApi } from "@/dev/mock-api"
 import { LIMITS, LOCKED_ADDRESS, SAMPLE_PASSWORD, mockPendingStep } from "@/dev/mock-sign-in"
 import { api, safeReturnTo } from "@/lib/api/client"
-import { LATER, SIGN_IN_TEXT } from "@/lib/api/sign-in-api"
+import { LATER, SIGN_IN_TEXT, SignInError, signInApi } from "@/lib/api/sign-in-api"
 import type { Later } from "@/lib/api/sign-in-api"
 import { outcomeOf } from "@/lib/sign-in-outcome"
 import { renderWithRouter } from "@/test/render"
@@ -594,5 +594,99 @@ describe("accept an invite, once its route is served", () => {
     )
     // There is no open sign-up.
     expect(screen.queryByRole("button", { name: /sign up|join/i })).toBeNull()
+  })
+})
+
+describe("after each attempt (#230)", () => {
+  it("clears a typed code after a refused sign-in with a code", async () => {
+    open("/sign-in?step=code")
+    await userEvent.type(await screen.findByLabelText("Email"), "riya@example.com")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    const code = await screen.findByLabelText("Code")
+    await userEvent.type(code, "654321")
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent(SIGN_IN_TEXT.invalid_code)
+    expect(code).toHaveValue("")
+    expect(code).toHaveFocus()
+  })
+
+  it("clears a typed code after a refused email confirmation", async () => {
+    open()
+    await signIn("unverified@example.com")
+    const code = await screen.findByLabelText("Code")
+    await userEvent.type(code, "654321")
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent(SIGN_IN_TEXT.invalid_code)
+    expect(code).toHaveValue("")
+  })
+
+  it("keeps a code that is not six digits, so it can be corrected", async () => {
+    open()
+    await signIn("unverified@example.com")
+    const code = await screen.findByLabelText("Code")
+    await userEvent.type(code, "12")
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
+    expect(code).toHaveValue("12")
+  })
+
+  it("sends one request for a double click on Email me a code", async () => {
+    const asked = vi.spyOn(signInApi, "requestCode")
+    open()
+    await userEvent.type(await screen.findByLabelText("Email"), "riya@example.com")
+    await userEvent.dblClick(screen.getByRole("button", { name: "Email me a code" }))
+    expect(await screen.findByRole("heading", { name: "Enter your code" })).toBeInTheDocument()
+    expect(asked).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("asking for a code while a wait runs (#230)", () => {
+  afterEach(() => vi.useRealTimers())
+
+  it("holds Send a new code until the wait shown has passed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    open("/sign-in?step=code")
+    await userEvent.type(await screen.findByLabelText("Email"), "riya@example.com")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    for (let i = 1; i <= LIMITS.sendAddress; i++)
+      await userEvent.click(await screen.findByRole("button", { name: "Send a new code" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("Wait 15 minutes")
+    const asked = vi.spyOn(signInApi, "requestCode")
+    const again = screen.getByRole("button", { name: "Send a new code" })
+    await waitFor(() => expect(again).toBeDisabled())
+    await userEvent.click(again)
+    expect(asked).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(LIMITS.sendWindowSeconds * 1000)
+    await waitFor(() => expect(again).toBeEnabled())
+  })
+
+  it("holds Email me a code for the address that was refused, not for another", async () => {
+    open()
+    const email = await screen.findByLabelText("Email")
+    await userEvent.type(email, LOCKED_ADDRESS)
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("Too many attempts. Wait")
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Email me a code" })).toBeDisabled(),
+    )
+
+    await userEvent.clear(email)
+    await userEvent.type(email, "riya@example.com")
+    expect(screen.getByRole("button", { name: "Email me a code" })).toBeEnabled()
+  })
+
+  it("holds Send a new code on the email confirmation too", async () => {
+    resetMockApi({ signedIn: false })
+    mockPendingStep("verify_email")
+    renderWithRouter(<Harness />, { at: "/sign-in?step=verify-email", signedIn: false, keep: true })
+    const resend = vi
+      .spyOn(signInApi, "resendVerification")
+      .mockRejectedValue(new SignInError("too_many_attempts", 60))
+    const button = await screen.findByRole("button", { name: "Send a new code" })
+    await userEvent.click(button)
+    expect(await screen.findByRole("alert")).toHaveTextContent("Wait 1 minute")
+    await waitFor(() => expect(button).toBeDisabled())
+    await userEvent.click(button)
+    expect(resend).toHaveBeenCalledTimes(1)
   })
 })

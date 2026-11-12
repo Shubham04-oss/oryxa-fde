@@ -12,7 +12,7 @@ import {
   TextButton,
 } from "./fields"
 import { AuthFrame } from "./frame"
-import { carried, codeOf, emailProblem, useCall, useFlow, useNote, waitText } from "./flow"
+import { carried, codeOf, emailProblem, useCall, useFlow, useHold, useNote, waitText } from "./flow"
 import { LATER, SIGN_IN_TEXT, SignInError, signInApi } from "@/lib/api/sign-in-api"
 import { OUTCOMES } from "@/lib/sign-in-outcome"
 import type { Outcome } from "@/lib/sign-in-outcome"
@@ -52,6 +52,7 @@ export function PasswordScreen({ returnTo }: Props) {
   const { follow, go, ended } = useFlow(returnTo)
   const { working, error, setError, run } = useCall(ended)
   const sending = useCall(ended)
+  const hold = useHold()
   const note = useNote()
   const noteId = useId()
   const [noted, setNoted] = useState(note !== null)
@@ -99,7 +100,7 @@ export function PasswordScreen({ returnTo }: Props) {
     if (problem) return emailField.current?.focus()
     carried.email = to
     const sent = await sending.run(async () => {
-      await signInApi.requestCode(to)
+      await hold.watch(to, () => signInApi.requestCode(to))
       return true
     })
     if (!sent) return
@@ -166,7 +167,7 @@ export function PasswordScreen({ returnTo }: Props) {
         </AuthForm>
         {(LATER.code || LATER.google) && <Or />}
         {LATER.code && (
-          <Secondary disabled={busy} onClick={() => void emailCode()}>
+          <Secondary disabled={busy || hold.held(email)} onClick={() => void emailCode()}>
             {sending.working ? "Sending a code…" : "Email me a code"}
           </Secondary>
         )}
@@ -203,6 +204,7 @@ export function CodeScreen({ returnTo }: Props) {
   const [code, setCode] = useState("")
   const [problem, setProblem] = useState<string | undefined>()
   const [resent, setResent] = useState(false)
+  const hold = useHold()
   const field = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -217,7 +219,7 @@ export function CodeScreen({ returnTo }: Props) {
   async function send(to: string) {
     setResent(false)
     const done = await run(async () => {
-      await signInApi.requestCode(to)
+      await hold.watch(to, () => signInApi.requestCode(to))
       return true
     })
     if (!done) return
@@ -231,6 +233,8 @@ export function CodeScreen({ returnTo }: Props) {
     setProblem(found ?? undefined)
     setError(null)
     if (found) return field.current?.focus()
+    // Enter in the field would otherwise ask again while the wait runs.
+    if (hold.held(email)) return
     await send(email.trim())
   }
 
@@ -240,6 +244,8 @@ export function CodeScreen({ returnTo }: Props) {
     setError(null)
     if (!digits || !sentTo) return field.current?.focus()
     const next = await run(() => signInApi.withCode(sentTo, digits, returnTo))
+    // A code is held only for its attempt (ADR 0007), right or wrong.
+    setCode("")
     if (next) follow(next)
     else field.current?.focus()
   }
@@ -268,7 +274,7 @@ export function CodeScreen({ returnTo }: Props) {
             {error && error.code !== "invalid_email" && (
               <Refusal error={error} returnTo={returnTo} />
             )}
-            <Submit working={working} busy="Sending…">
+            <Submit working={working} disabled={hold.held(email)} busy="Sending…">
               Email me a code
             </Submit>
           </AuthForm>
@@ -315,7 +321,7 @@ export function CodeScreen({ returnTo }: Props) {
             Sign in
           </Submit>
         </AuthForm>
-        <Secondary disabled={working} onClick={() => void send(sentTo)}>
+        <Secondary disabled={working || hold.held(sentTo)} onClick={() => void send(sentTo)}>
           Send a new code
         </Secondary>
         <TextButton
@@ -341,6 +347,8 @@ export function VerifyEmailScreen({ returnTo }: Props) {
   const [code, setCode] = useState("")
   const [problem, setProblem] = useState<string | undefined>()
   const [resent, setResent] = useState(false)
+  // The step has one address, so the hold needs no key.
+  const hold = useHold()
   const field = useRef<HTMLInputElement>(null)
 
   async function submit() {
@@ -350,6 +358,8 @@ export function VerifyEmailScreen({ returnTo }: Props) {
     setResent(false)
     if (!digits) return field.current?.focus()
     const next = await run(() => signInApi.verifyEmail(digits))
+    // A code is held only for its attempt (ADR 0007), right or wrong.
+    setCode("")
     if (next) follow(next)
     else field.current?.focus()
   }
@@ -357,7 +367,7 @@ export function VerifyEmailScreen({ returnTo }: Props) {
   async function resend() {
     setResent(false)
     const done = await run(async () => {
-      await signInApi.resendVerification()
+      await hold.watch("", () => signInApi.resendVerification())
       return true
     })
     if (done) setResent(true)
@@ -400,7 +410,7 @@ export function VerifyEmailScreen({ returnTo }: Props) {
           </Submit>
         </AuthForm>
         {LATER.resend && (
-          <Secondary disabled={working} onClick={() => void resend()}>
+          <Secondary disabled={working || hold.held("")} onClick={() => void resend()}>
             Send a new code
           </Secondary>
         )}
