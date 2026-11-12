@@ -6,22 +6,24 @@
 //   POST /auth/sign-in/password      { email, password, return_to? } → 200 SignInStep
 //   POST /auth/sign-in/verify-email  { code }                        → 200 SignInStep (pending cookie)
 //   POST /auth/sign-in/organisation  { organisation }                → 200 SignInStep (one offered)
+//   POST /auth/sign-in/code          { email }                       → 200 CodeRequested, the same
+//                                                                       whatever the address
+//   POST /auth/sign-in/code/verify   { email, code, return_to? }     → 200 SignInStep
+//   POST /auth/sign-in/verify-email/resend   (no body)               → 200 { next: "verify_email" }
 //   SignInStep = { next: "done", return_to }        session cookie set, pending cookie cleared
 //              | { next: "verify_email" }           a code was emailed; pending cookie set
 //              | { next: "choose_organisation", organisations: [{ id, name }] }   pending cookie set
+//   CodeRequested = { next: "enter_code" }   a code is on its way if the address has an account
 //   A refusal is { error: code }: 400 invalid_body | invalid_email | invalid_password |
 //   invalid_return_to | invalid_code | invalid_organisation | invalid_sign_in (start again),
 //   401 invalid_credentials | invalid_code (the step stays open), 403 csrf | no_organisation |
 //   sign_in_unsupported, 429 too_many_attempts with `Retry-After` in seconds, 503 unavailable.
 //
 // ASSUMED, HAND-WRITTEN: routes the API does not serve yet (#204's later PRs). Their screens and
-// buttons stay hidden until `LATER` turns them on, so the flag never shows a dead button. When a
+// buttons stay hidden while `LATER` has them off, so the flag never shows a dead button. When a
 // route lands, match its call here to the API and turn it on.
-//   POST /auth/code                { email }                  → 202, the same whatever the address
-//   POST /auth/code/verify         { email, code, return_to } → 200 SignInStep
 //   POST /auth/invite/lookup       { token }                  → 200 { email } (the invited address)
 //   POST /auth/invite   { token, name, password, return_to }  → 200 SignInStep
-//   POST /auth/verify-email/resend {}                         → 202
 //   POST /auth/password/forgot     { email }                  → 202, the same whatever the address
 //   POST /auth/password/reset      { token, password }        → 204
 //   GET  /auth/google?return_to=   → 302 straight to Google, back through /auth/callback
@@ -48,14 +50,14 @@ export const ownSignIn = ownSignInOn({
 })
 
 /**
- * The ways in whose API routes are still to come, each off until its route is served. Their screens
- * and buttons are hidden while off; turn one on in the PR that matches its call to the API.
+ * Each way in beyond the password, on once its API route is served. Screens and buttons of one that
+ * is off are hidden; turn one on in the PR that matches its call to the API.
  */
 export const LATER = {
-  /** An emailed one-time code: `/sign-in?step=code` and "Email me a code instead". */
-  code: false,
+  /** An emailed one-time code: `/sign-in?step=code` and "Email me a code". */
+  code: true,
   /** "Send a new code" on the verify-email step. */
-  resend: false,
+  resend: true,
   /** "Forgotten password?" and `/sign-in?step=forgot`. */
   forgot: false,
   /** The emailed reset link, `/sign-in?step=reset`. */
@@ -85,6 +87,12 @@ export const Next = z.discriminatedUnion("next", [
   z.object({ next: z.literal("choose_organisation"), organisations: z.array(Organisation).min(1) }),
 ])
 export type Next = z.infer<typeof Next>
+
+/** The one answer to asking for a code: the API's `CodeRequested`, whatever the address. */
+export const CodeRequested = z.object({ next: z.literal("enter_code") })
+
+/** The answer to sending the verification code again: the step stays as it is. */
+export const Resent = z.object({ next: z.literal("verify_email") })
 
 const InviteOut = z.object({ email: z.string().min(3).max(320) })
 
@@ -152,16 +160,19 @@ function returnToSent(returnTo: string): string {
 
 /** The sign-in calls over `transport`. Tests pass their own. */
 export function signInOver(transport: () => Promise<Transport>) {
-  /** POSTs `body` as JSON. The body is never logged or kept; a failure throws a `SignInError`. */
-  async function post(path: string, body: object): Promise<Response> {
+  /**
+   * POSTs `body` as JSON, or nothing for a route that takes no body. The body is never logged or
+   * kept; a failure throws a `SignInError`.
+   */
+  async function post(path: string, body?: object): Promise<Response> {
     const t = await transport()
     let response: Response
     try {
       response = await t.fetch(
         new Request(`${globalThis.location.origin}${path}`, {
           method: "POST",
-          headers: { ...HEADERS, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          headers: body ? { ...HEADERS, "Content-Type": "application/json" } : HEADERS,
+          body: body ? JSON.stringify(body) : undefined,
           credentials: "same-origin",
         }),
       )
@@ -173,11 +184,14 @@ export function signInOver(transport: () => Promise<Transport>) {
     return response
   }
 
-  async function next(path: string, body: object): Promise<Next> {
-    const parsed = Next.safeParse(await (await post(path, body)).json().catch(() => null))
+  /** The answer to `path`, read as `schema`; any other answer is `failed`. */
+  async function answer<T>(schema: z.ZodType<T>, path: string, body?: object): Promise<T> {
+    const parsed = schema.safeParse(await (await post(path, body)).json().catch(() => null))
     if (!parsed.success) throw new SignInError("failed")
     return parsed.data
   }
+
+  const next = (path: string, body: object): Promise<Next> => answer(Next, path, body)
 
   return {
     /** `returnTo` is where the API sends the person once signed in, by this step or a later one. */
@@ -191,11 +205,21 @@ export function signInOver(transport: () => Promise<Transport>) {
       next("/auth/sign-in/verify-email", { code } satisfies Spec["VerifyEmailIn"]),
     chooseOrganisation: (organisation: string) =>
       next("/auth/sign-in/organisation", { organisation } satisfies Spec["ChooseOrganisationIn"]),
+    /** Answers the same whether or not the address has an account. */
+    requestCode: async (email: string) =>
+      void (await answer(CodeRequested, "/auth/sign-in/code", {
+        email,
+      } satisfies Spec["CodeRequestIn"])),
+    withCode: (email: string, code: string, returnTo: string) =>
+      next("/auth/sign-in/code/verify", {
+        email,
+        code,
+        return_to: returnToSent(returnTo),
+      } satisfies Spec["CodeSignInIn"]),
+    resendVerification: async () =>
+      void (await answer(Resent, "/auth/sign-in/verify-email/resend")),
 
     // The routes still to come (`LATER`), on the assumed contract.
-    requestCode: async (email: string) => void (await post("/auth/code", { email })),
-    withCode: (email: string, code: string, returnTo: string) =>
-      next("/auth/code/verify", { email, code, return_to: returnToSent(returnTo) }),
     async invite(token: string): Promise<{ email: string }> {
       const parsed = InviteOut.safeParse(
         await (await post("/auth/invite/lookup", { token })).json().catch(() => null),
@@ -205,7 +229,6 @@ export function signInOver(transport: () => Promise<Transport>) {
     },
     acceptInvite: (token: string, name: string, password: string, returnTo: string) =>
       next("/auth/invite", { token, name, password, return_to: returnToSent(returnTo) }),
-    resendVerification: async () => void (await post("/auth/verify-email/resend", {})),
     forgotPassword: async (email: string) => void (await post("/auth/password/forgot", { email })),
     resetPassword: async (token: string, password: string) =>
       void (await post("/auth/password/reset", { token, password })),

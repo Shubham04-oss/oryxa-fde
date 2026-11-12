@@ -122,8 +122,10 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
 - **Our own sign-in (ADR 0007),** behind the build flag `VITE_FDE_OWN_SIGN_IN=1`, off until the API's
   sign-in routes are deployed. Every step is `/sign-in?step=…` in the same frame
   (`components/auth/frame.tsx`; fields in `fields.tsx`, so a restyle starts in those two): email and
-  password with "Email me a code instead" and "Continue with Google"; the code (ask, then enter);
-  verify your email; choose an organisation (the API's list, from the pending step, so Google's
+  password, then "or" and **Email me a code** as its own full-width choice (with an address typed it
+  asks for the code at once and opens on typing it, so a person with no password signs in with a
+  code alone), and "Continue with Google"; the code (ask, then enter, with **Send a new code**);
+  verify your email (with **Send a new code**); choose an organisation (the API's list, from the pending step, so Google's
   callback lands on it too); forgotten and reset password; accept an invite. An end with no session
   is `/sign-in?error=…`: not in an organisation yet, or a step we cannot take yet (MFA, SSO), each
   with what to do next and **Back to sign in**. Rules: one wording for a wrong password and an
@@ -134,9 +136,11 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   emailed link's token is taken out of the address bar once read, offered only to the step it was
   read for, and the page sends no `Referer`; `autocomplete` set for password
   managers (`username`, `current-password`, `new-password`, `one-time-code`, `name`); every field
-  labelled, its error read with it, and focus moved to the new step's title or the field to fix.
-  The calls are the hand-written assumed contract in `lib/api/sign-in-api.ts`, until the API's spec
-  has them.
+  labelled, its error read with it, and focus moved to the new step's title or the field to fix; a
+  note on the first screen ("sign in again") is read with its title, which takes focus for it. One
+  main button per view. Password, verify email, organisation and the code routes follow the API's
+  spec; forgotten and reset password, invites and Google are on a hand-written assumed contract in
+  `lib/api/sign-in-api.ts` and stay hidden (`LATER`) until the API serves them.
 - **Companies (home).** **New company** above two cards per row (one below 960px): name, industry
   and the FDE's part (Lead, Engineer, or Organisation admin when they reach it as one), each project
   with its stage, and what needs the FDE there today. With no company it is the first minute of an
@@ -585,7 +589,9 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     row of up to eight small bars, one per recent finished result (height is the result's own rate, 0 to 1), the latest
     darker, neutral in colour, with every value in text for a screen reader and as the bars' title ("Recent results,
     oldest first: 0.58 (7 of 12), 0.67 (8 of 12), 0.75 (9 of 12)."). The bars need two results to show. The suite's name
-    under the row opens it in the Eval suites card.
+    under the row opens it in the Eval suites card. Last, one quiet line names the tasks that work towards it, in the board's order, each
+    with its status ("Tasks towards it: “Replay last month's orders” (to do), “Run the first replay” (done)."), the
+    first three and "and N more"; a criterion no task works towards has no such line.
   - **The statuses.** **Met** (green) and **Not met** (amber, because it is failing) are the API's verdict and nothing
     else; **No result yet** (a suite measures it and no finished run has produced a value), **No eval suite** (nothing
     measures it) and **Not read yet** (the verdict could not be read) are neutral. A run that is going says "A run
@@ -672,8 +678,10 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
-  click on every visit. A card has the title, who has it, why it is stuck (the blocker, or who it
-  waits on and for how long) and when it is due; overdue and blocked get the amber dot.
+  click on every visit. A card has the title, who has it, the success criterion it works towards
+  ("Towards: ..." on one line, cut short with the whole sentence as its title), why it is stuck (the
+  blocker, or who it waits on and for how long) and when it is due; overdue and blocked get the
+  amber dot.
   - **Summary line.** One line above the columns, always visible, says what is stuck, for example
     "1 blocked 1 waiting on the customer 2 overdue" (a part with none is left out; with none at all
     it says nothing is blocked, waiting or overdue). Blocked and overdue carry the amber dot, waiting
@@ -692,9 +700,15 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     and on keyboard focus; on touch it is always shown. Either way the title's first line stops short
     of it (and on touch every line does), so a long title stays readable under the button. The rest
     of a title uses the card's full width.
-  - **Moving.** Drag a card to another column, or open its menu (the button in the card's corner,
-    reachable by Tab and operated with the arrow keys and Enter) and pick **Move to**. The menu is
-    the only way on a phone. Dropping on the same column does nothing.
+  - **Moving.** Drag a card to another column, or to another place in its own: a 2px line in the
+    tint, in the gap between two cards, shows where it lands (above a card when the pointer is in
+    its upper half, below it past the middle, at the end below the last card), and the column a card
+    comes into from another one is outlined as well. Or open its menu (the button in the card's corner,
+    reachable by Tab and operated with the arrow keys and Enter) and pick **Move to** (the end of that
+    column), **Move up** or **Move down** (one place; offered only where the card can go, and not in
+    Done). The menu is the only way on a phone, and a card moved from it keeps the keyboard focus on
+    its menu button, so the next move is one key away. A drop that leaves the card where it is sends
+    nothing. A screen reader hears where it went: "Moved ... above ...".
   - **Two moves ask first.** Into **Blocked** asks what is blocking it, and the answer is required.
     Into **Waiting on the customer** asks who, from the company's stakeholders, or "No one in
     particular". Moves to the other columns go straight through, and leaving Blocked or Waiting
@@ -705,11 +719,27 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     dimmed and marked "Moving to ...", and jumps only when the API answers. A refused move leaves
     the card where it was and says why above the board, with Dismiss. A dialog that fails stays
     open with its reason and what was typed.
-  - **Order** in a column is creation order, except Done, which is the most recently finished first. The API has no position field, so the board does not
-    invent one.
+  - **Order** in a column is the project's order, as the API lists the tasks (PR #190): a column is
+    that order filtered by status. A move names its place as one other task of the column it goes to,
+    `before` the top card or `after` the card above it; with no card there it names none and the API
+    puts it at the end. A new task, or one moved to another column with no place, goes to the end, and
+    any other save keeps its place. The API returns no position, so the page puts a confirmed move where
+    those rules put it. A repeated identical move is a no-op on the API, version and all. Done is the
+    exception: it lists the most recently finished first, because it is a record of what was finished
+    and shows only the latest five, so it takes a drop but keeps no order of its own.
+  - **A stale move within a column** (409 `stale_version`) is held like any other (see **A stale save**):
+    the card takes the task as it now stands, and the note offers **Move it again**, the same place on the
+    current version. The API returns no position, so the page cannot tell whether someone else already
+    made the same move, and never says so.
   - **Create, edit, delete.** **New task** opens a form: title, status, the blocker or who it waits
-    on when the status needs one, due date, and who has it (you, or unassigned). Clicking a card
-    opens the same form. **Delete task** asks first. A teammate's name is not known yet, only their
+    on when the status needs one, due date, who has it (you, or unassigned), and **Works towards**,
+    one of the project's success criteria or none (not shown while the project has none). Clicking a
+    card opens the same form.
+  - **Every save sends the criterion back.** The API replaces `criterion` on each save, as it does
+    `assignee`, so a save that left it out would unlink the task. `toBody` returns `TaskSave`, whose
+    replaced fields are all required, so no move, edit, prompt or Today action can drop one; unlinking
+    is choosing "No success criterion" in the form. Removing a criterion unlinks its tasks (the API's
+    `on delete set null`). **Delete task** asks first. A teammate's name is not known yet, only their
     id, so a task assigned to one says "Assigned to a teammate" and keeps them on save.
 - **Agent runs (project).** A card after Access: the project's runs, newest first, each with its
   state, and **Start a task**: what the agent should do and the GitHub repository and branch it

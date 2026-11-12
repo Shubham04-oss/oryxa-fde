@@ -163,7 +163,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
     mover.dismiss()
     access.dismiss()
     if (item.kind === "task" && action.kind === "task")
-      mover.request(scopeOf(item), item.task, action.to)
+      void mover.request(scopeOf(item), item.task, action.to)
     else if (item.kind === "access_request" && action.kind === "access")
       void access.move(scopeOf(item), item.access, action.to)
   }

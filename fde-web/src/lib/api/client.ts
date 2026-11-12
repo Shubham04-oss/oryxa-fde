@@ -1142,7 +1142,9 @@ export function safeReturnTo(value: unknown): string {
   } catch {
     return "/"
   }
-  return url.origin === HERE ? `${url.pathname}${url.search}${url.hash}` : "/"
+  const path = `${url.pathname}${url.search}${url.hash}`
+  // Resolving dot segments can leave "//host" ("/.//evil.example"), which a browser reads as another origin.
+  return url.origin === HERE && !path.startsWith("//") ? path : "/"
 }
 
 /** Where sign-in starts: AuthKit's hosted page, through the API, coming back to `returnTo`. */

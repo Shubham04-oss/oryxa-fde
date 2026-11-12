@@ -13,7 +13,7 @@ import type {
 } from "@/lib/api/schemas"
 import { blockers, clip } from "@/lib/access"
 import { STATUS_LABEL, TASK_LABELS, asksFirst, fieldsOf, problem, toBody } from "@/lib/board"
-import type { Fields } from "@/lib/board"
+import type { Fields, Place } from "@/lib/board"
 import { isHeld } from "@/lib/records"
 import { commitTask, reason } from "@/lib/task-move"
 import type { Refusal } from "@/lib/task-move"
@@ -27,7 +27,21 @@ export const FIELD =
   "w-full rounded-lg border bg-raised px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:border-strong aria-invalid:border-destructive"
 
 /** The question a move into Blocked or Waiting on the customer asks first. */
-export type Ask = { scope: ProjectScope; task: TaskOut; to: "blocked" | "waiting_on_customer" }
+export type Ask = {
+  scope: ProjectScope
+  task: TaskOut
+  to: "blocked" | "waiting_on_customer"
+  place?: Place
+}
+
+/** What a confirmed move says to a screen reader: where the task went, beside which task. */
+function movedLine(task: TaskOut, to: TaskState, place: Place | undefined) {
+  const beside = place && `${place.side === "before" ? "above" : "below"} “${place.anchor.title}”`
+  if (!beside) return `Moved “${task.title}” to ${STATUS_LABEL[to]}.`
+  if (task.status === to) return `Moved “${task.title}” ${beside}.`
+  return `Moved “${task.title}” to ${STATUS_LABEL[to]}, ${beside}.`
+}
+
 export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } = {}) {
   const queryClient = useQueryClient()
   // The status each task is on its way to, until the API answers.
@@ -42,45 +56,53 @@ export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } 
       scope,
       base,
       fields,
+      place,
     }: {
       scope: ProjectScope
       base: TaskOut | null
       fields: Fields
+      place?: Place
     }) =>
       base
-        ? api.updateTask(scope, base.id, toBody(fields), base.version)
-        : api.addTask(scope, toBody(fields)),
-    async onSuccess(saved, { scope }) {
-      await commitTask(queryClient, scope, saved)
+        ? api.updateTask(scope, base.id, toBody(fields, place), base.version)
+        : api.addTask(scope, toBody(fields, place)),
+    async onSuccess(saved, { scope, place }) {
+      await commitTask(queryClient, scope, saved, place)
       onSaved?.(saved)
     },
   })
 
   /**
    * Moves a task that needs no answer, or one whose answer is in `fields`, as a copy of the task
-   * the page had when the person acted. If the task has moved on since, nothing is saved: the
-   * current task goes into the page and the person is told, with the move offered again.
+   * the page had when the person acted, to `place` in its column if one is given. If the task has
+   * moved on since, nothing is saved: the current task goes into the page and the person is told,
+   * with the move offered again. True once the API has confirmed it.
    */
-  async function move(scope: ProjectScope, task: TaskOut, fields: Fields) {
+  async function move(scope: ProjectScope, task: TaskOut, fields: Fields, place?: Place) {
     setRefusal(null)
     setSaving((s) => ({ ...s, [task.id]: fields.status }))
+    const to = fields.status
     try {
-      await save.mutateAsync({ scope, base: task, fields })
-      say(`Moved “${task.title}” to ${STATUS_LABEL[fields.status]}.`)
+      await save.mutateAsync({ scope, base: task, fields, place })
+      say(movedLine(task, to, place))
+      return true
     } catch (e) {
       say("")
       if (e instanceof StaleSaveError) {
         const now = e.current as TaskOut
         await commitTask(queryClient, scope, now)
+        // Positions are not returned, so a task in the right column may still not be in the right place.
+        const already = now.status === to && !place
         setRefusal({
           scope,
           task: now,
-          to: fields.status,
+          to,
+          place,
           why: e.message,
-          kind: now.status === fields.status ? "already" : "stale",
+          kind: already ? "already" : "stale",
         })
       } else {
-        setRefusal({ scope, task, to: fields.status, why: reason(e), kind: "refused" })
+        setRefusal({ scope, task, to, place, why: reason(e), kind: "refused" })
         // The task may have changed or gone elsewhere: read it again.
         if (e instanceof ApiError && e.status === 404) {
           void queryClient.invalidateQueries({ queryKey: queries.project(scope).queryKey })
@@ -90,13 +112,22 @@ export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } 
     } finally {
       setSaving(({ [task.id]: _, ...rest }) => rest)
     }
+    return false
   }
 
-  /** A move to `to`: straight through, or after asking first. */
-  function request(scope: ProjectScope, task: TaskOut, to: TaskState) {
-    if (to === task.status || saving[task.id]) return
-    if (asksFirst(to)) setAsk({ scope, task, to })
-    else void move(scope, task, { ...fieldsOf(task), status: to })
+  /**
+   * A move to `to`, at `place` in that column if given: straight through, or after asking first when
+   * the status changes to one that needs an answer. Resolves true once the API has confirmed a move
+   * made straight through.
+   */
+  async function request(scope: ProjectScope, task: TaskOut, to: TaskState, place?: Place) {
+    if ((to === task.status && !place) || place?.anchor.id === task.id || saving[task.id])
+      return false
+    if (to !== task.status && asksFirst(to)) {
+      setAsk({ scope, task, to, place })
+      return false
+    }
+    return move(scope, task, { ...fieldsOf(task), status: to }, place)
   }
 
   return {
@@ -112,14 +143,15 @@ export function useTaskMover({ onSaved }: { onSaved?: (task: TaskOut) => void } 
     again() {
       if (!refusal || refusal.kind !== "stale") return
       setRefusal(null)
-      request(refusal.scope, refusal.task, refusal.to)
+      void request(refusal.scope, refusal.task, refusal.to, refusal.place)
     },
     /**
-     * A dialog's save, as a copy of the task the dialog opened on (null for a new task). Throws what
-     * the API refused with, a `StaleSaveError` among it: the dialog says what to do about it.
+     * A dialog's save, as a copy of the task the dialog opened on (null for a new task), to `place` if
+     * given. Throws what the API refused with, a `StaleSaveError` among it: the dialog says what to do
+     * about it.
      */
-    async send(scope: ProjectScope, base: TaskOut | null, fields: Fields) {
-      await save.mutateAsync({ scope, base, fields })
+    async send(scope: ProjectScope, base: TaskOut | null, fields: Fields, place?: Place) {
+      await save.mutateAsync({ scope, base, fields, place })
       say(base ? `Saved “${fields.title.trim()}”.` : `Added “${fields.title.trim()}”.`)
       setRefusal(null)
     },
@@ -158,7 +190,7 @@ export function MoveAsk({
           peopleNote={peopleNote}
           requests={requests}
           requestsNote={requestsNote}
-          onSave={(base, fields) => mover.send(ask.scope, base ?? null, fields)}
+          onSave={(base, fields) => mover.send(ask.scope, base ?? null, fields, ask.place)}
           onAdopt={(current) => mover.adopt(ask.scope, current)}
           onClose={mover.cancelAsk}
         />

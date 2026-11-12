@@ -62,6 +62,16 @@ describe("proof for each criterion", () => {
     )
   })
 
+  it("names the tasks that work towards a criterion, each with its status", async () => {
+    renderWithRouter(<ProjectPage scope={DISPATCH} />)
+    const accepted = await criterion("Plans dispatchers accept with no changes")
+    expect(accepted).toHaveTextContent(
+      "Tasks towards it: “Replay last month's orders through the planner” (to do), “Run the first planner replay on sample orders” (done).",
+    )
+    // A criterion no task works towards says nothing about tasks.
+    expect(await criterion("Time to a draft plan")).not.toHaveTextContent(/towards it/)
+  })
+
   it("says not met, in words and a dot, when the API's verdict is no", async () => {
     renderWithRouter(<ProjectPage scope={DISPATCH} />)
     const row = await criterion("Plans that keep every driver-hours rule")

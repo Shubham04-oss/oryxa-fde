@@ -174,17 +174,24 @@ export function useHydrated(): boolean {
  */
 export function Submit({
   working,
+  disabled = false,
   children,
   busy,
 }: {
   working: boolean
+  /** Held back while another call on the screen is working. */
+  disabled?: boolean
   children: ReactNode
   /** What it says while working: "Signing in…". */
   busy: string
 }) {
   const hydrated = useHydrated()
   return (
-    <Button type="submit" className="h-11 w-full text-[13px]" disabled={working || !hydrated}>
+    <Button
+      type="submit"
+      className="h-11 w-full text-[13px]"
+      disabled={working || disabled || !hydrated}
+    >
       {working ? busy : children}
     </Button>
   )
@@ -213,6 +220,19 @@ export function Secondary({
   )
 }
 
+/** A quiet way on, drawn like `StepLink` but acting on this screen. */
+export function TextButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      className={`${TEXT_LINK} outline-none focus-visible:ring-1 focus-visible:ring-ring`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  )
+}
+
 /** A refusal for the whole form, announced when it appears. */
 export function FormError({ children }: { children: ReactNode }) {
   return (
@@ -223,13 +243,20 @@ export function FormError({ children }: { children: ReactNode }) {
 }
 
 /** A confirmation, announced when it appears. */
-export function Notice({ children }: { children: ReactNode }) {
+export function Notice({ id, children }: { id?: string; children: ReactNode }) {
   return (
-    <p role="status" className="rounded-field bg-tint-soft px-4 py-3 text-meta text-foreground">
+    <p
+      id={id}
+      role="status"
+      className="rounded-field bg-tint-soft px-4 py-3 text-meta text-foreground"
+    >
       {children}
     </p>
   )
 }
+
+const TEXT_LINK =
+  "justify-self-start rounded-sm text-meta text-soft underline decoration-strong underline-offset-4 transition-colors hover:text-foreground hover:decoration-foreground"
 
 /** A link to another sign-in step, keeping where the person was going. */
 export function StepLink({
@@ -248,11 +275,7 @@ export function StepLink({
     <Link
       to="/sign-in"
       search={{ return_to: returnTo, ...(step === "password" ? {} : { step }) }}
-      className={
-        button
-          ? buttonVariants({ className: "h-11 w-full text-[13px]" })
-          : "justify-self-start rounded-sm text-meta text-soft underline decoration-strong underline-offset-4 transition-colors hover:text-foreground hover:decoration-foreground"
-      }
+      className={button ? buttonVariants({ className: "h-11 w-full text-[13px]" }) : TEXT_LINK}
     >
       {children}
     </Link>
