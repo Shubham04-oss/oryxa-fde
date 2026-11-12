@@ -14,6 +14,13 @@ obey, and a generated screen can show something misleading.
 - **The assistant has no authority of its own.** It holds no credentials and no role. Everything it
   reads, it reads through the API as the signed-in person, inside that person's `CompanyScope` or
   `ProjectScope`, with every permission check made by `oryxa-authz` as for any other call.
+- **A conversation belongs to one company.** Every conversation is bound, when it starts, to one
+  company (or one project in it), and that cannot change. It reads only that company's records, and
+  a proposal may name only records in that company; the API refuses any other. The home
+  conversation that spans companies reads only what the companies list already shows (names, stage,
+  next step, counts), never documents, messages or signals, and may propose only opening a
+  company's conversation or creating a company. So text planted in one company's material has no
+  route to another company or its customer, even though the FDE may see both.
 - **It answers with data, never with markup or code.** An answer is text plus a list of typed
   **blocks** from a fixed catalogue the web owns (plan, rules, people, checklist, board, proof,
   suggestion and so on). Each block has a schema; the API validates blocks before sending them and
@@ -31,10 +38,15 @@ obey, and a generated screen can show something misleading.
   unchanged. There is no separate path by which the assistant writes. An action with no API route
   cannot be proposed.
 - **Some actions always need their own confirmation.** Inviting a person, granting or requesting
-  access, changing a role or a rule for agents, anything sent to a customer, and anything that
-  deletes are confirmed one at a time, never as part of "approve all".
+  access, changing a role or a rule for agents, anything sent to a customer, connecting a source or
+  adding an outbound host, starting an agent run, and anything that deletes are confirmed one at a
+  time, never as part of "approve all". Where an action records a reason under the person's name
+  (moving a stage with a checklist item open), the person types the reason; the assistant does not
+  supply it.
 - **Proactive means it prepares, not that it acts.** Suggestions raised by an event are built by a
-  worker from the event's ids and are shown to the people who may already see the records behind
+  worker from the event's ids and fixed templates. The worker calls no model and reads no content,
+  so it needs no person's authority; any wording from the model is produced when a person opens the
+  suggestion, under that person's session and limits. Suggestions are shown to the people who may already see the records behind
   them, checked through `oryxa-authz` when shown, and never to a customer role (ADR 0005). A
   suggestion is a proposal like any other.
 - **Everything it reads is untrusted.** Documents, messages, signals and web content are passed to
@@ -43,16 +55,20 @@ obey, and a generated screen can show something misleading.
   person confirming exactly what will run.
 - **Per company and per person.** What a company told the workspace in setup (how the work runs,
   the rules, the plan) is stored as that company's records, in AWS with the rest. Layout choices
-  for a person are stored for that person. Context for one company is never put in a prompt for
-  another.
+  for a person are stored for that person. Conversation history is stored in Postgres in AWS as
+  that company's data, readable by the person who held the conversation, under the company's key
+  once per-company keys exist. Context for one company is never put in a prompt for another.
 - **Data and models.** The assistant runs behind the API. It sees sample data only until
-  per-company keys exist (ADR 0003). Prompts and answers are not logged in full; logs carry ids.
+  per-company keys exist (ADR 0003). Prompts and answers are never logged; logs carry ids.
   Which model serves it, and where prompts are processed, is a separate decision recorded before
   any real customer data is sent to one.
+- **A plan step is a task.** The plan the assistant proposes is an ordered list of ordinary tasks,
+  each tied to a stage and, where it proves something, to a success criterion. The first one not
+  done is the project's next step. There is no separate plan record.
 - **It is measured.** `oryxa-fde-evals` holds suites for the assistant itself: that a setup
   conversation yields a valid plan with a way to prove each criterion, that blocks validate, that
-  it proposes nothing outside the catalogue, and that instructions planted in documents and
-  messages do not produce a proposal. A change of prompt or model runs these before it ships.
+  it proposes nothing outside the catalogue, that instructions planted in documents and
+  messages do not produce a proposal, and that nothing from one company appears in another's. A change of prompt or model runs these before it ships.
 - **Limits.** Calls to the model are limited per person and per organisation, and a refusal says so
   plainly.
 
