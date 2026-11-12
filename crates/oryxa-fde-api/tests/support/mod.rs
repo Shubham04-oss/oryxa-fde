@@ -93,6 +93,8 @@ pub struct FakeAuthKit {
     /// People lookups asked for, whatever their outcome.
     pub people_lookups: std::sync::atomic::AtomicUsize,
     challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// The client each password sign-in named to WorkOS.
+    pub clients: std::sync::Mutex<Vec<oryxa_fde_api::Client>>,
 }
 
 type Fut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -188,5 +190,43 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
                 .cloned()
                 .unwrap_or_default())
         })
+    }
+
+    /// `right password` signs in whoever `who` names; anything else is refused.
+    fn sign_in_with_password<'a>(
+        &'a self,
+        _: &'a str,
+        password: &'a str,
+        client: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Attempt> {
+        Box::pin(async move {
+            self.clients.lock().unwrap().push(client.clone());
+            if password != "right password" {
+                return oryxa_fde_api::Attempt::Refused;
+            }
+            let (org, user, role) = self.who.lock().unwrap().clone();
+            oryxa_fde_api::Attempt::SignedIn(oryxa_fde_api::Tokens {
+                access_token: token(org.as_deref(), &user, &role),
+                refresh_token: format!("refresh|{}|{user}|{role}", org.unwrap_or_default()),
+            })
+        })
+    }
+
+    fn verify_email<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Attempt> {
+        Box::pin(async { oryxa_fde_api::Attempt::Refused })
+    }
+
+    fn choose_organisation<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Attempt> {
+        Box::pin(async { oryxa_fde_api::Attempt::Refused })
     }
 }
