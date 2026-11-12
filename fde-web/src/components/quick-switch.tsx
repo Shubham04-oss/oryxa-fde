@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Building2, FolderKanban, Search } from "lucide-react"
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog"
 import { queries } from "@/lib/api/client"
 import type { CompanySummary, ProjectSummaryOut } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 export type SwitchTarget =
   | { kind: "company"; company: CompanySummary }
@@ -103,7 +103,13 @@ function Switcher({
   return (
     <div className="text-[13px]">
       <div className="flex items-center gap-2.5 border-b px-4">
-        <Search size={16} strokeWidth={1.7} aria-hidden="true" className="text-muted-foreground" />
+        <Icon
+          name="search"
+          size={16}
+          strokeWidth={1.7}
+          aria-hidden="true"
+          className="text-muted-foreground"
+        />
         <input
           ref={input}
           role="combobox"
@@ -129,7 +135,6 @@ function Switcher({
         className="max-h-[min(380px,55vh)] overflow-y-auto p-1.5"
       >
         {results.map((target, i) => {
-          const Icon = target.kind === "company" ? Building2 : FolderKanban
           return (
             <li
               key={target.kind === "company" ? target.company.id : target.project.id}
@@ -144,6 +149,7 @@ function Switcher({
               )}
             >
               <Icon
+                name={target.kind === "company" ? "building" : "project"}
                 size={16}
                 strokeWidth={1.7}
                 aria-hidden="true"

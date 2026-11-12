@@ -4,10 +4,11 @@ import type { FormEvent, ReactNode, Ref } from "react"
 import { Button, buttonVariants } from "../ui/button"
 import type { Step } from "./flow"
 
-// The sign-in screens' controls: plain, large enough to tap, every one labelled. Restyle them here.
+// The sign-in screens' controls: plain, large enough to tap, every one labelled, on the same tokens
+// as the workspace's fields. Restyle them here.
 
 const INPUT =
-  "h-11 w-full min-w-0 rounded-lg border bg-raised px-3 text-[14px] text-foreground outline-none focus-visible:border-strong focus-visible:ring-1 focus-visible:ring-ring aria-invalid:border-destructive read-only:text-muted-foreground"
+  "h-11 w-full min-w-0 rounded-field border bg-raised px-3.5 text-body text-foreground outline-none transition-[border-color,box-shadow] duration-150 hover:border-strong focus-visible:border-tint/60 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tint/12 aria-invalid:border-destructive read-only:text-muted-foreground read-only:hover:border-border"
 
 type FieldProps = {
   ref?: Ref<HTMLInputElement>
@@ -56,7 +57,7 @@ export function Field({
   return (
     <div className="grid gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-[12px] font-medium">
+        <label htmlFor={id} className="text-meta font-medium text-soft">
           {label}
         </label>
         {aside}
@@ -83,12 +84,12 @@ export function Field({
         {after}
       </div>
       {error && (
-        <p id={errorId} className="text-[12px] text-destructive">
+        <p id={errorId} className="text-meta text-destructive">
           {error}
         </p>
       )}
       {hint && (
-        <p id={hintId} className="text-[11px] text-muted-foreground">
+        <p id={hintId} className="text-micro text-muted-foreground">
           {hint}
         </p>
       )}
@@ -110,7 +111,7 @@ export function PasswordField(props: Omit<FieldProps, "type" | "after" | "inputM
         <Button
           type="button"
           variant="outline"
-          className="h-11 px-3 text-[12px]"
+          className="h-11 px-4 text-meta"
           aria-pressed={shown}
           aria-label={shown ? "Hide password" : "Show password"}
           onClick={() => setShown((s) => !s)}
@@ -215,7 +216,7 @@ export function Secondary({
 /** A refusal for the whole form, announced when it appears. */
 export function FormError({ children }: { children: ReactNode }) {
   return (
-    <div role="alert" className="text-[12px] leading-normal text-destructive">
+    <div role="alert" className="text-meta text-destructive">
       {children}
     </div>
   )
@@ -224,7 +225,7 @@ export function FormError({ children }: { children: ReactNode }) {
 /** A confirmation, announced when it appears. */
 export function Notice({ children }: { children: ReactNode }) {
   return (
-    <p role="status" className="text-[12px] leading-normal text-foreground">
+    <p role="status" className="rounded-field bg-tint-soft px-4 py-3 text-meta text-foreground">
       {children}
     </p>
   )
@@ -250,7 +251,7 @@ export function StepLink({
       className={
         button
           ? buttonVariants({ className: "h-11 w-full text-[13px]" })
-          : "justify-self-start text-[12px] underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          : "justify-self-start rounded-sm text-meta text-soft underline decoration-strong underline-offset-4 transition-colors hover:text-foreground hover:decoration-foreground"
       }
     >
       {children}
@@ -261,7 +262,7 @@ export function StepLink({
 /** "or", between two ways to sign in. */
 export function Or() {
   return (
-    <div className="flex items-center gap-3 text-[11px] text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">
+    <div className="flex items-center gap-3 text-micro text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">
       or
     </div>
   )

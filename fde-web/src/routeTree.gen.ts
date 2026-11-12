@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppNewCompanyRouteImport } from './routes/_app/new-company'
 import { Route as AppTodayRouteImport } from './routes/_app/today'
+import { Route as AppCompaniesIndexRouteImport } from './routes/_app/companies/index'
 import { Route as AppCompaniesCompanyIdIndexRouteImport } from './routes/_app/companies/$companyId/index'
 import { Route as AppCompaniesCompanyIdProjectsProjectIdIndexRouteImport } from './routes/_app/companies/$companyId/projects/$projectId/index'
 import { Route as AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRouteImport } from './routes/_app/companies/$companyId/projects/$projectId/runs/$runId'
@@ -31,9 +33,19 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppNewCompanyRoute = AppNewCompanyRouteImport.update({
+  id: '/new-company',
+  path: '/new-company',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppTodayRoute = AppTodayRouteImport.update({
   id: '/today',
   path: '/today',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCompaniesIndexRoute = AppCompaniesIndexRouteImport.update({
+  id: '/companies/',
+  path: '/companies/',
   getParentRoute: () => AppRoute,
 } as any)
 const AppCompaniesCompanyIdIndexRoute =
@@ -58,15 +70,19 @@ const AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/sign-in': typeof SignInRoute
+  '/new-company': typeof AppNewCompanyRoute
   '/today': typeof AppTodayRoute
+  '/companies/': typeof AppCompaniesIndexRoute
   '/companies/$companyId/': typeof AppCompaniesCompanyIdIndexRoute
   '/companies/$companyId/projects/$projectId/': typeof AppCompaniesCompanyIdProjectsProjectIdIndexRoute
   '/companies/$companyId/projects/$projectId/runs/$runId': typeof AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute
 }
 export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
+  '/new-company': typeof AppNewCompanyRoute
   '/today': typeof AppTodayRoute
   '/': typeof AppIndexRoute
+  '/companies': typeof AppCompaniesIndexRoute
   '/companies/$companyId': typeof AppCompaniesCompanyIdIndexRoute
   '/companies/$companyId/projects/$projectId': typeof AppCompaniesCompanyIdProjectsProjectIdIndexRoute
   '/companies/$companyId/projects/$projectId/runs/$runId': typeof AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute
@@ -75,8 +91,10 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/_app/new-company': typeof AppNewCompanyRoute
   '/_app/today': typeof AppTodayRoute
   '/_app/': typeof AppIndexRoute
+  '/_app/companies/': typeof AppCompaniesIndexRoute
   '/_app/companies/$companyId/': typeof AppCompaniesCompanyIdIndexRoute
   '/_app/companies/$companyId/projects/$projectId/': typeof AppCompaniesCompanyIdProjectsProjectIdIndexRoute
   '/_app/companies/$companyId/projects/$projectId/runs/$runId': typeof AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute
@@ -86,15 +104,19 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/sign-in'
+    | '/new-company'
     | '/today'
+    | '/companies/'
     | '/companies/$companyId/'
     | '/companies/$companyId/projects/$projectId/'
     | '/companies/$companyId/projects/$projectId/runs/$runId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/sign-in'
+    | '/new-company'
     | '/today'
     | '/'
+    | '/companies'
     | '/companies/$companyId'
     | '/companies/$companyId/projects/$projectId'
     | '/companies/$companyId/projects/$projectId/runs/$runId'
@@ -102,8 +124,10 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/sign-in'
+    | '/_app/new-company'
     | '/_app/today'
     | '/_app/'
+    | '/_app/companies/'
     | '/_app/companies/$companyId/'
     | '/_app/companies/$companyId/projects/$projectId/'
     | '/_app/companies/$companyId/projects/$projectId/runs/$runId'
@@ -137,11 +161,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/new-company': {
+      id: '/_app/new-company'
+      path: '/new-company'
+      fullPath: '/new-company'
+      preLoaderRoute: typeof AppNewCompanyRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/today': {
       id: '/_app/today'
       path: '/today'
       fullPath: '/today'
       preLoaderRoute: typeof AppTodayRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/companies/': {
+      id: '/_app/companies/'
+      path: '/companies'
+      fullPath: '/companies/'
+      preLoaderRoute: typeof AppCompaniesIndexRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/companies/$companyId/': {
@@ -169,16 +207,20 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppNewCompanyRoute: typeof AppNewCompanyRoute
   AppTodayRoute: typeof AppTodayRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppCompaniesIndexRoute: typeof AppCompaniesIndexRoute
   AppCompaniesCompanyIdIndexRoute: typeof AppCompaniesCompanyIdIndexRoute
   AppCompaniesCompanyIdProjectsProjectIdIndexRoute: typeof AppCompaniesCompanyIdProjectsProjectIdIndexRoute
   AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute: typeof AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppNewCompanyRoute: AppNewCompanyRoute,
   AppTodayRoute: AppTodayRoute,
   AppIndexRoute: AppIndexRoute,
+  AppCompaniesIndexRoute: AppCompaniesIndexRoute,
   AppCompaniesCompanyIdIndexRoute: AppCompaniesCompanyIdIndexRoute,
   AppCompaniesCompanyIdProjectsProjectIdIndexRoute:
     AppCompaniesCompanyIdProjectsProjectIdIndexRoute,

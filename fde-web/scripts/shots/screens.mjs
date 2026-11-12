@@ -18,8 +18,10 @@
 //   evalsOff  true: the API serves no eval routes, as where no sandbox gateway is set (the mock's
 //             `__fdeMockEvalsOff`, set before the app loads)
 //   signedOut true: no sign-in first (the sign-in screens themselves)
-//   pendingStep "verify_email" or "choose_organisation": the mock starts with a sign-in waiting at that
-//             step, as Google's callback leaves it (the mock's `__fdeMockPendingStep`, set before the app loads)
+//   workspace true: the new workspace (issue #209) on for this tab, whatever the dev server's
+//             VITE_FDE_WORKSPACE (the mock's `__fdeMockWorkspace`, set before the app loads)
+//   pendingStep "verify_email": the mock starts with a sign-in waiting to verify its email, as a
+//             password sign-in leaves it (the mock's `__fdeMockPendingStep`, set before the app loads)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
 export const SIZES = [
@@ -1050,7 +1052,9 @@ function proofScreens() {
 }
 
 // Our own sign-in screens (ADR 0007), on the mock's sample accounts (src/dev/mock-sign-in.ts). Each
-// screen at every size; each refusal or later state at the widest and at phone width.
+// screen at every size; each refusal or later state at the widest and at phone width. Only the steps
+// the API serves are here: the code, invite, reset and Google screens stay hidden (`LATER` in
+// src/lib/api/sign-in-api.ts) and come back here with their routes.
 function ownSignInScreens() {
   const STATE = { signedOut: true, sizes: ["1440", "390"] }
   // These pages are server-rendered: typing before React hydrates is lost, so every act waits for it.
@@ -1067,17 +1071,6 @@ function ownSignInScreens() {
     await field(page, "Email").fill(email)
     await field(page, "Password").fill(secret)
     await press(page, "Sign in")
-  }
-  async function codeSent(page) {
-    await field(page, "Email").fill("riya@example.com")
-    await press(page, "Email me a code")
-    await title("Enter your code")(page).waitFor()
-  }
-  async function code(page, value) {
-    await codeSent(page)
-    await field(page, "Code").fill(value)
-    await press(page, "Sign in")
-    await alert(page).waitFor()
   }
   const screens = [
     { name: "auth-password", path: "/sign-in", signedOut: true, ready: title("Sign in") },
@@ -1109,31 +1102,14 @@ function ownSignInScreens() {
       },
     },
     {
-      name: "auth-code-ask",
-      path: "/sign-in?step=code",
-      signedOut: true,
-      ready: title("Sign in with a code"),
-    },
-    {
-      name: "auth-code-enter",
-      path: "/sign-in?step=code",
-      signedOut: true,
-      ready: title("Sign in with a code"),
-      act: codeSent,
-    },
-    {
-      name: "auth-code-wrong",
-      path: "/sign-in?step=code",
+      name: "auth-unsupported",
+      path: "/sign-in",
       ...STATE,
-      ready: title("Sign in with a code"),
-      act: (page) => code(page, "654321"),
-    },
-    {
-      name: "auth-code-expired",
-      path: "/sign-in?step=code",
-      ...STATE,
-      ready: title("Sign in with a code"),
-      act: (page) => code(page, "000000"),
+      ready: title("Sign in"),
+      act: async (page) => {
+        await password(page, "mfa@example.com", "sample-password")
+        await alert(page).waitFor()
+      },
     },
     {
       name: "auth-verify-email",
@@ -1143,28 +1119,33 @@ function ownSignInScreens() {
       ready: title("Check your email"),
     },
     {
-      name: "auth-verify-email-resent",
+      name: "auth-verify-email-wrong",
       path: "/sign-in?step=verify-email",
       ...STATE,
       pendingStep: "verify_email",
       ready: title("Check your email"),
       act: async (page) => {
-        await press(page, "Send a new code")
-        await page.getByRole("status").waitFor()
+        await field(page, "Code").fill("654321")
+        await press(page, "Confirm and sign in")
+        await alert(page).waitFor()
       },
     },
     {
       name: "auth-organisation",
-      path: "/sign-in?step=organisation",
+      path: "/sign-in",
       signedOut: true,
-      pendingStep: "choose_organisation",
-      ready: (page) => page.getByRole("list", { name: "Your organisations" }),
+      ready: title("Sign in"),
+      act: async (page) => {
+        await password(page, "two-orgs@example.com", "sample-password")
+        await page.getByRole("list", { name: "Your organisations" }).waitFor()
+      },
     },
     {
-      name: "auth-organisation-expired",
+      // A step that lapsed, or the organisations lost to a reload: back to the start with a note.
+      name: "auth-start-again",
       path: "/sign-in?step=organisation",
       ...STATE,
-      ready: alert,
+      ready: (page) => page.getByRole("status"),
     },
     {
       name: "auth-mfa-required",
@@ -1178,76 +1159,6 @@ function ownSignInScreens() {
       ...STATE,
       ready: title("We could not finish signing you in"),
     },
-    {
-      name: "auth-forgot",
-      path: "/sign-in?step=forgot",
-      signedOut: true,
-      ready: title("Reset your password"),
-    },
-    {
-      name: "auth-forgot-sent",
-      path: "/sign-in?step=forgot",
-      ...STATE,
-      ready: title("Reset your password"),
-      act: async (page) => {
-        await field(page, "Email").fill("riya@example.com")
-        await press(page, "Email me a reset link")
-        await page.getByRole("status").waitFor()
-      },
-    },
-    {
-      name: "auth-reset",
-      path: "/sign-in?step=reset&token=reset-sample",
-      signedOut: true,
-      ready: title("Choose a new password"),
-    },
-    {
-      name: "auth-reset-rejected",
-      path: "/sign-in?step=reset&token=reset-sample",
-      ...STATE,
-      ready: title("Choose a new password"),
-      act: async (page) => {
-        await field(page, "New password").fill("short")
-        await press(page, "Change password")
-        await page.getByText("That password was refused.").waitFor()
-      },
-    },
-    {
-      name: "auth-reset-done",
-      path: "/sign-in?step=reset&token=reset-sample",
-      ...STATE,
-      ready: title("Choose a new password"),
-      act: async (page) => {
-        await field(page, "New password").fill("a much longer password")
-        await press(page, "Change password")
-        await title("Password changed")(page).waitFor()
-      },
-    },
-    {
-      name: "auth-reset-expired",
-      path: "/sign-in?step=reset",
-      ...STATE,
-      ready: alert,
-    },
-    {
-      name: "auth-invite",
-      path: "/sign-in?step=invite&token=invite-sample",
-      signedOut: true,
-      ready: (page) => field(page, "Your name"),
-    },
-    {
-      name: "auth-invite-missing",
-      path: "/sign-in?step=invite&token=invite-sample",
-      ...STATE,
-      ready: (page) => field(page, "Your name"),
-      act: (page) => press(page, "Join and sign in"),
-    },
-    {
-      name: "auth-invite-expired",
-      path: "/sign-in?step=invite&token=old",
-      ...STATE,
-      ready: alert,
-    },
   ]
   return screens.map((screen) =>
     screen.act
@@ -1260,6 +1171,128 @@ function ownSignInScreens() {
         }
       : screen,
   )
+}
+
+// The new workspace (issue #209): the welcome screen and a new company made in a conversation, on
+// with `workspace: true` whatever the dev server's flag. Desktop and phone, light and dark.
+const WORKSPACE = { workspace: true, sizes: ["1440", "390"] }
+const question = (name) => (page) => page.getByRole("heading", { name, exact: true })
+const conversation = (page) => page.getByRole("region", { name: "Conversation" })
+async function cont(page, label = "Continue") {
+  await conversation(page).getByRole("button", { name: label, exact: true }).click()
+}
+/** Answers the conversation's first `n` steps with sample answers. */
+async function answer(page, n) {
+  const c = conversation(page)
+  if (n >= 1) {
+    await c.getByLabel("Company name").fill("Orion Rail")
+    await c
+      .getByLabel("What are you delivering?")
+      .fill("Automate claims intake for their freight team.")
+    await c.getByLabel("Industry").fill("Transport")
+    await c.getByLabel("Region").fill("UK")
+    await cont(page)
+    await question("How do you want to start?")(page).waitFor()
+  }
+  if (n >= 2) {
+    await c.getByLabel("Main contact at the company").fill("Dana Ortiz")
+    await c.getByLabel("What would show it worked?").fill("Claims triaged within two hours")
+    await cont(page)
+    await question("What may agents do here, and who approves?")(page).waitFor()
+  }
+  if (n >= 3) {
+    await cont(page)
+    await question("Who should be invited?")(page).waitFor()
+  }
+  if (n >= 4) {
+    await c.getByLabel("Email of person 1").fill("sam@example.com")
+    await c.getByRole("button", { name: "Add a person" }).click()
+    await c.getByLabel("Email of person 2").fill("dana.ortiz@example.com")
+    await c.getByLabel("Role of person 2").selectOption("sponsor")
+    await cont(page)
+    await question("Here is a plan to start with. Change anything.")(page).waitFor()
+  }
+  if (n >= 5) {
+    await cont(page, "Use this plan")
+    await question("Ready to create Orion Rail?")(page).waitFor()
+  }
+  // Settle the quiet motion, and leave no field focused.
+  await page.evaluate(
+    () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
+  )
+  await page.waitForTimeout(400)
+}
+const STEP_NAMES = ["company", "start", "rules", "people", "plan", "review"]
+
+function workspaceScreens() {
+  return [
+    {
+      name: "welcome",
+      path: "/",
+      ...WORKSPACE,
+      sizes: undefined,
+      ready: (page) => page.getByRole("button", { name: /^Not now:/ }).first(),
+    },
+    {
+      name: "welcome-empty",
+      path: "/",
+      ...WORKSPACE,
+      emptyWorkspace: true,
+      ready: (page) => page.getByRole("button", { name: "Start" }),
+    },
+    {
+      name: "welcome-reply",
+      path: "/",
+      ...WORKSPACE,
+      ready: (page) => page.getByRole("button", { name: /^Not now:/ }).first(),
+      act: async (page) => {
+        await page
+          .getByLabel("What do you want to work on?")
+          .fill("We have a new customer to set up")
+        await page.keyboard.press("Enter")
+        await page.getByText("Let's set it up together.").waitFor()
+        await page.waitForTimeout(400)
+      },
+    },
+    ...STEP_NAMES.map((step, i) => ({
+      name: `new-company-${i + 1}-${step}`,
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: (page) => answer(page, i),
+    })),
+    {
+      name: "new-company-plan-edited",
+      path: "/new-company",
+      ...WORKSPACE,
+      themes: ["light"],
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 4)
+        const plan = page.getByRole("list", { name: "Plan" })
+        await plan.getByRole("button", { name: "Move “Build” up" }).click()
+        await plan.getByRole("button", { name: "Remove “Hand off”" }).click()
+        await page.getByLabel("New step").fill("Train the claims team")
+        await page.getByLabel("New step").press("Enter")
+        await page.getByLabel("New step").blur()
+        await page.waitForTimeout(400)
+      },
+    },
+    {
+      name: "new-company-summary",
+      path: "/new-company",
+      ...WORKSPACE,
+      sizes: ["390"],
+      full: false,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 4)
+        await page.getByRole("button", { name: /^Summary/ }).click()
+        await page.getByRole("dialog", { name: "Summary" }).waitFor()
+        await page.waitForTimeout(500)
+      },
+    },
+  ]
 }
 
 export const screens = [
@@ -1281,6 +1314,7 @@ export const screens = [
         .or(page.getByRole("heading", { name: "Your account is not part of an organisation yet" })),
   },
   ...ownSignInScreens(),
+  ...workspaceScreens(),
   { name: "companies", path: "/", ready: heading("Companies") },
   { name: "today", path: "/today", ready: heading("Today") },
   {

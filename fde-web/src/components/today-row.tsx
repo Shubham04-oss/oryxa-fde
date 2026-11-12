@@ -1,6 +1,5 @@
 import type { KeyboardEvent } from "react"
 import { Link } from "@tanstack/react-router"
-import { Ellipsis } from "lucide-react"
 import { Button } from "./ui/button"
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu"
 import type { Tone } from "./page"
@@ -11,6 +10,7 @@ import { dayOf, daysBetween, dueLabel, waitingLabel } from "@/lib/time"
 import { actionsOf, itemKey } from "@/lib/today"
 import type { RowAction, TodayGroup } from "@/lib/today"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 /** What an item is, in a few words. */
 export function itemTitle(item: TodayItem) {
@@ -156,7 +156,7 @@ export function TodayRow({
               aria-label={`Actions for ${title}`}
               className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-selected hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-45 data-popup-open:bg-selected max-[800px]:size-9 pointer-coarse:size-9"
             >
-              <Ellipsis size={15} strokeWidth={1.7} aria-hidden="true" />
+              <Icon name="more" size={15} strokeWidth={1.7} aria-hidden="true" />
             </MenuTrigger>
             <MenuContent label={`Actions for ${title}`}>
               {rest.map((action) => (

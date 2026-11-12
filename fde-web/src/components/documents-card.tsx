@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
-import { FileText, Search } from "lucide-react"
 import { UploadDialog } from "./document-upload"
 import { Card, Quiet, Row, Rows, Status } from "./page"
 import { Button } from "./ui/button"
@@ -25,6 +24,7 @@ import {
   whereIn,
 } from "@/lib/documents"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 // The company's documents and search over them (DESIGN.md §3, Documents). A document is searchable
 // only once the API says it is ingested, and the card says so rather than guessing. Everything from a
@@ -220,7 +220,8 @@ function SearchField({
 }) {
   return (
     <div className="relative">
-      <Search
+      <Icon
+        name="search"
         size={14}
         strokeWidth={1.7}
         aria-hidden="true"
@@ -412,7 +413,8 @@ function DocumentRow({ doc, me }: { doc: DocumentOut; me: string | undefined }) 
   return (
     <Row>
       <div className="flex items-start gap-2.5">
-        <FileText
+        <Icon
+          name="file"
           size={16}
           strokeWidth={1.6}
           aria-hidden="true"

@@ -6,7 +6,8 @@ import { carried, emailProblem, useCall, useFlow, waitText } from "./flow"
 import { SignInError, signInApi } from "@/lib/api/sign-in-api"
 
 // The screens that set a password: a forgotten one, a reset from the emailed link, and joining from
-// an invite. The calls are the assumed contract in `sign-in-api.ts`.
+// an invite. Their API routes are still to come, so the calls are the assumed contract in
+// `sign-in-api.ts` and the screens stay hidden until `LATER` turns them on.
 
 type Props = { returnTo: string }
 
@@ -287,7 +288,7 @@ function InviteForm({ returnTo, token, email }: Props & { token: string; email: 
     if (found.name) return nameField.current?.focus()
     if (found.password) return passwordField.current?.focus()
     carried.email = email
-    const next = await run(() => signInApi.acceptInvite(token, name.trim(), password))
+    const next = await run(() => signInApi.acceptInvite(token, name.trim(), password, returnTo))
     setPassword("")
     if (next) follow(next)
     else passwordField.current?.focus()

@@ -1,7 +1,6 @@
 import { useId, useRef, useState } from "react"
 import type { DragEvent, KeyboardEvent, ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, ChevronRight, Ellipsis } from "lucide-react"
 import { Card, Quiet } from "./page"
 import { Button } from "./ui/button"
 import { FormDialog } from "./form-dialog"
@@ -43,6 +42,7 @@ import type { Fields } from "@/lib/board"
 import { commitRemoved, reason, refusalNote } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 const DOT: Record<TaskState, string> = {
   todo: "bg-strong",
@@ -390,14 +390,16 @@ function Column({
             </span>
             <span className="text-muted-foreground tabular-nums">{count}</span>
             {collapsed ? (
-              <ChevronRight
+              <Icon
+                name="chevron-right"
                 size={13}
                 strokeWidth={1.7}
                 aria-hidden="true"
                 className="text-muted-foreground max-[800px]:order-last max-[800px]:ml-auto"
               />
             ) : (
-              <ChevronDown
+              <Icon
+                name="chevron-down"
                 size={13}
                 strokeWidth={1.7}
                 aria-hidden="true"
@@ -551,7 +553,7 @@ function TaskCard({
             "pointer-fine:opacity-0 pointer-fine:group-focus-within:opacity-100 pointer-fine:group-hover:opacity-100 pointer-fine:data-popup-open:opacity-100",
           )}
         >
-          <Ellipsis size={15} strokeWidth={1.7} aria-hidden="true" />
+          <Icon name="more" size={15} strokeWidth={1.7} aria-hidden="true" />
         </MenuTrigger>
         <MenuContent label={`Actions for ${task.title}`}>
           <MenuGroup>
