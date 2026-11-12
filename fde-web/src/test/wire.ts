@@ -19,6 +19,8 @@ export type Wire = {
   keys: Array<{ key: string | null; text: string }>
   /** Lets the API act on this many writes, then loses each answer as a dropped connection does. */
   lose: number
+  /** Lets the API act on every write, then holds its answer until this resolves or the caller gives up. */
+  holdAnswers: Promise<void> | null
   /** The path of every read made, in order. */
   reads: Array<string>
 }
@@ -31,6 +33,7 @@ export const wire: Wire = {
   sent: [],
   keys: [],
   lose: 0,
+  holdAnswers: null,
   reads: [],
 }
 
@@ -46,6 +49,7 @@ export function resetWire() {
   wire.sent = []
   wire.keys = []
   wire.lose = 0
+  wire.holdAnswers = null
   wire.reads = []
 }
 
@@ -77,6 +81,17 @@ export function installWire() {
     if (write && wire.lose > 0) {
       wire.lose -= 1
       throw new TypeError("Failed to fetch")
+    }
+    if (write && wire.holdAnswers) {
+      const signal = request.signal
+      await Promise.race([
+        wire.holdAnswers,
+        new Promise((_, reject) => {
+          const gaveUp = () => reject(new DOMException("The operation was aborted.", "AbortError"))
+          if (signal.aborted) gaveUp()
+          signal.addEventListener("abort", gaveUp, { once: true })
+        }),
+      ])
     }
     if (!write && wire.holdReads) await wire.holdReads
     return response

@@ -7,9 +7,9 @@ import { BlockView, Empty, LongText } from "./blocks"
 import { CompanyForm, PeopleForm, PlanForm, RulesForm, StartForm } from "./step-forms"
 import { Voice } from "./welcome"
 import { api } from "@/lib/api/client"
-import type { SetupRequest } from "@/lib/api/client"
+import type { SetupBody } from "@/lib/api/client"
 import { commitSetUp } from "@/lib/records"
-import { inUnit, measure, targetOf } from "@/lib/scope"
+import { inUnit, measure } from "@/lib/scope"
 import { STAGE_LABEL } from "@/lib/stage"
 import type { Block, PlanStep } from "@/lib/workspace/blocks"
 import {
@@ -24,7 +24,15 @@ import {
   summaryBlocks,
 } from "@/lib/workspace/new-company"
 import type { Answers, StepId } from "@/lib/workspace/new-company"
-import { STEP_OF, prepare, setupBody, setupProblem } from "@/lib/workspace/setup"
+import {
+  STEP_OF,
+  holdKey,
+  prepare,
+  releaseKey,
+  settlesKey,
+  setupBody,
+  setupProblem,
+} from "@/lib/workspace/setup"
 import type { Part, SetupProblem } from "@/lib/workspace/setup"
 import { cn } from "@/lib/utils"
 
@@ -32,7 +40,10 @@ import { cn } from "@/lib/utils"
 // workspace asks one step at a time; each answer fills a block on the summary beside it. Nothing is
 // saved or sent until the person confirms on the review step, and then in one setup call.
 
-export function NewCompanyConversation() {
+/** How long a setup may take before the page stops waiting and says it may or may not be saved. */
+export const GIVE_UP_MS = 30_000
+
+export function NewCompanyConversation({ giveUpMs = GIVE_UP_MS }: { giveUpMs?: number } = {}) {
   const client = useQueryClient()
   const navigate = useNavigate()
   const [answers, setAnswers] = useState<Answers>(NO_ANSWERS)
@@ -42,10 +53,16 @@ export function NewCompanyConversation() {
   const [edited, setEdited] = useState(false)
   const [creating, setCreating] = useState(false)
   const [problem, setProblem] = useState<SetupProblem | null>(null)
-  // The setup as last sent: its key and bytes go again only with an identical body.
-  const sent = useRef<SetupRequest | null>(null)
   // A second click before the first one's render cannot send a second request.
   const sending = useRef(false)
+  // Left (Back, Not now) while a setup was on its way: it settles without taking the person anywhere.
+  const here = useRef(true)
+  useEffect(() => {
+    here.current = true
+    return () => {
+      here.current = false
+    }
+  }, [])
   const question = useRef<HTMLHeadingElement>(null)
   const opened = useRef(false)
 
@@ -89,24 +106,30 @@ export function NewCompanyConversation() {
     // The only write this screen makes, and only from the review, once every step is answered.
     const body = current === "review" ? setupBody(answers) : null
     if (!body || sending.current) return
-    const request = prepare(body, sent.current)
-    sent.current = request
+    const request = prepare(body)
+    // Held before it is sent: whatever happens to this page, the next setup from this tab reuses it.
+    holdKey(request.key)
     sending.current = true
     setCreating(true)
     setProblem(null)
+    const giveUp = new AbortController()
+    const timer = setTimeout(() => giveUp.abort(), giveUpMs)
     try {
-      const out = await api.setUpCompany(request)
+      const out = await api.setUpCompany(request, giveUp.signal)
+      releaseKey()
       await commitSetUp(client, out)
-      await navigate({
-        to: "/companies/$companyId/projects/$projectId",
-        params: { companyId: out.company.id, projectId: out.project.id },
-      })
+      if (here.current)
+        await navigate({
+          to: "/companies/$companyId/projects/$projectId",
+          params: { companyId: out.company.id, projectId: out.project.id },
+        })
     } catch (error) {
-      const failed = setupProblem(error, body)
-      // A refused body, or a key that set up something else: the next attempt takes a new key.
-      if (failed.kind === "part" || failed.key === "fresh") sent.current = null
-      setProblem(failed)
+      if (settlesKey(error)) releaseKey()
+      if (!here.current) return
+      setProblem(setupProblem(error, body))
       setCreating(false)
+    } finally {
+      clearTimeout(timer)
       sending.current = false
     }
   }
@@ -152,6 +175,7 @@ export function NewCompanyConversation() {
                       review={
                         <Review
                           answers={answers}
+                          body={setupBody(answers)}
                           ready={readyToCreate(answers)}
                           creating={creating}
                           problem={problem}
@@ -264,6 +288,7 @@ function StepAnswer({
 
 function Review({
   answers,
+  body,
   ready,
   creating,
   problem,
@@ -271,6 +296,8 @@ function Review({
   onChange,
 }: {
   answers: Answers
+  /** What Create company sends; null until every required answer is there. */
+  body: SetupBody | null
   ready: boolean
   creating: boolean
   problem: SetupProblem | null
@@ -288,7 +315,7 @@ function Review({
           Saved when you create it
         </h3>
         <dl className="grid divide-y rounded-field border">
-          {savedRows(answers).map((row) => (
+          {(body ? savedRows(body) : []).map((row) => (
             <div
               key={row.part}
               className="grid grid-cols-[112px_minmax(0,1fr)] gap-x-4 gap-y-1 px-4 py-3 max-[560px]:grid-cols-1"
@@ -342,7 +369,7 @@ function Review({
           Not now
         </Link>
         <Button size="lg" disabled={!ready || creating} onClick={onCreate}>
-          {creating ? "Creating…" : general?.key === "retry" ? "Try again" : "Create company"}
+          {creating ? "Creating…" : general?.retry ? "Try again" : "Create company"}
         </Button>
       </div>
     </div>
@@ -355,24 +382,25 @@ const Quiet = ({ children }: { children: React.ReactNode }) => (
   <span className="text-muted-foreground">{children}</span>
 )
 
-/** Each part the setup call saves, as the review shows it: taken from the answers, as sent. */
-function savedRows(answers: Answers): Array<{ part: Part; label: string; value: React.ReactNode }> {
-  const c = answers.company
-  const start = answers.start
-  const plan = answers.plan ?? []
-  if (!c || !start) return []
-  const where = [c.industry.trim(), c.region.trim()].filter(Boolean).join(" · ")
-  const criterion = start.criterion.description.trim() ? start.criterion : null
-  const target = criterion ? targetOf(criterion.target) : null
-  const baseline = criterion ? targetOf(criterion.baseline) : null
-  const proving = plan.filter((s) => s.criterion).length
+/**
+ * Each part the setup call saves, as the review shows it: drawn from the body that is sent, so the
+ * screen shows the arguments themselves (ADR 0008) and cannot say one thing while sending another.
+ */
+function savedRows(body: SetupBody): Array<{ part: Part; label: string; value: React.ReactNode }> {
+  const { company, project } = body
+  const stakeholders = body.stakeholders ?? []
+  const criteria = body.criteria ?? []
+  const plan = body.plan ?? []
+  const where = [company.industry, company.region].filter(Boolean).join(" · ")
+  const main = body.main_contact == null ? null : stakeholders[body.main_contact]
+  const proving = plan.filter((s) => s.criterion != null).length
   return [
     {
       part: "company",
       label: "Company",
       value: (
         <>
-          <span className="font-medium">{c.name.trim()}</span>
+          <span className="font-medium">{company.name}</span>
           {where && <Quiet>{where}</Quiet>}
           <Quiet>You become its lead.</Quiet>
         </>
@@ -383,50 +411,52 @@ function savedRows(answers: Answers): Array<{ part: Part; label: string; value: 
       label: "First project",
       value: (
         <>
-          <span className="font-medium">{c.project.trim()}</span>
-          {c.summary.trim() ? <LongText value={c.summary.trim()} /> : <Quiet>No summary.</Quiet>}
+          <span className="font-medium">{project.name}</span>
+          {project.summary ? <LongText value={project.summary} /> : <Quiet>No summary.</Quiet>}
         </>
       ),
     },
     {
       part: "contact",
       label: "Main contact",
-      value: start.contact.trim() ? (
-        <>
-          <span className="font-medium">{start.contact.trim()}</span>
-          <Quiet>A stakeholder at the company, marked as its main contact.</Quiet>
-        </>
-      ) : (
-        <Quiet>No one named.</Quiet>
-      ),
+      value:
+        stakeholders.length === 0 ? (
+          <Quiet>No one named.</Quiet>
+        ) : (
+          stakeholders.map((s, i) => (
+            <span key={i} className="grid">
+              <span className="font-medium">{s.name}</span>
+              <Quiet>
+                {s === main
+                  ? "A stakeholder at the company, marked as its main contact."
+                  : "A stakeholder at the company."}
+              </Quiet>
+            </span>
+          ))
+        ),
     },
     {
       part: "criterion",
       label: "Success criterion",
-      value: criterion ? (
-        <>
-          <span className="font-medium">{criterion.description}</span>
-          {target !== null && (
-            <span>
-              Met when{" "}
-              {measure({
-                metric: criterion.metric,
-                comparator: criterion.comparator,
-                target,
-                unit: criterion.unit || null,
-              })}
-              .{baseline !== null && ` Baseline ${inUnit(baseline, criterion.unit)}.`}
+      value:
+        criteria.length === 0 ? (
+          <Quiet>None yet. Add one on the project.</Quiet>
+        ) : (
+          criteria.map((c, i) => (
+            <span key={i} className="grid gap-1">
+              <span className="font-medium">{c.description}</span>
+              <span>
+                Met when {measure(c)}.
+                {c.baseline != null && ` Baseline ${inUnit(c.baseline, c.unit)}.`}
+              </span>
+              <Quiet>
+                {c.proof
+                  ? `How we will prove it: ${c.proof}`
+                  : "How it will be proven is not said yet."}
+              </Quiet>
             </span>
-          )}
-          <Quiet>
-            {criterion.proof
-              ? `How we will prove it: ${criterion.proof}`
-              : "How it will be proven is not said yet."}
-          </Quiet>
-        </>
-      ) : (
-        <Quiet>None yet. Add one on the project.</Quiet>
-      ),
+          ))
+        ),
     },
     {
       part: "plan",
@@ -439,14 +469,14 @@ function savedRows(answers: Answers): Array<{ part: Part; label: string; value: 
           </span>
           <ol className="grid gap-1 pt-1">
             {plan.map((step, i) => (
-              <li key={step.id} className="flex min-w-0 gap-2">
+              <li key={i} className="flex min-w-0 gap-2">
                 <span className="w-5 flex-none text-right text-muted-foreground tabular-nums">
                   {i + 1}.
                 </span>
                 <span className="min-w-0">
                   {step.title}
                   {/* "Build" under "Build" says nothing twice, as the plan block does. */}
-                  {bare(step.title) !== bare(STAGE_LABEL[step.stage]) && (
+                  {step.stage && bare(step.title) !== bare(STAGE_LABEL[step.stage]) && (
                     <Quiet> · {STAGE_LABEL[step.stage]}</Quiet>
                   )}
                 </span>

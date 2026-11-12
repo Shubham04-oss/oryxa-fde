@@ -124,6 +124,7 @@ describe("a setup in one call, in the mock", () => {
     const many = <T>(n: number, one: T) => Array.from({ length: n }, () => one)
     for (const [extra, want] of [
       [{ company: { name: "" } }, "invalid_name"],
+      [{ company: { name: "Orion\u0085Rail" } }, "invalid_name"],
       [{ project: { name: " " } }, "invalid_name"],
       [{ stakeholders: many(21, { name: "x" }) }, "invalid_stakeholders"],
       [{ scope_items: many(31, { kind: "in", description: "x" }) }, "invalid_scope_items"],
@@ -149,6 +150,8 @@ describe("a setup in one call, in the mock", () => {
     g.__fdeMockRefuseSetup = "invalid_target"
     expect(await code(send("setup-switch", JSON.stringify(body)))).toBe("400 invalid_target")
     expect(g.__fdeMockRefuseSetup).toBeUndefined()
+    g.__fdeMockRefuseSetup = "forbidden"
+    expect(await code(send("setup-switch", JSON.stringify(body)))).toBe("403 forbidden")
     expect((await send("setup-switch", JSON.stringify(body))).status).toBe(201)
   })
 

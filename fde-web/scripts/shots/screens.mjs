@@ -1373,8 +1373,11 @@ async function answer(page, n) {
   )
   await page.waitForTimeout(400)
 }
-/** The start step's answers: a main contact, and a criterion with how it is measured. */
-async function measured(page) {
+/**
+ * The start step's answers: a main contact, and a criterion with how it is measured. `more: false`
+ * leaves the baseline and proof a step away, as the step first shows them.
+ */
+async function measured(page, { more = true } = {}) {
   const c = conversation(page)
   await c.getByLabel("Main contact at the company", { exact: true }).fill("Dana Ortiz")
   await c
@@ -1386,6 +1389,10 @@ async function measured(page) {
   await c.getByLabel("It passes when it is", { exact: true }).selectOption("at_most")
   await c.getByLabel("Target", { exact: true }).fill("2")
   await c.getByLabel("Unit", { exact: true }).fill("h")
+  if (!more) return
+  await c
+    .getByRole("button", { name: "Add a baseline and how it will be proven", exact: true })
+    .click()
   await c.getByLabel("Baseline", { exact: true }).fill("9.5")
   await c
     .getByLabel("How we will prove it", { exact: true })
@@ -1445,7 +1452,7 @@ function workspaceScreens() {
       ready: question("Which company is it, and what are you delivering for them?"),
       act: async (page) => {
         await answer(page, 1)
-        await measured(page)
+        await measured(page, { more: false })
         await page.evaluate(
           () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
         )
@@ -1453,7 +1460,9 @@ function workspaceScreens() {
       },
     },
     {
-      // A part the API refused, shown beside it on the review (the mock's `__fdeMockRefuseSetup`).
+      // A setup the API refused: a 403, which any answers can meet (the mock's `__fdeMockRefuseSetup`).
+      // A refused part only happens when the web's checks and the API's drift, so a staged one would
+      // contradict the value on screen; the tests cover it.
       name: "new-company-6-review-refused",
       path: "/new-company",
       ...WORKSPACE,
@@ -1461,7 +1470,7 @@ function workspaceScreens() {
       ready: question("Which company is it, and what are you delivering for them?"),
       act: async (page) => {
         await answer(page, 5)
-        await page.evaluate(() => (globalThis.__fdeMockRefuseSetup = "invalid_target"))
+        await page.evaluate(() => (globalThis.__fdeMockRefuseSetup = "forbidden"))
         await cont(page, "Create company")
         await conversation(page).getByRole("alert").waitFor()
         await page.mouse.move(0, 0)

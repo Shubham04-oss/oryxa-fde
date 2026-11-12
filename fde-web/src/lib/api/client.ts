@@ -500,13 +500,14 @@ function connect(transport: Transport) {
      * people, scope, criteria and plan, all or nothing. A retry with the same key and bytes answers
      * the first setup (200) and makes nothing new; 201 and 200 are the same result.
      */
-    setUpCompany: (request: SetupRequest) =>
+    setUpCompany: (request: SetupRequest, signal?: AbortSignal) =>
       read(
         SetupOut,
         client.POST("/v1/companies/setup", {
           params: { header: { "Idempotency-Key": request.key } },
           body: request.body,
           bodySerializer: () => request.json,
+          signal,
         }),
       ),
 
@@ -1099,7 +1100,7 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     scope: async (scope) => (await use()).scope(scope),
     today: async () => (await use()).today(),
     createCompany: async (body) => (await use()).createCompany(body),
-    setUpCompany: async (request) => (await use()).setUpCompany(request),
+    setUpCompany: async (request, signal) => (await use()).setUpCompany(request, signal),
     updateCompany: async (id, patch) => (await use()).updateCompany(id, patch),
     createProject: async (id, body) => (await use()).createProject(id, body),
     updateProject: async (scope, patch) => (await use()).updateProject(scope, patch),

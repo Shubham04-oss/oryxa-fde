@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import type { FormEvent, ReactNode } from "react"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
@@ -295,6 +295,15 @@ export function StartForm({
   const named = c.description.trim() !== ""
   const target = targetOf(c.target)
   const baseline = targetOf(c.baseline)
+  // The optional baseline and proof are a step away, so the step stays short on a phone; once open,
+  // or once either holds something, they stay in view, so nothing typed is ever hidden.
+  const [more, setMore] = useState(Boolean(c.baseline.trim() || c.proof.trim()))
+  const baselineBox = useRef<HTMLInputElement>(null)
+  const opening = useRef(false)
+  useEffect(() => {
+    if (more && opening.current) baselineBox.current?.focus()
+    opening.current = false
+  }, [more])
   return (
     <AnswerCard
       label={label}
@@ -370,7 +379,8 @@ export function StartForm({
               />
             )}
           </Field>
-          <div className="grid grid-cols-3 gap-4 max-[560px]:grid-cols-1">
+          {/* On a phone the comparison takes the row, and the target and unit share the next. */}
+          <div className="grid grid-cols-3 items-start gap-4 max-[560px]:grid-cols-2 max-[560px]:[&>:first-child]:col-span-2">
             <Field label="It passes when it is">
               {(props) => (
                 <select
@@ -409,32 +419,47 @@ export function StartForm({
               )}
             </Field>
           </div>
-          <div className="grid grid-cols-2 gap-4 max-[560px]:grid-cols-1">
-            <Field label="Baseline" hint="Optional. Measured before the work, in the same unit.">
-              {(props) => (
-                <input
-                  {...props}
-                  inputMode="decimal"
-                  value={c.baseline}
-                  onChange={(e) => setCriterion({ baseline: e.target.value })}
-                  className={cn(INPUT, "h-11")}
-                />
-              )}
-            </Field>
-            <Field
-              label="How we will prove it"
-              hint="Optional. Such as: an eval on sample data, run against the baseline."
+          {more ? (
+            <div className="grid grid-cols-2 gap-4 max-[560px]:grid-cols-1">
+              <Field label="Baseline" hint="Optional. Measured before the work, in the same unit.">
+                {(props) => (
+                  <input
+                    {...props}
+                    ref={baselineBox}
+                    inputMode="decimal"
+                    value={c.baseline}
+                    onChange={(e) => setCriterion({ baseline: e.target.value })}
+                    className={cn(INPUT, "h-11")}
+                  />
+                )}
+              </Field>
+              <Field
+                label="How we will prove it"
+                hint="Optional. Such as: an eval on sample data, run against the baseline."
+              >
+                {(props) => (
+                  <input
+                    {...props}
+                    value={c.proof}
+                    onChange={(e) => setCriterion({ proof: e.target.value })}
+                    className={cn(INPUT, "h-11")}
+                  />
+                )}
+              </Field>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                opening.current = true
+                setMore(true)
+              }}
+              className="inline-flex items-center gap-1.5 justify-self-start rounded-sm text-meta font-medium text-soft underline decoration-strong underline-offset-4 transition-colors hover:text-foreground"
             >
-              {(props) => (
-                <input
-                  {...props}
-                  value={c.proof}
-                  onChange={(e) => setCriterion({ proof: e.target.value })}
-                  className={cn(INPUT, "h-11")}
-                />
-              )}
-            </Field>
-          </div>
+              <Icon name="plus" size={14} className="flex-none" />
+              Add a baseline and how it will be proven
+            </button>
+          )}
           {c.metric.trim() && target !== null && (
             <p className="text-meta text-soft">
               Met when{" "}

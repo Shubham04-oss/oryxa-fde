@@ -876,8 +876,9 @@ points to Today without claiming anything, until the API serves suggestions.
   scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
 - **New company** (`/new-company`): the workspace asks one step at a time (the company, its first
   project's name and what is delivered; how to start, the main contact and, optionally, one success
-  criterion with how it is measured: what, at least or at most, a target and unit, and optionally a
-  baseline and how it will be proven; rules for agents and who approves; who to invite, optional;
+  criterion with how it is measured: what, at least or at most, a target and unit, and, behind
+  **Add a baseline and how it will be proven** (open once either holds something), a baseline and
+  how it will be proven; rules for agents and who approves; who to invite, optional;
   the plan; the review). Each answer fills a section of the **Summary** beside it (a sheet from **Summary** on
   a narrow screen). The plan is proposed from the answers (a call first, scope first, or a pilot)
   and can be reordered, renamed, added to and removed from, from one menu per step (the ⋯ button,
@@ -893,7 +894,8 @@ points to Today without claiming anything, until the API serves suggestions.
   sections of the summary. A plan step's criterion is the one given at the start (renamed or taken
   away with it, even on a changed plan), and its "How we will prove it" is what was typed, or "Not
   said yet"; nothing is made up for it. Real customer data is always "Never".
-- **The review** says exactly what will be saved, taken from the answers as they will be sent:
+- **The review** says exactly what will be saved, drawn from the very body Create company sends
+  (`setupBody`), never from the answers, so the screen shows the arguments themselves (ADR 0008):
   the company (and that the FDE becomes its lead), the first project and what is delivered, the
   main contact, the success criterion as it will read ("Met when ... Baseline ..."), and the plan as
   tasks in order with their stages. Under **Not saved yet** it lists the rules for agents, any
@@ -902,15 +904,22 @@ points to Today without claiming anything, until the API serves suggestions.
   Nothing is saved until **Create company**, which sends one `POST /v1/companies/setup`
   (`setupBody` in `src/lib/workspace/setup.ts` maps the answers; an answer with no field is left
   out) and lands on the new project, its first step the next step.
-  - **One key per setup.** The `Idempotency-Key` is made when the review first sends, and the same key
-    goes again, with the same bytes (kept, never serialized again), only while the body is identical:
-    a double click, Try again after a lost answer (it says it may or may not have been saved, and
-    that trying again will not make a second company), a 403 or a 5xx. A changed body takes a new
-    key, as does a body the API could not read, and a 409 `rejected_idempotency_key_reused` (it says
-    to check the companies first).
+  - **One key until it is settled.** The `Idempotency-Key` is made when the review first sends and
+    held by the tab (`sessionStorage`) until the API answers it with a setup or a 409. Every send in
+    between, whatever its body, goes under that key with that body's own bytes (never serialized
+    again): a double click, Try again, a changed answer, leaving the review and coming back, or Back
+    and Forward. After a lost answer, a 5xx or a request the page gave up on (30 seconds), no one
+    knows whether the first send made a company; a 400, 401 or 403 that follows says nothing about
+    it either, as the API refuses those before it claims a key. With the key held, the API answers
+    409 `rejected_idempotency_key_reused` if the first landed (the screen says to check the
+    companies first, and the next setup takes a new key) and makes it if it did not. Never two
+    companies. A setup that answers after the page was left settles without taking anyone anywhere.
   - **A refused part** (a 400 `invalid_*`) is shown under that part of the review, with a link to the
     step that changes it; `invalid_name` is worked out from the names sent, in the API's order.
     A 401 keeps every answer and says to sign in again in another tab.
+  - **Numbers** (target, baseline) are decimal only, as typed: digits, a point, a sign. A comma gets
+    "Use a point for decimals, such as 1.5, and no commas."; `0x10`, `1e3` and the like are refused,
+    never read as something else.
 
 ## 4. Data
 
@@ -1024,8 +1033,8 @@ points to Today without claiming anything, until the API serves suggestions.
   the key claimed by caller and key, the same key and bytes answered with that setup as it stands
   (200, or 403 if it can no longer be seen), and other bytes a 409 `rejected_idempotency_key_reused`.
   With two parts wrong it may name another one first than the API, which checks all before writing.
-  `globalThis.__fdeMockRefuseSetup = "invalid_target"` (any code) refuses the next setup with that 400,
-  once, so a refused part can be seen.
+  `globalThis.__fdeMockRefuseSetup = "forbidden"` refuses the next setup once with that code (a 403 for
+  `forbidden`, a 400 for any other), so a refused setup can be seen.
   The mock answers `/v1/people` from its invented directory as the API does (the organisation's own people by
   name, the unnamed last, no guest, no email), names members and assignees when it answers them, adds only
   someone of the organisation to a company (404 otherwise), and takes a task's assignee or a note's attendee

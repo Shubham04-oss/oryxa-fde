@@ -1,7 +1,7 @@
-import { describe, expect, expectTypeOf, it } from "vitest"
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest"
 import { NO_ANSWERS, NO_CRITERION, defaultRules, proposePlan } from "./new-company"
 import type { Answers } from "./new-company"
-import { prepare, setupBody, setupProblem } from "./setup"
+import { holdKey, prepare, releaseKey, settlesKey, setupBody, setupProblem } from "./setup"
 import { ApiError, api } from "@/lib/api/client"
 import type { SetupRequest } from "@/lib/api/client"
 import type { components, paths } from "@/lib/api/fde-api.gen"
@@ -107,21 +107,47 @@ describe("the setup call's body", () => {
 })
 
 describe("the setup's key", () => {
-  it("is reused only with the identical body, and the same bytes go again", () => {
+  afterEach(releaseKey)
+
+  it("is held from its first send until the API answers with a setup or a 409", () => {
     let n = 0
     const key = () => `setup-${++n}`
     const body = setupBody(all)!
-    const first = prepare(body, null, key)
+    const first = prepare(body, key)
     expect(first).toEqual({ key: "setup-1", body, json: JSON.stringify(body) })
-    // A double click or Try again: the same request, bytes and all.
-    expect(prepare(setupBody(all)!, first, key)).toBe(first)
-    // Anything changed is a new setup, with a new key.
+    // Not held yet: nothing was sent, so a new key is fine.
+    expect(prepare(body, key).key).toBe("setup-2")
+    holdKey(first.key)
+    // Held: the same key, for the same body or a changed one, with that body's own bytes.
     const changed = setupBody({ ...all, company: { ...company, region: "UK" } })!
-    expect(prepare(changed, first, key)).toMatchObject({ key: "setup-2", body: changed })
+    expect(prepare(changed, key)).toEqual({
+      key: "setup-1",
+      body: changed,
+      json: JSON.stringify(changed),
+    })
+    // Kept by the tab, so a new page in it (Back, then Forward) finds it.
+    expect(sessionStorage.getItem("fde.setup.key")).toBe("setup-1")
+    releaseKey()
+    expect(prepare(body, key).key).toBe("setup-3")
+  })
+
+  it("is settled only by a 409: a 400, 401 or 403 says nothing about an earlier send", () => {
+    expect(settlesKey(new ApiError(409, "rejected_idempotency_key_reused"))).toBe(true)
+    expect(settlesKey(new ApiError(400, "invalid_idempotency_key"))).toBe(true)
+    for (const [status, code] of [
+      [400, "invalid_target"],
+      [400, "invalid_body"],
+      [401, "unauthorized"],
+      [403, "forbidden"],
+      [503, "unavailable"],
+    ] as const)
+      expect(settlesKey(new ApiError(status, code))).toBe(false)
+    expect(settlesKey(new TypeError("Failed to fetch"))).toBe(false)
+    expect(settlesKey(new DOMException("The operation was aborted.", "AbortError"))).toBe(false)
   })
 
   it("is one the API takes", () => {
-    expect(prepare(setupBody(all)!, null).key).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    expect(prepare(setupBody(all)!).key).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
   })
 })
 
@@ -155,23 +181,23 @@ describe("a refused setup", () => {
     expect(named("Orion", "x".repeat(201), "Dana")).toMatchObject({ part: "project" })
     expect(named("Orion\u0007", "Claims", "Dana\nOrtiz")).toMatchObject({ part: "contact" })
     // None it can see: it says so, and the next try is a new setup.
-    expect(named("Orion", "Claims", "Dana")).toMatchObject({ kind: "general", key: "fresh" })
+    expect(named("Orion", "Claims", "Dana")).toMatchObject({ kind: "general", retry: false })
   })
 
   it("keeps the key where a retry is safe, and drops it where it is not", () => {
     expect(setupProblem(new TypeError("Failed to fetch"), body)).toMatchObject({
       kind: "general",
-      key: "retry",
+      retry: true,
       message: expect.stringMatching(/will not make a second company/),
     })
-    expect(refused(503, "unavailable")).toMatchObject({ key: "retry" })
-    expect(refused(403, "forbidden")).toMatchObject({ key: "retry" })
-    expect(refused(401, "unauthorized")).toMatchObject({ key: "retry" })
+    expect(refused(503, "unavailable")).toMatchObject({ retry: true })
+    expect(refused(403, "forbidden")).toMatchObject({ retry: true })
+    expect(refused(401, "unauthorized")).toMatchObject({ retry: true })
     expect(refused(409, "rejected_idempotency_key_reused")).toMatchObject({
-      key: "fresh",
+      retry: false,
       message: expect.stringMatching(/Check your companies/),
     })
-    expect(refused(400, "invalid_body")).toMatchObject({ kind: "general", key: "fresh" })
-    expect(refused(400, "invalid_idempotency_key")).toMatchObject({ kind: "general", key: "fresh" })
+    expect(refused(400, "invalid_body")).toMatchObject({ kind: "general", retry: false })
+    expect(refused(400, "invalid_idempotency_key")).toMatchObject({ kind: "general", retry: false })
   })
 })

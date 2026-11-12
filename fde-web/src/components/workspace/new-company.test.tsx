@@ -4,46 +4,19 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest"
 import { NewCompanyConversation } from "./new-company"
 import { api } from "@/lib/api/client"
 import { CompanyId, ProjectId } from "@/lib/api/schemas"
+import { releaseKey } from "@/lib/workspace/setup"
+import { conversation, press, question, savedList, toPlan, toReview } from "@/test/conversation"
 import { renderWithRouter } from "@/test/render"
 import { installWire, resetWire, wire } from "@/test/wire"
 
 beforeAll(installWire)
 afterEach(() => {
   resetWire()
+  releaseKey()
   delete (globalThis as Record<string, unknown>).__fdeMockFailWrites
 })
 
-const conversation = () => screen.getByRole("region", { name: "Conversation" })
 const summary = () => screen.getByRole("complementary", { name: "Summary" })
-const question = (name: string) => screen.findByRole("heading", { name })
-const press = (name: string) =>
-  userEvent.click(within(conversation()).getByRole("button", { name, exact: true } as never))
-
-/** Answers the conversation up to the plan step; `name` is typed as the company's name. */
-async function toPlan(name = "Orion Rail") {
-  await userEvent.type(await screen.findByLabelText("Company name"), name)
-  await userEvent.type(screen.getByLabelText("First project"), "Claims intake")
-  await userEvent.type(screen.getByLabelText("What are you delivering?"), "Claims intake.")
-  await press("Continue")
-  await question("How do you want to start?")
-  await userEvent.type(screen.getByLabelText("Main contact at the company"), "Dana Ortiz")
-  await userEvent.type(
-    screen.getByLabelText("What would show it worked?"),
-    "Claims triaged in two hours",
-  )
-  await userEvent.type(screen.getByLabelText("What is measured"), "hours to triage")
-  await userEvent.selectOptions(screen.getByLabelText("It passes when it is"), "at_most")
-  await userEvent.type(screen.getByLabelText("Target"), "2")
-  await userEvent.type(screen.getByLabelText("Unit"), "h")
-  await userEvent.type(screen.getByLabelText("Baseline"), "9")
-  await press("Continue")
-  await question("What may agents do here, and who approves?")
-  await press("Continue")
-  await question("Who should be invited?")
-  await userEvent.type(screen.getByLabelText("Email of person 1"), "sam@example.com")
-  await press("Continue")
-  await question("Here is a plan to start with. Change anything.")
-}
 
 /** The plan's step titles in order, read from each step's menu button. */
 const planTitles = () =>
@@ -60,15 +33,7 @@ async function stepMenu(title: string, item: string) {
 
 const focused = () => document.activeElement
 
-/** Answers every step and opens the review. */
-async function toReview(name = "Orion Rail") {
-  await toPlan(name)
-  await press("Use this plan")
-  await question(`Ready to create ${name}?`)
-}
-
-const review = () =>
-  within(conversation()).getByRole("region", { name: "Saved when you create it" })
+const review = savedList
 const notSaved = () => within(conversation()).getByRole("region", { name: "Not saved yet" })
 
 /** Where the router went after a setup: the new project's page. */
@@ -175,7 +140,108 @@ describe("a new company as a conversation", () => {
     expect(named).toHaveLength(1)
   })
 
-  it("shows a refused part beside it, and a changed answer goes with a new key", async () => {
+  it("keeps the key after a lost answer even when an answer then changes, so it makes one company", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    // The API made it, and the answer never came back.
+    wire.lose = 1
+    await press("Create company")
+    await within(conversation()).findByRole("alert")
+    // The person changes an answer, and creates again.
+    await press("Change: How do you want to start?")
+    const target = await screen.findByLabelText("Target")
+    await userEvent.clear(target)
+    await userEvent.type(target, "1.5")
+    await press("Continue")
+    await question("Ready to create Orion Rail?")
+    await press("Create company")
+    await waitFor(() =>
+      expect(within(conversation()).getByRole("alert")).toHaveTextContent("Check your companies"),
+    )
+    expect(wire.keys).toHaveLength(2)
+    expect(wire.keys[1]!.key).toBe(wire.keys[0]!.key)
+    expect(wire.keys[1]!.text).not.toBe(wire.keys[0]!.text)
+    const named = (await api.companies()).companies.filter((c) => c.name === "Orion Rail")
+    expect(named).toHaveLength(1)
+  })
+
+  it("keeps the key when the page gave up waiting, and the API had made it", async () => {
+    renderWithRouter(<NewCompanyConversation giveUpMs={50} />, { at: "/new-company" })
+    await toReview()
+    // The API makes it, and the answer is slower than the page will wait.
+    wire.holdAnswers = new Promise<void>(() => {})
+    await press("Create company")
+    expect(await within(conversation()).findByRole("alert")).toHaveTextContent(
+      "may or may not have been saved",
+    )
+    wire.holdAnswers = null
+    await press("Change: Which company is it, and what are you delivering for them?")
+    await userEvent.type(await screen.findByLabelText("Region"), "UK")
+    await press("Continue")
+    await question("Ready to create Orion Rail?")
+    await press("Create company")
+    await waitFor(() =>
+      expect(within(conversation()).getByRole("alert")).toHaveTextContent("Check your companies"),
+    )
+    expect(wire.keys.map((k) => k.key)).toEqual([wire.keys[0]!.key, wire.keys[0]!.key])
+    const named = (await api.companies()).companies.filter((c) => c.name === "Orion Rail")
+    expect(named).toHaveLength(1)
+  })
+
+  it("keeps the key across Back and Forward in the tab, so answering again makes no second company", async () => {
+    const first = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    wire.lose = 1
+    await press("Create company")
+    await within(conversation()).findByRole("alert")
+    // Back leaves the page; Forward opens a new conversation in the same tab.
+    first.unmount()
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company", keep: true })
+    // Answered again, a little differently: a new body, under the same key.
+    await toReview("Orion Rail Ltd")
+    await press("Create company")
+    await waitFor(() =>
+      expect(within(conversation()).getByRole("alert")).toHaveTextContent("Check your companies"),
+    )
+    expect(wire.keys[1]!.key).toBe(wire.keys[0]!.key)
+    const names = (await api.companies()).companies.map((c) => c.name)
+    expect(names.filter((n) => n.startsWith("Orion Rail"))).toEqual(["Orion Rail"])
+  })
+
+  it("settles a setup that answers after the page was left, and frees the key", async () => {
+    const page = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    let answer = () => {}
+    wire.holdAnswers = new Promise<void>((resolve) => (answer = resolve))
+    await press("Create company")
+    await waitFor(() => expect(wire.keys).toHaveLength(1))
+    expect(sessionStorage.getItem("fde.setup.key")).toBe(wire.keys[0]!.key)
+    // Back, while it is on its way; then the API answers that it made it.
+    page.unmount()
+    answer()
+    await waitFor(() => expect(sessionStorage.getItem("fde.setup.key")).toBeNull())
+    const named = (await api.companies()).companies.filter((c) => c.name === "Orion Rail")
+    expect(named).toHaveLength(1)
+  })
+
+  it("keeps the key and the bytes when the review is left and opened again unchanged", async () => {
+    const { router } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    wire.lose = 1
+    await press("Create company")
+    await within(conversation()).findByRole("alert")
+    await press("Change: Here is a plan to start with. Change anything.")
+    await press("Use this plan")
+    await question("Ready to create Orion Rail?")
+    await press("Create company")
+    // The same key and bytes: the API answers with the setup it made (200), and the page opens it.
+    await waitFor(() => expect(router.state.location.pathname).toMatch(PROJECT_PAGE))
+    expect(wire.keys[1]).toEqual(wire.keys[0])
+    const named = (await api.companies()).companies.filter((c) => c.name === "Orion Rail")
+    expect(named).toHaveLength(1)
+  })
+
+  it("shows a refused part beside it; the changed answer goes under the same key, never claimed", async () => {
     const { router } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
     await toReview()
     wire.refuse = Response.json({ error: "invalid_target" }, { status: 400 })
@@ -193,7 +259,7 @@ describe("a new company as a conversation", () => {
     await press("Create company")
     await waitFor(() => expect(router.state.location.pathname).toMatch(PROJECT_PAGE))
     expect(wire.keys).toHaveLength(2)
-    expect(wire.keys[1]!.key).not.toBe(wire.keys[0]!.key)
+    expect(wire.keys[1]!.key).toBe(wire.keys[0]!.key)
     expect(wire.sent[1]?.body).toMatchObject({ criteria: [{ target: 1.5 }] })
   })
 
@@ -248,6 +314,34 @@ describe("a new company as a conversation", () => {
     expect(within(review()).getByText(hostile)).toBeInTheDocument()
     expect(container.querySelector("img, b")).toBeNull()
     expect((window as unknown as Record<string, unknown>).__owned).toBeUndefined()
+  })
+
+  it("keeps the baseline and proof a step away, and reads a comma decimal as a plain hint", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await userEvent.type(await screen.findByLabelText("Company name"), "Orion Rail")
+    await userEvent.type(screen.getByLabelText("First project"), "Claims intake")
+    await press("Continue")
+    await question("How do you want to start?")
+    expect(screen.queryByLabelText("What is measured")).toBeNull()
+    await userEvent.type(screen.getByLabelText("What would show it worked?"), "Claims triaged")
+    expect(screen.queryByLabelText("Baseline")).toBeNull()
+    await press("Add a baseline and how it will be proven")
+    expect(document.activeElement).toBe(screen.getByLabelText("Baseline"))
+    expect(screen.getByLabelText("How we will prove it")).toBeInTheDocument()
+
+    await userEvent.type(screen.getByLabelText("What is measured"), "hours to triage")
+    await userEvent.type(screen.getByLabelText("Target"), "1,5")
+    await press("Continue")
+    expect(within(conversation()).getByRole("alert")).toHaveTextContent(
+      "Use a point for decimals, such as 1.5, and no commas.",
+    )
+    await userEvent.clear(screen.getByLabelText("Target"))
+    await userEvent.type(screen.getByLabelText("Target"), "0x10")
+    await press("Continue")
+    expect(within(conversation()).getByRole("alert")).toHaveTextContent(
+      "The target must be a number.",
+    )
+    expect(wire.sent).toEqual([])
   })
 
   it("needs a name before it moves on, and says so at the field", async () => {

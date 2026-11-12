@@ -30,10 +30,11 @@ export type SystemBody = Omit<components["schemas"]["SystemBody"], "version">
 export const MAX_NAME = 200
 export const MAX_TEXT = 4000
 
+// The API's rule is Rust's `char::is_control`: C0, DEL and C1. Text keeps newlines and tabs.
 // eslint-disable-next-line no-control-regex
-const NAME_CONTROL = /[\u0000-\u001f\u007f]/
+const NAME_CONTROL = /[\u0000-\u001f\u007f-\u009f]/
 // eslint-disable-next-line no-control-regex
-const TEXT_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/
+const TEXT_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
 
 const length = (value: string) => [...value].length
 export const say = (code: string) => SAFE_TEXT[code] ?? "Check what you typed."

@@ -84,13 +84,29 @@ export type CriterionFields = {
   proof: string
 }
 
+/** A number as the box shows it: always decimal (`String` writes 1e-7), so the box reads it back the same. */
+function decimalText(n: number) {
+  const text = String(n)
+  const m = /^(-?)(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(text)
+  if (!m) return text
+  const [, sign, lead, rest = "", exp] = m
+  const digits = `${lead}${rest}`
+  // Where the point goes among the digits.
+  const point = 1 + Number(exp)
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`
+  const whole = digits.padEnd(point, "0")
+  return point < digits.length
+    ? `${sign}${whole.slice(0, point)}.${digits.slice(point)}`
+    : `${sign}${whole}`
+}
+
 export const criterionFields = (c?: CriterionOut): CriterionFields => ({
   description: c?.description ?? "",
   metric: c?.metric ?? "",
   comparator: c?.comparator ?? "at_least",
-  target: c ? String(c.target) : "",
+  target: c ? decimalText(c.target) : "",
   unit: c?.unit ?? "",
-  baseline: c?.baseline == null ? "" : String(c.baseline),
+  baseline: c?.baseline == null ? "" : decimalText(c.baseline),
   proof: c?.proof ?? "",
 })
 
@@ -100,12 +116,21 @@ export const MAX_PROOF = 500
 // eslint-disable-next-line no-control-regex
 const PROOF_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
 
-/** The number in a number box (the target, the baseline), or null when it is not a finite one. */
+/** A decimal number as a person types it: digits, a point, a sign. No `0x10`, `1e3` or `Infinity`. */
+const DECIMAL = /^[+-]?(\d+(\.\d*)?|\.\d+)$/
+
+/** The number in a number box (the target, the baseline), or null when it is not a decimal one. */
 export function targetOf(text: string): number | null {
   const v = text.trim()
-  if (!v) return null
+  if (!DECIMAL.test(v)) return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
+}
+
+/** Why a number box cannot be read, or null: a comma is said plainly, never read as something else. */
+export function numberProblem(text: string, code: "invalid_target" | "invalid_baseline") {
+  if (targetOf(text) !== null) return null
+  return text.includes(",") ? "Use a point for decimals, such as 1.5, and no commas." : say(code)
 }
 
 export function criterionProblem(f: CriterionFields) {
@@ -116,9 +141,9 @@ export function criterionProblem(f: CriterionFields) {
   const proof = f.proof.trim()
   return (
     checkName(f.metric, "invalid_metric", true) ??
-    (targetOf(f.target) === null ? say("invalid_target") : null) ??
+    numberProblem(f.target, "invalid_target") ??
     checkName(f.unit, "invalid_unit", false) ??
-    (f.baseline.trim() && targetOf(f.baseline) === null ? say("invalid_baseline") : null) ??
+    (f.baseline.trim() ? numberProblem(f.baseline, "invalid_baseline") : null) ??
     ([...proof].length > MAX_PROOF || PROOF_CONTROL.test(proof) ? say("invalid_proof") : null)
   )
 }

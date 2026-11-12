@@ -1222,13 +1222,16 @@ const TASK_FIELDS = [
 const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
 let taskCount = 0
 
-// A plain string of 1 to `max` characters, as the API's `Name` and `Text` types take it.
+// A plain string of 1 to `max` characters, as the API's `Name` and `Text` types take it (no control
+// character by Rust's `char::is_control`: C0, DEL and C1; text keeps newlines and tabs).
 const plain = (value: unknown, max: number, lines: boolean) =>
   typeof value === "string" &&
   [...value.trim()].length >= 1 &&
   [...value.trim()].length <= max &&
   // eslint-disable-next-line no-control-regex
-  !(lines ? /[\u0000-\u0008\u000b-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/).test(value.trim())
+  !(lines ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/ : /[\u0000-\u001f\u007f-\u009f]/).test(
+    value.trim(),
+  )
 
 /** `POST`, `PUT` and `DELETE` on a project's tasks, with the checks the API makes on a task. */
 async function taskRoutes(
@@ -1855,13 +1858,13 @@ async function makeSetup(b: SetupShape): Promise<Response | { company: string; p
  * bytes answers that setup with 200 and makes nothing new, and with other bytes is a 409.
  */
 async function setUp(request: Request) {
-  // Dev and test only: `globalThis.__fdeMockRefuseSetup = "invalid_target"` refuses the next setup with
-  // that 400 once, so a refused part can be seen (the forms catch it before it is sent).
+  // Dev and test only: `globalThis.__fdeMockRefuseSetup = "forbidden"` refuses the next setup once with
+  // that code: a 403 for `forbidden`, a 400 for any other (the forms catch those before they are sent).
   const g = globalThis as Record<string, unknown>
   const refused = g.__fdeMockRefuseSetup
   if (typeof refused === "string") {
     delete g.__fdeMockRefuseSetup
-    return refuse(400, refused)
+    return refuse(refused === "forbidden" ? 403 : 400, refused)
   }
   const key = request.headers.get("idempotency-key")
   if (key === null || !SETUP_KEY.test(key)) return refuse(400, "invalid_idempotency_key")

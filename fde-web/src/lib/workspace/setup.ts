@@ -37,21 +37,57 @@ export function setupBody(answers: Answers): SetupBody | null {
   }
 }
 
-/** One key for a retry: what the API's `Idempotency-Key` takes (1 to 128 of `A-Za-z0-9-_`). */
+/** A new key: what the API's `Idempotency-Key` takes (1 to 128 of `A-Za-z0-9-_`). */
 export const newKey = () => `setup-${crypto.randomUUID()}`
 
+/** Where this tab keeps the key of a setup that may have been made: not a secret, it binds only its caller. */
+const HELD = "fde.setup.key"
+// Without storage the key lasts as long as the page.
+let heldHere: string | null = null
+
 /**
- * The request to send: the same key and the same bytes as `earlier` when the body is identical (a
- * double click, or Try again), and a new key for a body that changed. The API hashes the raw bytes,
- * so the serialized body is kept and sent as it is, never rebuilt.
+ * The key a setup sent from this tab holds until the API answers it with a setup or a 409. A lost
+ * answer, a 5xx or a request the page gave up on leave it unknown whether the first send made a
+ * company, and a 400, 401 or 403 that follows says nothing about that first send: the API refuses
+ * those before it claims a key. So every later send, whatever its body, goes under the same key,
+ * even after the person changes an answer, leaves the review, or goes Back and Forward in the tab:
+ * the API answers 409 if the first one landed, and makes it if it did not. Never two companies.
  */
-export function prepare(
-  body: SetupBody,
-  earlier: SetupRequest | null,
-  key: () => string = newKey,
-): SetupRequest {
-  const json = JSON.stringify(body)
-  return earlier?.json === json ? earlier : { key: key(), body, json }
+export function heldKey(): string | null {
+  try {
+    const key = window.sessionStorage.getItem(HELD)
+    if (key && /^[A-Za-z0-9_-]{1,128}$/.test(key)) return key
+  } catch {
+    // Blocked storage: the page's own copy.
+  }
+  return heldHere
+}
+
+export function holdKey(key: string) {
+  heldHere = key
+  try {
+    window.sessionStorage.setItem(HELD, key)
+  } catch {
+    // Blocked storage: the page's own copy.
+  }
+}
+
+/** The API answered for this key: a setup, or a 409. The next setup takes a new key. */
+export function releaseKey() {
+  heldHere = null
+  try {
+    window.sessionStorage.removeItem(HELD)
+  } catch {
+    // Blocked storage: nothing kept there.
+  }
+}
+
+/**
+ * The request to send: the held key if there is one, else a new one, and the body's bytes, kept and
+ * sent as they are (the API hashes the raw bytes, so a retry must never serialize them again).
+ */
+export function prepare(body: SetupBody, key: () => string = newKey): SetupRequest {
+  return { key: heldKey() ?? key(), body, json: JSON.stringify(body) }
 }
 
 /** A part of the setup the review lists, and the step where it is changed. */
@@ -106,8 +142,16 @@ const SETUP_TEXT: Record<string, string> = {
 export type SetupProblem =
   /** One part is wrong: changing it makes a new body, and so a new key. */
   | { kind: "part"; part: Part; message: string }
-  /** Nothing is wrong with the answers: `retry` keeps the same key and bytes, `fresh` drops them. */
-  | { kind: "general"; message: string; key: "retry" | "fresh" }
+  /**
+   * Nothing is wrong with the answers. `retry`: sending the same again may work. `fresh`: it will not,
+   * as it stands (a 409, or a body the API could not read).
+   */
+  | { kind: "general"; message: string; retry: boolean }
+
+/** Whether this failure settles the held key: only a 409 says what the key already made. */
+export const settlesKey = (error: unknown) =>
+  error instanceof ApiError &&
+  (error.code === "rejected_idempotency_key_reused" || error.code === "invalid_idempotency_key")
 
 /** The part an `invalid_name` is about: the first name, in the API's order, that its rule refuses. */
 function namedPart(body: SetupBody): Part | null {
@@ -125,7 +169,7 @@ export function setupProblem(error: unknown, body: SetupBody): SetupProblem {
       kind: "general",
       message:
         "We could not reach the workspace, so it may or may not have been saved. Try again: it will not make a second company.",
-      key: "retry",
+      retry: true,
     }
   const { status, code } = error
   if (status === 400 && code.startsWith("invalid_")) {
@@ -135,7 +179,7 @@ export function setupProblem(error: unknown, body: SetupBody): SetupProblem {
     return {
       kind: "general",
       message: "The workspace could not read this setup. Nothing was saved. Try again.",
-      key: "fresh",
+      retry: false,
     }
   }
   if (status === 401)
@@ -143,27 +187,27 @@ export function setupProblem(error: unknown, body: SetupBody): SetupProblem {
       kind: "general",
       message:
         "You have been signed out. Sign in again in another tab, then try again here: your answers are kept.",
-      key: "retry",
+      retry: true,
     }
   if (status === 403)
     return {
       kind: "general",
       message:
         "You are not allowed to set up a company here. Ask an organisation admin, then try again.",
-      key: "retry",
+      retry: true,
     }
   if (status === 409)
     return {
       kind: "general",
       message:
-        "This setup was already sent with other answers, and nothing new was saved. Check your companies before you create it again.",
-      key: "fresh",
+        "An earlier try from this tab was saved, with other answers, so nothing new was made. Check your companies before you create it again.",
+      retry: false,
     }
   // The API was reached but could not finish: the same key is safe to send again.
   return {
     kind: "general",
     message:
       "The workspace could not save it just now. Try again: it will not make a second company.",
-    key: "retry",
+    retry: true,
   }
 }
