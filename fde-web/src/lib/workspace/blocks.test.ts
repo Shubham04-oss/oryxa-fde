@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { parseBlock, parseBlocks } from "./blocks"
+import { CompanyId, STAGES } from "@/lib/api/schemas"
+import { MAX_TEXT } from "@/lib/records"
 
 const suggestion = {
   type: "suggestion",
@@ -109,5 +111,28 @@ describe("blocks", () => {
   it("trims text and strips keys the schema does not know", () => {
     const parsed = parseBlock({ ...suggestion, title: "  Start  ", onClick: "alert(1)" })
     expect(parsed).toEqual({ ...suggestion, title: "Start" })
+  })
+})
+
+describe("the catalogue's own copies of the API's rules", () => {
+  // blocks.ts imports nothing but zod, so the assistant Worker can check blocks with the same file.
+  it("match the API's ids, stages and longest text", () => {
+    const step = (stage: string) =>
+      parseBlock({ type: "plan", steps: [{ id: "s", title: "Step", stage }] })
+    expect(STAGES.filter((s) => step(s) === null)).toEqual([])
+    expect(step("launch")).toBeNull()
+    for (const id of ["cmp_1", "a".repeat(128), "", "a".repeat(129), "cmp:1", "cmp/1"]) {
+      const go = {
+        type: "suggestion",
+        id: "s",
+        title: "Go",
+        approve: { label: "Go", to: { screen: "company", company: id } },
+      }
+      expect(parseBlock(go) !== null, id).toBe(CompanyId.safeParse(id).success)
+    }
+    const brief = (value: string) =>
+      parseBlock({ type: "brief", items: [{ label: "Summary", value }] })
+    expect(brief("x".repeat(MAX_TEXT))).not.toBeNull()
+    expect(brief("x".repeat(MAX_TEXT + 1))).toBeNull()
   })
 })

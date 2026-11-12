@@ -1,17 +1,40 @@
 import { z } from "zod"
-import { CompanyId, ProjectId, Stage } from "@/lib/api/schemas"
-import { MAX_TEXT } from "@/lib/records"
 
 // The workspace's building blocks (issue #209): the only things it may put on a screen. A screen
 // arranges and fills them; it never sends markup. Each block is checked here and a screen renders
 // only what passes: an unknown or malformed block is dropped, never guessed at. This is the seam a
-// model drives later, so everything in a block is untrusted text, shown as text.
+// model drives, so everything in a block is untrusted text, shown as text.
+//
+// The assistant Worker checks blocks with this same file before it sends one (issue #236):
+// `assistant/scripts/catalogue.mjs` copies it there, so it imports nothing but zod. The ids, stages
+// and limit below repeat the API's (`api/schemas.ts`, `records.ts`); blocks.test.ts fails if they drift.
+
+/** An id with the platform's rule, branded as `api/schemas.ts` brands it, so the two are one type. */
+const id = <TBrand extends string>() =>
+  z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,128}$/)
+    .brand<TBrand>()
+const CompanyId = id<"CompanyId">()
+const ProjectId = id<"ProjectId">()
+const Stage = z.enum([
+  "discover",
+  "scope",
+  "access",
+  "build",
+  "evaluate",
+  "deploy",
+  "handoff",
+  "operate",
+])
+/** The longest text a record field holds (`MAX_TEXT` in `records.ts`). */
+const MAX_TEXT = 4000
 
 /** At most `max` characters as a person counts them (code points), as the forms count them. */
-const atMost = (max: number) => (v: string) => [...v].length <= max
+export const atMost = (max: number) => (v: string) => [...v].length <= max
 
 /** One line of text a person reads: trimmed, not empty, no control characters, at most `max`. */
-const line = (max: number) =>
+export const line = (max: number) =>
   z
     .string()
     .trim()
@@ -21,7 +44,7 @@ const line = (max: number) =>
     .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "one line of plain text")
 
 /** Several lines are fine; other control characters are not. */
-const text = (max: number) =>
+export const text = (max: number) =>
   z
     .string()
     .trim()
@@ -31,7 +54,7 @@ const text = (max: number) =>
     .refine((v) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v), "plain text")
 
 /** An id a block gives one of its parts, so a screen can key and refer to it. */
-const PartId = z
+export const PartId = z
   .string()
   .min(1)
   .max(64)
