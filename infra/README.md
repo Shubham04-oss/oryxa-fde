@@ -1062,7 +1062,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
 | `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`, `oryxa-fde-mcp`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, then rolls the API service and then each deployed worker onto it (the tunnel sidecar included in the API's new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
-| `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID` |
+| `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
 apply (Apply order, step 3):
@@ -1077,6 +1077,7 @@ apply (Apply order, step 3):
   | `CLOUDFLARE_ZONE_ID` | `cloudflare_zone_id` from tfvars |
   | `WEB_HOSTNAME` | `tofu output -raw web_hostname` |
   | `API_VPC_SERVICE_ID` | `tofu output -raw api_vpc_service_id` |
+  | `WEB_OWN_SIGN_IN` | Optional. `1` builds fde-web with `VITE_FDE_OWN_SIGN_IN=1` (our own sign-in screens, ADR 0007); unset or any other value leaves them off |
 - **Environment secret** `CLOUDFLARE_API_TOKEN`, on `dev` only, never a repository secret: a token
   for this account and zone only, with Account: Workers Scripts Edit and Containers Edit (the
   gateway's sandbox image), and Zone: Workers Routes Edit. Not the OpenTofu token. Only the
@@ -1229,6 +1230,10 @@ Without the workflow, the same steps by hand: push an image, put its sha in
 `wrangler.jsonc` stays local-only: after `pnpm build`, the workflow adds dev's settings to the built
 config: the zone route `<WEB_HOSTNAME>/*` (OpenTofu owns that DNS record), the `API` binding to the
 Workers VPC service, and `workers_dev` and preview URLs off, so `<web_hostname>` is its only address.
+The web build's flags come from an explicit list of `dev` variables, one per flag: today only
+`WEB_OWN_SIGN_IN` to `VITE_FDE_OWN_SIGN_IN`, on only when the variable is exactly `1`. Nothing else is
+passed through, because every `VITE_` value is baked into the public bundle and must never be a secret. The
+job summary lists each flag and whether it is on. The mock-only `VITE_FDE_WORKSPACE` is not passed.
 Worker secrets are set by hand with `wrangler secret put` and are never in the workflow.
 
 **Teardown.**
