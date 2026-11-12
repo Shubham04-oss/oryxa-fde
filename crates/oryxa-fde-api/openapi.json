@@ -175,7 +175,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SignInStep"
+                  "$ref": "#/components/schemas/CodeRequested"
                 }
               }
             }
@@ -9281,6 +9281,25 @@
         },
         "additionalProperties": false
       },
+      "CodeRequested": {
+        "type": "object",
+        "description": "The one answer to asking for a sign-in code: `{\"next\":\"enter_code\"}`, whether or not the address\nhas an account. A type of its own, so no other route can claim it.",
+        "required": [
+          "next"
+        ],
+        "properties": {
+          "next": {
+            "$ref": "#/components/schemas/CodeRequestedNext"
+          }
+        }
+      },
+      "CodeRequestedNext": {
+        "type": "string",
+        "description": "If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.",
+        "enum": [
+          "enter_code"
+        ]
+      },
       "CodeSignInIn": {
         "type": "object",
         "required": [
@@ -10961,21 +10980,6 @@
                 "items": {
                   "$ref": "#/components/schemas/OrganisationOut"
                 }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.",
-            "required": [
-              "next"
-            ],
-            "properties": {
-              "next": {
-                "type": "string",
-                "enum": [
-                  "enter_code"
-                ]
               }
             }
           }

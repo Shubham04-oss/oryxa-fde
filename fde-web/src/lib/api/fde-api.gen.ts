@@ -1842,6 +1842,18 @@ export interface components {
         CodeRequestIn: {
             email: string;
         };
+        /**
+         * @description The one answer to asking for a sign-in code: `{"next":"enter_code"}`, whether or not the address
+         *     has an account. A type of its own, so no other route can claim it.
+         */
+        CodeRequested: {
+            next: components["schemas"]["CodeRequestedNext"];
+        };
+        /**
+         * @description If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.
+         * @enum {string}
+         */
+        CodeRequestedNext: "enter_code";
         CodeSignInIn: {
             /** @description The one-time code we emailed to the address. */
             code: string;
@@ -2354,9 +2366,6 @@ export interface components {
             /** @enum {string} */
             next: "choose_organisation";
             organisations: components["schemas"]["OrganisationOut"][];
-        } | {
-            /** @enum {string} */
-            next: "enter_code";
         };
         SignOffBody: {
             /** @description The person at the customer who signed off. */
@@ -2943,7 +2952,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SignInStep"];
+                    "application/json": components["schemas"]["CodeRequested"];
                 };
             };
             /** @description Bad Request */

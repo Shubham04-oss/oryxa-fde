@@ -232,7 +232,19 @@ pub enum SignInStep {
     VerifyEmail,
     /// Post one of these to `/auth/sign-in/organisation`.
     ChooseOrganisation { organisations: Vec<OrganisationOut> },
-    /// If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.
+}
+
+/// The one answer to asking for a sign-in code: `{"next":"enter_code"}`, whether or not the address
+/// has an account. A type of its own, so no other route can claim it.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct CodeRequested {
+    pub next: CodeRequestedNext,
+}
+
+/// If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeRequestedNext {
     EnterCode,
 }
 
@@ -333,7 +345,7 @@ fn code_of(raw: &str) -> Option<&str> {
 
 /// The answer to a request to email a code: `step` whether or not anything was sent, unless WorkOS
 /// is down. Whether a mail went out says whether the address has an account, so it is only logged.
-fn sent_answer(sent: Sent, step: SignInStep) -> Response {
+fn sent_answer<T: Serialize>(sent: Sent, answer: T) -> Response {
     match sent {
         Sent::Sent => tracing::info!("sign-in code sent"),
         Sent::NotSent(why) => tracing::info!(why = %why, "sign-in code not sent"),
@@ -342,7 +354,7 @@ fn sent_answer(sent: Sent, step: SignInStep) -> Response {
             return ApiError::Unavailable.into_response();
         }
     }
-    Json(step).into_response()
+    Json(answer).into_response()
 }
 
 /// The address's keyed hash, from its lowercased form.
@@ -584,7 +596,16 @@ pub(crate) async fn request_code(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8])
         return padded(start, e.into_response()).await;
     }
     let sent = ctx.sign_in.authkit().send_code(email.as_str(), &client).await;
-    padded(start, sent_answer(sent, SignInStep::EnterCode)).await
+    padded(
+        start,
+        sent_answer(
+            sent,
+            CodeRequested {
+                next: CodeRequestedNext::EnterCode,
+            },
+        ),
+    )
+    .await
 }
 
 pub(crate) async fn code_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
@@ -616,6 +637,7 @@ pub(crate) async fn code_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8])
         .sign_in_with_code(email.as_str(), code, &client)
         .await;
     // A wrong code and a code for an address with no account answer alike.
+    // This route needs no pending cookie, so clearing one on a refusal only drops a stale step.
     let resp = conclude(ctx, attempt, address, return_to, ApiError::InvalidCode, false).await;
     padded(start, resp).await
 }
@@ -691,7 +713,7 @@ pub(crate) async fn choose_organisation(State(app): State<Arc<App>>, headers: He
 /// a limit reached is 429 `too_many_attempts`, alike for every address.
 #[utoipa::path(post, operation_id = "sign_in_request_code", path = "/auth/sign-in/code", tag = "auth",
     security(()), request_body = CodeRequestIn,
-    responses((status = 200, body = SignInStep, description = "`enter_code`, whether or not a code was sent"),
+    responses((status = 200, body = CodeRequested, description = "`enter_code`, whether or not a code was sent"),
         (status = 400, body = ErrorBody), (status = 403, body = ErrorBody, description = "`csrf`"),
         (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
         (status = 503, body = ErrorBody)))]
