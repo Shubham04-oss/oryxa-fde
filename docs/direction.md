@@ -160,7 +160,7 @@ the FDE approves, changes or dismisses it.
 **Plan first, and adaptive.** A new company or project starts as a short brief built in
 conversation: what is being delivered, how the work will run, the rules for it, who to invite. From
 that the workspace proposes a plan as an ordered sequence of steps, and the FDE reorders and edits
-it. The sequence is theirs: the first step may be a call with the sponsor, not a task. The eight
+it. The sequence is theirs: the first step may be a call with the sponsor rather than build work. The eight
 stages stay as the backbone and the plan's steps hang off them, so the lifecycle is still managed
 (next step, stage checklists, handoff) however the FDE chose to begin.
 

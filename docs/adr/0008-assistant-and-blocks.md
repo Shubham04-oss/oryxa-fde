@@ -46,9 +46,10 @@ obey, and a generated screen can show something misleading.
 - **Proactive means it prepares, not that it acts.** Suggestions raised by an event are built by a
   worker from the event's ids and fixed templates. The worker calls no model and reads no content,
   so it needs no person's authority; any wording from the model is produced when a person opens the
-  suggestion, under that person's session and limits. Suggestions are shown to the people who may already see the records behind
-  them, checked through `oryxa-authz` when shown, and never to a customer role (ADR 0005). A
-  suggestion is a proposal like any other.
+  suggestion, under that person's session and limits. A suggestion belongs to the company its event
+  came from and opens in that company's conversation. Suggestions are shown to the people who may
+  already see the records behind them, checked through `oryxa-authz` when shown, and never to a
+  customer role (ADR 0005). A suggestion is a proposal like any other.
 - **Everything it reads is untrusted.** Documents, messages, signals and web content are passed to
   the model as data, marked as such, and never as instructions. Because that marking cannot be
   relied on alone, the rules above are the defence: no authority, a fixed set of actions, and a
@@ -57,7 +58,9 @@ obey, and a generated screen can show something misleading.
   the rules, the plan) is stored as that company's records, in AWS with the rest. Layout choices
   for a person are stored for that person. Conversation history is stored in Postgres in AWS as
   that company's data, readable by the person who held the conversation, under the company's key
-  once per-company keys exist. Context for one company is never put in a prompt for another.
+  once per-company keys exist. The home conversation's history is stored for that person and holds
+  only the list-level facts it may read. Context for one company is never put in a prompt for
+  another.
 - **Data and models.** The assistant runs behind the API. It sees sample data only until
   per-company keys exist (ADR 0003). Prompts and answers are never logged; logs carry ids.
   Which model serves it, and where prompts are processed, is a separate decision recorded before
@@ -68,7 +71,8 @@ obey, and a generated screen can show something misleading.
 - **It is measured.** `oryxa-fde-evals` holds suites for the assistant itself: that a setup
   conversation yields a valid plan with a way to prove each criterion, that blocks validate, that
   it proposes nothing outside the catalogue, that instructions planted in documents and
-  messages do not produce a proposal, and that nothing from one company appears in another's. A change of prompt or model runs these before it ships.
+  messages do not produce a proposal, and that nothing from one company appears in another's. A
+  change of prompt or model runs these before it ships.
 - **Limits.** Calls to the model are limited per person and per organisation, and a refusal says so
   plainly.
 
