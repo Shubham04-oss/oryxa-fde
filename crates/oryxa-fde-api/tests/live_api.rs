@@ -837,6 +837,9 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("POST", "/auth/sign-in/password"),
     ("POST", "/auth/sign-in/verify-email"),
     ("POST", "/auth/sign-in/organisation"),
+    ("POST", "/auth/sign-in/code"),
+    ("POST", "/auth/sign-in/code/verify"),
+    ("POST", "/auth/sign-in/verify-email/resend"),
     // The organisation's own: installs and workspace, under its admins or members.
     ("POST", "/v1/github/install"),
     ("GET", "/v1/github/installations"),
@@ -2288,9 +2291,12 @@ async fn every_documented_route_is_served() {
             "/auth/callback" => StatusCode::BAD_REQUEST,
             "/auth/logout" => StatusCode::NO_CONTENT,
             // Not from the web app's origin: refused before anything else.
-            "/auth/sign-in/password" | "/auth/sign-in/verify-email" | "/auth/sign-in/organisation" => {
-                StatusCode::FORBIDDEN
-            }
+            "/auth/sign-in/password"
+            | "/auth/sign-in/verify-email"
+            | "/auth/sign-in/organisation"
+            | "/auth/sign-in/code"
+            | "/auth/sign-in/code/verify"
+            | "/auth/sign-in/verify-email/resend" => StatusCode::FORBIDDEN,
             // Needs no sign-in, only a token, which `{}` lacks.
             "/v1/digest/unsubscribe" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::UNAUTHORIZED,
@@ -2638,6 +2644,95 @@ async fn a_password_sign_in_works_past_a_stale_session_and_is_limited_in_postgre
     for b in &rows {
         assert!(!b.contains('@') && !b.contains(&email) && !b.contains(&client), "{b}");
     }
+}
+
+/// A sign-in POST from the web app to `path`, as `client`.
+fn sign_in_post(path: &str, body: Value, client: &str, cookie: Option<&str>) -> Request<Body> {
+    let mut req = Request::post(path)
+        .header("origin", WEB)
+        .header("x-oryxa-request", "1")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", client)
+        .header("user-agent", "Browser/1.0");
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    req.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn an_emailed_code_signs_in_and_asking_for_codes_is_limited_per_address() {
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+    *w.authkit.who.lock().unwrap() = (Some(org.clone()), alice.id.clone(), "member".into());
+    let email = format!("{}@example.com", new_id("someone"));
+    let client = fresh_client();
+
+    // Three codes an address per window; the fourth is refused and sends nothing.
+    for _ in 0..3 {
+        let (status, _, body) = w
+            .send(sign_in_post(
+                "/auth/sign-in/code",
+                json!({ "email": email }),
+                &client,
+                None,
+            ))
+            .await;
+        assert_eq!((status, body), (StatusCode::OK, json!({ "next": "enter_code" })));
+    }
+    let sent = w.authkit.clients.lock().unwrap().len();
+    let (status, headers, body) = w
+        .send(sign_in_post(
+            "/auth/sign-in/code",
+            json!({ "email": email }),
+            &fresh_client(),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::TOO_MANY_REQUESTS, json!({ "error": "too_many_attempts" }))
+    );
+    assert!(headers.contains_key("retry-after"));
+    assert_eq!(w.authkit.clients.lock().unwrap().len(), sent, "nothing more was sent");
+
+    // The code signs in, whatever stale cookie the browser still has.
+    let stale = "__Host-fde_session=not-a-session-any-more";
+    let verify = |code: &str| {
+        sign_in_post(
+            "/auth/sign-in/code/verify",
+            json!({ "email": email, "code": code, "return_to": "/companies" }),
+            &client,
+            Some(stale),
+        )
+    };
+    let (status, _, body) = w.send(verify("999999")).await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::UNAUTHORIZED, json!({ "error": "invalid_code" }))
+    );
+    let (status, headers, body) = w.send(verify("000000")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "next": "done", "return_to": "/companies" }));
+    let session = set_cookie(&headers, "__Host-fde_session").unwrap();
+    let (status, _, me) = w.with_cookie(&session, "GET", "/v1/me", None, false).await;
+    assert_eq!((status, me["user"]["id"].clone()), (StatusCode::OK, json!(alice.id)));
+
+    // Resending a verification code needs a pending verification.
+    let (status, _, body) = w
+        .send(sign_in_post(
+            "/auth/sign-in/verify-email/resend",
+            json!({}),
+            &client,
+            None,
+        ))
+        .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::BAD_REQUEST, json!({ "error": "invalid_sign_in" }))
+    );
 }
 
 #[tokio::test]

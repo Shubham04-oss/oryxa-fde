@@ -104,8 +104,10 @@ pub struct Client {
 pub enum Attempt {
     SignedIn(Tokens),
     /// The address must be verified first: WorkOS has emailed a code, and `pending` continues.
+    /// `verification` names that code, for sending it again.
     VerifyEmail {
         pending: String,
+        verification: Option<String>,
     },
     /// The person belongs to several organisations: they choose one, and `pending` continues.
     ChooseOrganisation {
@@ -117,6 +119,17 @@ pub enum Attempt {
     /// A step our screens do not handle yet (MFA, SSO required, a Radar challenge): the code, for the log.
     Unsupported(String),
     /// WorkOS could not answer (timeout, 5xx, rate limited, our own credentials refused): why, for the log.
+    Unavailable(String),
+}
+
+/// What asking for a code to be emailed came to. Only an outage is told apart: whether a mail went
+/// out says whether the address has an account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sent {
+    Sent,
+    /// WorkOS sent nothing (no such account, its own per-address limit): why, for the log.
+    NotSent(String),
+    /// WorkOS could not answer: why, for the log.
     Unavailable(String),
 }
 
@@ -152,6 +165,39 @@ pub trait AuthKit: Send + Sync + 'static {
         organisation: &'a str,
         client: &'a Client,
     ) -> BoxFuture<'a, Attempt>;
+    /// Emails a one-time sign-in code to the address. The code itself never comes back here.
+    fn send_code<'a>(&'a self, email: &'a str, client: &'a Client) -> BoxFuture<'a, Sent>;
+    /// Signs in with an address and the one-time code emailed to it.
+    fn sign_in_with_code<'a>(&'a self, email: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt>;
+    /// Emails the code of a pending email verification again.
+    fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent>;
+}
+
+/// An id WorkOS gave us, checked before it goes back into a WorkOS path.
+fn workos_id(v: &str) -> Option<String> {
+    let ok = (1..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    ok.then(|| v.to_owned())
+}
+
+/// A failed send as [`Sent`]: an outage, or nothing sent for a reason the person must not learn.
+fn sent_from(e: &workos::Error) -> Sent {
+    let Some(a) = e.api() else {
+        return Sent::Unavailable("network or decode".into());
+    };
+    let code: String = a
+        .code
+        .as_deref()
+        .unwrap_or("none")
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || *c == '_')
+        .take(64)
+        .collect();
+    match (a.status, code.as_str()) {
+        (401, "invalid_client" | "unauthorized_client") | (500.., _) => {
+            Sent::Unavailable(format!("status {}, code {code}", a.status))
+        }
+        (status, _) => Sent::NotSent(format!("status {status}, code {code}")),
+    }
 }
 
 /// WorkOS answers that need a screen we do not have yet; each ends the sign-in with no session.
@@ -179,7 +225,13 @@ fn attempt_of(status: u16, body: &[u8]) -> Attempt {
         .filter(|t| !t.is_empty() && t.len() <= 4096)
         .map(str::to_owned);
     match (code, pending) {
-        (Some("email_verification_required"), Some(pending)) => return Attempt::VerifyEmail { pending },
+        (Some("email_verification_required"), Some(pending)) => {
+            let verification = v
+                .get("email_verification_id")
+                .and_then(|i| i.as_str())
+                .and_then(workos_id);
+            return Attempt::VerifyEmail { pending, verification };
+        }
         (Some("organization_selection_required"), Some(pending)) => {
             let organisations: Vec<(String, String)> = v
                 .get("organizations")
@@ -436,6 +488,55 @@ impl AuthKit for WorkOsAuthKit {
                     .authenticate_with_organization_selection(p)
                     .await,
             )
+        })
+    }
+
+    fn send_code<'a>(&'a self, email: &'a str, client: &'a Client) -> BoxFuture<'a, Sent> {
+        Box::pin(async move {
+            let body = workos::models::CreateMagicCodeAndReturn {
+                email: email.to_owned(),
+                invitation_token: None,
+                ip_address: client.ip.clone(),
+                user_agent: client.user_agent.clone(),
+                radar_auth_attempt_id: None,
+                signals_id: None,
+            };
+            // The answer holds the code itself: dropped unread.
+            match self
+                .0
+                .user_management()
+                .create_magic_auth(workos::user_management::CreateMagicAuthParams::new(body))
+                .await
+            {
+                Ok(_) => Sent::Sent,
+                Err(e) => sent_from(&e),
+            }
+        })
+    }
+
+    fn sign_in_with_code<'a>(&'a self, email: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt> {
+        Box::pin(async move {
+            let mut p = workos::user_management::AuthenticateWithMagicAuthParams::new(code, email);
+            p.ip_address = client.ip.clone();
+            p.user_agent = client.user_agent.clone();
+            attempt_from(self.0.user_management().authenticate_with_magic_auth(p).await)
+        })
+    }
+
+    fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent> {
+        Box::pin(async move {
+            // The verification names its user; its code is dropped unread.
+            let user = match self.0.user_management().get_email_verification(verification).await {
+                Ok(v) => v.user_id,
+                Err(e) => return sent_from(&e),
+            };
+            let Some(user) = workos_id(&user) else {
+                return Sent::NotSent("user id not valid".into());
+            };
+            match self.0.user_management().send_verification_email(&user).await {
+                Ok(_) => Sent::Sent,
+                Err(e) => sent_from(&e),
+            }
         })
     }
 }
@@ -1106,6 +1207,15 @@ mod tests {
         fn choose_organisation<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
             Box::pin(async { Attempt::Unavailable("unused".into()) })
         }
+        fn send_code<'a>(&'a self, _: &'a str, _: &'a Client) -> BoxFuture<'a, Sent> {
+            Box::pin(async { Sent::Unavailable("unused".into()) })
+        }
+        fn sign_in_with_code<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+        fn resend_verification<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Sent> {
+            Box::pin(async { Sent::Unavailable("unused".into()) })
+        }
     }
 
     fn kind(a: &Attempt) -> &'static str {
@@ -1154,10 +1264,16 @@ mod tests {
     fn pending_steps_keep_only_their_token_and_the_organisations_offered() {
         let body = r#"{"code":"email_verification_required","message":"verify","pending_authentication_token":"pt_1",
             "email":"someone@example.com","email_verification_id":"email_verification_1"}"#;
-        let Attempt::VerifyEmail { pending } = attempt_of(403, body.as_bytes()) else {
+        let Attempt::VerifyEmail { pending, verification } = attempt_of(403, body.as_bytes()) else {
             panic!("a verification step")
         };
         assert_eq!(pending, "pt_1");
+        assert_eq!(verification.as_deref(), Some("email_verification_1"));
+        let odd = r#"{"code":"email_verification_required","pending_authentication_token":"pt","email_verification_id":"../users/x"}"#;
+        let Attempt::VerifyEmail { verification, .. } = attempt_of(403, odd.as_bytes()) else {
+            panic!("a verification step")
+        };
+        assert_eq!(verification, None, "an id that could leave its WorkOS path is dropped");
 
         let body = r#"{"code":"organization_selection_required","pending_authentication_token":"pt_2",
             "organizations":[{"id":"org_01A","name":"Acme"},{"id":"bad id; drop","name":"x"},{"id":"org_01B","name":"Beta"}],

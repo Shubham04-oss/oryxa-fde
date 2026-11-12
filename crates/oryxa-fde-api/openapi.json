@@ -152,6 +152,164 @@
         ]
       }
     },
+    "/auth/sign-in/code": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Email a one-time sign-in code. The answer is the same whether or not the address has an account;\na limit reached is 429 `too_many_attempts`, alike for every address.",
+        "operationId": "sign_in_request_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeRequestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`enter_code`, whether or not a code was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeRequested"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/sign-in/code/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign in with the one-time code we emailed. A wrong code and an address with no account get the\nsame 401 `invalid_code`.",
+        "operationId": "sign_in_with_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeSignInIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`invalid_code`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`; `no_organisation`; `sign_in_unsupported`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/auth/sign-in/organisation": {
       "post": {
         "tags": [
@@ -370,6 +528,70 @@
           },
           "429": {
             "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/sign-in/verify-email/resend": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Email the code of a pending email verification again. The step stays as it is.",
+        "operationId": "sign_in_resend_verification",
+        "responses": {
+          "200": {
+            "description": "`verify_email`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_sign_in`: no pending verification (start again)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
             "content": {
               "application/json": {
                 "schema": {
@@ -9043,6 +9265,61 @@
           "organisation": {
             "type": "string",
             "description": "One of the organisations the last step offered."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodeRequestIn": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodeRequested": {
+        "type": "object",
+        "description": "The one answer to asking for a sign-in code: `{\"next\":\"enter_code\"}`, whether or not the address\nhas an account. A type of its own, so no other route can claim it.",
+        "required": [
+          "next"
+        ],
+        "properties": {
+          "next": {
+            "$ref": "#/components/schemas/CodeRequestedNext"
+          }
+        }
+      },
+      "CodeRequestedNext": {
+        "type": "string",
+        "description": "If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.",
+        "enum": [
+          "enter_code"
+        ]
+      },
+      "CodeSignInIn": {
+        "type": "object",
+        "required": [
+          "email",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The one-time code we emailed to the address."
+          },
+          "email": {
+            "type": "string"
+          },
+          "return_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to go once signed in: a path on the web app. Defaults to `/`."
           }
         },
         "additionalProperties": false

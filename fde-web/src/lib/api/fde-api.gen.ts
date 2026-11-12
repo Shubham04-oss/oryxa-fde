@@ -58,6 +58,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/sign-in/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Email a one-time sign-in code. The answer is the same whether or not the address has an account;
+         *     a limit reached is 429 `too_many_attempts`, alike for every address.
+         */
+        post: operations["sign_in_request_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/sign-in/code/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign in with the one-time code we emailed. A wrong code and an address with no account get the
+         *     same 401 `invalid_code`.
+         */
+        post: operations["sign_in_with_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/sign-in/organisation": {
         parameters: {
             query?: never;
@@ -107,6 +147,23 @@ export interface paths {
         put?: never;
         /** Continue a sign-in that waits on email verification, with the code we emailed. */
         post: operations["sign_in_verify_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/sign-in/verify-email/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Email the code of a pending email verification again. The step stays as it is. */
+        post: operations["sign_in_resend_verification"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1782,6 +1839,28 @@ export interface components {
             /** @description One of the organisations the last step offered. */
             organisation: string;
         };
+        CodeRequestIn: {
+            email: string;
+        };
+        /**
+         * @description The one answer to asking for a sign-in code: `{"next":"enter_code"}`, whether or not the address
+         *     has an account. A type of its own, so no other route can claim it.
+         */
+        CodeRequested: {
+            next: components["schemas"]["CodeRequestedNext"];
+        };
+        /**
+         * @description If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.
+         * @enum {string}
+         */
+        CodeRequestedNext: "enter_code";
+        CodeSignInIn: {
+            /** @description The one-time code we emailed to the address. */
+            code: string;
+            email: string;
+            /** @description Where to go once signed in: a path on the web app. Defaults to `/`. */
+            return_to?: string | null;
+        };
         CommentBody: {
             body: string;
         };
@@ -2854,6 +2933,135 @@ export interface operations {
             };
         };
     };
+    sign_in_request_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CodeRequestIn"];
+            };
+        };
+        responses: {
+            /** @description `enter_code`, whether or not a code was sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CodeRequested"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in_with_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CodeSignInIn"];
+            };
+        };
+        responses: {
+            /** @description Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `invalid_code` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf`; `no_organisation`; `sign_in_unsupported` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     sign_in_choose_organisation: {
         parameters: {
             query?: never;
@@ -3033,6 +3241,62 @@ export interface operations {
                 };
             };
             /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sign_in_resend_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description `verify_email` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description `invalid_sign_in`: no pending verification (start again) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
             429: {
                 headers: {
                     [name: string]: unknown;
