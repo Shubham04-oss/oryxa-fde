@@ -143,6 +143,7 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(projects::assign, projects::unassign))
         .routes(routes!(records::stakeholders, records::add_stakeholder))
         .routes(routes!(records::update_stakeholder, records::remove_stakeholder))
+        .routes(routes!(records::set_main_contact))
         .routes(routes!(records::systems, records::add_system))
         .routes(routes!(records::update_system, records::remove_system))
         .routes(routes!(records::project_stakeholders))

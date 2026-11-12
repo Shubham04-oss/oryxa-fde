@@ -1,11 +1,11 @@
 //! Projects and their assignees.
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, Stage};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope, Stage, TaskId};
 use oryxa_fde_events::{ProjectCreated, ProjectStageChanged};
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Postgres, Row, Transaction};
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 
 use crate::{
     Actor, Name, Reason, StoreError, Text, audit, audit_override, enqueue, id, name, opt, text, unique_violation,
@@ -20,6 +20,8 @@ pub struct Project {
     pub stage: Stage,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    /// The first task in order that is not done; `None` when every task is done or there are none.
+    pub next_step: Option<NextStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +53,44 @@ impl From<Project> for ProjectIn {
     }
 }
 
-pub(crate) const COLUMNS: &str = "project_id, company_id, name, summary, stage, created_at, updated_at";
+/// A project's own columns, and its next step: the first task in the project's order that is not
+/// done (ADR 0008: a plan step is a task), derived on every read, never stored.
+pub(crate) const COLUMNS: &str = "project_id, company_id, name, summary, stage, created_at, updated_at,
+     (select json_build_object('task', t.task_id, 'title', t.title, 'assignee', t.assignee, 'due_on', t.due_on)
+      from tasks t
+      where t.tenant_id = projects.tenant_id and t.company_id = projects.company_id
+        and t.project_id = projects.project_id and t.status <> 'done'
+      order by t.position, t.task_id limit 1) as next_step";
+
+/// The next step of a project: its first task, in order, that is not done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextStep {
+    pub task: TaskId,
+    pub title: Name,
+    pub assignee: Option<UserId>,
+    pub due_on: Option<Date>,
+}
+
+/// The `next_step` column as a [`NextStep`]; a field that does not read back is corrupt.
+fn next_step(raw: Option<serde_json::Value>) -> Result<Option<NextStep>, StoreError> {
+    let Some(v) = raw else { return Ok(None) };
+    let corrupt = || StoreError::Corrupt("next step");
+    let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+    let task = id("task id", TaskId::new, field("task").ok_or_else(corrupt)?.to_owned())?;
+    let title = name(field("title").ok_or_else(corrupt)?.to_owned(), "title")?;
+    let assignee = field("assignee")
+        .map(|a| id("user id", UserId::new, a.to_owned()))
+        .transpose()?;
+    let due_on = field("due_on")
+        .map(|d| Date::parse(d, time::macros::format_description!("[year]-[month]-[day]")).map_err(|_| corrupt()))
+        .transpose()?;
+    Ok(Some(NextStep {
+        task,
+        title,
+        assignee,
+        due_on,
+    }))
+}
 
 impl ProjectTx {
     pub(crate) fn new(tx: Transaction<'static, Postgres>, scope: ProjectScope) -> Self {
@@ -355,5 +394,44 @@ pub(crate) fn project(r: PgRow) -> Result<Project, StoreError> {
         stage: stage(r.try_get("stage")?)?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
+        next_step: next_step(r.try_get("next_step")?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_next_step_is_read_back_whole_or_refused() {
+        assert_eq!(next_step(None).unwrap(), None);
+        let step = next_step(Some(json!({
+            "task": "tsk_1", "title": "Call the sponsor", "assignee": "user_ada", "due_on": "2026-12-01"
+        })))
+        .unwrap()
+        .unwrap();
+        assert_eq!(step.task.as_str(), "tsk_1");
+        assert_eq!(step.title.as_str(), "Call the sponsor");
+        assert_eq!(step.assignee.map(|a| a.to_string()).as_deref(), Some("user_ada"));
+        assert_eq!(
+            step.due_on,
+            Date::from_calendar_date(2026, time::Month::December, 1).ok()
+        );
+        let bare = next_step(Some(
+            json!({ "task": "tsk_1", "title": "x", "assignee": null, "due_on": null }),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!((bare.assignee, bare.due_on), (None, None));
+        for bad in [
+            json!({ "title": "x" }),
+            json!({ "task": "a|b", "title": "x" }),
+            json!({ "task": "tsk_1" }),
+            json!({ "task": "tsk_1", "title": "x", "due_on": "1 December" }),
+            json!({ "task": "tsk_1", "title": "x", "assignee": "not a user" }),
+        ] {
+            assert!(next_step(Some(bad.clone())).is_err(), "{bad}");
+        }
+    }
 }

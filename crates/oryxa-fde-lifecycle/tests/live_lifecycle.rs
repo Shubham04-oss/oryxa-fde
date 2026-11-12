@@ -134,6 +134,7 @@ fn task_in(title: &str, status: TaskStatus, blocked_by: Option<&AccessRequestId>
         waiting_on: None,
         blocked_by: blocked_by.cloned(),
         criterion: None,
+        stage: None,
         place: None,
     }
 }

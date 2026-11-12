@@ -80,6 +80,16 @@ export const CompanyOut = z.object({
 })
 export type CompanyOut = z.infer<typeof CompanyOut>
 
+/** A project's next step: its first task in order that is not done (`next_step` on a project). */
+export const NextStepOut = z.object({
+  task: TaskId,
+  title: z.string(),
+  /** A WorkOS user id. */
+  assignee: UserId.nullish(),
+  due_on: day.nullish(),
+})
+export type NextStepOut = z.infer<typeof NextStepOut>
+
 export const ProjectOut = z.object({
   id: ProjectId,
   company: CompanyId,
@@ -88,6 +98,8 @@ export const ProjectOut = z.object({
   summary: optionalText,
   created_at: instant,
   updated_at: instant,
+  /** Null when every task is done or there are none. */
+  next_step: NextStepOut.nullish(),
 })
 export type ProjectOut = z.infer<typeof ProjectOut>
 
@@ -148,6 +160,8 @@ export const StakeholderOut = z.object({
   email: optionalText,
   /** When they unsubscribed from the weekly digest, if they did. */
   digest_unsubscribed_at: instant.nullish(),
+  /** The company's main contact; at most one stakeholder of a company is. */
+  main_contact: z.boolean().optional(),
   updated_at: instant,
   version: recordVersion,
 })
@@ -200,6 +214,10 @@ export const CriterionOut = z.object({
   comparator: z.enum(["at_least", "at_most"]),
   target: z.number(),
   unit: optionalText,
+  /** The value measured before the work, in the target's unit. */
+  baseline: z.number().nullish(),
+  /** How it will be proven; shown as text. */
+  proof: optionalText,
   updated_at: instant,
   version: recordVersion,
 })
@@ -260,6 +278,8 @@ export const TaskOut = z.object({
   blocked_by: AccessRequestId.nullish(),
   /** The success criterion it works towards. */
   criterion: CriterionId.nullish(),
+  /** The stage of the plan it belongs to. */
+  stage: Stage.nullish(),
   created_at: instant,
   updated_at: instant,
   version: recordVersion,
@@ -382,7 +402,13 @@ export const TodayItemOut = z.discriminatedUnion("kind", [
   }),
 ])
 export type TodayItem = z.infer<typeof TodayItemOut>
-export const TodayOut = z.object({ items: z.array(TodayItemOut) })
+export const TodayOut = z.object({
+  items: z.array(TodayItemOut),
+  /** Projects with no next step: every task is done, or there are none. */
+  projects_without_next_step: z
+    .array(z.object({ company: Named(CompanyId), project: Named(ProjectId) }))
+    .optional(),
+})
 
 // What the company and project screens read, gathered by `api` (client.ts) from the answers above.
 

@@ -15,9 +15,9 @@ use oryxa_fde_core::{
 };
 use oryxa_fde_events::AccessStatus;
 use oryxa_fde_store::{
-    AccessRequest, AccessRequestIn, ChecklistItem, Comparator, Criterion, CriterionIn, Decision, DecisionIn, ProjectTx,
-    Reason, Saved, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff, StoreError, Task, TaskIn,
-    TaskPlace, TaskStatus,
+    AccessRequest, AccessRequestIn, ChecklistItem, Comparator, Criterion, CriterionIn, CriterionProof, Decision,
+    DecisionIn, ProjectTx, Proof, Reason, Saved, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
+    StoreError, Task, TaskIn, TaskPlace, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -219,6 +219,13 @@ pub struct CriterionBody {
     pub target: f64,
     /// e.g. "%" or "s".
     pub unit: Option<String>,
+    /// The value measured before the work, in the target's unit. Left out on a `PUT`, it is cleared.
+    #[serde(default)]
+    pub baseline: Option<f64>,
+    /// How it will be proven, in a few words: an eval suite, an uploaded result. Up to 500
+    /// characters, shown as text. Left out on a `PUT`, it is cleared.
+    #[serde(default)]
+    pub proof: Option<String>,
     /// On a `PUT`, the `version` of the record this save was based on. If the record has moved on
     /// since, the answer is 409 `stale_version` with the record as it stands, and nothing changes.
     /// Left out, the save is not checked and the last writer wins. Not allowed on a create.
@@ -233,6 +240,10 @@ pub struct CriterionOut {
     pub comparator: TargetComparator,
     pub target: f64,
     pub unit: Option<String>,
+    /// The value measured before the work, in the target's unit.
+    pub baseline: Option<f64>,
+    /// How it will be proven.
+    pub proof: Option<String>,
     pub updated_at: String,
     /// Bumped by every change to the record; send it back as `version` on a `PUT`.
     // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
@@ -249,6 +260,8 @@ impl From<Criterion> for CriterionOut {
             comparator: c.comparator.into(),
             target: c.target,
             unit: c.unit.map(|u| u.as_str().to_owned()),
+            baseline: c.baseline,
+            proof: c.proof.map(|p| p.as_str().to_owned()),
             updated_at: ts(c.updated_at),
             version: c.version,
         }
@@ -427,6 +440,9 @@ pub struct TaskBody {
     #[schema(value_type = Option<String>)]
     #[serde(default)]
     pub after: Option<TaskId>,
+    /// The stage of the plan it belongs to. Left out on a `PUT`, it is cleared.
+    #[serde(default)]
+    pub stage: Option<ProjectStage>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -453,6 +469,8 @@ pub struct TaskOut {
     pub blocked_by: Option<String>,
     /// The success criterion it works towards.
     pub criterion: Option<String>,
+    /// The stage of the plan it belongs to.
+    pub stage: Option<ProjectStage>,
     pub created_at: String,
     pub updated_at: String,
     /// Bumped by every change to the record; send it back as `version` on a `PUT`.
@@ -477,6 +495,7 @@ impl From<Task> for TaskOut {
             waiting_since: t.waiting_since.map(ts),
             blocked_by: t.blocked_by.map(|a| a.to_string()),
             criterion: t.criterion.map(|c| c.to_string()),
+            stage: t.stage.map(Into::into),
             created_at: ts(t.created_at),
             updated_at: ts(t.updated_at),
             version: t.version,
@@ -532,17 +551,30 @@ impl ScopeItemBody {
 }
 
 impl CriterionBody {
-    fn parse(self) -> Result<CriterionIn, ApiError> {
+    fn parse(self) -> Result<(CriterionIn, CriterionProof), ApiError> {
         if !self.target.is_finite() {
             return Err(ApiError::Invalid("target"));
         }
-        Ok(CriterionIn {
-            description: text(self.description, "description")?,
-            metric: name(self.metric, "metric")?,
-            comparator: self.comparator.into(),
-            target: self.target,
-            unit: self.unit.map(|u| name(u, "unit")).transpose()?,
-        })
+        if self.baseline.is_some_and(|b| !b.is_finite()) {
+            return Err(ApiError::Invalid("baseline"));
+        }
+        let proof = self
+            .proof
+            .map(|p| Proof::new(p).map_err(|_| ApiError::Invalid("proof")))
+            .transpose()?;
+        Ok((
+            CriterionIn {
+                description: text(self.description, "description")?,
+                metric: name(self.metric, "metric")?,
+                comparator: self.comparator.into(),
+                target: self.target,
+                unit: self.unit.map(|u| name(u, "unit")).transpose()?,
+            },
+            CriterionProof {
+                baseline: self.baseline,
+                proof,
+            },
+        ))
     }
 }
 
@@ -577,6 +609,7 @@ impl TaskBody {
             waiting_on: self.waiting_on,
             blocked_by: self.blocked_by,
             criterion: self.criterion,
+            stage: self.stage.map(Into::into),
             place,
         })
     }
@@ -741,10 +774,10 @@ pub(crate) async fn add_criterion(
     Json(body): Json<CriterionBody>,
 ) -> Result<(StatusCode, Json<CriterionOut>), ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
-    let v = unversioned(body.version).and_then(|()| body.parse())?;
+    let (v, m) = unversioned(body.version).and_then(|()| body.parse())?;
     let id = new("crt", CriterionId::new)?;
     let added = tx
-        .add_criterion(&id, &v, &who.actor())
+        .add_criterion_with(&id, &v, &m, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
@@ -766,9 +799,9 @@ pub(crate) async fn update_criterion(
 ) -> Result<Response, ApiError> {
     let mut tx = project_tx(&app, &who, c, p).await?;
     let expected = body.version;
-    let v = body.parse()?;
+    let (v, m) = body.parse()?;
     let updated = tx
-        .update_criterion(&id, expected, &v, &who.actor())
+        .update_criterion(&id, expected, &v, &m, &who.actor())
         .await?
         .ok_or(ApiError::NotFound)?;
     tx.commit().await?;
@@ -1030,6 +1063,52 @@ pub(crate) async fn record_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_criterion_body_checks_its_baseline_and_proof() {
+        let body = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({ "description": "Answers are right", "metric": "accuracy",
+                "comparator": "at_least", "target": 90.0 });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<CriterionBody>(v).unwrap()
+        };
+        let (_, m) = body(serde_json::json!({ "baseline": 61.5, "proof": "Support eval suite" }))
+            .parse()
+            .unwrap();
+        assert_eq!(m.baseline, Some(61.5));
+        assert_eq!(m.proof.as_ref().map(Proof::as_str), Some("Support eval suite"));
+        let (_, m) = body(serde_json::json!({})).parse().unwrap();
+        assert_eq!(m, CriterionProof::default(), "both may be left out");
+        for (extra, code) in [
+            (serde_json::json!({ "proof": "" }), "invalid_proof"),
+            (serde_json::json!({ "proof": "x".repeat(501) }), "invalid_proof"),
+            (serde_json::json!({ "proof": "a\u{7}b" }), "invalid_proof"),
+        ] {
+            assert_eq!(body(extra.clone()).parse().unwrap_err().code(), code, "{extra}");
+        }
+        let mut infinite = body(serde_json::json!({}));
+        infinite.baseline = Some(f64::INFINITY);
+        assert_eq!(infinite.parse().unwrap_err().code(), "invalid_baseline");
+    }
+
+    #[test]
+    fn a_task_body_takes_one_of_the_eight_stages_or_none() {
+        let parse = |stage: serde_json::Value| {
+            serde_json::from_value::<TaskBody>(serde_json::json!({ "title": "Call", "status": "todo", "stage": stage }))
+        };
+        assert_eq!(
+            parse(serde_json::json!("build")).unwrap().parse().unwrap().stage,
+            Some(Stage::Build)
+        );
+        assert_eq!(parse(serde_json::Value::Null).unwrap().parse().unwrap().stage, None);
+        for bad in [
+            serde_json::json!("Build"),
+            serde_json::json!("nope"),
+            serde_json::json!(3),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn a_task_goes_before_or_after_one_task_at_most() {

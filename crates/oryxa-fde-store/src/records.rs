@@ -61,6 +61,8 @@ pub struct Stakeholder {
     pub email: Option<EmailAddress>,
     /// Unsubscribed from the digest, and when.
     pub digest_opt_out_at: Option<OffsetDateTime>,
+    /// The company's main contact; at most one stakeholder of a company is.
+    pub main_contact: bool,
     pub updated_at: OffsetDateTime,
     /// Bumped by every change to the stakeholder; a save names the version it read.
     pub version: u32,
@@ -107,7 +109,8 @@ pub struct SystemIn {
     pub description: Option<Text>,
 }
 
-const STAKEHOLDER: &str = "stakeholder_id, name, title, role, email, digest_opt_out_at, updated_at, version";
+const STAKEHOLDER: &str =
+    "stakeholder_id, name, title, role, email, digest_opt_out_at, main_contact, updated_at, version";
 const SYSTEM: &str = "system_id, name, kind, description, updated_at, version";
 
 impl CompanyTx {
@@ -147,6 +150,72 @@ impl CompanyTx {
         })?;
         let Some(row) = row else { return Ok(None) };
         audit(&mut self.tx, s, None, by, "stakeholder.added", Some(id.as_str())).await?;
+        stakeholder(row).map(Some)
+    }
+
+    /// Makes `id` the company's one main contact, or with `None` leaves it with none. Any other
+    /// stakeholder stops being it in the same transaction. The stakeholder as it now stands, or
+    /// `None` for no main contact; `StoreError::Missing("stakeholder")` if `id` is not one of the
+    /// company's.
+    pub async fn set_main_contact(
+        &mut self,
+        id: Option<&StakeholderId>,
+        by: &Actor,
+    ) -> Result<Option<Stakeholder>, StoreError> {
+        let s = &self.scope;
+        // Locks the company's stakeholders in one order, so two settings run one after the other.
+        sqlx::query(
+            "select 1 from stakeholders where tenant_id = $1 and company_id = $2 order by stakeholder_id for update",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .execute(&mut *self.tx)
+        .await?;
+        if let Some(id) = id {
+            let known: bool = sqlx::query_scalar(
+                "select exists (select 1 from stakeholders where tenant_id = $1 and company_id = $2 and stakeholder_id = $3)",
+            )
+            .bind(s.tenant.as_str())
+            .bind(s.company.as_str())
+            .bind(id.as_str())
+            .fetch_one(&mut *self.tx)
+            .await?;
+            if !known {
+                return Err(StoreError::Missing("stakeholder"));
+            }
+        }
+        // Only rows that change are updated, so no other stakeholder's version moves.
+        sqlx::query(
+            "update stakeholders set main_contact = false, updated_at = now()
+             where tenant_id = $1 and company_id = $2 and main_contact and stakeholder_id is distinct from $3",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.map(StakeholderId::as_str))
+        .execute(&mut *self.tx)
+        .await?;
+        let Some(id) = id else {
+            audit(&mut self.tx, s, None, by, "company.main_contact_cleared", None).await?;
+            return Ok(None);
+        };
+        sqlx::query(
+            "update stakeholders set main_contact = true, updated_at = now()
+             where tenant_id = $1 and company_id = $2 and stakeholder_id = $3 and not main_contact",
+        )
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .execute(&mut *self.tx)
+        .await?;
+        let row = sqlx::query(&format!(
+            "select {STAKEHOLDER} from stakeholders where tenant_id = $1 and company_id = $2 and stakeholder_id = $3"
+        ))
+        .bind(s.tenant.as_str())
+        .bind(s.company.as_str())
+        .bind(id.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        audit(&mut self.tx, s, None, by, "company.main_contact_set", Some(id.as_str())).await?;
         stakeholder(row).map(Some)
     }
 
@@ -471,6 +540,7 @@ fn stakeholder(r: PgRow) -> Result<Stakeholder, StoreError> {
             .map(|e| EmailAddress::new(e).map_err(|_| StoreError::Corrupt("email")))
             .transpose()?,
         digest_opt_out_at: r.try_get("digest_opt_out_at")?,
+        main_contact: r.try_get("main_contact")?,
         updated_at: r.try_get("updated_at")?,
         version: row_version(r.try_get("version")?)?,
     })
@@ -506,6 +576,7 @@ mod tests {
             role: v.role,
             email: v.email.clone(),
             digest_opt_out_at: Some(OffsetDateTime::UNIX_EPOCH),
+            main_contact: false,
             updated_at: OffsetDateTime::UNIX_EPOCH,
             version: 5,
         };

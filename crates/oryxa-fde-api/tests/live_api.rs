@@ -917,6 +917,11 @@ const TARGETED: &[(&str, &str, Option<&str>)] = &[
         Some(r#"{"name":"pwned"}"#),
     ),
     ("DELETE", "/v1/companies/{company}/stakeholders/{stakeholder}", None),
+    (
+        "PUT",
+        "/v1/companies/{company}/main-contact",
+        Some(r#"{"stakeholder":null}"#),
+    ),
     ("GET", "/v1/companies/{company}/systems", None),
     ("POST", "/v1/companies/{company}/systems", Some(r#"{"name":"pwned"}"#)),
     (
@@ -5602,4 +5607,178 @@ async fn a_stale_task_save_answers_stale_whatever_ids_it_names() {
         (status, resp["error"].as_str()),
         (StatusCode::BAD_REQUEST, Some("invalid_assignee"))
     );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_plan_step_is_a_task_with_a_stage_and_the_first_open_one_is_the_next_step() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    // A project of its own: the helper's project already has tasks.
+    let fresh = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("/v1/companies/{}/projects", t.company),
+            Some(json!({"name": "Plan"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let id = fresh["id"].as_str().unwrap().to_owned();
+    let project = format!("/v1/companies/{}/projects/{id}", t.company);
+    let tasks = format!("{project}/tasks");
+
+    // No tasks: no next step, and Today lists the project as having none.
+    let read = w.ok(&t.lead, "GET", &project, None, StatusCode::OK).await;
+    assert_eq!(read["next_step"], Value::Null);
+    let today = w.ok(&t.lead, "GET", "/v1/today", None, StatusCode::OK).await;
+    let without: Vec<&str> = today["projects_without_next_step"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["project"]["id"].as_str().unwrap())
+        .collect();
+    assert!(without.contains(&id.as_str()), "{today}");
+
+    let call = json!({"title": "Call the sponsor", "status": "done", "stage": "discover"});
+    w.ok(&t.lead, "POST", &tasks, Some(call), StatusCode::CREATED).await;
+    let vpn = json!({"title": "Get VPN access", "status": "todo", "stage": "access",
+        "assignee": t.engineer.id, "due_on": "2026-12-01"});
+    let vpn = w.ok(&t.lead, "POST", &tasks, Some(vpn), StatusCode::CREATED).await;
+    assert_eq!(vpn["stage"], "access");
+    let bad = json!({"title": "x", "status": "todo", "stage": "Build"});
+    assert_eq!(
+        w.status(&t.lead, "POST", &tasks, Some(bad)).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let read = w.ok(&t.lead, "GET", &project, None, StatusCode::OK).await;
+    assert_eq!(
+        read["next_step"],
+        json!({"task": vpn["id"], "title": "Get VPN access", "assignee": t.engineer.id, "due_on": "2026-12-01"}),
+        "the done task is skipped"
+    );
+    let today = w.ok(&t.lead, "GET", "/v1/today", None, StatusCode::OK).await;
+    assert!(
+        !today["projects_without_next_step"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["project"]["id"] == id.as_str()),
+        "{today}"
+    );
+
+    // A criterion carries its baseline and how it is proven.
+    let criteria = format!("{project}/scope/criteria");
+    let crit = json!({"description": "Answers are right", "metric": "accuracy", "comparator": "at_least",
+        "target": 90.0, "unit": "%", "baseline": 61.5, "proof": "The support eval suite"});
+    let crit = w.ok(&t.lead, "POST", &criteria, Some(crit), StatusCode::CREATED).await;
+    assert_eq!(
+        (crit["baseline"].clone(), crit["proof"].clone()),
+        (json!(61.5), json!("The support eval suite"))
+    );
+    let long = json!({"description": "d", "metric": "m", "comparator": "at_least", "target": 1.0,
+        "proof": "x".repeat(501)});
+    assert_eq!(
+        w.status(&t.lead, "POST", &criteria, Some(long)).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_company_names_one_main_contact_among_its_own_stakeholders() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let base = format!("/v1/companies/{}", t.company);
+    let add = |name: &str| Some(json!({"name": name, "role": "sponsor"}));
+    let a = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{base}/stakeholders"),
+            add("Sam"),
+            StatusCode::CREATED,
+        )
+        .await;
+    let b = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("{base}/stakeholders"),
+            add("Kim"),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(a["main_contact"], false);
+    let main = format!("{base}/main-contact");
+    let set = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &main,
+            Some(json!({"stakeholder": a["id"]})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(
+        (
+            set["stakeholder"]["id"].clone(),
+            set["stakeholder"]["main_contact"].clone()
+        ),
+        (a["id"].clone(), json!(true))
+    );
+    w.ok(
+        &t.lead,
+        "PUT",
+        &main,
+        Some(json!({"stakeholder": b["id"]})),
+        StatusCode::OK,
+    )
+    .await;
+    let list = w
+        .ok(&t.lead, "GET", &format!("{base}/stakeholders"), None, StatusCode::OK)
+        .await;
+    let mains: Vec<&Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["main_contact"] == true)
+        .collect();
+    assert_eq!(mains.len(), 1);
+    assert_eq!(mains[0]["id"], b["id"]);
+
+    // Another company's stakeholder is refused, and someone without the company is forbidden.
+    let other = company(&w, &org, "globex").await;
+    let theirs = w
+        .ok(
+            &other.lead,
+            "POST",
+            &format!("/v1/companies/{}/stakeholders", other.company),
+            add("Lee"),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(
+        w.status(&t.lead, "PUT", &main, Some(json!({"stakeholder": theirs["id"]})))
+            .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        w.status(&other.lead, "PUT", &main, Some(json!({"stakeholder": null})))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    let cleared = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &main,
+            Some(json!({"stakeholder": null})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(cleared, json!({"stakeholder": null}));
 }

@@ -37,6 +37,11 @@ pub enum TodayItem {
         company: Named<CompanyId>,
         project: Named<ProjectId>,
     },
+    /// A project with no next step: every task is done, or it has none (direction section 4).
+    NoNextStep {
+        company: Named<CompanyId>,
+        project: Named<ProjectId>,
+    },
 }
 
 /// A company with the caller's role in it and its projects.
@@ -134,8 +139,26 @@ impl Store {
         .bind(&pair_p)
         .fetch_all(&mut *tx)
         .await?;
+        let idle = sqlx::query(
+            "select p.company_id, p.project_id, c.name as company_name, p.name as project_name from projects p
+             join companies c on c.tenant_id = $1 and c.company_id = p.company_id
+             where p.tenant_id = $1
+               and (p.company_id, p.project_id) in (select * from unnest($2::text[], $3::text[]))
+               and not exists (select 1 from tasks t where t.tenant_id = $1 and t.company_id = p.company_id
+                   and t.project_id = p.project_id and t.status <> 'done')
+             order by p.created_at, p.project_id",
+        )
+        .bind(tenant.as_str())
+        .bind(&pair_c)
+        .bind(&pair_p)
+        .fetch_all(&mut *tx)
+        .await?;
         tx.commit().await?;
-        let mut items = Vec::with_capacity(tasks.len() + access.len());
+        let mut items = Vec::with_capacity(tasks.len() + access.len() + idle.len());
+        for r in idle {
+            let (company, project) = place(&r)?;
+            items.push(TodayItem::NoNextStep { company, project });
+        }
         for r in tasks {
             let (company, project) = place(&r)?;
             items.push(TodayItem::Task {

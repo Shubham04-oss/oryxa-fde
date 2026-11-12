@@ -375,6 +375,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/{company}/main-contact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Make one of the company's stakeholders its main contact, or none. The stakeholder who was it
+         *     before stops being it.
+         */
+        put: operations["set_main_contact"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}/meeting-notes": {
         parameters: {
             query?: never;
@@ -1670,7 +1690,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** What needs the caller across their projects: open tasks and unsettled access requests. */
+        /**
+         * What needs the caller across their projects: projects with no next step, open tasks and
+         *     unsettled access requests.
+         */
         get: operations["get_today"];
         put?: never;
         post?: never;
@@ -1920,10 +1943,20 @@ export interface components {
             role?: components["schemas"]["CallerRole"] | null;
         };
         CriterionBody: {
+            /**
+             * Format: double
+             * @description The value measured before the work, in the target's unit. Left out on a `PUT`, it is cleared.
+             */
+            baseline?: number | null;
             comparator: components["schemas"]["TargetComparator"];
             description: string;
             /** @description What is measured, e.g. "answer accuracy". */
             metric: string;
+            /**
+             * @description How it will be proven, in a few words: an eval suite, an uploaded result. Up to 500
+             *     characters, shown as text. Left out on a `PUT`, it is cleared.
+             */
+            proof?: string | null;
             /** Format: double */
             target: number;
             /** @description e.g. "%" or "s". */
@@ -1937,10 +1970,17 @@ export interface components {
             version?: number | null;
         };
         CriterionOut: {
+            /**
+             * Format: double
+             * @description The value measured before the work, in the target's unit.
+             */
+            baseline?: number | null;
             comparator: components["schemas"]["TargetComparator"];
             description: string;
             id: string;
             metric: string;
+            /** @description How it will be proven. */
+            proof?: string | null;
             /** Format: double */
             target: number;
             unit?: string | null;
@@ -2066,6 +2106,13 @@ export interface components {
             linked_by: string;
             shape: string;
         };
+        MainContactBody: {
+            /** @description The stakeholder of this company to make its main contact, or null for none. */
+            stakeholder?: string | null;
+        };
+        MainContactOut: {
+            stakeholder?: components["schemas"]["StakeholderOut"] | null;
+        };
         MeOut: {
             organisation: components["schemas"]["NamedOut"];
             /** @description The caller's WorkOS role in the organisation. */
@@ -2119,6 +2166,15 @@ export interface components {
             /** @description Shown once, never stored: the only way to redeem the link. */
             token: string;
         };
+        /** @description A project's next step: a task, with who works it and when it is due. */
+        NextStepOut: {
+            /** @description A WorkOS user id. */
+            assignee?: string | null;
+            /** @description `YYYY-MM-DD`. */
+            due_on?: string | null;
+            task: string;
+            title: string;
+        };
         /** @enum {string} */
         OrgRole: "admin" | "member";
         OrganisationOut: {
@@ -2162,6 +2218,7 @@ export interface components {
             created_at: string;
             id: string;
             name: string;
+            next_step?: components["schemas"]["NextStepOut"] | null;
             stage: components["schemas"]["ProjectStage"];
             summary?: string | null;
             updated_at: string;
@@ -2170,6 +2227,11 @@ export interface components {
         ProjectPatch: {
             name?: string | null;
             summary?: string | null;
+        };
+        /** @description A project, with its company. */
+        ProjectRefOut: {
+            company: components["schemas"]["NamedOut"];
+            project: components["schemas"]["NamedOut"];
         };
         /** @enum {string} */
         ProjectStage: "discover" | "scope" | "access" | "build" | "evaluate" | "deploy" | "handoff" | "operate";
@@ -2456,6 +2518,11 @@ export interface components {
             digest_unsubscribed_at?: string | null;
             email?: string | null;
             id: string;
+            /**
+             * @description The company's main contact; at most one stakeholder of a company is. Set with
+             *     `PUT /v1/companies/{company}/main-contact`.
+             */
+            main_contact?: boolean;
             name: string;
             role: components["schemas"]["StakeholderPart"];
             title?: string | null;
@@ -2505,10 +2572,17 @@ export interface components {
          */
         StaleBody_CriterionOut: {
             current: {
+                /**
+                 * Format: double
+                 * @description The value measured before the work, in the target's unit.
+                 */
+                baseline?: number | null;
                 comparator: components["schemas"]["TargetComparator"];
                 description: string;
                 id: string;
                 metric: string;
+                /** @description How it will be proven. */
+                proof?: string | null;
                 /** Format: double */
                 target: number;
                 unit?: string | null;
@@ -2572,6 +2646,11 @@ export interface components {
                 digest_unsubscribed_at?: string | null;
                 email?: string | null;
                 id: string;
+                /**
+                 * @description The company's main contact; at most one stakeholder of a company is. Set with
+                 *     `PUT /v1/companies/{company}/main-contact`.
+                 */
+                main_contact?: boolean;
                 name: string;
                 role: components["schemas"]["StakeholderPart"];
                 title?: string | null;
@@ -2621,6 +2700,7 @@ export interface components {
                 /** @description `YYYY-MM-DD`. */
                 due_on?: string | null;
                 id: string;
+                stage?: components["schemas"]["ProjectStage"] | null;
                 status: components["schemas"]["TaskState"];
                 title: string;
                 updated_at: string;
@@ -2700,6 +2780,7 @@ export interface components {
             criterion?: string | null;
             /** @description Due date, `YYYY-MM-DD`. */
             due_on?: string | null;
+            stage?: components["schemas"]["ProjectStage"] | null;
             status: components["schemas"]["TaskState"];
             title: string;
             /**
@@ -2723,6 +2804,7 @@ export interface components {
             /** @description `YYYY-MM-DD`. */
             due_on?: string | null;
             id: string;
+            stage?: components["schemas"]["ProjectStage"] | null;
             status: components["schemas"]["TaskState"];
             title: string;
             updated_at: string;
@@ -2781,6 +2863,11 @@ export interface components {
         };
         TodayOut: {
             items: components["schemas"]["TodayItemOut"][];
+            /**
+             * @description The caller's projects with no next step: every task is done, or there are none. An engagement
+             *     with no next step needs one, or is over (direction section 4).
+             */
+            projects_without_next_step?: components["schemas"]["ProjectRefOut"][];
         };
         UnsubscribeBody: {
             /** @description From the fragment of the link in a weekly digest. */
@@ -4009,6 +4096,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CompanyKeyOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_main_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Company id */
+                company: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MainContactBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MainContactOut"];
+                };
+            };
+            /** @description `invalid_stakeholder`: not one of this company's */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Forbidden */

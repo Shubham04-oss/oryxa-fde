@@ -92,6 +92,10 @@ pub struct Criterion {
     pub comparator: Comparator,
     pub target: f64,
     pub unit: Option<Name>,
+    /// The value measured before the work, in the target's unit.
+    pub baseline: Option<f64>,
+    /// How it will be proven: an eval suite, an uploaded result.
+    pub proof: Option<Proof>,
     pub updated_at: OffsetDateTime,
     /// The criterion's own version, bumped by every change to it; a save names the version it read.
     pub version: u32,
@@ -106,6 +110,10 @@ impl Criterion {
             && self.target == v.target
             && self.unit == v.unit
     }
+
+    fn holds_proof(&self, m: &CriterionProof) -> bool {
+        self.baseline == m.baseline && self.proof == m.proof
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +123,44 @@ pub struct CriterionIn {
     pub comparator: Comparator,
     pub target: f64,
     pub unit: Option<Name>,
+}
+
+/// A criterion's measured baseline and how it will be proven (direction sections 4 and 9). Kept
+/// apart from [`CriterionIn`] so a caller that sets neither need not name them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CriterionProof {
+    /// The value measured before the work, in the target's unit.
+    pub baseline: Option<f64>,
+    pub proof: Option<Proof>,
+}
+
+pub const MAX_PROOF_CHARS: usize = 500;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("a proof must be 1..={MAX_PROOF_CHARS} characters with no control characters but newlines and tabs")]
+pub struct ProofError;
+
+/// How a success criterion will be proven, in a few words. Customer text: it stays in Postgres and
+/// is shown as text, never as markup, so `Debug` shows only its length.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Proof(String);
+
+impl Proof {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ProofError> {
+        let v = value.as_ref().trim();
+        let chars = v.chars().count();
+        let ok = (1..=MAX_PROOF_CHARS).contains(&chars) && !v.chars().any(|c| c.is_control() && c != '\n' && c != '\t');
+        if ok { Ok(Self(v.to_owned())) } else { Err(ProofError) }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Proof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Proof({} chars)", self.0.chars().count())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +197,8 @@ pub struct ScopeChange {
 }
 
 const ITEM: &str = "item_id, kind, description, updated_at, version";
-const CRITERION: &str = "criterion_id, description, metric, comparator, target, unit, updated_at, version";
+const CRITERION: &str =
+    "criterion_id, description, metric, comparator, target, unit, baseline, proof, updated_at, version";
 
 impl ProjectTx {
     /// `None` if the project is not in this company.
@@ -303,15 +350,26 @@ impl ProjectTx {
         v: &CriterionIn,
         by: &Actor,
     ) -> Result<Option<Criterion>, StoreError> {
-        finite(v.target)?;
+        self.add_criterion_with(id, v, &CriterionProof::default(), by).await
+    }
+
+    /// [`Self::add_criterion`] with a baseline and how it will be proven.
+    pub async fn add_criterion_with(
+        &mut self,
+        id: &CriterionId,
+        v: &CriterionIn,
+        m: &CriterionProof,
+        by: &Actor,
+    ) -> Result<Option<Criterion>, StoreError> {
+        finite(v, m)?;
         let Some(version) = self.bump().await? else {
             return Ok(None);
         };
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "insert into criteria (tenant_id, company_id, project_id, criterion_id, description, metric, comparator,
-                 target, unit, created_by)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning {CRITERION}"
+                 target, unit, created_by, baseline, proof)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning {CRITERION}"
         ))
         .bind(&t)
         .bind(&c)
@@ -323,6 +381,8 @@ impl ProjectTx {
         .bind(v.target)
         .bind(v.unit.as_ref().map(Name::as_str))
         .bind(by.user.as_str())
+        .bind(m.baseline)
+        .bind(m.proof.as_ref().map(Proof::as_str))
         .fetch_one(&mut *self.tx)
         .await
         .map_err(|e| {
@@ -346,9 +406,10 @@ impl ProjectTx {
         id: &CriterionId,
         expected: Option<u32>,
         v: &CriterionIn,
+        m: &CriterionProof,
         by: &Actor,
     ) -> Result<Option<Saved<Criterion>>, StoreError> {
-        finite(v.target)?;
+        finite(v, m)?;
         let (t, c, p) = self.keys();
         // The row lock orders concurrent saves: the later one reads what the earlier one wrote.
         let row = sqlx::query(&format!(
@@ -366,12 +427,12 @@ impl ProjectTx {
         if stale(expected, current.version) {
             return Ok(Some(Saved::Stale(current)));
         }
-        if current.holds(v) {
+        if current.holds(v) && current.holds_proof(m) {
             return Ok(Some(Saved::Current(current)));
         }
         let row = sqlx::query(&format!(
             "update criteria set description = $5, metric = $6, comparator = $7, target = $8, unit = $9,
-                 updated_at = now()
+                 baseline = $10, proof = $11, updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and criterion_id = $4 returning {CRITERION}"
         ))
         .bind(&t)
@@ -383,6 +444,8 @@ impl ProjectTx {
         .bind(v.comparator.as_str())
         .bind(v.target)
         .bind(v.unit.as_ref().map(Name::as_str))
+        .bind(m.baseline)
+        .bind(m.proof.as_ref().map(Proof::as_str))
         .fetch_one(&mut *self.tx)
         .await?;
         let version = self.bump().await?.ok_or(StoreError::Corrupt("project"))?;
@@ -631,15 +694,20 @@ fn criterion_json(c: &Criterion) -> Value {
         "comparator": c.comparator.as_str(),
         "target": c.target,
         "unit": c.unit.as_ref().map(Name::as_str),
+        "baseline": c.baseline,
+        "proof": c.proof.as_ref().map(Proof::as_str),
     })
 }
 
-fn finite(target: f64) -> Result<(), StoreError> {
-    if target.is_finite() {
-        Ok(())
-    } else {
-        Err(StoreError::Rejected("target"))
+/// A target and a baseline are numbers, never NaN or infinite.
+fn finite(v: &CriterionIn, m: &CriterionProof) -> Result<(), StoreError> {
+    if !v.target.is_finite() {
+        return Err(StoreError::Rejected("target"));
     }
+    if m.baseline.is_some_and(|b| !b.is_finite()) {
+        return Err(StoreError::Rejected("baseline"));
+    }
+    Ok(())
 }
 
 fn version_of(v: i32) -> Result<u32, StoreError> {
@@ -664,6 +732,12 @@ fn criterion(r: PgRow) -> Result<Criterion, StoreError> {
         comparator: Comparator::parse(r.try_get("comparator")?)?,
         target: r.try_get("target")?,
         unit: opt(r.try_get("unit")?, "unit", name)?,
+        baseline: r.try_get("baseline")?,
+        proof: {
+            let raw: Option<String> = r.try_get("proof")?;
+            raw.map(|p| Proof::new(p).map_err(|_| StoreError::Corrupt("proof")))
+                .transpose()?
+        },
         updated_at: r.try_get("updated_at")?,
         version: row_version(r.try_get("version")?)?,
     })
@@ -672,6 +746,21 @@ fn criterion(r: PgRow) -> Result<Criterion, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proof_is_short_text_with_no_control_characters() {
+        assert_eq!(
+            Proof::new("  The support eval suite  ").unwrap().as_str(),
+            "The support eval suite"
+        );
+        assert!(Proof::new("line one\nline two").is_ok());
+        assert!(Proof::new("x".repeat(MAX_PROOF_CHARS)).is_ok());
+        for bad in ["", "   ", "a\u{7}b", "a\u{1b}[31mb"] {
+            assert!(Proof::new(bad).is_err(), "{bad:?}");
+        }
+        assert!(Proof::new("x".repeat(MAX_PROOF_CHARS + 1)).is_err());
+        assert_eq!(format!("{:?}", Proof::new("secret plan").unwrap()), "Proof(11 chars)");
+    }
 
     #[test]
     fn an_item_holds_a_save_only_when_kind_and_description_match() {
@@ -713,6 +802,8 @@ mod tests {
             comparator: v.comparator,
             target: v.target,
             unit: v.unit.clone(),
+            baseline: None,
+            proof: None,
             updated_at: OffsetDateTime::UNIX_EPOCH,
             version: 1,
         };
