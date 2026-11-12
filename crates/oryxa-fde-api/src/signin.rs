@@ -34,7 +34,8 @@ use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::session::{
-    Attempt, Client, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie, set_cookie,
+    Attempt, Client, Created, Reset, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie,
+    set_cookie,
 };
 use crate::{ApiError, App, BoxFuture, ErrorBody, VerifyToken};
 
@@ -44,13 +45,21 @@ pub const ORGANISATION_PATH: &str = "/auth/sign-in/organisation";
 pub const CODE_PATH: &str = "/auth/sign-in/code";
 pub const CODE_VERIFY_PATH: &str = "/auth/sign-in/code/verify";
 pub const RESEND_PATH: &str = "/auth/sign-in/verify-email/resend";
-const PATHS: [&str; 6] = [
+pub const INVITATION_PATH: &str = "/auth/invitation";
+pub const ACCEPT_PATH: &str = "/auth/invitation/accept";
+pub const FORGOT_PATH: &str = "/auth/password/forgot";
+pub const RESET_PATH: &str = "/auth/password/reset";
+const PATHS: [&str; 10] = [
     PASSWORD_PATH,
     VERIFY_EMAIL_PATH,
     ORGANISATION_PATH,
     CODE_PATH,
     CODE_VERIFY_PATH,
     RESEND_PATH,
+    INVITATION_PATH,
+    ACCEPT_PATH,
+    FORGOT_PATH,
+    RESET_PATH,
 ];
 
 /// Whether the session layer leaves `path` to its own checks.
@@ -118,6 +127,18 @@ pub(crate) const SEND_ADDRESS: Limit = Limit {
 };
 pub(crate) const SEND_CLIENT: Limit = Limit {
     kind: "send_client",
+    window: MINUTES_15,
+    limit: 10,
+};
+/// Invitations looked up or accepted from one client.
+pub(crate) const INVITE_CLIENT: Limit = Limit {
+    kind: "invite_client",
+    window: MINUTES_5,
+    limit: 30,
+};
+/// New passwords set with a reset token, from one client.
+pub(crate) const RESET_CLIENT: Limit = Limit {
+    kind: "reset_client",
     window: MINUTES_15,
     limit: 10,
 };
@@ -248,6 +269,81 @@ pub enum CodeRequestedNext {
     EnterCode,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InvitationIn {
+    /// The token from the invitation link.
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptInvitationIn {
+    /// The token from the invitation link.
+    pub token: String,
+    /// A new password, or the account's own when the address already has one.
+    #[schema(value_type = String, format = Password)]
+    pub password: Password,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    /// Where to go once signed in: a path on the web app. Defaults to `/`.
+    pub return_to: Option<String>,
+}
+
+/// An open invitation, for its screen. Only the link's holder learns it.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct InvitationOut {
+    /// The address it was sent to; the only one that can accept it.
+    pub email: String,
+    /// The organisation's name, when it could be read.
+    pub organisation: Option<String>,
+    /// The address has an account already: accepting takes its password, and names are ignored.
+    pub has_account: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForgotPasswordIn {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResetPasswordIn {
+    /// The token from the reset link.
+    pub token: String,
+    #[schema(value_type = String, format = Password)]
+    pub password: Password,
+}
+
+/// The one answer to a forgotten password: `{"next":"check_email"}`, whether or not the address
+/// has an account.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct ResetRequested {
+    pub next: ResetRequestedNext,
+}
+
+/// If the address has an account, a reset link is on its way.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetRequestedNext {
+    CheckEmail,
+}
+
+/// The answer to a new password set: `{"next":"sign_in"}`. WorkOS ends the account's sessions; the
+/// person signs in with the new password.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct PasswordChanged {
+    pub next: PasswordChangedNext,
+}
+
+/// Sign in with the new password.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordChangedNext {
+    SignIn,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Step {
@@ -305,11 +401,25 @@ fn hit(limit: Limit, key: Option<[u8; 32]>) -> Result<SignInHit, ApiError> {
     SignInHit::new(limit.kind, key.as_ref(), limit.window, limit.limit).map_err(|_| ApiError::Internal)
 }
 
+/// Whom a client's limits count: its IPv4 address, or the /64 of its IPv6 address, which one
+/// subscriber usually holds whole, so rotating within it does not get past them.
+fn client_bucket(ip: Option<&str>) -> String {
+    match ip.and_then(|i| i.parse::<std::net::IpAddr>().ok()) {
+        Some(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Some(ip) => ip.to_string(),
+        None => "unknown".into(),
+    }
+}
+
 /// Counts the attempt, before WorkOS is asked; refuses it over a limit or when it cannot be counted.
 async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits: &[Limit]) -> Result<(), ApiError> {
-    let client_key = ctx
-        .sign_in
-        .limit_hash("client", client.ip.as_deref().unwrap_or("unknown"));
+    let client_key = ctx.sign_in.limit_hash("client", &client_bucket(client.ip.as_deref()));
     // The ceiling counts only attempts their own limits let through, so one client cannot use it up.
     let ceiling = hit(CEILING, None)?;
     let mut hits = vec![];
@@ -335,6 +445,30 @@ async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits
     }
 }
 
+/// A token from a link (invitation, reset): opaque, so only its length and charset are checked.
+fn token_of(raw: &str) -> Option<&str> {
+    let ok = (1..=512).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    ok.then_some(raw)
+}
+
+/// A name as typed: trimmed, at most 100 characters, no control characters; empty is none.
+fn name_of(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if v.chars().count() > 100 || v.chars().any(char::is_control) {
+        return Err(ApiError::Invalid("name"));
+    }
+    Ok(Some(v.to_owned()))
+}
+
+fn password_ok(p: &Password) -> bool {
+    !p.0.is_empty() && p.0.len() <= MAX_PASSWORD_BYTES
+}
+
 /// An emailed code as typed: 1 to 16 ASCII letters or digits, spaces around it aside.
 fn code_of(raw: &str) -> Option<&str> {
     let code = raw.trim();
@@ -343,14 +477,14 @@ fn code_of(raw: &str) -> Option<&str> {
     ok.then_some(code)
 }
 
-/// The answer to a request to email a code: `step` whether or not anything was sent, unless WorkOS
+/// The answer to a request to email a code or a link: `answer` whether or not anything was sent, unless WorkOS
 /// is down. Whether a mail went out says whether the address has an account, so it is only logged.
 fn sent_answer<T: Serialize>(sent: Sent, answer: T) -> Response {
     match sent {
-        Sent::Sent => tracing::info!("sign-in code sent"),
-        Sent::NotSent(why) => tracing::info!(why = %why, "sign-in code not sent"),
+        Sent::Sent => tracing::info!("sign-in mail sent"),
+        Sent::NotSent(why) => tracing::info!(why = %why, "sign-in mail not sent"),
         Sent::Unavailable(why) => {
-            tracing::warn!(error = %why, "workos could not send a sign-in code");
+            tracing::warn!(error = %why, "workos could not send a sign-in mail");
             return ApiError::Unavailable.into_response();
         }
     }
@@ -661,6 +795,205 @@ pub(crate) async fn resend_verification(ctx: &Ctx<'_>, headers: &HeaderMap) -> R
     padded(start, sent_answer(sent, SignInStep::VerifyEmail)).await
 }
 
+/// The open invitation `token` names, and its address; an unknown, spent or revoked one is refused.
+async fn open_invitation(ctx: &Ctx<'_>, token: &str) -> Result<(EmailAddress, Option<String>), ApiError> {
+    match ctx.sign_in.authkit().invitation(token).await {
+        Ok(Some(i)) if i.pending => {
+            let email = EmailAddress::new(&i.email).map_err(|_| ApiError::Invalid("invitation"))?;
+            Ok((email, i.organisation))
+        }
+        Ok(_) => {
+            tracing::info!("invitation refused: none open for that token");
+            Err(ApiError::Invalid("invitation"))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "workos could not read an invitation");
+            Err(ApiError::Unavailable)
+        }
+    }
+}
+
+pub(crate) async fn look_up_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: InvitationIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Some(token) = token_of(&input.token) else {
+        return refuse(ApiError::Invalid("invitation"));
+    };
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, None, &[INVITE_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let answer = async {
+        let (email, organisation) = open_invitation(ctx, token).await?;
+        let has_account = ctx.sign_in.authkit().has_account(email.as_str()).await.map_err(|e| {
+            tracing::warn!(error = %e, "workos could not look up an account");
+            ApiError::Unavailable
+        })?;
+        let organisation = match organisation {
+            Some(o) => ctx.sign_in.authkit().organisation_name(&o).await.ok(),
+            None => None,
+        };
+        Ok::<_, ApiError>(InvitationOut {
+            email: email.as_str().to_owned(),
+            organisation,
+            has_account,
+        })
+    };
+    let resp = match answer.await {
+        Ok(out) => Json(out).into_response(),
+        Err(e) => e.into_response(),
+    };
+    padded(start, resp).await
+}
+
+pub(crate) async fn accept_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: AcceptInvitationIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Some(token) = token_of(&input.token) else {
+        return refuse(ApiError::Invalid("invitation"));
+    };
+    if !password_ok(&input.password) {
+        return refuse(ApiError::Invalid("password"));
+    }
+    let (first, last) = match (
+        name_of(input.first_name.as_deref()),
+        name_of(input.last_name.as_deref()),
+    ) {
+        (Ok(f), Ok(l)) => (f, l),
+        (Err(e), _) | (_, Err(e)) => return refuse(e),
+    };
+    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+        return refuse(ApiError::Invalid("return_to"));
+    };
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, None, &[INVITE_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    // The address is the invitation's own, never one the request names.
+    let email = match open_invitation(ctx, token).await {
+        Ok((email, _)) => email,
+        Err(e) => return padded(start, e.into_response()).await,
+    };
+    let address = address_key(ctx.sign_in, &email);
+    if let Err(e) = count(ctx, &client, Some(address), &[PASSWORD_ADDRESS]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let kit = ctx.sign_in.authkit();
+    let exists = match kit.has_account(email.as_str()).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            tracing::warn!(error = %e, "workos could not look up an account");
+            return padded(start, ApiError::Unavailable.into_response()).await;
+        }
+    };
+    if !exists {
+        let refused = match kit
+            .create_account(
+                email.as_str(),
+                &input.password.0,
+                (first.as_deref(), last.as_deref()),
+                &client,
+            )
+            .await
+        {
+            Created::Created | Created::Exists => None,
+            Created::WeakPassword => Some(ApiError::NeedsAction("weak_password")),
+            Created::Refused(why) => {
+                tracing::info!(why = %why, "account for an invitation refused");
+                Some(ApiError::Invalid("invitation"))
+            }
+            Created::Unavailable(why) => {
+                tracing::warn!(error = %why, "workos could not create an account");
+                Some(ApiError::Unavailable)
+            }
+        };
+        if let Some(e) = refused {
+            return padded(start, e.into_response()).await;
+        }
+    }
+    let attempt = kit
+        .accept_with_password(email.as_str(), &input.password.0, token, &client)
+        .await;
+    let resp = conclude(ctx, attempt, address, return_to, ApiError::InvalidCredentials, false).await;
+    padded(start, resp).await
+}
+
+pub(crate) async fn forgot_password(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: ForgotPasswordIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Ok(email) = EmailAddress::new(&input.email) else {
+        return refuse(ApiError::Invalid("email"));
+    };
+    let client = client_of(headers);
+    let address = address_key(ctx.sign_in, &email);
+    if let Err(e) = count(ctx, &client, Some(address), &[SEND_ADDRESS, SEND_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let sent = ctx.sign_in.authkit().send_password_reset(email.as_str()).await;
+    let answer = ResetRequested {
+        next: ResetRequestedNext::CheckEmail,
+    };
+    padded(start, sent_answer(sent, answer)).await
+}
+
+pub(crate) async fn reset_password(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: ResetPasswordIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Some(token) = token_of(&input.token) else {
+        return refuse(ApiError::Invalid("reset_token"));
+    };
+    if !password_ok(&input.password) {
+        return refuse(ApiError::Invalid("password"));
+    }
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, None, &[RESET_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let resp = match ctx.sign_in.authkit().reset_password(token, &input.password.0).await {
+        Reset::Done => {
+            tracing::info!("password reset");
+            Json(PasswordChanged {
+                next: PasswordChangedNext::SignIn,
+            })
+            .into_response()
+        }
+        Reset::WeakPassword => ApiError::NeedsAction("weak_password").into_response(),
+        Reset::Refused(why) => {
+            tracing::info!(why = %why, "password reset refused");
+            ApiError::Invalid("reset_token").into_response()
+        }
+        Reset::Unavailable(why) => {
+            tracing::warn!(error = %why, "workos could not reset a password");
+            ApiError::Unavailable.into_response()
+        }
+    };
+    padded(start, resp).await
+}
+
 /// Sign in with an email address and password. A wrong password and an unknown address get the
 /// same 401 `invalid_credentials`; a limit reached gets 429 `too_many_attempts` with `Retry-After`,
 /// alike for every address.
@@ -756,6 +1089,72 @@ pub(crate) async fn resend(State(app): State<Arc<App>>, headers: HeaderMap) -> R
     }
 }
 
+/// The invitation a link's token names: its address, organisation and whether the address has an
+/// account, for the accept screen. A token that names no open invitation is 400 `invalid_invitation`.
+#[utoipa::path(post, operation_id = "look_up_invitation", path = "/auth/invitation", tag = "auth",
+    security(()), request_body = InvitationIn,
+    responses((status = 200, body = InvitationOut),
+        (status = 400, body = ErrorBody, description = "`invalid_invitation`: unknown, accepted, expired or revoked"),
+        (status = 403, body = ErrorBody, description = "`csrf`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn invitation(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => look_up_invitation(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Accept an invitation and sign in. The address is the invitation's own: a new account gets this
+/// password and name, and an existing one signs in with its own password.
+#[utoipa::path(post, operation_id = "accept_invitation", path = "/auth/invitation/accept", tag = "auth",
+    security(()), request_body = AcceptInvitationIn,
+    responses((status = 200, body = SignInStep, description = "Signed in (`done`, with the session cookie), or the \
+        next step, with a short-lived pending cookie"),
+        (status = 400, body = ErrorBody, description = "`invalid_invitation`; `weak_password`: the password does \
+            not meet the policy; `invalid_password`, `invalid_name`, `invalid_return_to`, `invalid_body`"),
+        (status = 401, body = ErrorBody, description = "`invalid_credentials`: the existing account's password is wrong"),
+        (status = 403, body = ErrorBody, description = "`csrf`; `no_organisation`; `sign_in_unsupported`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn accept(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => accept_invitation(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Email a password reset link. The answer is the same whether or not the address has an account.
+#[utoipa::path(post, operation_id = "forgot_password", path = "/auth/password/forgot", tag = "auth",
+    security(()), request_body = ForgotPasswordIn,
+    responses((status = 200, body = ResetRequested, description = "`check_email`, whether or not a link was sent"),
+        (status = 400, body = ErrorBody), (status = 403, body = ErrorBody, description = "`csrf`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn forgot(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => forgot_password(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Set a new password with the token from a reset link. It signs nobody in: the account's sessions
+/// end, and the person signs in with the new password.
+#[utoipa::path(post, operation_id = "reset_password", path = "/auth/password/reset", tag = "auth",
+    security(()), request_body = ResetPasswordIn,
+    responses((status = 200, body = PasswordChanged, description = "`sign_in`"),
+        (status = 400, body = ErrorBody, description = "`invalid_reset_token`: wrong, spent or expired; \
+            `weak_password`; `invalid_password`"),
+        (status = 403, body = ErrorBody, description = "`csrf`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn reset(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => reset_password(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -767,11 +1166,13 @@ mod tests {
 
     use super::*;
     use crate::Person;
-    use crate::session::{AuthKit, RefreshError, SESSION_COOKIE, Tokens, session_of};
+    use crate::session::{AuthKit, Invitation, RefreshError, SESSION_COOKIE, Tokens, session_of};
 
     const WEB: &str = "https://fde.test";
     const KNOWN: &str = "Known.Person@Example.com";
     const PASSWORD: &str = "correct horse battery staple";
+    /// Invited, with no account yet.
+    const INVITED: &str = "new.person@example.com";
 
     /// Tokens are `tok|user|organisation|session`; an empty organisation is none.
     struct Verifier;
@@ -924,6 +1325,91 @@ mod tests {
                     .unwrap()
                     .push((format!("resend {verification}"), Client::default()));
                 Sent::Sent
+            })
+        }
+        fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((format!("invitation {token}"), Client::default()));
+                let open = |email: &str, pending| {
+                    Some(Invitation {
+                        email: email.into(),
+                        organisation: Some("org_01A".into()),
+                        pending,
+                    })
+                };
+                Ok(match token {
+                    "inv_new" => open(INVITED, true),
+                    "inv_known" => open(KNOWN, true),
+                    "inv_spent" => open(INVITED, false),
+                    "inv_down" => return Err("status 503".into()),
+                    _ => None,
+                })
+            })
+        }
+        fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+            Box::pin(async move { Ok(email == KNOWN) })
+        }
+        fn create_account<'a>(
+            &'a self,
+            email: &'a str,
+            password: &'a str,
+            name: (Option<&'a str>, Option<&'a str>),
+            client: &'a Client,
+        ) -> BoxFuture<'a, Created> {
+            Box::pin(async move {
+                let call = format!("create {email} {:?} {:?}", name.0, name.1);
+                self.calls.lock().unwrap().push((call, client.clone()));
+                if password == "weak" {
+                    Created::WeakPassword
+                } else {
+                    Created::Created
+                }
+            })
+        }
+        fn accept_with_password<'a>(
+            &'a self,
+            email: &'a str,
+            password: &'a str,
+            invitation: &'a str,
+            client: &'a Client,
+        ) -> BoxFuture<'a, Attempt> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((format!("accept {email} {invitation}"), client.clone()));
+                match (email, password) {
+                    (KNOWN, PASSWORD) => signed_in("user_1", "org_01A"),
+                    (INVITED, _) => signed_in("user_new", "org_01A"),
+                    _ => Attempt::Refused,
+                }
+            })
+        }
+        fn send_password_reset<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Sent> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(("reset link".into(), Client::default()));
+                if email == KNOWN {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    return self.on_send.lock().unwrap().clone();
+                }
+                Sent::NotSent("status 404, code user_not_found".into())
+            })
+        }
+        fn reset_password<'a>(&'a self, token: &'a str, password: &'a str) -> BoxFuture<'a, Reset> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("reset".into(), Client::default()));
+                match (token, password) {
+                    (_, "weak") => Reset::WeakPassword,
+                    ("reset_ok", _) => Reset::Done,
+                    ("reset_down", _) => Reset::Unavailable("status 503".into()),
+                    _ => Reset::Refused("status 400, code invalid_token".into()),
+                }
             })
         }
     }
@@ -1170,6 +1656,10 @@ mod tests {
                 request_code(&w.ctx(), &h, br#"{"email":"known@example.com"}"#).await,
                 code_sign_in(&w.ctx(), &h, br#"{"email":"known@example.com","code":"123456"}"#).await,
                 resend_verification(&w.ctx(), &h).await,
+                look_up_invitation(&w.ctx(), &h, br#"{"token":"inv_new"}"#).await,
+                accept_invitation(&w.ctx(), &h, br#"{"token":"inv_new","password":"x"}"#).await,
+                forgot_password(&w.ctx(), &h, br#"{"email":"known@example.com"}"#).await,
+                reset_password(&w.ctx(), &h, br#"{"token":"reset_ok","password":"x"}"#).await,
             ] {
                 let a = read(resp).await;
                 assert_eq!(
@@ -1414,8 +1904,17 @@ mod tests {
             let ctx = w.ctx();
             let flow = async {
                 let mut answers = vec![];
+                for token in ["inv_new", "inv_known", "inv_spent"] {
+                    let body = format!(r#"{{"token":"{token}","password":"{PASSWORD}","first_name":"Ada"}}"#);
+                    answers.push(read(accept_invitation(&ctx, &headers(&[]), body.as_bytes()).await).await);
+                }
+                for token in ["reset_ok", "reset_bad"] {
+                    let body = format!(r#"{{"token":"{token}","password":"{PASSWORD}"}}"#);
+                    answers.push(read(reset_password(&ctx, &headers(&[]), body.as_bytes()).await).await);
+                }
                 for email in [KNOWN, "nobody@example.com"] {
                     let body = format!(r#"{{"email":"{email}"}}"#);
+                    answers.push(read(forgot_password(&ctx, &headers(&[]), body.as_bytes()).await).await);
                     answers.push(read(request_code(&ctx, &headers(&[]), body.as_bytes()).await).await);
                     let body = format!(r#"{{"email":"{email}","code":"123456"}}"#);
                     answers.push(read(code_sign_in(&ctx, &headers(&[]), body.as_bytes()).await).await);
@@ -1452,6 +1951,10 @@ mod tests {
             "pt_choose",
             "123456",
             "email_verification_1",
+            "inv_new",
+            "inv_known",
+            "reset_ok",
+            "reset_bad",
         ] {
             assert!(
                 !log.to_lowercase().contains(&secret.to_lowercase()),
@@ -1644,6 +2147,238 @@ mod tests {
         let a = read(resend_verification(&w.ctx(), &headers(&[&pending_cookie(&a)])).await).await;
         assert_eq!(a.body, r#"{"next":"verify_email"}"#);
         assert!(!w.kit.calls.lock().unwrap().iter().any(|(c, _)| c.starts_with("resend")));
+    }
+
+    fn token_body(token: &str) -> Vec<u8> {
+        serde_json::json!({ "token": token }).to_string().into_bytes()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_invitation_is_looked_up_by_its_token_and_only_an_open_one_is_shown() {
+        let w = World::new(Attempt::Refused);
+        let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body("inv_new")).await).await;
+        assert_eq!(a.status, StatusCode::OK, "{}", a.body);
+        // The fake cannot name organisations, so the name is left out rather than failing.
+        assert_eq!(
+            a.body,
+            r#"{"email":"new.person@example.com","organisation":null,"has_account":false}"#
+        );
+        assert!(a.cookies.is_empty());
+        let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body("inv_known")).await).await;
+        assert!(a.body.contains(r#""has_account":true"#), "{}", a.body);
+
+        for token in ["inv_spent", "inv_unknown", "has space", "../x?y", ""] {
+            let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body(token)).await).await;
+            assert_eq!(
+                (a.status, a.body.as_str()),
+                (StatusCode::BAD_REQUEST, r#"{"error":"invalid_invitation"}"#),
+                "{token:?}"
+            );
+        }
+        let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body("inv_down")).await).await;
+        assert_eq!(a.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !w.kit
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(c, _)| c.contains("has space") || c.contains("../"))
+        );
+
+        let seen = w.limits.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().all(|b| b.iter().any(|x| x.starts_with("invite_client:"))),
+            "{seen:?}"
+        );
+        *w.limits.answer.lock().unwrap() = Ok(Some(Duration::from_secs(30)));
+        let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body("inv_new")).await).await;
+        assert_eq!(a.status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_invitation_is_accepted_only_at_its_own_address() {
+        let w = World::new(Attempt::Refused);
+        let accept = |token: &str, password: &str| {
+            serde_json::json!({ "token": token, "password": password, "first_name": " Ada ", "last_name": "Lovelace",
+                "return_to": "/companies" })
+            .to_string()
+            .into_bytes()
+        };
+
+        // The body cannot name an address: the invitation's own is used.
+        let smuggled = br#"{"token":"inv_new","password":"x","email":"attacker@example.com"}"#;
+        let a = read(accept_invitation(&w.ctx(), &headers(&[]), smuggled).await).await;
+        assert_eq!(a.body, r#"{"error":"invalid_body"}"#);
+        assert_eq!(w.kit.calls(), 0);
+
+        // No account yet: one is made for the invited address, with the name, then it signs in.
+        let stale = "__Host-fde_session=stale-or-someone-elses";
+        let a = read(accept_invitation(&w.ctx(), &headers(&[stale]), &accept("inv_new", PASSWORD)).await).await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_new".into(), "org_01A".into()))
+        );
+        let calls: Vec<String> = w.kit.calls.lock().unwrap().iter().map(|(c, _)| c.clone()).collect();
+        assert_eq!(
+            calls,
+            [
+                "invitation inv_new",
+                "create new.person@example.com Some(\"Ada\") Some(\"Lovelace\")",
+                "accept new.person@example.com inv_new"
+            ]
+        );
+        // Counted against the invitation's address, the same bucket a password sign-in uses.
+        let seen = w.limits.seen.lock().unwrap().clone();
+        let invited = address_key(&w.sign_in, &EmailAddress::new(INVITED).unwrap());
+        let hex: String = invited.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            seen.iter().flatten().any(|b| *b == format!("password_address:{hex}")),
+            "{seen:?}"
+        );
+
+        // An account already: no new one, it signs in with its own password.
+        w.kit.calls.lock().unwrap().clear();
+        let a = read(accept_invitation(&w.ctx(), &headers(&[]), &accept("inv_known", PASSWORD)).await).await;
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_1".into(), "org_01A".into()))
+        );
+        assert!(!w.kit.calls.lock().unwrap().iter().any(|(c, _)| c.starts_with("create")));
+        let a = read(accept_invitation(&w.ctx(), &headers(&[]), &accept("inv_known", "wrong")).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::UNAUTHORIZED, r#"{"error":"invalid_credentials"}"#)
+        );
+
+        // A weak password, a spent or unknown invitation: refused, and nobody signs in.
+        w.kit.calls.lock().unwrap().clear();
+        for (token, password, body) in [
+            ("inv_new", "weak", r#"{"error":"weak_password"}"#),
+            ("inv_spent", PASSWORD, r#"{"error":"invalid_invitation"}"#),
+            ("inv_unknown", PASSWORD, r#"{"error":"invalid_invitation"}"#),
+        ] {
+            let a = read(accept_invitation(&w.ctx(), &headers(&[]), &accept(token, password)).await).await;
+            assert_eq!((a.status, a.body.as_str()), (StatusCode::BAD_REQUEST, body), "{token}");
+            assert!(a.cookies.iter().all(|c| !c.starts_with(SESSION_COOKIE)));
+        }
+        assert!(!w.kit.calls.lock().unwrap().iter().any(|(c, _)| c.starts_with("accept")));
+
+        let long = "n".repeat(101);
+        for bad in [
+            serde_json::json!({ "token": "inv_new", "password": "" }),
+            serde_json::json!({ "token": "inv_new", "password": "x", "first_name": long }),
+            serde_json::json!({ "token": "inv_new", "password": "x", "last_name": "a\u{7}b" }),
+            serde_json::json!({ "token": "inv_new", "password": "x", "return_to": "//evil.example" }),
+        ] {
+            let a = read(accept_invitation(&w.ctx(), &headers(&[]), bad.to_string().as_bytes()).await).await;
+            assert_eq!(a.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forgotten_password_answers_alike_whether_or_not_the_address_has_an_account() {
+        let w = World::new(Attempt::Refused);
+        let mut answers = vec![];
+        for email in [KNOWN, "nobody@example.com"] {
+            let start = Instant::now();
+            let a = read(forgot_password(&w.ctx(), &headers(&[]), &email_body(email)).await).await;
+            answers.push((a.status, a.body, a.cookies, start.elapsed()));
+        }
+        assert_eq!(answers[0].1, r#"{"next":"check_email"}"#);
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[0].3, ANSWER_FLOOR);
+        let seen = w.limits.seen.lock().unwrap().clone();
+        assert!(seen.iter().all(
+            |b| b.iter().any(|x| x.starts_with("send_address:")) && b.iter().any(|x| x.starts_with("send_client:"))
+        ));
+
+        *w.limits.answer.lock().unwrap() = Ok(Some(Duration::from_secs(900)));
+        let calls = w.kit.calls();
+        for email in [KNOWN, "nobody@example.com"] {
+            let a = read(forgot_password(&w.ctx(), &headers(&[]), &email_body(email)).await).await;
+            assert_eq!(a.status, StatusCode::TOO_MANY_REQUESTS);
+        }
+        assert_eq!(w.kit.calls(), calls, "no mail over a limit");
+        *w.limits.answer.lock().unwrap() = Ok(None);
+        *w.kit.on_send.lock().unwrap() = Sent::Unavailable("status 503".into());
+        let a = read(forgot_password(&w.ctx(), &headers(&[]), &email_body(KNOWN)).await).await;
+        assert_eq!(a.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_sets_the_new_password_and_signs_nobody_in() {
+        let w = World::new(Attempt::Refused);
+        let body = |token: &str, password: &str| {
+            serde_json::json!({ "token": token, "password": password })
+                .to_string()
+                .into_bytes()
+        };
+        let a = read(reset_password(&w.ctx(), &headers(&[]), &body("reset_ok", PASSWORD)).await).await;
+        assert_eq!((a.status, a.body.as_str()), (StatusCode::OK, r#"{"next":"sign_in"}"#));
+        assert!(a.cookies.is_empty(), "no session: {:?}", a.cookies);
+        for (token, password, status, answer) in [
+            (
+                "reset_ok",
+                "weak",
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"weak_password"}"#,
+            ),
+            (
+                "reset_spent",
+                PASSWORD,
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"invalid_reset_token"}"#,
+            ),
+            (
+                "not a token",
+                PASSWORD,
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"invalid_reset_token"}"#,
+            ),
+            (
+                "reset_ok",
+                "",
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"invalid_password"}"#,
+            ),
+            (
+                "reset_down",
+                PASSWORD,
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"unavailable"}"#,
+            ),
+        ] {
+            let a = read(reset_password(&w.ctx(), &headers(&[]), &body(token, password)).await).await;
+            assert_eq!((a.status, a.body.as_str()), (status, answer), "{token} {password}");
+        }
+        let seen = w.limits.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().all(|b| b.iter().any(|x| x.starts_with("reset_client:"))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn ipv6_clients_are_limited_by_their_64() {
+        assert_eq!(client_bucket(Some("2001:db8:1:2:aaaa::1")), "2001:db8:1:2::/64");
+        assert_eq!(
+            client_bucket(Some("2001:db8:1:2:ffff:1:2:3")),
+            client_bucket(Some("2001:db8:1:2::9"))
+        );
+        assert_ne!(
+            client_bucket(Some("2001:db8:1:2::1")),
+            client_bucket(Some("2001:db8:1:3::1"))
+        );
+        assert_eq!(client_bucket(Some("203.0.113.7")), "203.0.113.7");
+        assert_eq!(
+            client_bucket(Some("::ffff:203.0.113.7")),
+            "203.0.113.7",
+            "a mapped IPv4 is that IPv4"
+        );
+        assert_eq!(client_bucket(None), "unknown");
+        assert_eq!(client_bucket(Some("not an ip")), "unknown");
     }
 
     #[test]

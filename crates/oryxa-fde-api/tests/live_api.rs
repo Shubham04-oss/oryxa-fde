@@ -840,6 +840,10 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("POST", "/auth/sign-in/code"),
     ("POST", "/auth/sign-in/code/verify"),
     ("POST", "/auth/sign-in/verify-email/resend"),
+    ("POST", "/auth/invitation"),
+    ("POST", "/auth/invitation/accept"),
+    ("POST", "/auth/password/forgot"),
+    ("POST", "/auth/password/reset"),
     // The organisation's own: installs and workspace, under its admins or members.
     ("POST", "/v1/github/install"),
     ("GET", "/v1/github/installations"),
@@ -2296,7 +2300,11 @@ async fn every_documented_route_is_served() {
             | "/auth/sign-in/organisation"
             | "/auth/sign-in/code"
             | "/auth/sign-in/code/verify"
-            | "/auth/sign-in/verify-email/resend" => StatusCode::FORBIDDEN,
+            | "/auth/sign-in/verify-email/resend"
+            | "/auth/invitation"
+            | "/auth/invitation/accept"
+            | "/auth/password/forgot"
+            | "/auth/password/reset" => StatusCode::FORBIDDEN,
             // Needs no sign-in, only a token, which `{}` lacks.
             "/v1/digest/unsubscribe" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::UNAUTHORIZED,
@@ -2732,6 +2740,89 @@ async fn an_emailed_code_signs_in_and_asking_for_codes_is_limited_per_address() 
     assert_eq!(
         (status, body),
         (StatusCode::BAD_REQUEST, json!({ "error": "invalid_sign_in" }))
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn an_invitation_is_accepted_at_its_own_address_and_a_reset_signs_nobody_in() {
+    let w = world().await;
+    let org = new_id("org");
+    let invited = user(&org, "invited", "member");
+    *w.authkit.who.lock().unwrap() = (Some(org.clone()), invited.id.clone(), "member".into());
+    let client = fresh_client();
+
+    let (status, _, body) = w
+        .send(sign_in_post(
+            "/auth/invitation",
+            json!({ "token": "invite-ok" }),
+            &client,
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["email"], "invited@example.com");
+    let (status, _, body) = w
+        .send(sign_in_post(
+            "/auth/invitation",
+            json!({ "token": "invite-gone" }),
+            &client,
+            None,
+        ))
+        .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::BAD_REQUEST, json!({ "error": "invalid_invitation" }))
+    );
+
+    // The body cannot name another address; the account is made for the invitation's own.
+    let smuggled = json!({ "token": "invite-ok", "password": "a long new password", "email": "x@example.com" });
+    let (status, _, _) = w
+        .send(sign_in_post("/auth/invitation/accept", smuggled, &client, None))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let accept = json!({ "token": "invite-ok", "password": "a long new password", "first_name": "Ada",
+        "return_to": "/companies" });
+    let stale = "__Host-fde_session=not-a-session-any-more";
+    let (status, headers, body) = w
+        .send(sign_in_post("/auth/invitation/accept", accept, &client, Some(stale)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "next": "done", "return_to": "/companies" }));
+    assert_eq!(*w.authkit.created.lock().unwrap(), ["invited@example.com"]);
+    let session = set_cookie(&headers, "__Host-fde_session").unwrap();
+    let (status, _, me) = w.with_cookie(&session, "GET", "/v1/me", None, false).await;
+    assert_eq!((status, me["user"]["id"].clone()), (StatusCode::OK, json!(invited.id)));
+
+    // A forgotten password answers the same for any address; a reset sets no session.
+    for email in ["invited@example.com", &format!("{}@example.com", new_id("nobody"))] {
+        let (status, _, body) = w
+            .send(sign_in_post(
+                "/auth/password/forgot",
+                json!({ "email": email }),
+                &client,
+                None,
+            ))
+            .await;
+        assert_eq!((status, body), (StatusCode::OK, json!({ "next": "check_email" })));
+    }
+    let reset = |token: &str| json!({ "token": token, "password": "another long password" });
+    let (status, headers, body) = w
+        .send(sign_in_post("/auth/password/reset", reset("reset-ok"), &client, None))
+        .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({ "next": "sign_in" })));
+    assert!(set_cookie(&headers, "__Host-fde_session").is_none());
+    let (status, _, body) = w
+        .send(sign_in_post(
+            "/auth/password/reset",
+            reset("reset-spent"),
+            &client,
+            None,
+        ))
+        .await;
+    assert_eq!(
+        (status, body),
+        (StatusCode::BAD_REQUEST, json!({ "error": "invalid_reset_token" }))
     );
 }
 

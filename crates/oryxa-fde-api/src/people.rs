@@ -237,6 +237,7 @@ mod tests {
         fn resend_verification<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Sent> {
             Box::pin(async { Sent::Unavailable("unused".into()) })
         }
+        crate::session::unused_invitation_and_reset!();
     }
 
     #[test]

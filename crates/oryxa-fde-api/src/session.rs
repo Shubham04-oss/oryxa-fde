@@ -133,6 +133,39 @@ pub enum Sent {
     Unavailable(String),
 }
 
+/// An invitation, as its token names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invitation {
+    /// The address it was sent to: the only address that may accept it.
+    pub email: String,
+    pub organisation: Option<String>,
+    /// Still open: not accepted, expired or revoked.
+    pub pending: bool,
+}
+
+/// What creating an account for an invited address came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Created {
+    Created,
+    /// The address already has an account.
+    Exists,
+    /// The password does not meet WorkOS's policy.
+    WeakPassword,
+    /// Refused for another reason: why, for the log.
+    Refused(String),
+    Unavailable(String),
+}
+
+/// What setting a new password with a reset token came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reset {
+    Done,
+    WeakPassword,
+    /// The token is wrong, spent or expired: why, for the log.
+    Refused(String),
+    Unavailable(String),
+}
+
 /// WorkOS as sign-in needs it. A trait so tests run without WorkOS.
 pub trait AuthKit: Send + Sync + 'static {
     /// Where to send the browser to sign in.
@@ -171,7 +204,101 @@ pub trait AuthKit: Send + Sync + 'static {
     fn sign_in_with_code<'a>(&'a self, email: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt>;
     /// Emails the code of a pending email verification again.
     fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent>;
+    /// The invitation a token names; `None` when there is no such invitation.
+    fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>>;
+    /// Whether the address has an account.
+    fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>>;
+    /// Creates an account for an invited address with this password and name.
+    fn create_account<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        name: (Option<&'a str>, Option<&'a str>),
+        client: &'a Client,
+    ) -> BoxFuture<'a, Created>;
+    /// Signs in with an address and password, accepting the invitation the token names.
+    fn accept_with_password<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        invitation: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt>;
+    /// Emails a password reset link to the address. The link's token never comes back here.
+    fn send_password_reset<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Sent>;
+    /// Sets a new password with the token from a reset link.
+    fn reset_password<'a>(&'a self, token: &'a str, password: &'a str) -> BoxFuture<'a, Reset>;
 }
+
+/// A WorkOS error's status and its code, cut to a code's own charset, for the log.
+fn status_and_code(e: &workos::Error) -> (u16, String) {
+    let Some(a) = e.api() else {
+        return (0, "network".into());
+    };
+    let code = a
+        .code
+        .as_deref()
+        .unwrap_or("none")
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || *c == '_')
+        .take(64)
+        .collect();
+    (a.status, code)
+}
+
+/// Whether a refusal is about the password's strength.
+fn weak_password(status: u16, code: &str) -> bool {
+    matches!(status, 400 | 422) && code.contains("password")
+}
+
+fn outage(status: u16, code: &str) -> bool {
+    status == 0
+        || status >= 500
+        || status == 429
+        || (status == 401 && matches!(code, "invalid_client" | "unauthorized_client"))
+}
+
+/// The invitation and reset methods of an [`AuthKit`] fake that never reaches them.
+#[cfg(test)]
+macro_rules! unused_invitation_and_reset {
+    () => {
+        fn invitation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> $crate::BoxFuture<'a, Result<Option<$crate::session::Invitation>, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn has_account<'a>(&'a self, _: &'a str) -> $crate::BoxFuture<'a, Result<bool, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn create_account<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: (Option<&'a str>, Option<&'a str>),
+            _: &'a $crate::session::Client,
+        ) -> $crate::BoxFuture<'a, $crate::session::Created> {
+            Box::pin(async { $crate::session::Created::Unavailable("unused".into()) })
+        }
+        fn accept_with_password<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: &'a str,
+            _: &'a $crate::session::Client,
+        ) -> $crate::BoxFuture<'a, $crate::session::Attempt> {
+            Box::pin(async { $crate::session::Attempt::Unavailable("unused".into()) })
+        }
+        fn send_password_reset<'a>(&'a self, _: &'a str) -> $crate::BoxFuture<'a, $crate::session::Sent> {
+            Box::pin(async { $crate::session::Sent::Unavailable("unused".into()) })
+        }
+        fn reset_password<'a>(&'a self, _: &'a str, _: &'a str) -> $crate::BoxFuture<'a, $crate::session::Reset> {
+            Box::pin(async { $crate::session::Reset::Unavailable("unused".into()) })
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use unused_invitation_and_reset;
 
 /// An id WorkOS gave us, checked before it goes back into a WorkOS path.
 fn workos_id(v: &str) -> Option<String> {
@@ -536,6 +663,144 @@ impl AuthKit for WorkOsAuthKit {
             match self.0.user_management().send_verification_email(&user).await {
                 Ok(_) => Sent::Sent,
                 Err(e) => sent_from(&e),
+            }
+        })
+    }
+
+    fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+        Box::pin(async move {
+            match self.0.user_management().find_invitation_by_token(token).await {
+                // The answer also holds the token and its link: only these fields are kept.
+                Ok(i) => Ok(Some(Invitation {
+                    email: i.email,
+                    organisation: i.organization_id,
+                    pending: matches!(i.state, workos::enums::UserInviteState::Pending),
+                })),
+                Err(e) => {
+                    let (status, code) = status_and_code(&e);
+                    if outage(status, &code) {
+                        Err(format!("status {status}, code {code}"))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+        })
+    }
+
+    fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let p = workos::user_management::ListUsersParams {
+                email: Some(email.to_owned()),
+                limit: Some(1),
+                ..Default::default()
+            };
+            match self.0.user_management().list_users(p).await {
+                Ok(list) => Ok(!list.data.is_empty()),
+                Err(e) => {
+                    let (status, code) = status_and_code(&e);
+                    Err(format!("status {status}, code {code}"))
+                }
+            }
+        })
+    }
+
+    fn create_account<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        name: (Option<&'a str>, Option<&'a str>),
+        client: &'a Client,
+    ) -> BoxFuture<'a, Created> {
+        Box::pin(async move {
+            let mut body = workos::user_management::CreateUserParamsBody::new(email);
+            body.first_name = name.0.map(str::to_owned);
+            body.last_name = name.1.map(str::to_owned);
+            body.ip_address = client.ip.clone();
+            body.user_agent = client.user_agent.clone();
+            body.password = Some(workos::user_management::Password::Plaintext {
+                password: password.to_owned(),
+            });
+            match self
+                .0
+                .user_management()
+                .create_user(workos::user_management::CreateUserParams::new(body))
+                .await
+            {
+                Ok(_) => Created::Created,
+                Err(e) => {
+                    let (status, code) = status_and_code(&e);
+                    if outage(status, &code) {
+                        Created::Unavailable(format!("status {status}, code {code}"))
+                    } else if weak_password(status, &code) {
+                        Created::WeakPassword
+                    } else if status == 409 || code.contains("already") || code.contains("not_available") {
+                        Created::Exists
+                    } else {
+                        Created::Refused(format!("status {status}, code {code}"))
+                    }
+                }
+            }
+        })
+    }
+
+    fn accept_with_password<'a>(
+        &'a self,
+        email: &'a str,
+        password: &'a str,
+        invitation: &'a str,
+        client: &'a Client,
+    ) -> BoxFuture<'a, Attempt> {
+        Box::pin(async move {
+            let mut p = workos::user_management::AuthenticateWithPasswordParams::new(email, password);
+            p.invitation_token = Some(invitation.into());
+            p.ip_address = client.ip.clone();
+            p.user_agent = client.user_agent.clone();
+            attempt_from(self.0.user_management().authenticate_with_password(p).await)
+        })
+    }
+
+    fn send_password_reset<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Sent> {
+        Box::pin(async move {
+            let body = workos::models::CreatePasswordResetToken {
+                email: email.to_owned(),
+            };
+            // The answer holds the reset token and its link: dropped unread.
+            match self
+                .0
+                .user_management()
+                .reset_password(workos::user_management::ResetPasswordParams::new(body))
+                .await
+            {
+                Ok(_) => Sent::Sent,
+                Err(e) => sent_from(&e),
+            }
+        })
+    }
+
+    fn reset_password<'a>(&'a self, token: &'a str, password: &'a str) -> BoxFuture<'a, Reset> {
+        Box::pin(async move {
+            let body = workos::models::CreatePasswordReset {
+                token: token.into(),
+                new_password: password.into(),
+            };
+            match self
+                .0
+                .user_management()
+                .confirm_password_reset(workos::user_management::ConfirmPasswordResetParams::new(body))
+                .await
+            {
+                Ok(_) => Reset::Done,
+                Err(e) => {
+                    let (status, code) = status_and_code(&e);
+                    if outage(status, &code) {
+                        Reset::Unavailable(format!("status {status}, code {code}"))
+                    } else if weak_password(status, &code) {
+                        Reset::WeakPassword
+                    } else {
+                        Reset::Refused(format!("status {status}, code {code}"))
+                    }
+                }
             }
         })
     }
@@ -1216,6 +1481,7 @@ mod tests {
         fn resend_verification<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Sent> {
             Box::pin(async { Sent::Unavailable("unused".into()) })
         }
+        crate::session::unused_invitation_and_reset!();
     }
 
     fn kind(a: &Attempt) -> &'static str {

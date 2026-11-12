@@ -53,7 +53,10 @@ pub use documents::{DocumentOut, SearchHitOut};
 pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use people::Person;
-pub use session::{Attempt, AuthKit, Client, RefreshError, Sent, SignIn, Tokens, WorkOsAuthKit, workos_issuer};
+pub use session::{
+    Attempt, AuthKit, Client, Created, Invitation, RefreshError, Reset, Sent, SignIn, Tokens, WorkOsAuthKit,
+    workos_issuer,
+};
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -192,6 +195,10 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(signin::code))
         .routes(routes!(signin::code_verify))
         .routes(routes!(signin::resend))
+        .routes(routes!(signin::invitation))
+        .routes(routes!(signin::accept))
+        .routes(routes!(signin::forgot))
+        .routes(routes!(signin::reset))
         .routes(routes!(documents::list))
         .routes(routes!(documents::get))
         .routes(routes!(documents::search))
