@@ -1,6 +1,7 @@
 # 0003: Where each part runs
 
-Status: accepted, 3 November 2026.
+Status: accepted, 3 November 2026. Amended 12 November 2026 by ADR 0009: Gemini through Vertex is the
+preferred model path for now, Bedrock the second, and the workspace assistant runs on Durable Objects.
 
 | Part | Runs on |
 | --- | --- |

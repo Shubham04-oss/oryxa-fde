@@ -3,7 +3,7 @@
 Status: accepted, 3 November 2026. Amended 10 November 2026: OpenCode becomes the main harness;
 amended again the same day with what the spike found (`sandbox/harness/OPENCODE.md`).
 Amended 12 November 2026 by ADR 0009: Gemini through Vertex is the preferred model path once the
-outbound handler can sign for it; until then runs stay on Bedrock.
+outbound handler can authenticate to it; until then runs stay on Bedrock.
 
 ## Decision
 - The main way FDEs build is a coding agent in each company's sandbox, not a browser editor.
