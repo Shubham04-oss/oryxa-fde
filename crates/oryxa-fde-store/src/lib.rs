@@ -66,11 +66,12 @@ pub use integrations::{
 pub use meetings::{MAX_NOTE_CHARS, MeetingNote, MeetingNoteIn, NoteText, NoteTextError};
 pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
 pub use plan::PlanTx;
-pub use projects::{Assignee, Project, ProjectIn, ProjectTx};
+pub use projects::{Assignee, NextStep, Project, ProjectIn, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, StakeholderRole, System, SystemIn};
 pub use runs::{AgentApprovalRow, AgentBudget, AgentDecided, AgentDecision, AgentRunRow, AgentSpend};
 pub use scope::{
-    Comparator, Criterion, CriterionIn, ScopeChange, ScopeItem, ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
+    Comparator, Criterion, CriterionIn, CriterionProof, MAX_PROOF_CHARS, Proof, ProofError, ScopeChange, ScopeItem,
+    ScopeItemIn, ScopeKind, ScopeOfWork, SignOff,
 };
 pub use updates::{
     DraftingLock, MAX_UPDATE_CHARS, UpdateBody, UpdateDraft, UpdateStatus, WeekFacts, week_bounds, week_of,

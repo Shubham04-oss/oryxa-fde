@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use oryxa_authz::Write;
 use oryxa_core::UserId;
 use oryxa_fde_core::{CompanyId, ProjectId, ProjectScope, Stage};
-use oryxa_fde_store::{Assignee, GrantRow, Project, ProjectIn, new_id};
+use oryxa_fde_store::{Assignee, GrantRow, NextStep, Project, ProjectIn, new_id};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -57,6 +57,31 @@ pub struct ProjectOut {
     pub stage: ProjectStage,
     pub created_at: String,
     pub updated_at: String,
+    /// The first task in the project's order that is not done, or null when there is none: every
+    /// task is done, or there are no tasks. Worked out on every read.
+    pub next_step: Option<NextStepOut>,
+}
+
+/// A project's next step: a task, with who works it and when it is due.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NextStepOut {
+    pub task: String,
+    pub title: String,
+    /// A WorkOS user id.
+    pub assignee: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub due_on: Option<String>,
+}
+
+impl From<NextStep> for NextStepOut {
+    fn from(n: NextStep) -> Self {
+        Self {
+            task: n.task.to_string(),
+            title: n.title.as_str().to_owned(),
+            assignee: n.assignee.map(|a| a.to_string()),
+            due_on: n.due_on.and_then(|d| d.format(crate::lifecycle::DATE).ok()),
+        }
+    }
 }
 
 impl From<Project> for ProjectOut {
@@ -69,6 +94,7 @@ impl From<Project> for ProjectOut {
             stage: p.stage.into(),
             created_at: ts(p.created_at),
             updated_at: ts(p.updated_at),
+            next_step: p.next_step.map(Into::into),
         }
     }
 }

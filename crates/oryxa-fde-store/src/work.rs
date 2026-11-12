@@ -1,7 +1,7 @@
 //! A project's tasks (with blockers and a "waiting on customer" state) and its decisions log.
 
 use oryxa_core::UserId;
-use oryxa_fde_core::{AccessRequestId, CriterionId, DecisionId, StakeholderId, TaskId};
+use oryxa_fde_core::{AccessRequestId, CriterionId, DecisionId, Stage, StakeholderId, TaskId};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use time::{Date, OffsetDateTime};
@@ -64,6 +64,8 @@ pub struct Task {
     pub blocked_by: Option<AccessRequestId>,
     /// The project's success criterion it works towards.
     pub criterion: Option<CriterionId>,
+    /// The stage of the plan it belongs to; tasks from before stages were kept have none.
+    pub stage: Option<Stage>,
     /// Its place in the project's order; lists are sorted by it.
     pub position: i64,
     pub created_at: OffsetDateTime,
@@ -84,6 +86,7 @@ impl Task {
             && self.waiting_on == v.waiting_on
             && self.blocked_by == v.blocked_by
             && self.criterion == v.criterion
+            && self.stage == v.stage
     }
 }
 
@@ -98,6 +101,7 @@ pub struct TaskIn {
     /// Only while the task is blocked.
     pub blocked_by: Option<AccessRequestId>,
     pub criterion: Option<CriterionId>,
+    pub stage: Option<Stage>,
     /// Where it goes. `None` puts a new task, or one whose status changes, after the project's last
     /// task, and leaves any other task where it is.
     pub place: Option<TaskPlace>,
@@ -163,7 +167,7 @@ impl<T> Page<T> {
 }
 
 pub(crate) const TASK: &str = "task_id, title, status, blocker, due_on, assignee, waiting_on, waiting_since, blocked_by, \
-     criterion, position, created_at, updated_at, version";
+     criterion, stage, position, created_at, updated_at, version";
 const DECISION: &str = "decision_id, title, rationale, decided_by, decided_at, recorded_by, created_at";
 
 impl ProjectTx {
@@ -236,9 +240,9 @@ impl ProjectTx {
         let (t, c, p) = self.keys();
         let row = sqlx::query(&format!(
             "insert into tasks (tenant_id, company_id, project_id, task_id, title, status, blocker, due_on, assignee,
-                 waiting_on, waiting_since, created_by, blocked_by, done_at, criterion, position)
+                 waiting_on, waiting_since, created_by, blocked_by, done_at, criterion, position, stage)
              select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, case when $6 = 'waiting_on_customer' then now() end, $11,
-                 $12, case when $6 = 'done' then now() end, $13, $14
+                 $12, case when $6 = 'done' then now() end, $13, $14, $15
              where exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)
              returning {TASK}"
         ))
@@ -256,6 +260,7 @@ impl ProjectTx {
         .bind(v.blocked_by.as_ref().map(AccessRequestId::as_str))
         .bind(v.criterion.as_ref().map(CriterionId::as_str))
         .bind(position)
+        .bind(v.stage.map(Stage::as_str))
         .fetch_optional(&mut *self.tx)
         .await
         .map_err(|e| {
@@ -340,7 +345,8 @@ impl ProjectTx {
             "update tasks set title = $5, status = $6, blocker = $7, due_on = $8, assignee = $9, waiting_on = $10,
                  waiting_since = case when $6 = 'waiting_on_customer' then coalesce(waiting_since, now()) end,
                  done_at = case when $6 = 'done' then coalesce(done_at, now()) end,
-                 blocked_by = $11, criterion = $12, position = coalesce($13, position), updated_at = now()
+                 blocked_by = $11, criterion = $12, position = coalesce($13, position), stage = $14,
+                 updated_at = now()
              where tenant_id = $1 and company_id = $2 and project_id = $3 and task_id = $4 returning {TASK}"
         ))
         .bind(&t)
@@ -356,6 +362,7 @@ impl ProjectTx {
         .bind(v.blocked_by.as_ref().map(AccessRequestId::as_str))
         .bind(v.criterion.as_ref().map(CriterionId::as_str))
         .bind(position)
+        .bind(v.stage.map(Stage::as_str))
         .fetch_one(&mut *self.tx)
         .await?;
         let s = self.scope.clone();
@@ -696,6 +703,7 @@ pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
     let waiting_on: Option<String> = r.try_get("waiting_on")?;
     let blocked_by: Option<String> = r.try_get("blocked_by")?;
     let criterion: Option<String> = r.try_get("criterion")?;
+    let stage: Option<String> = r.try_get("stage")?;
     Ok(Task {
         id: id("task id", TaskId::new, r.try_get("task_id")?)?,
         title: name(r.try_get("title")?, "title")?,
@@ -711,6 +719,7 @@ pub(crate) fn task(r: PgRow) -> Result<Task, StoreError> {
             .map(|a| id("access request id", AccessRequestId::new, a))
             .transpose()?,
         criterion: criterion.map(|c| id("criterion id", CriterionId::new, c)).transpose()?,
+        stage: stage.as_deref().map(crate::projects::stage).transpose()?,
         position: r.try_get("position")?,
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
@@ -771,6 +780,7 @@ mod tests {
             waiting_on: Some(StakeholderId::new("stk_1").unwrap()),
             blocked_by: Some(AccessRequestId::new("acc_1").unwrap()),
             criterion: Some(CriterionId::new("crt_1").unwrap()),
+            stage: Some(Stage::Access),
             place: None,
         };
         let stored = Task {
@@ -784,6 +794,7 @@ mod tests {
             waiting_since: Some(at),
             blocked_by: v.blocked_by.clone(),
             criterion: v.criterion.clone(),
+            stage: v.stage,
             position: 1 << 16,
             created_at: at,
             updated_at: at,
@@ -799,7 +810,7 @@ mod tests {
             ..v.clone()
         };
         assert!(stored.holds(&moved));
-        let changes: [fn(&mut TaskIn); 8] = [
+        let changes: [fn(&mut TaskIn); 10] = [
             |v| v.title = Name::new("Get VPN access now").unwrap(),
             |v| v.status = TaskStatus::Todo,
             |v| v.blocker = None,
@@ -808,6 +819,8 @@ mod tests {
             |v| v.waiting_on = None,
             |v| v.blocked_by = None,
             |v| v.criterion = None,
+            |v| v.stage = None,
+            |v| v.stage = Some(Stage::Build),
         ];
         for (i, change) in changes.into_iter().enumerate() {
             let mut other = v.clone();
@@ -827,6 +840,7 @@ mod tests {
             waiting_on: None,
             blocked_by: None,
             criterion: None,
+            stage: None,
             place: None,
         };
         assert!(matches!(t.check(), Err(StoreError::Rejected("blocker_required"))));

@@ -1543,6 +1543,78 @@
         }
       }
     },
+    "/v1/companies/{company}/main-contact": {
+      "put": {
+        "tags": [
+          "records"
+        ],
+        "summary": "Make one of the company's stakeholders its main contact, or none. The stakeholder who was it\nbefore stops being it.",
+        "operationId": "set_main_contact",
+        "parameters": [
+          {
+            "name": "company",
+            "in": "path",
+            "description": "Company id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MainContactBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MainContactOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_stakeholder`: not one of this company's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}/meeting-notes": {
       "get": {
         "tags": [
@@ -8792,7 +8864,7 @@
         "tags": [
           "projects"
         ],
-        "summary": "What needs the caller across their projects: open tasks and unsettled access requests.",
+        "summary": "What needs the caller across their projects: projects with no next step, open tasks and\nunsettled access requests.",
         "operationId": "get_today",
         "responses": {
           "200": {
@@ -9546,6 +9618,14 @@
           "target"
         ],
         "properties": {
+          "baseline": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The value measured before the work, in the target's unit. Left out on a `PUT`, it is cleared."
+          },
           "comparator": {
             "$ref": "#/components/schemas/TargetComparator"
           },
@@ -9555,6 +9635,13 @@
           "metric": {
             "type": "string",
             "description": "What is measured, e.g. \"answer accuracy\"."
+          },
+          "proof": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How it will be proven, in a few words: an eval suite, an uploaded result. Up to 500\ncharacters, shown as text. Left out on a `PUT`, it is cleared."
           },
           "target": {
             "type": "number",
@@ -9590,6 +9677,14 @@
           "updated_at"
         ],
         "properties": {
+          "baseline": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The value measured before the work, in the target's unit."
+          },
           "comparator": {
             "$ref": "#/components/schemas/TargetComparator"
           },
@@ -9601,6 +9696,13 @@
           },
           "metric": {
             "type": "string"
+          },
+          "proof": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How it will be proven."
           },
           "target": {
             "type": "number",
@@ -10004,6 +10106,35 @@
           }
         }
       },
+      "MainContactBody": {
+        "type": "object",
+        "properties": {
+          "stakeholder": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stakeholder of this company to make its main contact, or null for none."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MainContactOut": {
+        "type": "object",
+        "properties": {
+          "stakeholder": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StakeholderOut",
+                "description": "The company's main contact as they now stand, or null for none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "MeOut": {
         "type": "object",
         "required": [
@@ -10185,6 +10316,36 @@
           }
         }
       },
+      "NextStepOut": {
+        "type": "object",
+        "description": "A project's next step: a task, with who works it and when it is due.",
+        "required": [
+          "task",
+          "title"
+        ],
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A WorkOS user id."
+          },
+          "due_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`YYYY-MM-DD`."
+          },
+          "task": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "OrgRole": {
         "type": "string",
         "enum": [
@@ -10359,6 +10520,17 @@
           "name": {
             "type": "string"
           },
+          "next_step": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NextStepOut",
+                "description": "The first task in the project's order that is not done, or null when there is none: every\ntask is done, or there are no tasks. Worked out on every read."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stage": {
             "$ref": "#/components/schemas/ProjectStage"
           },
@@ -10391,6 +10563,22 @@
           }
         },
         "additionalProperties": false
+      },
+      "ProjectRefOut": {
+        "type": "object",
+        "description": "A project, with its company.",
+        "required": [
+          "company",
+          "project"
+        ],
+        "properties": {
+          "company": {
+            "$ref": "#/components/schemas/NamedOut"
+          },
+          "project": {
+            "$ref": "#/components/schemas/NamedOut"
+          }
+        }
       },
       "ProjectStage": {
         "type": "string",
@@ -11239,6 +11427,10 @@
           "id": {
             "type": "string"
           },
+          "main_contact": {
+            "type": "boolean",
+            "description": "The company's main contact; at most one stakeholder of a company is. Set with\n`PUT /v1/companies/{company}/main-contact`."
+          },
           "name": {
             "type": "string"
           },
@@ -11364,6 +11556,14 @@
               "updated_at"
             ],
             "properties": {
+              "baseline": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double",
+                "description": "The value measured before the work, in the target's unit."
+              },
               "comparator": {
                 "$ref": "#/components/schemas/TargetComparator"
               },
@@ -11375,6 +11575,13 @@
               },
               "metric": {
                 "type": "string"
+              },
+              "proof": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "How it will be proven."
               },
               "target": {
                 "type": "number",
@@ -11537,6 +11744,10 @@
               "id": {
                 "type": "string"
               },
+              "main_contact": {
+                "type": "boolean",
+                "description": "The company's main contact; at most one stakeholder of a company is. Set with\n`PUT /v1/companies/{company}/main-contact`."
+              },
               "name": {
                 "type": "string"
               },
@@ -11673,6 +11884,17 @@
               },
               "id": {
                 "type": "string"
+              },
+              "stage": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ProjectStage",
+                    "description": "The stage of the plan it belongs to."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "status": {
                 "$ref": "#/components/schemas/TaskState"
@@ -11901,6 +12123,17 @@
             ],
             "description": "Due date, `YYYY-MM-DD`."
           },
+          "stage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProjectStage",
+                "description": "The stage of the plan it belongs to. Left out on a `PUT`, it is cleared."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "$ref": "#/components/schemas/TaskState"
           },
@@ -11974,6 +12207,17 @@
           },
           "id": {
             "type": "string"
+          },
+          "stage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProjectStage",
+                "description": "The stage of the plan it belongs to."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "$ref": "#/components/schemas/TaskState"
@@ -12179,6 +12423,13 @@
             "items": {
               "$ref": "#/components/schemas/TodayItemOut"
             }
+          },
+          "projects_without_next_step": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectRefOut"
+            },
+            "description": "The caller's projects with no next step: every task is done, or there are none. An engagement\nwith no next step needs one, or is over (direction section 4)."
           }
         }
       },

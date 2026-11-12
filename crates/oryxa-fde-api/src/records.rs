@@ -124,6 +124,11 @@ pub struct StakeholderOut {
     pub email: Option<String>,
     /// When they unsubscribed from the weekly digest, if they did.
     pub digest_unsubscribed_at: Option<String>,
+    /// The company's main contact; at most one stakeholder of a company is. Set with
+    /// `PUT /v1/companies/{company}/main-contact`.
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub main_contact: bool,
     pub updated_at: String,
     /// Bumped by every change to the record; send it back as `version` on a `PUT`.
     // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
@@ -140,6 +145,7 @@ impl From<Stakeholder> for StakeholderOut {
             role: s.role.into(),
             email: s.email.map(|e| e.as_str().to_owned()),
             digest_unsubscribed_at: s.digest_opt_out_at.map(ts),
+            main_contact: s.main_contact,
             updated_at: ts(s.updated_at),
             version: s.version,
         }
@@ -289,6 +295,42 @@ pub(crate) async fn update_stakeholder(
         StatusCode::OK,
         updated.map(StakeholderOut::from, StakeholderOut::from),
     ))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MainContactBody {
+    /// The stakeholder of this company to make its main contact, or null for none.
+    #[schema(value_type = Option<String>)]
+    pub stakeholder: Option<StakeholderId>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MainContactOut {
+    /// The company's main contact as they now stand, or null for none.
+    pub stakeholder: Option<StakeholderOut>,
+}
+
+/// Make one of the company's stakeholders its main contact, or none. The stakeholder who was it
+/// before stops being it.
+#[utoipa::path(put, operation_id = "set_main_contact", path = "/v1/companies/{company}/main-contact",
+    tag = "records", request_body = MainContactBody,
+    params(("company" = String, Path, description = "Company id")),
+    responses((status = 200, body = MainContactOut),
+        (status = 400, body = ErrorBody, description = "`invalid_stakeholder`: not one of this company's"),
+        (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+pub(crate) async fn set_main_contact(
+    State(app): State<Arc<App>>,
+    who: Principal,
+    Path(c): Path<CompanyId>,
+    Json(body): Json<MainContactBody>,
+) -> Result<Json<MainContactOut>, ApiError> {
+    let mut tx = company_tx(&app, &who, c).await?;
+    let set = tx.set_main_contact(body.stakeholder.as_ref(), &who.actor()).await?;
+    tx.commit().await?;
+    Ok(Json(MainContactOut {
+        stakeholder: set.map(Into::into),
+    }))
 }
 
 /// Remove a stakeholder. Refused (409) once they have signed off a scope.

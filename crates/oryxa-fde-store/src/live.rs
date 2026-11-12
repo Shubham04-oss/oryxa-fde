@@ -927,6 +927,7 @@ async fn row_level_security_covers_every_lifecycle_table() {
             waiting_on: None,
             blocked_by: None,
             criterion: None,
+            stage: None,
             place: None,
         };
         tx.add_task(&oryxa_fde_core::TaskId::new(new_id("tsk")).unwrap(), &task, &by)
@@ -1280,6 +1281,7 @@ fn task_in(title: &str, status: TaskStatus) -> TaskIn {
         waiting_on: None,
         blocked_by: None,
         criterion: None,
+        stage: None,
         place: None,
     }
 }
@@ -1356,6 +1358,7 @@ async fn the_today_view_reads_exactly_the_projects_it_names() {
                     (Some("Sam Sponsor"), &p1.project)
                 );
             }
+            TodayItem::NoNextStep { .. } => panic!("the project has an open task, so a next step"),
         }
     }
     assert!(matches!(
@@ -3874,7 +3877,10 @@ async fn an_identical_scope_save_keeps_the_sign_off_and_a_stale_sign_off_signs_n
     // Saving the item and the criterion as they are changes nothing, so the sign-off stands.
     let same = tx.update_scope_item(&item, Some(1), &v, &by).await.unwrap();
     assert_eq!(same, Some(Saved::Current(scope.items[0].clone())));
-    let same = tx.update_criterion(&crit, Some(1), &c, &by).await.unwrap();
+    let same = tx
+        .update_criterion(&crit, Some(1), &c, &crate::CriterionProof::default(), &by)
+        .await
+        .unwrap();
     assert_eq!(same, Some(Saved::Current(scope.criteria[0].clone())));
     let now = tx.scope_of_work().await.unwrap().unwrap();
     assert_eq!((now.version, now.sign_off.map(|s| s.version)), (2, Some(2)));
@@ -3895,14 +3901,16 @@ async fn an_identical_scope_save_keeps_the_sign_off_and_a_stale_sign_off_signs_n
     let mut stale_c = c.clone();
     stale_c.target = 95.0;
     let moved = tx
-        .update_criterion(&crit, Some(1), &stale_c, &by)
+        .update_criterion(&crit, Some(1), &stale_c, &crate::CriterionProof::default(), &by)
         .await
         .unwrap()
         .unwrap()
         .record();
     assert_eq!(moved.version, 2);
     assert!(matches!(
-        tx.update_criterion(&crit, Some(1), &c, &by).await.unwrap(),
+        tx.update_criterion(&crit, Some(1), &c, &crate::CriterionProof::default(), &by)
+            .await
+            .unwrap(),
         Some(Saved::Stale(_))
     ));
     assert_eq!(tx.scope_of_work().await.unwrap().unwrap().version, 4);
@@ -4472,4 +4480,195 @@ async fn existing_tasks_get_positions_in_creation_order() {
     // In creation order, at their old versions.
     let want = [("tsk_a", 1), ("tsk_b", 2), ("tsk_c", 3), ("tsk_z", 1)].map(|(t, n)| (t.to_owned(), n * 65536, 1));
     assert_eq!(rows, want);
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_projects_next_step_is_its_first_task_in_order_that_is_not_done() {
+    use oryxa_fde_core::{Stage, TaskId};
+    let store = store().await;
+    let by = actor("alice");
+    let (t, p) = project_world(&store).await;
+    let next = |store: &Store, p: &ProjectScope| {
+        let (store, p) = (store.clone(), p.clone());
+        async move {
+            let mut tx = store.project(&p).await.unwrap();
+            let got = tx.get().await.unwrap().unwrap().next_step;
+            tx.commit().await.unwrap();
+            got
+        }
+    };
+    assert_eq!(next(&store, &p).await, None, "no tasks, no next step");
+
+    let ids: Vec<TaskId> = (0..3).map(|_| TaskId::new(new_id("tsk")).unwrap()).collect();
+    let mut tx = store.project(&p).await.unwrap();
+    let due = time::Date::from_calendar_date(2026, time::Month::December, 1).unwrap();
+    for (id, (title, status)) in ids.iter().zip([
+        ("Kick-off call", TaskStatus::Done),
+        ("Get VPN access", TaskStatus::Todo),
+        ("Build the index", TaskStatus::Todo),
+    ]) {
+        let mut v = task_in(title, status);
+        v.stage = Some(Stage::Access);
+        v.due_on = Some(due);
+        v.assignee = Some(oryxa_core::UserId::new("user_ada").unwrap());
+        let added = tx.add_task(id, &v, &by).await.unwrap().unwrap();
+        assert_eq!(added.stage, Some(Stage::Access), "the stage is kept");
+    }
+    tx.commit().await.unwrap();
+
+    // The done task is skipped; the first open one in order is next, with its owner and date.
+    let step = next(&store, &p).await.expect("a next step");
+    assert_eq!(
+        (
+            step.task.clone(),
+            step.title.as_str(),
+            step.assignee.as_ref().map(|a| a.as_str()),
+            step.due_on
+        ),
+        (ids[1].clone(), "Get VPN access", Some("user_ada"), Some(due))
+    );
+
+    // Order decides, not age: the last task moved before it becomes next.
+    let mut tx = store.project(&p).await.unwrap();
+    let mut moved = task_in("Build the index", TaskStatus::Todo);
+    moved.place = Some(TaskPlace::Before(ids[1].clone()));
+    tx.update_task(&ids[2], None, &moved, &by).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(next(&store, &p).await.map(|s| s.task), Some(ids[2].clone()));
+
+    // A stage cleared on a save is gone.
+    let mut tx = store.project(&p).await.unwrap();
+    let saved = tx
+        .update_task(&ids[2], None, &moved, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(saved.stage, None);
+    tx.commit().await.unwrap();
+
+    // Every task done: no next step, and Today says so.
+    let mut tx = store.project(&p).await.unwrap();
+    for id in &ids[1..] {
+        tx.update_task(id, None, &task_in("Done now", TaskStatus::Done), &by)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    assert_eq!(next(&store, &p).await, None);
+    let items = store.today(std::slice::from_ref(&p)).await.unwrap();
+    assert!(
+        matches!(&items[..], [TodayItem::NoNextStep { project, .. }] if project.id == p.project),
+        "{items:?}"
+    );
+    let _ = t;
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_criterion_keeps_its_baseline_and_proof_and_a_same_save_changes_nothing() {
+    let store = store().await;
+    let by = actor("alice");
+    let (_, p) = project_world(&store).await;
+    let crit = oryxa_fde_core::CriterionId::new(new_id("crt")).unwrap();
+    let v = CriterionIn {
+        description: Text::new("Answers are right").unwrap(),
+        metric: Name::new("answer accuracy").unwrap(),
+        comparator: Comparator::AtLeast,
+        target: 90.0,
+        unit: Some(Name::new("%").unwrap()),
+    };
+    let m = CriterionProof {
+        baseline: Some(61.5),
+        proof: Some(Proof::new("The support eval suite, 200 tickets").unwrap()),
+    };
+    let mut tx = store.project(&p).await.unwrap();
+    let added = tx.add_criterion_with(&crit, &v, &m, &by).await.unwrap().unwrap();
+    assert_eq!((added.baseline, added.proof.clone()), (m.baseline, m.proof.clone()));
+    let same = tx
+        .update_criterion(&crit, None, &v, &m, &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!(same.version, added.version, "saving the same values bumps nothing");
+    let cleared = tx
+        .update_criterion(&crit, None, &v, &CriterionProof::default(), &by)
+        .await
+        .unwrap()
+        .unwrap()
+        .record();
+    assert_eq!((cleared.baseline, cleared.proof), (None, None));
+    assert!(cleared.version > added.version);
+    let bad = CriterionProof {
+        baseline: Some(f64::NAN),
+        proof: None,
+    };
+    assert!(matches!(
+        tx.update_criterion(&crit, None, &v, &bad, &by).await,
+        Err(StoreError::Rejected("baseline"))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_company_has_at_most_one_main_contact() {
+    let store = store().await;
+    let by = actor("alice");
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let (a, b) = (add_stakeholder(&store, &c).await, add_stakeholder(&store, &c).await);
+    let other = scope(&t, &new_id("cmp"));
+    create_company(&store, &other).await;
+    let theirs = add_stakeholder(&store, &other).await;
+
+    let main = |store: &Store, c: &CompanyScope| {
+        let (store, c) = (store.clone(), c.clone());
+        async move {
+            let mut tx = store.company(&c).await.unwrap();
+            let all = tx.stakeholders().await.unwrap();
+            tx.commit().await.unwrap();
+            all.into_iter()
+                .filter(|s| s.main_contact)
+                .map(|s| s.id)
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut tx = store.company(&c).await.unwrap();
+    let set = tx.set_main_contact(Some(&a), &by).await.unwrap().unwrap();
+    assert!(set.main_contact && set.id == a);
+    tx.commit().await.unwrap();
+    assert_eq!(main(&store, &c).await, std::slice::from_ref(&a));
+
+    // Another one takes over; the first stops being it.
+    let mut tx = store.company(&c).await.unwrap();
+    tx.set_main_contact(Some(&b), &by).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(main(&store, &c).await, std::slice::from_ref(&b));
+
+    // Only a stakeholder of this company; nothing changes otherwise.
+    let mut tx = store.company(&c).await.unwrap();
+    assert!(matches!(
+        tx.set_main_contact(Some(&theirs), &by).await,
+        Err(StoreError::Missing("stakeholder"))
+    ));
+    drop(tx);
+    assert_eq!(main(&store, &c).await, std::slice::from_ref(&b));
+
+    let mut tx = store.company(&c).await.unwrap();
+    assert_eq!(tx.set_main_contact(None, &by).await.unwrap(), None);
+    tx.commit().await.unwrap();
+    assert!(main(&store, &c).await.is_empty());
+
+    // The database holds the rule too, whatever writes to it.
+    let admin = admin().await;
+    sqlx::query("update stakeholders set main_contact = true where tenant_id = $1 and company_id = $2")
+        .bind(c.tenant.as_str())
+        .bind(c.company.as_str())
+        .execute(&admin)
+        .await
+        .expect_err("two main contacts in one company");
 }

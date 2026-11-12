@@ -33,9 +33,21 @@ pub enum TodayItemOut {
     },
 }
 
+/// A project, with its company.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProjectRefOut {
+    pub company: NamedOut,
+    pub project: NamedOut,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TodayOut {
     pub items: Vec<TodayItemOut>,
+    /// The caller's projects with no next step: every task is done, or there are none. An engagement
+    /// with no next step needs one, or is over (direction section 4).
+    // ponytail: always sent, but optional in the spec until the web's fixtures carry it.
+    #[schema(required = false)]
+    pub projects_without_next_step: Vec<ProjectRefOut>,
 }
 
 fn named<T: std::fmt::Display>(n: Named<T>) -> NamedOut {
@@ -45,9 +57,10 @@ fn named<T: std::fmt::Display>(n: Named<T>) -> NamedOut {
     }
 }
 
-impl From<TodayItem> for TodayItemOut {
-    fn from(i: TodayItem) -> Self {
-        match i {
+impl TodayItemOut {
+    /// The item, or the project it marks as having no next step.
+    fn of(i: TodayItem) -> Result<Self, ProjectRefOut> {
+        Ok(match i {
             TodayItem::Task { task, company, project } => TodayItemOut::Task {
                 task: task.into(),
                 company: named(company),
@@ -64,18 +77,32 @@ impl From<TodayItem> for TodayItemOut {
                 company: named(company),
                 project: named(project),
             },
-        }
+            TodayItem::NoNextStep { company, project } => {
+                return Err(ProjectRefOut {
+                    company: named(company),
+                    project: named(project),
+                });
+            }
+        })
     }
 }
 
-/// What needs the caller across their projects: open tasks and unsettled access requests.
+/// What needs the caller across their projects: projects with no next step, open tasks and
+/// unsettled access requests.
 #[utoipa::path(get, operation_id = "get_today", path = "/v1/today", tag = "projects",
     responses((status = 200, body = TodayOut), (status = 401, body = ErrorBody), (status = 503, body = ErrorBody)))]
 pub(crate) async fn today(State(app): State<Arc<App>>, who: Principal) -> Result<Json<TodayOut>, ApiError> {
     let projects = app.projects_for(&who).await?;
     let scopes = app.store.project_scopes(&who.tenant, &projects).await?;
-    let items = app.store.today(&scopes).await?;
-    Ok(Json(TodayOut {
-        items: items.into_iter().map(Into::into).collect(),
-    }))
+    let mut out = TodayOut {
+        items: Vec::new(),
+        projects_without_next_step: Vec::new(),
+    };
+    for item in app.store.today(&scopes).await? {
+        match TodayItemOut::of(item) {
+            Ok(i) => out.items.push(i),
+            Err(p) => out.projects_without_next_step.push(p),
+        }
+    }
+    Ok(Json(out))
 }
