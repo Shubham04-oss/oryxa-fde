@@ -20,8 +20,8 @@
 //   signedOut true: no sign-in first (the sign-in screens themselves)
 //   workspace true: the new workspace (issue #209) on for this tab, whatever the dev server's
 //             VITE_FDE_WORKSPACE (the mock's `__fdeMockWorkspace`, set before the app loads)
-//   pendingStep "verify_email" or "choose_organisation": the mock starts with a sign-in waiting at that
-//             step, as Google's callback leaves it (the mock's `__fdeMockPendingStep`, set before the app loads)
+//   pendingStep "verify_email": the mock starts with a sign-in waiting to verify its email, as a
+//             password sign-in leaves it (the mock's `__fdeMockPendingStep`, set before the app loads)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
 
 export const SIZES = [
@@ -1052,7 +1052,9 @@ function proofScreens() {
 }
 
 // Our own sign-in screens (ADR 0007), on the mock's sample accounts (src/dev/mock-sign-in.ts). Each
-// screen at every size; each refusal or later state at the widest and at phone width.
+// screen at every size; each refusal or later state at the widest and at phone width. Only the steps
+// the API serves are here: the code, invite, reset and Google screens stay hidden (`LATER` in
+// src/lib/api/sign-in-api.ts) and come back here with their routes.
 function ownSignInScreens() {
   const STATE = { signedOut: true, sizes: ["1440", "390"] }
   // These pages are server-rendered: typing before React hydrates is lost, so every act waits for it.
@@ -1069,17 +1071,6 @@ function ownSignInScreens() {
     await field(page, "Email").fill(email)
     await field(page, "Password").fill(secret)
     await press(page, "Sign in")
-  }
-  async function codeSent(page) {
-    await field(page, "Email").fill("riya@example.com")
-    await press(page, "Email me a code")
-    await title("Enter your code")(page).waitFor()
-  }
-  async function code(page, value) {
-    await codeSent(page)
-    await field(page, "Code").fill(value)
-    await press(page, "Sign in")
-    await alert(page).waitFor()
   }
   const screens = [
     { name: "auth-password", path: "/sign-in", signedOut: true, ready: title("Sign in") },
@@ -1111,31 +1102,14 @@ function ownSignInScreens() {
       },
     },
     {
-      name: "auth-code-ask",
-      path: "/sign-in?step=code",
-      signedOut: true,
-      ready: title("Sign in with a code"),
-    },
-    {
-      name: "auth-code-enter",
-      path: "/sign-in?step=code",
-      signedOut: true,
-      ready: title("Sign in with a code"),
-      act: codeSent,
-    },
-    {
-      name: "auth-code-wrong",
-      path: "/sign-in?step=code",
+      name: "auth-unsupported",
+      path: "/sign-in",
       ...STATE,
-      ready: title("Sign in with a code"),
-      act: (page) => code(page, "654321"),
-    },
-    {
-      name: "auth-code-expired",
-      path: "/sign-in?step=code",
-      ...STATE,
-      ready: title("Sign in with a code"),
-      act: (page) => code(page, "000000"),
+      ready: title("Sign in"),
+      act: async (page) => {
+        await password(page, "mfa@example.com", "sample-password")
+        await alert(page).waitFor()
+      },
     },
     {
       name: "auth-verify-email",
@@ -1145,28 +1119,33 @@ function ownSignInScreens() {
       ready: title("Check your email"),
     },
     {
-      name: "auth-verify-email-resent",
+      name: "auth-verify-email-wrong",
       path: "/sign-in?step=verify-email",
       ...STATE,
       pendingStep: "verify_email",
       ready: title("Check your email"),
       act: async (page) => {
-        await press(page, "Send a new code")
-        await page.getByRole("status").waitFor()
+        await field(page, "Code").fill("654321")
+        await press(page, "Confirm and sign in")
+        await alert(page).waitFor()
       },
     },
     {
       name: "auth-organisation",
-      path: "/sign-in?step=organisation",
+      path: "/sign-in",
       signedOut: true,
-      pendingStep: "choose_organisation",
-      ready: (page) => page.getByRole("list", { name: "Your organisations" }),
+      ready: title("Sign in"),
+      act: async (page) => {
+        await password(page, "two-orgs@example.com", "sample-password")
+        await page.getByRole("list", { name: "Your organisations" }).waitFor()
+      },
     },
     {
-      name: "auth-organisation-expired",
+      // A step that lapsed, or the organisations lost to a reload: back to the start with a note.
+      name: "auth-start-again",
       path: "/sign-in?step=organisation",
       ...STATE,
-      ready: alert,
+      ready: (page) => page.getByRole("status"),
     },
     {
       name: "auth-mfa-required",
@@ -1179,76 +1158,6 @@ function ownSignInScreens() {
       path: "/sign-in?error=sso_required",
       ...STATE,
       ready: title("We could not finish signing you in"),
-    },
-    {
-      name: "auth-forgot",
-      path: "/sign-in?step=forgot",
-      signedOut: true,
-      ready: title("Reset your password"),
-    },
-    {
-      name: "auth-forgot-sent",
-      path: "/sign-in?step=forgot",
-      ...STATE,
-      ready: title("Reset your password"),
-      act: async (page) => {
-        await field(page, "Email").fill("riya@example.com")
-        await press(page, "Email me a reset link")
-        await page.getByRole("status").waitFor()
-      },
-    },
-    {
-      name: "auth-reset",
-      path: "/sign-in?step=reset&token=reset-sample",
-      signedOut: true,
-      ready: title("Choose a new password"),
-    },
-    {
-      name: "auth-reset-rejected",
-      path: "/sign-in?step=reset&token=reset-sample",
-      ...STATE,
-      ready: title("Choose a new password"),
-      act: async (page) => {
-        await field(page, "New password").fill("short")
-        await press(page, "Change password")
-        await page.getByText("That password was refused.").waitFor()
-      },
-    },
-    {
-      name: "auth-reset-done",
-      path: "/sign-in?step=reset&token=reset-sample",
-      ...STATE,
-      ready: title("Choose a new password"),
-      act: async (page) => {
-        await field(page, "New password").fill("a much longer password")
-        await press(page, "Change password")
-        await title("Password changed")(page).waitFor()
-      },
-    },
-    {
-      name: "auth-reset-expired",
-      path: "/sign-in?step=reset",
-      ...STATE,
-      ready: alert,
-    },
-    {
-      name: "auth-invite",
-      path: "/sign-in?step=invite&token=invite-sample",
-      signedOut: true,
-      ready: (page) => field(page, "Your name"),
-    },
-    {
-      name: "auth-invite-missing",
-      path: "/sign-in?step=invite&token=invite-sample",
-      ...STATE,
-      ready: (page) => field(page, "Your name"),
-      act: (page) => press(page, "Join and sign in"),
-    },
-    {
-      name: "auth-invite-expired",
-      path: "/sign-in?step=invite&token=old",
-      ...STATE,
-      ready: alert,
     },
   ]
   return screens.map((screen) =>

@@ -46,7 +46,7 @@ async function shoot(screen, size, theme) {
   if (screen.evalsOff) await page.addInitScript(() => (globalThis.__fdeMockEvalsOff = true))
   // The new workspace (issue #209) on for this tab, as `VITE_FDE_WORKSPACE=1` would be for a build.
   if (screen.workspace) await page.addInitScript(() => (globalThis.__fdeMockWorkspace = true))
-  // A sign-in waiting at a step, as Google's callback leaves it.
+  // A sign-in waiting at a step, as a password sign-in leaves it.
   if (screen.pendingStep)
     await page.addInitScript((step) => (globalThis.__fdeMockPendingStep = step), screen.pendingStep)
   try {
