@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from "react"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
 import type { IconName } from "../ui/icon"
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu"
 import { Proof, StepMeta, StepNumber } from "./blocks"
 import { companyProblem } from "@/lib/records"
 import type { CompanyFields } from "@/lib/records"
@@ -220,7 +221,8 @@ function ChoiceCard({
       <span
         aria-hidden="true"
         className={cn(
-          "mt-0.5 grid size-4 flex-none place-items-center rounded-full border border-strong bg-canvas transition-colors",
+          // The muted ink, not the border colour: an unchosen circle must be seen (3:1 or more).
+          "mt-0.5 grid size-4 flex-none place-items-center rounded-full border-[1.5px] border-muted-foreground bg-canvas transition-colors",
           checked && "border-tint",
         )}
       >
@@ -331,8 +333,10 @@ function Segmented<T extends string>({
           <label
             key={o.id}
             className={cn(
-              "cursor-pointer rounded-full px-3 py-1 text-micro font-medium text-muted-foreground transition-colors select-none hover:text-foreground has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-tint/40",
-              value === o.id && "bg-canvas text-foreground shadow-[0_1px_2px_var(--border-strong)]",
+              "cursor-pointer rounded-full px-3 py-1 text-meta font-medium text-muted-foreground transition-colors select-none hover:text-foreground has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-tint/40",
+              // The chosen option in the tint's well, as a chosen card is: seen at a glance.
+              value === o.id &&
+                "bg-tint-soft text-tint ring-1 ring-tint/35 ring-inset hover:text-tint",
             )}
           >
             <input
@@ -522,14 +526,12 @@ function IconButton({
   onClick,
   disabled,
   className,
-  ...data
 }: {
   icon: IconName
   label: string
   onClick: () => void
   disabled?: boolean
   className?: string
-  "data-move"?: string
 }) {
   return (
     <button
@@ -542,7 +544,6 @@ function IconButton({
         "grid size-8 flex-none place-items-center rounded-full text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-selected hover:text-foreground disabled:pointer-events-none disabled:opacity-30 motion-safe:active:scale-[0.92]",
         className,
       )}
-      {...data}
     >
       <Icon name={icon} size={15} />
     </button>
@@ -552,9 +553,12 @@ function IconButton({
 let added = 0
 const STEP_TITLE = PlanStepItem.shape.title
 
+/** Where focus goes after a change to the plan: a step's menu button, the new step's field. */
+type FocusTo = { step: string } | "new-step"
+
 /**
- * The plan the workspace proposed, for the FDE to change: reorder, rename, add and remove steps.
- * Every change is local until Continue; the summary beside it shows the draft as it goes.
+ * The plan the workspace proposed, for the FDE to change: reorder, rename, add and remove steps,
+ * from one menu per step. Every change is local until Continue; the summary shows the draft.
  */
 export function PlanForm({
   label,
@@ -574,7 +578,17 @@ export function PlanForm({
   const [said, setSaid] = useState("")
   const rows = useRef(new Map<string, HTMLLIElement>())
   const tops = useRef(new Map<string, number>())
-  const refocus = useRef<{ id: string; move: "up" | "down" } | null>(null)
+  const newStep = useRef<HTMLInputElement>(null)
+  // Set by a change, used once the page shows it: a removed row or a closed rename takes its
+  // control with it, which would leave focus on the page itself.
+  const focusTo = useRef<FocusTo | null>(null)
+
+  const target = (to: FocusTo | null): HTMLElement | null =>
+    to === "new-step"
+      ? newStep.current
+      : to
+        ? (rows.current.get(to.step)?.querySelector<HTMLElement>("[data-step-menu]") ?? null)
+        : null
 
   // Steps glide to their new place when the order changes (FLIP); not under reduced motion.
   useLayoutEffect(() => {
@@ -589,17 +603,13 @@ export function PlanForm({
         })
       tops.current.set(id, top)
     }
-    // Moving a row moves its button in the page, which loses focus: put it back.
-    const want = refocus.current
-    refocus.current = null
-    if (want) {
-      const row = rows.current.get(want.id)
-      const button =
-        row?.querySelector<HTMLButtonElement>(`[data-move="${want.move}"]:not(:disabled)`) ??
-        row?.querySelector<HTMLButtonElement>("[data-move]:not(:disabled)")
-      button?.focus()
-    }
   }, [steps])
+
+  useLayoutEffect(() => {
+    const to = focusTo.current
+    focusTo.current = null
+    target(to)?.focus()
+  })
 
   function move(i: number, by: -1 | 1) {
     const j = i + by
@@ -607,18 +617,32 @@ export function PlanForm({
     const next = [...steps]
     const [step] = next.splice(i, 1)
     next.splice(j, 0, step!)
-    refocus.current = { id: step!.id, move: by < 0 ? "up" : "down" }
+    focusTo.current = { step: step!.id }
     onChange(next)
     setSaid(`Moved “${step!.title}” to step ${j + 1} of ${steps.length}.`)
+  }
+
+  function remove(i: number) {
+    const step = steps[i]!
+    // The step that takes its place, or the one before it, or the field to add one.
+    const near = steps[i + 1] ?? steps[i - 1]
+    focusTo.current = near ? { step: near.id } : "new-step"
+    onChange(steps.filter((s) => s.id !== step.id))
+    setSaid(`Removed “${step.title}”.`)
+  }
+
+  function stopRenaming(id: string) {
+    focusTo.current = { step: id }
+    setRenaming(null)
+    setProblem("")
   }
 
   function rename(id: string) {
     const title = STEP_TITLE.safeParse(draftTitle)
     if (!title.success)
       return setProblem("A step needs a name of up to 120 characters on one line.")
-    setProblem("")
     onChange(steps.map((s) => (s.id === id ? { ...s, title: title.data } : s)))
-    setRenaming(null)
+    stopRenaming(id)
   }
 
   function add() {
@@ -653,7 +677,7 @@ export function PlanForm({
               if (el) rows.current.set(step.id, el)
               else rows.current.delete(step.id)
             }}
-            className="group relative -mx-2 flex items-start gap-3 rounded-field px-2 py-2.5 transition-colors hover:bg-card max-[560px]:flex-wrap max-[560px]:gap-y-1"
+            className="relative -mx-2 flex items-start gap-3 rounded-field px-2 py-2.5 transition-colors hover:bg-card"
           >
             <span className="pt-0.5">
               <StepNumber n={i + 1} />
@@ -672,8 +696,7 @@ export function PlanForm({
                     }
                     if (e.key === "Escape") {
                       e.preventDefault()
-                      setRenaming(null)
-                      setProblem("")
+                      stopRenaming(step.id)
                     }
                   }}
                   className={cn(INPUT, "h-9 min-w-0 flex-1")}
@@ -683,51 +706,31 @@ export function PlanForm({
                 </Button>
               </span>
             ) : (
-              <span className="grid min-w-0 flex-1 gap-0.5">
-                <span className="text-body break-words">{step.title}</span>
-                <StepMeta step={step} />
-                {step.criterion && <Proof criterion={step.criterion} />}
-              </span>
-            )}
-            {renaming !== step.id && (
-              <span className="flex flex-none items-center opacity-100 transition-opacity duration-150 max-[560px]:-my-1 max-[560px]:basis-full max-[560px]:pl-7 pointer-fine:opacity-0 pointer-fine:group-focus-within:opacity-100 pointer-fine:group-hover:opacity-100">
-                <IconButton
-                  icon="chevron-up"
-                  data-move="up"
-                  label={`Move “${step.title}” up`}
-                  disabled={i === 0}
-                  onClick={() => move(i, -1)}
-                />
-                <IconButton
-                  icon="chevron-down"
-                  data-move="down"
-                  label={`Move “${step.title}” down`}
-                  disabled={i === steps.length - 1}
-                  onClick={() => move(i, 1)}
-                />
-                <IconButton
-                  icon="pencil"
-                  label={`Rename “${step.title}”`}
-                  onClick={() => {
+              <>
+                <span className="grid min-w-0 flex-1 gap-0.5">
+                  <span className="text-body break-words">{step.title}</span>
+                  <StepMeta step={step} />
+                  {step.criterion && <Proof criterion={step.criterion} />}
+                </span>
+                <StepMenu
+                  title={step.title}
+                  first={i === 0}
+                  last={i === steps.length - 1}
+                  onMove={(by) => move(i, by)}
+                  onRename={() => {
                     setDraftTitle(step.title)
                     setRenaming(step.id)
                   }}
+                  onRemove={() => remove(i)}
                 />
-                <IconButton
-                  icon="close"
-                  label={`Remove “${step.title}”`}
-                  onClick={() => {
-                    onChange(steps.filter((s) => s.id !== step.id))
-                    setSaid(`Removed “${step.title}”.`)
-                  }}
-                />
-              </span>
+              </>
             )}
           </li>
         ))}
       </ol>
       <div className="flex items-center gap-2">
         <input
+          ref={newStep}
           aria-label="New step"
           value={newTitle}
           onChange={(e) => setNewTitle(e.target.value)}
@@ -749,5 +752,76 @@ export function PlanForm({
         {said}
       </p>
     </AnswerCard>
+  )
+}
+
+/**
+ * A step's changes behind one button, so a long plan stays a list of steps. The plan form puts
+ * focus back itself after a change (`finalFocus` is off then); Escape returns it to the button.
+ */
+function StepMenu({
+  title,
+  first,
+  last,
+  onMove,
+  onRename,
+  onRemove,
+}: {
+  title: string
+  first: boolean
+  last: boolean
+  onMove: (by: -1 | 1) => void
+  onRename: () => void
+  onRemove: () => void
+}) {
+  const chose = useRef(false)
+  const pick = (act: () => void) => () => {
+    chose.current = true
+    act()
+  }
+  return (
+    <Menu>
+      <MenuTrigger
+        data-step-menu=""
+        aria-label={`Change “${title}”`}
+        className="-my-1 grid size-8 flex-none place-items-center rounded-full text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-selected hover:text-foreground data-popup-open:bg-selected data-popup-open:text-foreground motion-safe:active:scale-[0.92]"
+      >
+        <Icon name="more" size={16} />
+      </MenuTrigger>
+      <MenuContent
+        label={`Change “${title}”`}
+        finalFocus={() => {
+          const handled = chose.current
+          chose.current = false
+          return !handled
+        }}
+      >
+        <MenuItem
+          disabled={first}
+          onClick={pick(() => onMove(-1))}
+          className="data-disabled:opacity-45"
+        >
+          <Icon name="chevron-up" size={15} className="text-muted-foreground" />
+          Move up
+        </MenuItem>
+        <MenuItem
+          disabled={last}
+          onClick={pick(() => onMove(1))}
+          className="data-disabled:opacity-45"
+        >
+          <Icon name="chevron-down" size={15} className="text-muted-foreground" />
+          Move down
+        </MenuItem>
+        <MenuItem onClick={pick(onRename)}>
+          <Icon name="pencil" size={15} className="text-muted-foreground" />
+          Rename
+        </MenuItem>
+        <MenuSeparator />
+        <MenuItem onClick={pick(onRemove)}>
+          <Icon name="close" size={15} className="text-muted-foreground" />
+          Remove
+        </MenuItem>
+      </MenuContent>
+    </Menu>
   )
 }

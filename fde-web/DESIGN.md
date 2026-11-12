@@ -35,7 +35,7 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 | `--focus`         | `#3b54c4` | `#8d9df5` | Keyboard focus ring (the tint)                                                                                                                                                                                                                                                                                            |
 | `--text`          | `#1b1a17` | `#f2f0eb` | Titles, body, the primary button                                                                                                                                                                                                                                                                                          |
 | `--text-soft`     | `#46423c` | `#bab5ac` | Navigation labels, secondary emphasis                                                                                                                                                                                                                                                                                     |
-| `--text-muted`    | `#75706a` | `#918c84` | Metadata and hints                                                                                                                                                                                                                                                                                                        |
+| `--text-muted`    | `#68635d` | `#96918a` | Metadata, hints, an unchosen radio, an open checklist item's circle, the Never mark                                                                                                                                                                                                                                       |
 | `--text-inverse`  | `#fffefc` | `#161514` | Text on the primary button                                                                                                                                                                                                                                                                                                |
 | `--tint`          | `#3b54c4` | `#8d9df5` | Our one colour (lapis): focus, the current step, the workspace's voice, "ask first". Never a status.                                                                                                                                                                                                                      |
 | `--tint-soft`     | `#eceffa` | `#22263b` | A tinted well: the workspace's mark, a chosen option, a confirmation on sign-in                                                                                                                                                                                                                                           |
@@ -43,6 +43,12 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 | `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items, a save held back because the record changed, a criterion that is not met, a result that is out of date, a case that did not pass. Nothing else. |
 | `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                                                                                                                                                             |
 
+- Contrast is measured, not judged by eye (WCAG 2.2). `--text-muted` is at least 4.5:1 on every
+  surface it sits on: light 5.32 on `--base`, 4.56 on `--selected`, 4.86 on `--hover`, 5.90 on
+  `--canvas`; dark 6.03, 4.70, 5.37 and 5.62. A control's outline that says something (an unchosen
+  radio, an open checklist item, the Never mark) is drawn in `--text-muted`, never `--border-strong`
+  (1.6:1 light, 1.9:1 dark), so it reaches 3:1 and more. The tint on `--tint-soft`, a chosen
+  option, is 5.63:1 light and 5.87:1 dark.
 - Warm paper and ink, not pure greys: every neutral leans a little warm, the same in both themes.
   One colour of our own, `--tint`, used sparingly; no other decorative colour, no gradients.
 - A status is a dot and words, never colour alone.
@@ -68,6 +74,8 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
 | `text-title`   | 20 / 28     | A question in the conversation         |
 | `text-display` | 30 / 38     | The greeting (26 / 32 on a phone)      |
 
+- `cn()` (`src/lib/utils.ts`) knows these sizes: without that, tailwind-merge took `text-meta` beside
+  a text colour for a colour and dropped it.
 - Spacing is the 4px scale, in these steps only: 4, 8, 12, 16, 24, 32, 48, 56. A column of the
   workspace is 680px (the welcome screen) or 1120px with its summary; 16px gutters on a phone.
 - Radius: `rounded-field` (12px) for fields and choices, `rounded-card` (18px) for cards, 24px for
@@ -755,17 +763,29 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   screens, named (never a URL), and loads nothing from another host. A plan step is an ordinary
   task: a title, one of the eight stages, and, where it proves something, a success criterion with
   "How we will prove it" beside it (the place evals will fill).
-- **Welcome** (`/`): the date and a greeting (the screen's heading); the conversation box, the one
-  primary thing (Enter sends, Shift and Enter is a new line); two quiet prompts ("Set up a new
-  company", "What needs me today?"); **Suggested next**, up to three, each approved by opening where
-  it is done or put away (with Undo); and four companies with **See all**. Suggestions are fixed
+- **Welcome** (`/`): the date and a greeting (the screen's heading); the conversation box, the
+  centrepiece (Enter sends, Shift and Enter is a new line); two quiet prompts in one row ("Set up a
+  new company", "What needs me today?"; full width, one under the other, on a phone); **Suggested
+  next**, up to three, each approved by opening where it is done or put away (with Undo); and four
+  companies with **See all**. One rhythm: 24px inside the opening, 48px between sections (40px on a phone), the
+  same heading for each section, and the companies' tiles on the same edge as the cards above. Each
+  suggestion reads where it comes from, then what (semibold), then why; the first one's approve is
+  the screen's one primary button (ink), the others are outlined. Suggestions are fixed
   templates over names, counts and days waiting; they never quote a record's own text. The
   scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
 - **New company** (`/new-company`): the workspace asks one step at a time (the company and what is
   delivered; how to start; rules for agents and who approves; who to invite, optional; the plan;
   the review). Each answer fills a section of the **Summary** beside it (a sheet from **Summary** on
   a narrow screen). The plan is proposed from the answers (a call first, scope first, or a pilot)
-  and can be reordered, renamed, added to and removed from, by buttons that keep focus on the step.
+  and can be reordered, renamed, added to and removed from, from one menu per step (the ⋯ button,
+  so a phone's list stays a list of steps). Focus never falls to the page: after a move it stays on
+  the step's menu button, after Remove it goes to the step that takes its place (or the one
+  before, or the New step field), and after a rename is saved or left with Escape it returns to
+  the step's menu button. The Summary is a digest, so the page has one focus: the company as label
+  and value, a long value shortened to three lines with **Show more**; the plan as its count, how
+  many steps prove a criterion and the first three, with **Show all**; the rules as a count per
+  verdict and who approves, with **Show the rules**; and the people. A value is never dropped for
+  its length: a block's limits are the forms' own, counted in characters as the forms count them.
   Any answer can be changed. Nothing is saved until **Create company** on the review, which calls
   `api.createCompany` and opens the company; in this preview the plan, rules and invitations are
   not kept, and the review says so. Real customer data is always "Never".

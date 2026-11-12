@@ -153,7 +153,7 @@ export function proposePlan(answers: Answers): Array<PlanStep> {
   const contact = start?.contact.trim() || ""
   const named = start?.criterion.trim() || ""
   const criterion = { name: named || "Each criterion agreed at scope", proof: PROOF }
-  const withContact = contact ? { with: `with ${contact}` } : {}
+  const withContact = contact ? { with: contact } : {}
   const scope: Omit<PlanStep, "id"> = {
     title: "Agree scope and success criteria",
     stage: "scope",
@@ -181,7 +181,7 @@ export function proposePlan(answers: Answers): Array<PlanStep> {
             {
               title: "Discovery call",
               stage: "discover",
-              ...(contact ? withContact : { with: "with the sponsor" }),
+              ...(contact ? withContact : { with: "the sponsor" }),
             },
             scope,
             { title: "Request access to the systems", stage: "access" },

@@ -10,6 +10,7 @@ import {
   summaryBlocks,
 } from "./new-company"
 import type { Answers } from "./new-company"
+import { MAX_NAME, MAX_TEXT } from "@/lib/records"
 
 const company = { name: "Orion Rail", industry: "", region: "", summary: "Claims intake." }
 const start = (approach: "talk" | "scope" | "pilot", contact = "", criterion = "") => ({
@@ -46,7 +47,7 @@ describe("the new-company conversation", () => {
     expect(talk[0]).toMatchObject({
       title: "Discovery call",
       stage: "discover",
-      with: "with Dana Ortiz",
+      with: "Dana Ortiz",
     })
     expect(talk.map((s) => s.stage)).toEqual([
       "discover",
@@ -86,6 +87,32 @@ describe("the new-company conversation", () => {
     expect(summaryBlocks(NO_ANSWERS)).toEqual([])
     expect(summaryBlocks({ ...NO_ANSWERS, company }).map((b) => b.type)).toEqual(["brief"])
     expect(summaryBlocks(all).map((b) => b.type)).toEqual(["brief", "plan", "rules", "people"])
+  })
+
+  it("never drops a section at the longest answers the forms take", () => {
+    // Each field at its form's limit, counted as the forms count (characters, not UTF-16 units).
+    const long = (n: number, unit = "a") => unit.repeat(n)
+    const answers: Answers = {
+      company: {
+        name: long(MAX_NAME, "é"),
+        industry: long(MAX_NAME),
+        region: long(MAX_NAME),
+        summary: long(MAX_TEXT - 1, "𝒶") + "\n",
+      },
+      start: start("talk", long(120), long(200)),
+      rules: defaultRules(),
+      people: [{ email: `${long(64)}@example.com`, role: "sponsor" }],
+      plan: null,
+    }
+    for (const approach of ["talk", "scope", "pilot"] as const) {
+      const shown = { ...answers, start: { ...answers.start!, approach } }
+      const blocks = summaryBlocks({ ...shown, plan: proposePlan(shown) })
+      expect(blocks.map((b) => b.type)).toEqual(["brief", "plan", "rules", "people"])
+      const brief = blocks[0]
+      expect(
+        brief?.type === "brief" && brief.items.find((i) => i.label === "Delivering")?.value,
+      ).toBe(long(MAX_TEXT - 1, "𝒶"))
+    }
   })
 
   it("keeps real customer data off whatever the answer says", () => {

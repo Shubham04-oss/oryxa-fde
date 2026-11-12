@@ -1,6 +1,8 @@
+import { useId, useState } from "react"
 import { useNavigate } from "@tanstack/react-router"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
+import { VERDICTS } from "@/lib/workspace/blocks"
 import type {
   Block,
   BriefBlock,
@@ -45,29 +47,33 @@ export function useGo() {
 export function Suggestion({
   block,
   onDismiss,
+  lead,
 }: {
   block: SuggestionBlock
   /** Without it, the row offers approve only. */
   onDismiss?: () => void
+  /** The first suggestion: its approve is the screen's primary action. */
+  lead?: boolean
 }) {
   const go = useGo()
   return (
     <article
       aria-label={block.title}
-      className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-card max-[560px]:flex-col max-[560px]:items-stretch max-[560px]:gap-3 max-[560px]:px-4"
+      className="flex items-center gap-6 px-5 py-4 max-[560px]:flex-col max-[560px]:items-stretch max-[560px]:gap-3 max-[560px]:px-4"
     >
-      <div className="grid min-w-0 flex-1 gap-0.5">
+      <div className="grid min-w-0 flex-1 gap-1">
         {block.context && (
           <p className="truncate text-micro text-muted-foreground">{block.context}</p>
         )}
-        <h3 className="text-body font-medium text-pretty">{block.title}</h3>
+        <h3 className="text-body font-semibold text-pretty">{block.title}</h3>
         {block.detail && (
           <p className="line-clamp-2 text-meta text-muted-foreground">{block.detail}</p>
         )}
       </div>
       <div className="flex flex-none items-center gap-1">
-        <Button variant="outline" onClick={() => void go(block.approve.to)}>
+        <Button variant={lead ? "default" : "outline"} onClick={() => void go(block.approve.to)}>
           {block.approve.label}
+          <Icon name="arrow-right" size={14} strokeWidth={2} />
         </Button>
         {onDismiss && (
           <button
@@ -85,15 +91,65 @@ export function Suggestion({
   )
 }
 
+/** Opens the rest of a list or a value in place, and says whether it is open. */
+function ShowMore({
+  open,
+  onToggle,
+  controls,
+  more,
+  less = "Show less",
+}: {
+  open: boolean
+  onToggle: () => void
+  controls: string
+  more: string
+  less?: string
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls={controls}
+      onClick={onToggle}
+      className="justify-self-start rounded-sm text-micro font-medium text-soft underline decoration-strong underline-offset-4 transition-colors hover:text-foreground hover:decoration-current"
+    >
+      {open ? less : more}
+    </button>
+  )
+}
+
+/** A value this long (in characters, or lines) is shown shortened, with Show more. */
+const LONG = 140
+
+function BriefValue({ value }: { value: string }) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const long = [...value].length > LONG || value.split("\n").length > 3
+  return (
+    <dd className="grid min-w-0 gap-1">
+      <span
+        id={id}
+        className={cn(
+          "text-meta break-words whitespace-pre-line text-foreground",
+          long && !open && "line-clamp-3",
+        )}
+      >
+        {value}
+      </span>
+      {long && (
+        <ShowMore open={open} onToggle={() => setOpen(!open)} controls={id} more="Show more" />
+      )}
+    </dd>
+  )
+}
+
 function Brief({ block }: { block: BriefBlock }) {
   return (
-    <dl className="grid gap-3">
+    <dl className="grid grid-cols-[84px_minmax(0,1fr)] gap-x-3 gap-y-2">
       {block.items.map((item) => (
-        <div key={item.label} className="grid gap-0.5">
-          <dt className="text-micro text-muted-foreground">{item.label}</dt>
-          <dd className="text-meta break-words whitespace-pre-line text-foreground">
-            {item.value}
-          </dd>
+        <div key={item.label} className="contents">
+          <dt className="text-micro leading-[18px] text-muted-foreground">{item.label}</dt>
+          <BriefValue value={item.value} />
         </div>
       ))}
     </dl>
@@ -110,11 +166,13 @@ export function Proof({ criterion }: { criterion: { name: string; proof: string 
   )
 }
 
+const bare = (s: string) => s.replace(/\s+/g, "").toLowerCase()
+
 /** A step's stage, and who it is with: the task it becomes sits on that stage. */
 export function StepMeta({ step }: { step: PlanStep }) {
   const stage = STAGE_LABEL[step.stage]
-  // "Build" under a step called "Build" says nothing twice.
-  const parts = [stage.toLowerCase() === step.title.toLowerCase() ? null : stage, step.with]
+  // "Build" under "Build", or "Handoff" under "Hand off", says nothing twice.
+  const parts = [bare(stage) === bare(step.title) ? null : stage, step.with && `with ${step.with}`]
   const said = parts.filter(Boolean).join(" · ")
   if (!said) return null
   return <span className="text-micro text-muted-foreground">{said}</span>
@@ -132,48 +190,108 @@ export function StepNumber({ n }: { n: number }) {
   )
 }
 
+/** How many steps the plan's digest shows before Show all. */
+const FIRST_STEPS = 3
+
+/** The plan as a digest: how many steps, how many prove a criterion, and the first few. */
 function Plan({ block }: { block: PlanBlock }) {
-  if (block.steps.length === 0) return <Empty>No steps yet.</Empty>
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const n = block.steps.length
+  if (n === 0) return <Empty>No steps yet.</Empty>
+  const proving = block.steps.filter((s) => s.criterion).length
+  const shown = open ? block.steps : block.steps.slice(0, FIRST_STEPS)
   return (
-    <ol className="grid gap-3">
-      {block.steps.map((step, i) => (
-        <li key={step.id} className="flex gap-2.5">
-          <StepNumber n={i + 1} />
-          <span className="grid min-w-0 gap-0.5">
-            <span className="text-meta break-words text-foreground">{step.title}</span>
-            <StepMeta step={step} />
-            {step.criterion && <Proof criterion={step.criterion} />}
+    <div className="grid gap-3">
+      <p className="text-meta text-soft">
+        {n} {n === 1 ? "step" : "steps"}
+        {proving > 0 && (
+          <span className="text-muted-foreground">
+            {" · "}
+            {proving} {proving === 1 ? "proves" : "prove"} a criterion
           </span>
-        </li>
-      ))}
-    </ol>
+        )}
+      </p>
+      <ol id={id} className="grid gap-2">
+        {shown.map((step, i) => (
+          <li key={step.id} className="flex items-start gap-2.5">
+            <StepNumber n={i + 1} />
+            <span className="grid min-w-0 gap-0.5">
+              <span className="text-meta break-words text-foreground">{step.title}</span>
+              {open && <StepMeta step={step} />}
+              {open && step.criterion && <Proof criterion={step.criterion} />}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {n > FIRST_STEPS && (
+        <ShowMore
+          open={open}
+          onToggle={() => setOpen(!open)}
+          controls={id}
+          more={`Show all ${n} steps`}
+        />
+      )}
+    </div>
   )
 }
 
 const VERDICT_DOT: Record<Verdict, string> = {
   allowed: "bg-success",
   ask: "bg-tint",
-  never: "bg-strong",
+  // A ring in the muted ink: "Never" is not a status, and it must still be seen (3:1 or more).
+  never: "border-[1.5px] border-muted-foreground",
 }
 
+function VerdictDot({ verdict }: { verdict: Verdict }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn("size-2 flex-none rounded-full", VERDICT_DOT[verdict])}
+    />
+  )
+}
+
+/** The rules as a digest: how many of each verdict and who approves; the rules themselves on Show. */
 function Rules({ block }: { block: RulesBlock }) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const counts = VERDICTS.map((verdict) => ({
+    verdict,
+    n: block.rules.filter((r) => r.verdict === verdict).length,
+  })).filter((c) => c.n > 0)
   return (
     <div className="grid gap-3">
-      <ul className="grid gap-2">
+      <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-meta text-soft">
+        {counts.map((c) => (
+          <span key={c.verdict} className="inline-flex items-center gap-1.5">
+            <VerdictDot verdict={c.verdict} />
+            {c.n} {VERDICT_LABEL[c.verdict].toLowerCase()}
+          </span>
+        ))}
+      </p>
+      {/* Kept in the page when closed, so the button's aria-controls always names it. */}
+      <ul id={id} hidden={!open} className="grid gap-2">
         {block.rules.map((rule) => (
           <li key={rule.id} className="flex items-baseline justify-between gap-3 text-meta">
             <span className="min-w-0 text-foreground">{rule.action}</span>
             <span className="inline-flex flex-none items-center gap-1.5 text-micro text-soft">
-              <span
-                aria-hidden="true"
-                className={cn("size-1.5 rounded-full", VERDICT_DOT[rule.verdict])}
-              />
+              <VerdictDot verdict={rule.verdict} />
               {VERDICT_LABEL[rule.verdict]}
             </span>
           </li>
         ))}
       </ul>
-      <p className="text-micro text-muted-foreground">Approves: {block.approver}</p>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-micro text-muted-foreground">Approves: {block.approver}</p>
+        <ShowMore
+          open={open}
+          onToggle={() => setOpen(!open)}
+          controls={id}
+          more="Show the rules"
+          less="Hide the rules"
+        />
+      </div>
     </div>
   )
 }
@@ -204,9 +322,10 @@ function Checklist({ block }: { block: ChecklistBlock }) {
               <Icon name="check" size={11} strokeWidth={2.5} />
             </span>
           ) : (
+            // The muted ink, not the border colour: an open item's circle must be seen (3:1 or more).
             <span
               aria-hidden="true"
-              className="size-4 flex-none rounded-full border border-strong"
+              className="size-4 flex-none rounded-full border-[1.5px] border-muted-foreground"
             />
           )}
           <span className={item.done ? "text-foreground" : "text-muted-foreground"}>
@@ -226,7 +345,8 @@ export function Empty({ children }: { children: React.ReactNode }) {
 
 /**
  * One block, drawn. Suggestions are drawn by `Suggestion` where they can be dismissed; here they
- * offer approve only. A type this file does not know is drawn as nothing.
+ * offer approve only. A type this file does not know is drawn as nothing. Plan and rules are
+ * drawn as a digest that opens in place: the full plan is edited on its own step.
  */
 export function BlockView({ block }: { block: Block }) {
   switch (block.type) {

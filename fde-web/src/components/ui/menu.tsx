@@ -9,12 +9,22 @@ export const Menu = MenuPrimitive.Root
 export const MenuTrigger = MenuPrimitive.Trigger
 export const MenuGroup = MenuPrimitive.Group
 
-export function MenuContent({ children, label }: { children: ReactNode; label: string }) {
+export function MenuContent({
+  children,
+  label,
+  finalFocus,
+}: {
+  children: ReactNode
+  label: string
+  /** Where focus goes when the menu closes; the trigger by default. */
+  finalFocus?: MenuPrimitive.Popup.Props["finalFocus"]
+}) {
   return (
     <MenuPrimitive.Portal>
       <MenuPrimitive.Positioner align="end" sideOffset={4} className="z-50 outline-none">
         <MenuPrimitive.Popup
           aria-label={label}
+          finalFocus={finalFocus}
           className="min-w-44 rounded-xl border border-border bg-popover p-1 text-xs text-popover-foreground shadow-overlay outline-none"
         >
           {children}
