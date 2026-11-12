@@ -437,6 +437,12 @@ describe("safeReturnTo", () => {
       expect(safeReturnTo(bad), JSON.stringify(bad)).toBe("/")
   })
 
+  it("refuses a path that only becomes another host once dot segments are resolved", () => {
+    for (const bad of ["/.//evil.example", "/x/..//evil.example", "/./.././/evil.example/x?y=1"])
+      expect(safeReturnTo(bad), bad).toBe("/")
+    expect(safeReturnTo("/x/.//today")).toBe("/x//today")
+  })
+
   it("leaves an encoded slash as a path on this origin", () => {
     expect(safeReturnTo("/%2F%2Fevil.example")).toBe("/%2F%2Fevil.example")
   })

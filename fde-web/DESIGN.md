@@ -122,8 +122,10 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
 - **Our own sign-in (ADR 0007),** behind the build flag `VITE_FDE_OWN_SIGN_IN=1`, off until the API's
   sign-in routes are deployed. Every step is `/sign-in?step=…` in the same frame
   (`components/auth/frame.tsx`; fields in `fields.tsx`, so a restyle starts in those two): email and
-  password with "Email me a code instead" and "Continue with Google"; the code (ask, then enter);
-  verify your email; choose an organisation (the API's list, from the pending step, so Google's
+  password, then "or" and **Email me a code** as its own full-width choice (with an address typed it
+  asks for the code at once and opens on typing it, so a person with no password signs in with a
+  code alone), and "Continue with Google"; the code (ask, then enter, with **Send a new code**);
+  verify your email (with **Send a new code**); choose an organisation (the API's list, from the pending step, so Google's
   callback lands on it too); forgotten and reset password; accept an invite. An end with no session
   is `/sign-in?error=…`: not in an organisation yet, or a step we cannot take yet (MFA, SSO), each
   with what to do next and **Back to sign in**. Rules: one wording for a wrong password and an
@@ -134,9 +136,11 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   emailed link's token is taken out of the address bar once read, offered only to the step it was
   read for, and the page sends no `Referer`; `autocomplete` set for password
   managers (`username`, `current-password`, `new-password`, `one-time-code`, `name`); every field
-  labelled, its error read with it, and focus moved to the new step's title or the field to fix.
-  The calls are the hand-written assumed contract in `lib/api/sign-in-api.ts`, until the API's spec
-  has them.
+  labelled, its error read with it, and focus moved to the new step's title or the field to fix; a
+  note on the first screen ("sign in again") is read with its title, which takes focus for it. One
+  main button per view. Password, verify email, organisation and the code routes follow the API's
+  spec; forgotten and reset password, invites and Google are on a hand-written assumed contract in
+  `lib/api/sign-in-api.ts` and stay hidden (`LATER`) until the API serves them.
 - **Companies (home).** **New company** above two cards per row (one below 960px): name, industry
   and the FDE's part (Lead, Engineer, or Organisation admin when they reach it as one), each project
   with its stage, and what needs the FDE there today. With no company it is the first minute of an
