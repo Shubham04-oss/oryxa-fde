@@ -102,7 +102,7 @@ pub struct StakeholderBody {
 }
 
 impl StakeholderBody {
-    fn parse(self) -> Result<StakeholderIn, ApiError> {
+    pub(crate) fn parse(self) -> Result<StakeholderIn, ApiError> {
         Ok(StakeholderIn {
             name: name(self.name, "name")?,
             title: self.title.map(|t| name(t, "title")).transpose()?,

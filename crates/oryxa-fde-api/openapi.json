@@ -699,6 +699,88 @@
         }
       }
     },
+    "/v1/companies/setup": {
+      "post": {
+        "tags": [
+          "companies"
+        ],
+        "summary": "Set up a company in one call: the company (the caller becomes its lead), its first project,\nits stakeholders and main contact, the project's scope items and success criteria, and the plan\nas tasks in order. All of it or none of it. Send an `Idempotency-Key` header: a retry with the\nsame key and body answers the first setup with 200 and makes nothing new.",
+        "operationId": "set_up_company",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 128 of `A-Za-z0-9-_`, the same for a retry",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Set up earlier with this key and body: that setup, as it stands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupOut"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Set up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_*` naming the part, e.g. `invalid_name`, `invalid_plan` (more than 30 steps), `invalid_criterion`, `invalid_idempotency_key`; nothing is made",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`rejected_idempotency_key_reused`: this key set up something else",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies/{company}": {
       "get": {
         "tags": [
@@ -11062,6 +11144,135 @@
             "type": "string"
           }
         }
+      },
+      "SetupBody": {
+        "type": "object",
+        "description": "Everything the new-company conversation confirmed.",
+        "required": [
+          "company",
+          "project"
+        ],
+        "properties": {
+          "company": {
+            "$ref": "#/components/schemas/CompanyBody"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CriterionBody"
+            },
+            "description": "Up to 20 success criteria, each with its baseline and how it will be proven, without\n`version`."
+          },
+          "main_contact": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The company's main contact, by place in `stakeholders` (from 0).",
+            "minimum": 0
+          },
+          "plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SetupTaskBody"
+            },
+            "description": "Up to 30 plan steps, as tasks in this order."
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectBody",
+            "description": "The company's first project."
+          },
+          "scope_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeItemBody"
+            },
+            "description": "Up to 30 in-scope and out-of-scope items, without `version`."
+          },
+          "stakeholders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StakeholderBody"
+            },
+            "description": "Up to 20 people at the customer, without `version`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetupOut": {
+        "type": "object",
+        "description": "What the setup made, read back from the store.",
+        "required": [
+          "company",
+          "project",
+          "stakeholders",
+          "scope",
+          "plan"
+        ],
+        "properties": {
+          "company": {
+            "$ref": "#/components/schemas/CompanyOut"
+          },
+          "plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskOut"
+            },
+            "description": "The plan, in order."
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectOut",
+            "description": "With its `next_step`: the plan's first step."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeOut"
+          },
+          "stakeholders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StakeholderOut"
+            }
+          }
+        }
+      },
+      "SetupTaskBody": {
+        "type": "object",
+        "description": "One step of the plan: a task, `todo`, in the order given.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "criterion": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The success criterion it works towards, by its place in `criteria` (from 0).",
+            "minimum": 0
+          },
+          "due_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Due date, `YYYY-MM-DD`."
+          },
+          "stage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProjectStage",
+                "description": "The stage of the plan it belongs to."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "ShareLinkBody": {
         "type": "object",

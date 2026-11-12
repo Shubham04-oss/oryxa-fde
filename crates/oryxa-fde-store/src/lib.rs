@@ -37,6 +37,7 @@ mod records;
 pub mod relay;
 mod runs;
 mod scope;
+mod setup;
 mod share;
 mod sign_in;
 #[cfg(any(test, feature = "testing"))]
@@ -79,6 +80,7 @@ pub use updates::{
 
 pub use threads::{Comment, PromoteIn, Subject, Thread};
 
+pub use setup::SetupClaim;
 pub use share::{Redeemed, ShareLink};
 pub use sign_in::Hit as SignInHit;
 pub use views::{CompanySummary, Named, TodayItem};

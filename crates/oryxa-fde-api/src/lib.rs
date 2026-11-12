@@ -44,6 +44,7 @@ pub mod shutdown;
 mod signin;
 mod threads;
 
+mod setup;
 mod share;
 mod today;
 
@@ -132,6 +133,7 @@ const CANVAS_BODY_SLACK: usize = 1024 * 1024;
 fn routes() -> OpenApiRouter<Arc<App>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(companies::list, companies::create))
+        .routes(routes!(setup::setup))
         .routes(routes!(companies::get, companies::update))
         .routes(routes!(companies::members))
         .routes(routes!(companies::key))
