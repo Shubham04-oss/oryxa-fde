@@ -20,6 +20,8 @@ path = "src/bin/ops.rs"
 aws-config.workspace = true
 aws-sdk-secretsmanager.workspace = true
 axum.workspace = true
+# The sign-in limits' keyed hashes; already in the tree.
+hmac = "0.12"
 oryxa-authn.workspace = true
 oryxa-authz.workspace = true
 oryxa-core.workspace = true
@@ -50,7 +52,6 @@ utoipa-axum.workspace = true
 workos.workspace = true
 
 [dev-dependencies]
-hmac = "0.12"
 oryxa-fde-integrations = { workspace = true, features = ["testing"] }
 base64 = "0.23.1"
 http-body-util = "0.1.5"

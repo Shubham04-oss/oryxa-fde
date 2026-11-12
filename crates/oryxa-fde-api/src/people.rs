@@ -174,7 +174,7 @@ mod tests {
 
     use super::*;
     use crate::BoxFuture;
-    use crate::session::{RefreshError, Tokens};
+    use crate::session::{Attempt, Client, RefreshError, Tokens};
 
     /// AuthKit whose only working call is `people`, counting lookups.
     #[derive(Default)]
@@ -218,6 +218,15 @@ mod tests {
                     role: "member".into(),
                 }])
             })
+        }
+        fn sign_in_with_password<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+        fn verify_email<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
+        }
+        fn choose_organisation<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
+            Box::pin(async { Attempt::Unavailable("unused".into()) })
         }
     }
 
