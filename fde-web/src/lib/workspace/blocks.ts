@@ -1,10 +1,14 @@
 import { z } from "zod"
 import { CompanyId, ProjectId, Stage } from "@/lib/api/schemas"
+import { MAX_TEXT } from "@/lib/records"
 
 // The workspace's building blocks (issue #209): the only things it may put on a screen. A screen
 // arranges and fills them; it never sends markup. Each block is checked here and a screen renders
 // only what passes: an unknown or malformed block is dropped, never guessed at. This is the seam a
 // model drives later, so everything in a block is untrusted text, shown as text.
+
+/** At most `max` characters as a person counts them (code points), as the forms count them. */
+const atMost = (max: number) => (v: string) => [...v].length <= max
 
 /** One line of text a person reads: trimmed, not empty, no control characters, at most `max`. */
 const line = (max: number) =>
@@ -12,7 +16,7 @@ const line = (max: number) =>
     .string()
     .trim()
     .min(1)
-    .max(max)
+    .refine(atMost(max), `at most ${max} characters`)
     // eslint-disable-next-line no-control-regex
     .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "one line of plain text")
 
@@ -22,7 +26,7 @@ const text = (max: number) =>
     .string()
     .trim()
     .min(1)
-    .max(max)
+    .refine(atMost(max), `at most ${max} characters`)
     // eslint-disable-next-line no-control-regex
     .refine((v) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v), "plain text")
 
@@ -54,10 +58,13 @@ export const SuggestionBlock = z.object({
   approve: z.object({ label: line(40), to: Destination }),
 })
 
-/** Facts about the work, as label and value: the company, what is delivered, how it starts. */
+/**
+ * Facts about the work, as label and value: the company, what is delivered, how it starts. A value
+ * is as long as the field it comes from may be, so a long one is shown shortened, never dropped.
+ */
 export const BriefBlock = z.object({
   type: z.literal("brief"),
-  items: z.array(z.object({ label: line(40), value: text(600) })).max(8),
+  items: z.array(z.object({ label: line(40), value: text(MAX_TEXT) })).max(8),
 })
 
 /** A success criterion a step works towards, and the placeholder for how it will be proven. */
@@ -71,7 +78,7 @@ export const PlanStepItem = z.object({
   id: PartId,
   title: line(120),
   stage: Stage,
-  /** Who the step is with, when it is with someone: "with Dana Ortiz". */
+  /** Who the step is with, when it is with someone: "Dana Ortiz", shown as "with Dana Ortiz". */
   with: line(120).optional(),
   criterion: Criterion.optional(),
 })

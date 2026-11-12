@@ -68,9 +68,10 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
   }
 
   return (
-    <div className="mx-auto grid w-[min(680px,calc(100%-48px))] gap-14 pt-[clamp(32px,11vh,120px)] pb-20 text-body max-[800px]:w-[calc(100%-32px)] max-[800px]:gap-10">
+    // One rhythm: 24 inside the opening, 48 between sections (40 on a phone).
+    <div className="mx-auto grid w-[min(680px,calc(100%-48px))] gap-12 pt-[clamp(32px,9vh,96px)] pb-20 text-body max-[800px]:w-[calc(100%-32px)] max-[800px]:gap-10 max-[800px]:pt-8">
       <section aria-labelledby="welcome-title" className="grid gap-6">
-        <hgroup className="grid gap-1.5 motion-safe:animate-rise">
+        <hgroup className="grid gap-2 motion-safe:animate-rise">
           <p className="text-meta text-muted-foreground">{dateLine(now)}</p>
           <h2
             id="welcome-title"
@@ -85,7 +86,8 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
 
         <div className="grid gap-3">
           <Composer onSend={say} busy={thinking} />
-          <div className="flex flex-wrap gap-2">
+          {/* One row; on a phone each takes the full width, so they never wrap unevenly. */}
+          <div className="flex gap-2 max-[560px]:grid">
             <Chip to="/new-company" icon="plus">
               Set up a new company
             </Chip>
@@ -95,21 +97,15 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
               onClick={() => say("What needs me today?")}
               className={CHIP}
             >
-              <Icon name="calendar-check" size={14} className="text-muted-foreground" />
-              What needs me today?
+              <Icon name="calendar-check" size={14} className="flex-none text-muted-foreground" />
+              <span className="truncate">What needs me today?</span>
             </button>
           </div>
         </div>
       </section>
 
-      <section aria-labelledby="suggested-title" className="grid gap-3">
-        <h2
-          id="suggested-title"
-          className="flex items-center gap-2 text-meta font-medium text-soft"
-        >
-          <Icon name="sparkle" size={15} className="text-tint" />
-          Suggested next
-        </h2>
+      <section aria-labelledby="suggested-title" className="grid">
+        <SectionHead id="suggested-title" title="Suggested next" />
         {companies.isPending || today.isPending ? (
           <Skeleton rows={2} label="Reading your day…" />
         ) : companies.isError || today.isError ? (
@@ -126,14 +122,20 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
           </div>
         ) : (
           <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
-            {shown.map((block) => (
+            {shown.map((block, i) => (
               <li key={block.id} className="motion-safe:animate-rise">
-                <Suggestion block={block} onDismiss={() => setDismissed((d) => [...d, block])} />
+                <Suggestion
+                  block={block}
+                  // Once there is a reply, its own first action is the primary one instead.
+                  lead={i === 0 && turns.length === 0}
+                  onDismiss={() => setDismissed((d) => [...d, block])}
+                />
               </li>
             ))}
           </ul>
         )}
-        <p role="status" className="min-h-5 text-meta text-muted-foreground">
+        {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
+        <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
           {lastDismissed && (
             <>
               Put away: {lastDismissed.title}.{" "}
@@ -155,13 +157,13 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
 }
 
 const CHIP =
-  "inline-flex h-8 items-center gap-1.5 rounded-full border bg-transparent px-3 text-meta text-soft transition-colors hover:border-strong hover:bg-selected hover:text-foreground disabled:opacity-45 motion-safe:active:scale-[0.97]"
+  "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full border bg-transparent px-3 text-meta max-[560px]:px-2 text-soft transition-colors hover:border-strong hover:bg-selected hover:text-foreground disabled:opacity-45 motion-safe:active:scale-[0.97]"
 
 function Chip({ to, icon, children }: { to: "/new-company"; icon: "plus"; children: string }) {
   return (
     <Link to={to} className={CHIP}>
-      <Icon name={icon} size={14} className="text-muted-foreground" />
-      {children}
+      <Icon name={icon} size={14} className="flex-none text-muted-foreground" />
+      <span className="truncate">{children}</span>
     </Link>
   )
 }
@@ -178,7 +180,7 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
     const el = box.current
     if (!el) return
     el.style.height = "auto"
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [text])
 
   function send(event?: FormEvent) {
@@ -195,7 +197,7 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
   return (
     <form
       onSubmit={send}
-      className="group relative rounded-[22px] border bg-canvas shadow-lift transition-[border-color,box-shadow] duration-200 focus-within:border-tint/50 focus-within:ring-4 focus-within:ring-tint/10 hover:border-strong"
+      className="group relative rounded-[24px] border bg-canvas shadow-lift transition-[border-color,box-shadow] duration-200 focus-within:border-tint/50 focus-within:ring-4 focus-within:ring-tint/10 hover:border-strong"
     >
       <label htmlFor={label} className="sr-only">
         What do you want to work on?
@@ -210,9 +212,9 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
         onKeyDown={onKeyDown}
         placeholder="What do you want to work on?"
         // The box shows its own focus: the ring is on the form around it.
-        className="block min-h-[88px] w-full resize-none bg-transparent px-5 pt-4 pb-[60px] text-lead text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none"
+        className="block min-h-[128px] w-full resize-none bg-transparent px-6 pt-5 pb-[64px] text-lead text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none"
       />
-      <div className="absolute right-3 bottom-3 left-5 flex items-center justify-between gap-3">
+      <div className="absolute right-3.5 bottom-3.5 left-6 flex items-center justify-between gap-3">
         <button
           type="submit"
           aria-label="Send"
@@ -229,7 +231,7 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
 function Thread({ turns, thinking }: { turns: Array<Turn>; thinking: boolean }) {
   return (
     <div role="log" aria-label="Conversation" className="grid gap-5">
-      {turns.map((turn) =>
+      {turns.map((turn, t) =>
         turn.who === "you" ? (
           <p
             key={turn.id}
@@ -249,10 +251,10 @@ function Thread({ turns, thinking }: { turns: Array<Turn>; thinking: boolean }) 
             </p>
             {turn.blocks.length > 0 && (
               <ul className="ml-8 divide-y overflow-hidden rounded-card border bg-canvas">
-                {turn.blocks.map((block) =>
+                {turn.blocks.map((block, i) =>
                   block.type === "suggestion" ? (
                     <li key={block.id}>
-                      <Suggestion block={block} />
+                      <Suggestion block={block} lead={i === 0 && t === turns.length - 1} />
                     </li>
                   ) : null,
                 )}
@@ -296,11 +298,8 @@ function Companies() {
   // The same read as the rest of the screen: the cache answers it once.
   const query = useQuery(queries.companies())
   return (
-    <section aria-labelledby="companies-title" className="grid gap-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 id="companies-title" className="text-meta font-medium text-soft">
-          Companies
-        </h2>
+    <section aria-labelledby="companies-title" className="grid">
+      <SectionHead id="companies-title" title="Companies">
         {query.isSuccess && query.data.companies.length > 0 && (
           <Link
             to="/companies"
@@ -309,7 +308,7 @@ function Companies() {
             See all {query.data.companies.length}
           </Link>
         )}
-      </div>
+      </SectionHead>
       {query.isPending ? (
         <Skeleton rows={2} label="Loading your companies…" />
       ) : query.isError ? (
@@ -317,7 +316,8 @@ function Companies() {
       ) : query.data.companies.length === 0 ? (
         <p className="text-meta text-muted-foreground">None yet.</p>
       ) : (
-        <ul className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
+        // The rows' own padding sits outside the column, so each tile lines up with the cards above.
+        <ul className="-mx-2.5 grid grid-cols-2 gap-x-4 gap-y-1 max-[560px]:grid-cols-1">
           {query.data.companies.slice(0, 4).map((company) => (
             <li key={company.id} className="min-w-0">
               <Link
@@ -338,6 +338,26 @@ function Companies() {
         </ul>
       )}
     </section>
+  )
+}
+
+/** A section's heading, the same for each, with what it links to on the right. */
+function SectionHead({
+  id,
+  title,
+  children,
+}: {
+  id: string
+  title: string
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="mb-3 flex h-5 items-baseline justify-between gap-3">
+      <h2 id={id} className="text-meta font-medium text-soft">
+        {title}
+      </h2>
+      {children}
+    </div>
   )
 }
 

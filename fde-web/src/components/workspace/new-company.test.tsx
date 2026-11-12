@@ -37,11 +37,20 @@ async function toPlan(name = "Orion Rail") {
   await question("Here is a plan to start with. Change anything.")
 }
 
-/** The plan's step titles in order, read from each step's Rename button. */
+/** The plan's step titles in order, read from each step's menu button. */
 const planTitles = () =>
   within(screen.getByRole("list", { name: "Plan" }))
-    .getAllByRole("button", { name: /^Rename “/ })
-    .map((b) => b.getAttribute("aria-label")!.slice("Rename “".length, -1))
+    .getAllByRole("button", { name: /^Change “/ })
+    .map((b) => b.getAttribute("aria-label")!.slice("Change “".length, -1))
+
+/** Opens a step's menu and picks one of its items. */
+async function stepMenu(title: string, item: string) {
+  const plan = screen.getByRole("list", { name: "Plan" })
+  await userEvent.click(within(plan).getByRole("button", { name: `Change “${title}”` }))
+  await userEvent.click(await screen.findByRole("menuitem", { name: item }))
+}
+
+const focused = () => document.activeElement
 
 describe("a new company as a conversation", () => {
   it("saves nothing until the person confirms on the review, then creates it through the existing call", async () => {
@@ -112,15 +121,14 @@ describe("a new company as a conversation", () => {
     // The criterion they gave says how it will be proven, beside the steps that name it.
     expect(within(conversation()).getAllByText(/How we will prove it/)).toHaveLength(2)
 
-    const plan = screen.getByRole("list", { name: "Plan" })
-    await userEvent.click(within(plan).getByRole("button", { name: "Move “Build” up" }))
+    await stepMenu("Build", "Move up")
     expect(planTitles()[2]).toBe("Build")
     // Focus stays with the step that moved, so it can be moved again.
-    expect(document.activeElement).toHaveAccessibleName("Move “Build” up")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("Change “Build”"))
 
-    await userEvent.click(within(plan).getByRole("button", { name: "Remove “Hand off”" }))
+    await stepMenu("Hand off", "Remove")
     await userEvent.type(screen.getByLabelText("New step"), "Train the claims team{Enter}")
-    await userEvent.click(within(plan).getByRole("button", { name: "Rename “Discovery call”" }))
+    await stepMenu("Discovery call", "Rename")
     const rename = screen.getByLabelText("Name of step 1")
     await userEvent.clear(rename)
     await userEvent.type(rename, "Call the sponsor{Enter}")
@@ -133,13 +141,62 @@ describe("a new company as a conversation", () => {
       "Evaluate",
       "Train the claims team",
     ])
-    // The summary shows the draft as it changes.
+    // The summary shows the draft as it changes, as a digest that opens to the whole plan.
+    expect(within(summary()).getByText("6 steps")).toBeInTheDocument()
+    expect(within(summary()).queryByText("Train the claims team")).toBeNull()
+    await userEvent.click(within(summary()).getByRole("button", { name: "Show all 6 steps" }))
     expect(within(summary()).getByText("Train the claims team")).toBeInTheDocument()
     expect(within(summary()).queryByText("Hand off")).toBeNull()
 
     await press("Use this plan")
     await question("Ready to create Orion Rail?")
     expect(wire.sent).toEqual([])
+  })
+
+  it("keeps focus on the plan after a step is removed, renamed or the rename is left", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toPlan()
+
+    // Removing a step hands focus to the step that takes its place.
+    await stepMenu("Evaluate", "Remove")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("Change “Hand off”"))
+    // The last step hands it to the one before; the only step, to the field that adds one.
+    await stepMenu("Hand off", "Remove")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("Change “Build”"))
+
+    // Saving a new name, or Escape, puts focus back on the step's menu button.
+    await stepMenu("Build", "Rename")
+    expect(focused()).toHaveAccessibleName("Name of step 4")
+    await userEvent.type(focused()!, " the intake{Enter}")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("Change “Build the intake”"))
+    await stepMenu("Discovery call", "Rename")
+    await userEvent.keyboard("{Escape}")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("Change “Discovery call”"))
+    expect(planTitles()[0]).toBe("Discovery call")
+
+    for (const title of [...planTitles()]) await stepMenu(title, "Remove")
+    await waitFor(() => expect(focused()).toHaveAccessibleName("New step"))
+    expect(wire.sent).toEqual([])
+  })
+
+  it("shows a long answer shortened in the summary, never drops it, and opens it in place", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    const long = "Automate claims intake for their freight team. ".repeat(20).trim()
+    await userEvent.type(await screen.findByLabelText("Company name"), "Orion Rail")
+    // Pasted, as a long brief would be; typing it would take the test's whole budget.
+    await userEvent.click(screen.getByLabelText("What are you delivering?"))
+    await userEvent.paste(long)
+    await press("Continue")
+    await question("How do you want to start?")
+    const company = within(summary()).getByRole("region", { name: "Company" })
+    expect(within(company).getByText(long)).toBeInTheDocument()
+    const more = within(company).getByRole("button", { name: "Show more" })
+    expect(more).toHaveAttribute("aria-expanded", "false")
+    await userEvent.click(more)
+    expect(within(company).getByRole("button", { name: "Show less" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
   })
 
   it("lets an earlier answer be changed, and keeps the rest", async () => {

@@ -1222,6 +1222,14 @@ async function answer(page, n) {
   )
   await page.waitForTimeout(400)
 }
+/** Opens a plan step's menu and picks one of its items. */
+async function stepMenu(page, title, item) {
+  await page
+    .getByRole("list", { name: "Plan" })
+    .getByRole("button", { name: `Change “${title}”` })
+    .click()
+  await page.getByRole("menuitem", { name: item }).click()
+}
 const STEP_NAMES = ["company", "start", "rules", "people", "plan", "review"]
 
 function workspaceScreens() {
@@ -1269,13 +1277,46 @@ function workspaceScreens() {
       ready: question("Which company is it, and what are you delivering for them?"),
       act: async (page) => {
         await answer(page, 4)
-        const plan = page.getByRole("list", { name: "Plan" })
-        await plan.getByRole("button", { name: "Move “Build” up" }).click()
-        await plan.getByRole("button", { name: "Remove “Hand off”" }).click()
+        await stepMenu(page, "Build", "Move up")
+        await stepMenu(page, "Hand off", "Remove")
         await page.getByLabel("New step").fill("Train the claims team")
         await page.getByLabel("New step").press("Enter")
         await page.getByLabel("New step").blur()
         await page.waitForTimeout(400)
+      },
+    },
+    {
+      name: "new-company-summary-open",
+      path: "/new-company",
+      ...WORKSPACE,
+      sizes: ["1440"],
+      themes: ["light"],
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 5)
+        const summary = page.getByRole("complementary", { name: "Summary" })
+        await summary.getByRole("button", { name: /^Show all/ }).click()
+        await summary.getByRole("button", { name: "Show the rules" }).click()
+        await page.mouse.move(0, 0)
+        await page.waitForTimeout(400)
+      },
+    },
+    {
+      name: "new-company-plan-menu",
+      path: "/new-company",
+      ...WORKSPACE,
+      sizes: ["390"],
+      full: false,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 4)
+        const button = page
+          .getByRole("list", { name: "Plan" })
+          .getByRole("button", { name: "Change “Agree scope and success criteria”" })
+        await button.scrollIntoViewIfNeeded()
+        await button.click()
+        await page.getByRole("menu").waitFor()
+        await page.waitForTimeout(300)
       },
     },
     {

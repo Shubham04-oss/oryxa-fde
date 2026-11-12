@@ -22,7 +22,7 @@
   /* Text */
   --text: #1b1a17; /* titles, body, the primary button */
   --text-soft: #46423c; /* navigation labels and secondary emphasis */
-  --text-muted: #75706a; /* metadata and hints */
+  --text-muted: #68635d; /* metadata, hints, an unchosen radio and an open checklist circle */
   --text-inverse: #fffefc; /* text on the primary button */
 
   /* The one colour of our own: focus, the current step, the workspace's voice. Never a status. */
@@ -75,7 +75,7 @@
   --focus: #8d9df5;
   --text: #f2f0eb;
   --text-soft: #bab5ac;
-  --text-muted: #918c84;
+  --text-muted: #96918a;
   --text-inverse: #161514;
   --tint: #8d9df5;
   --tint-soft: #22263b;
@@ -100,7 +100,7 @@
     --focus: #8d9df5;
     --text: #f2f0eb;
     --text-soft: #bab5ac;
-    --text-muted: #918c84;
+    --text-muted: #96918a;
     --text-inverse: #161514;
     --tint: #8d9df5;
     --tint-soft: #22263b;
