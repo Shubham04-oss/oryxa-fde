@@ -18,13 +18,14 @@ obey, and a generated screen can show something misleading.
   **blocks** from a fixed catalogue the web owns (plan, rules, people, checklist, board, proof,
   suggestion and so on). Each block has a schema; the API validates blocks before sending them and
   the web validates again before rendering. An unknown or malformed block is dropped. Text from the
-  model and from people is rendered as text, never as HTML, and links are shown only for our own
-  routes.
+  model and from people is rendered as text, never as HTML, links are shown only for our own
+  routes, and no block loads an image or anything else from another host.
 - **It proposes actions; a person confirms them.** A change is a typed **proposal** naming an
   action from a fixed catalogue (create a company, add a task, invite a person, request access, set
   a rule, move a stage and so on) with its exact arguments. The screen shows what will happen in
-  plain words, taken from the arguments and not from the model's own description. Nothing runs
-  until the person confirms.
+  plain words, taken from the arguments and not from the model's own description: each record by
+  the name the person reads for it through the API, and any text that will be stored or sent in
+  full. Nothing runs until the person confirms.
 - **A confirmed action is an ordinary API call.** The web calls the existing route with the
   person's session, so validation, permission checks, the audit log and the outbox apply
   unchanged. There is no separate path by which the assistant writes. An action with no API route
@@ -34,7 +35,8 @@ obey, and a generated screen can show something misleading.
   deletes are confirmed one at a time, never as part of "approve all".
 - **Proactive means it prepares, not that it acts.** Suggestions raised by an event are built by a
   worker from the event's ids and are shown to the people who may already see the records behind
-  them. A suggestion is a proposal like any other.
+  them, checked through `oryxa-authz` when shown, and never to a customer role (ADR 0005). A
+  suggestion is a proposal like any other.
 - **Everything it reads is untrusted.** Documents, messages, signals and web content are passed to
   the model as data, marked as such, and never as instructions. Because that marking cannot be
   relied on alone, the rules above are the defence: no authority, a fixed set of actions, and a

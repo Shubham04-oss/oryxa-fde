@@ -175,8 +175,9 @@ that person's own permissions.
 
 **Evals are part of the plan, not a separate tool.** Every success criterion in a plan comes with
 how it will be proven: a baseline, a target and an eval suite or an uploaded result. Proof shows in
-the conversation and on the engagement, a stage cannot be called met on a claim alone, and the
-workspace's own proposals are measured too (ADR 0008).
+the conversation and on the engagement, a criterion is never shown as met on a claim alone (an FDE
+may still move on with it open by giving a reason, as section 4 says), and the workspace's own
+proposals are measured too (ADR 0008).
 
 **Clear, decluttered, premium.** Usability comes first.
 
