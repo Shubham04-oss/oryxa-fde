@@ -108,6 +108,11 @@ describe("Board", () => {
     ).toBeInTheDocument()
     expect(within(column("To do")).getByText("Due today")).toBeInTheDocument()
     expect(within(column("To do")).getByText("Assigned to Jonah Ade")).toBeInTheDocument()
+    // A long name is whole on the card, wrapped, for keyboard and touch as much as for a mouse.
+    const who = within(column("To do")).getByText("Assigned to Jonah Ade")
+    expect(who).not.toHaveClass("truncate")
+    expect(who).not.toHaveAttribute("title")
+    expect(who).toHaveClass("[overflow-wrap:anywhere]")
     expect(within(column("Blocked")).getByText("Assigned to you")).toBeInTheDocument()
   })
 

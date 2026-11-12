@@ -28,7 +28,7 @@ pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm
   Its conversation box talks to the assistant Worker (`assistant/`, issue #236) through `/assistant/*`
   (`src/assistant.ts`) once the Worker has the `ASSISTANT` service binding and the secrets
   `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY`; without them, and on the mock, it answers from
-  its script.
+  its script. In a build without the flag, `/assistant/*` answers 404 whatever is configured.
 - `src/lib/workspace/blocks.ts` and `wire.ts` are copied into the assistant Worker, which checks what it
   sends with them. After changing either, run `npm run catalogue` in `assistant/` and commit the copies.
 - On the mock, sign-in is simulated and kept for the browser tab. To see sign-in again, sign out

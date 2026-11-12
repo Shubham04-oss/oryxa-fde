@@ -54,7 +54,7 @@ export const Proposal = z.discriminatedUnion("action", [
 export type Proposal = z.infer<typeof Proposal>
 
 /** Why a reply stopped short, which the screen says plainly. */
-export const NOTICES = ["tool_limit", "reply_limit", "failed"] as const
+export const NOTICES = ["tool_limit", "reply_limit", "timed_out", "failed"] as const
 export const Notice = z.enum(NOTICES)
 export type Notice = z.infer<typeof Notice>
 

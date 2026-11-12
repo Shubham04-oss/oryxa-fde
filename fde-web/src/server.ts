@@ -64,6 +64,9 @@ export function assistant(env: Env): Assistant | null {
 
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
 
+/** Whether this build has the new workspace, and so the assistant (src/lib/workspace/flag.ts). */
+const assistantBuilt = () => import.meta.env.VITE_FDE_WORKSPACE === "1"
+
 /** A call to another service that throws (it is down, or the request cannot be made) is a 502. */
 async function across(call: () => Promise<Response>): Promise<Response> {
   try {
@@ -80,6 +83,8 @@ async function respond(request: Request, env: Env, nonce: string): Promise<Respo
   const asked = assistantPath(url)
   if (live === null && path === null && asked === null)
     return handler.fetch(request, { context: { nonce } })
+  // Without the new workspace the assistant's routes are not there at all, configured or not.
+  if (asked !== null && !assistantBuilt()) return refuse(404, "not_found")
   if (path !== null && !sameOriginWrite(request)) return refuse(403, "csrf")
   const api = upstream(env, import.meta.env.DEV)
   if (!api) return refuse(503, "api_not_configured")

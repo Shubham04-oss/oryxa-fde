@@ -135,9 +135,13 @@ export type ToolAnswer =
   | { readonly unreadable: true }
   | { readonly refused: "tool_limit" };
 
+const encoder = new TextEncoder();
+/** Bytes as UTF-8, not UTF-16 units: a name in another script can take three bytes a character. */
+const bytesOf = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
+
 function capped(found: Array<unknown>): ToolAnswer {
   let kept = found.slice(0, MAX_ENTRIES);
-  while (kept.length > 0 && JSON.stringify(kept).length > MAX_TOOL_ANSWER_BYTES) kept = kept.slice(0, -1);
+  while (kept.length > 0 && bytesOf(kept) > MAX_TOOL_ANSWER_BYTES) kept = kept.slice(0, -1);
   return { found: kept, truncated: kept.length < found.length };
 }
 

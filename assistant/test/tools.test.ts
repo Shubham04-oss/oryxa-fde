@@ -109,4 +109,15 @@ describe("tool answers", () => {
     expect("found" in answer && answer.truncated).toBe(true);
     expect(JSON.stringify(answer).length).toBeLessThanOrEqual(MAX_TOOL_ANSWER_BYTES + 100);
   });
+
+  it("counts the cap in bytes, so names in other scripts are cut to it too", () => {
+    // 200 characters of three bytes each: under the cap in UTF-16 units, three times over it in bytes.
+    const many = Array.from({ length: 50 }, (_, i) => ({ id: `cmp_${i}`, name: "界".repeat(200), projects: [] }));
+    expect(JSON.stringify(many).length).toBeLessThan(MAX_TOOL_ANSWER_BYTES);
+    const answer = companiesAnswer(HOME, many);
+    expect("found" in answer && answer.truncated).toBe(true);
+    const found = "found" in answer ? answer.found : [];
+    expect(found.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(JSON.stringify(found)).byteLength).toBeLessThanOrEqual(MAX_TOOL_ANSWER_BYTES);
+  });
 });

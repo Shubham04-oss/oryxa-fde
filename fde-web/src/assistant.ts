@@ -38,6 +38,22 @@ export function assistantPath(url: URL): AssistantTarget | null {
   return { conversation, company: company ?? null, rest: rest as AssistantTarget["rest"] }
 }
 
+/** The API's session cookie (`SESSION_COOKIE` in crates/oryxa-fde-api/src/session.rs). */
+export const SESSION_COOKIE = "__Host-fde_session"
+
+/**
+ * The session cookie alone, as `name=value`, from the browser's Cookie header: the assistant's reads
+ * need nothing else. Null when there is none, or more than one, so nothing is guessed.
+ */
+export function sessionCookie(header: string | null): string | null {
+  const found = (header ?? "")
+    .split(";")
+    .map((pair) => pair.trim())
+    .filter((pair) => pair.startsWith(`${SESSION_COOKIE}=`))
+  if (found.length !== 1) return null
+  return found[0]!.length > SESSION_COOKIE.length + 1 ? found[0]! : null
+}
+
 /** How long a binding lives: long enough for one call, never long enough to replay. */
 export const BINDING_SECONDS = 60
 /** How long the API may take to answer the check; past it the call is refused. */
@@ -139,7 +155,7 @@ async function bounded(request: Request): Promise<ArrayBuffer | null> {
 
 /**
  * Checks the person with the API, then forwards one call to the assistant with a fresh binding. Writes come
- * only from this app's own pages. The person's session goes with a turn alone, for that turn's reads.
+ * only from this app's own pages. The person's session cookie goes with a turn alone, for that turn's reads.
  */
 export async function openAssistant(
   request: Request,
@@ -188,9 +204,9 @@ export async function openAssistant(
     headers.set("content-type", "application/json")
   }
   if (target.rest === "/turns") {
-    const cookie = request.headers.get("cookie")
-    if (!cookie) return refuse(401, "unauthorized")
-    headers.set("x-assistant-session", cookie)
+    const session = sessionCookie(request.headers.get("cookie"))
+    if (session === null) return refuse(401, "unauthorized")
+    headers.set("x-assistant-session", session)
   }
   const answer = await assistant.fetch(
     new Request(

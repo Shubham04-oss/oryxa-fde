@@ -6,8 +6,8 @@ import type { Names } from "./people"
 import { Button } from "./ui/button"
 import { FIELD } from "./task-move"
 import { api, queries } from "@/lib/api/client"
-import type { CompanyId, MemberRole, ProjectScope, UserId } from "@/lib/api/schemas"
-import { clip } from "@/lib/access"
+import { UserId } from "@/lib/api/schemas"
+import type { CompanyId, MemberRole, ProjectScope } from "@/lib/api/schemas"
 import { byName } from "@/lib/people"
 import { attempt, commitPeople } from "@/lib/records"
 import { shortDate, dayOf } from "@/lib/time"
@@ -17,6 +17,8 @@ import { cn } from "@/lib/utils"
 // adds someone from the organisation's people, and assigns engineers from the company's team.
 
 const ROLE_LABEL: Record<MemberRole, string> = { lead: "Lead", engineer: "Engineer" }
+/** Said when the chosen id is not one the API takes; nothing is sent. */
+const CANNOT_ADD = "That person can't be added from here. Reload the page and choose again."
 
 /** A person in a row: their initials and their name. */
 function Who({ user, names }: { user: string; names: Names }) {
@@ -323,19 +325,23 @@ export function AssigneesCard({
           className="mt-3 flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault()
-            if (choice) void run(choice as UserId, true)
+            // Checked here, not trusted from the list: it goes into the URL.
+            const user = UserId.safeParse(choice)
+            if (user.success) void run(user.data, true)
+            else if (choice) setRefused({ user: choice, why: CANNOT_ADD })
           }}
         >
           <select
             aria-label="Assign from the team"
-            className={cn(FIELD, "w-auto min-w-44")}
+            className={cn(FIELD, "w-auto max-w-full min-w-44")}
             value={choice}
             onChange={(e) => setChoice(e.target.value)}
           >
             <option value="">Choose from the team</option>
             {left.map((p) => (
-              <option key={p.id} value={p.id} title={p.label}>
-                {clip(p.label, 60)}, {ROLE_LABEL[roles.get(p.id) ?? "engineer"].toLowerCase()}
+              // The whole name: a cut one would be all a screen reader hears.
+              <option key={p.id} value={p.id}>
+                {p.label}, {ROLE_LABEL[roles.get(p.id) ?? "engineer"].toLowerCase()}
               </option>
             ))}
           </select>
@@ -373,14 +379,17 @@ function AddMember({
   const [refused, setRefused] = useState<string | null>(null)
   const heading = useId()
   const add = useMutation({
-    mutationFn: async () => api.setMember(company, choice as UserId, role),
+    mutationFn: async (user: UserId) => api.setMember(company, user, role),
     onSuccess: () => commitPeople(client),
   })
 
   async function run() {
+    // Checked here, not trusted from the list: it goes into the URL.
+    const user = UserId.safeParse(choice)
+    if (!user.success) return setRefused(CANNOT_ADD)
     setSaving(true)
     setRefused(null)
-    const why = await attempt(() => add.mutateAsync(), "person")
+    const why = await attempt(() => add.mutateAsync(user.data), "person")
     setSaving(false)
     if (why) setRefused(why)
     else setChoice("")
@@ -411,15 +420,16 @@ function AddMember({
       </h3>
       <select
         aria-label="Add from the organisation"
-        className={cn(FIELD, "w-auto max-w-80 min-w-44")}
+        className={cn(FIELD, "w-auto max-w-[min(20rem,100%)] min-w-44")}
         value={choice}
         disabled={saving}
         onChange={(e) => setChoice(e.target.value)}
       >
         <option value="">Choose someone to add</option>
         {others.map((p) => (
-          <option key={p.id} value={p.id} title={p.label}>
-            {clip(p.label, 60)}
+          // The whole name: a cut one would be all a screen reader hears.
+          <option key={p.id} value={p.id}>
+            {p.label}
           </option>
         ))}
       </select>

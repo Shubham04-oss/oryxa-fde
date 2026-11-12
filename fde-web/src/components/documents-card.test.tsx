@@ -15,6 +15,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   delete (globalThis as Record<string, unknown>).__fdeMockIngestMs
   delete (globalThis as Record<string, unknown>).__fdeMockFailWrites
+  delete (globalThis as Record<string, unknown>).__fdeMockPeople
 })
 
 const KESTREL = CompanyId.parse("cmp_kestrel")
@@ -72,6 +73,16 @@ describe("the documents list", () => {
     // Nothing is called ready that the API has not ingested, and a pending one has no passage count.
     expect(rows[0]).not.toHaveTextContent("passage")
     expect(rows[0]).not.toHaveTextContent("Ready")
+  })
+
+  it("keeps who added it together on a phone when names are unavailable", async () => {
+    ;(globalThis as Record<string, unknown>).__fdeMockPeople = "unavailable"
+    renderWithRouter(<DocumentsCard company={KESTREL} />)
+    const rows = await within(await card()).findAllByRole("listitem")
+    // "by a teammate …" and the end of the id stay on one line: only the space after "by" may break.
+    await waitFor(() => expect(rows[0]!.textContent).toMatch(/by a\u00a0teammate\u00a0…\S+/))
+    // A person's own name still wraps between words.
+    expect(rows[2]!.textContent).toContain("by you")
   })
 
   it("says why a document could not be read, and that it cannot be read again from here", async () => {

@@ -64,6 +64,13 @@ export function applyEvent(turn: WorkspaceTurn, event: WireEvent): WorkspaceTurn
   }
 }
 
+/** A turn whose stream has ended: it stops streaming, and says plainly if it stopped short. */
+function finished(turn: WorkspaceTurn, ended: "done" | "failed" | "timed_out"): WorkspaceTurn {
+  // A notice the Worker sent says it best; the screen's own words are for when it sent none.
+  const notice = ended === "done" ? turn.notice : (turn.notice ?? NOTICE_TEXT[ended])
+  return { ...turn, notice, streaming: false }
+}
+
 function readStored() {
   try {
     const id = window.localStorage.getItem(STORED)
@@ -112,7 +119,7 @@ export function useConversation(scripted: (said: string) => Reply) {
       if (live && liveTurn?.who === "workspace") {
         void followTurn(id, live.id, null, (event) =>
           update(liveTurn.id, (t) => applyEvent(t, event)),
-        ).then(() => update(liveTurn.id, (t) => ({ ...t, streaming: false })))
+        ).then((ended) => update(liveTurn.id, (t) => finished(t, ended)))
       }
       return "on"
     })()
@@ -147,9 +154,9 @@ export function useConversation(scripted: (said: string) => Reply) {
     if (ended.kind === "off") await answerScripted()
     else if (ended.kind === "refused")
       update(reply, (t) => ({ ...t, text: REFUSAL_TEXT[ended.refusal] }))
-    else if (ended.kind === "failed")
-      update(reply, (t) => ({ ...t, notice: t.notice ?? NOTICE_TEXT.failed }))
-    update(reply, (t) => ({ ...t, streaming: false }))
+    if (ended.kind !== "off" && ended.kind !== "refused")
+      update(reply, (t) => finished(t, ended.kind))
+    else update(reply, (t) => ({ ...t, streaming: false }))
     setThinking(false)
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { readStream } from "./assistant"
-import { parseEvent, parseView } from "./wire"
+import { MAX_PENDING, budget, readStream } from "./assistant"
+import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, parseEvent, parseView } from "./wire"
 import type { WireEvent } from "./wire"
 import { MAX_NAME } from "@/lib/records"
 
@@ -137,5 +137,105 @@ describe("a turn's stream", () => {
         () => {},
       ),
     ).toEqual({ ended: "dropped", last: 1, turn: "t_9" })
+  })
+})
+
+/** A stream that sends `text` and then stays open, sending a heartbeat every `everyMs` if given. */
+const open = (text: string, everyMs?: number) => {
+  let timer: ReturnType<typeof setInterval> | undefined
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+      if (everyMs)
+        timer = setInterval(
+          () => controller.enqueue(new TextEncoder().encode(": heartbeat\n\n")),
+          everyMs,
+        )
+    },
+    cancel() {
+      clearInterval(timer)
+    },
+  })
+}
+const turnFrame = frame(0, { v: 1, type: "turn", turn: "t_1", said: "Hello" })
+
+describe("a turn's stream, held to the reply's own limits", () => {
+  it("cuts it off at the reply's length, across the whole turn", async () => {
+    const got: Array<WireEvent> = []
+    const half = "a".repeat(MAX_REPLY / 2)
+    const read = await readStream(
+      open(
+        turnFrame +
+          frame(1, { v: 1, type: "text", delta: half }) +
+          frame(2, { v: 1, type: "text", delta: half }) +
+          frame(3, { v: 1, type: "text", delta: "!" }) +
+          frame(4, { v: 1, type: "text", delta: "never" }),
+      ),
+      (event) => got.push(event),
+    )
+    expect(read).toEqual({ ended: "cut", last: 2, turn: "t_1" })
+    expect(got.map((e) => e.type)).toEqual(["turn", "text", "text"])
+  })
+
+  it("cuts it off past the blocks or the proposals a reply may carry", async () => {
+    const blocks: Array<WireEvent> = []
+    const many = (n: number, data: unknown) =>
+      Array.from({ length: n }, (_, i) => frame(i + 1, data)).join("")
+    expect(
+      await readStream(
+        open(turnFrame + many(MAX_BLOCKS + 1, { v: 1, type: "block", block: brief })),
+        (event) => blocks.push(event),
+      ),
+    ).toMatchObject({ ended: "cut", last: MAX_BLOCKS })
+    expect(blocks.filter((e) => e.type === "block")).toHaveLength(MAX_BLOCKS)
+
+    const proposals: Array<WireEvent> = []
+    expect(
+      await readStream(
+        open(turnFrame + many(MAX_PROPOSALS + 1, { v: 1, type: "proposal", proposal: create })),
+        (event) => proposals.push(event),
+      ),
+    ).toMatchObject({ ended: "cut", last: MAX_PROPOSALS })
+    expect(proposals.filter((e) => e.type === "proposal")).toHaveLength(MAX_PROPOSALS)
+  })
+
+  it("counts what an earlier connection carried, so a reconnect cannot start the caps again", async () => {
+    const given = budget()
+    const block = (id: number) => frame(id, { v: 1, type: "block", block: brief })
+    const first = Array.from({ length: MAX_BLOCKS }, (_, i) => block(i + 1)).join("")
+    expect(await readStream(stream(turnFrame + first), () => {}, given)).toMatchObject({
+      ended: "dropped",
+    })
+    expect(await readStream(open(block(MAX_BLOCKS + 1)), () => {}, given)).toMatchObject({
+      ended: "cut",
+    })
+  })
+
+  it("cuts off a frame that never ends instead of holding all of it", async () => {
+    const got: Array<WireEvent> = []
+    const read = await readStream(
+      open(`${turnFrame}id: 1\ndata: "${"x".repeat(MAX_PENDING)}`),
+      (e) => got.push(e),
+    )
+    expect(read).toEqual({ ended: "cut", last: 0, turn: "t_1" })
+    expect(got.map((e) => e.type)).toEqual(["turn"])
+  })
+})
+
+describe("a turn's stream, in time", () => {
+  it("drops a connection that has gone quiet, heartbeats and all, so it can reconnect", async () => {
+    const read = await readStream(open(turnFrame), () => {}, { ...budget(), idleMs: 20 })
+    expect(read).toEqual({ ended: "dropped", last: 0, turn: "t_1" })
+  })
+
+  it("gives up on a turn past its deadline, even while heartbeats keep it open", async () => {
+    const started = Date.now()
+    const read = await readStream(open(turnFrame, 5), () => {}, {
+      ...budget(),
+      idleMs: 1_000,
+      until: Date.now() + 60,
+    })
+    expect(read).toEqual({ ended: "timed_out", last: 0, turn: "t_1" })
+    expect(Date.now() - started).toBeLessThan(1_000)
   })
 })

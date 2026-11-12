@@ -1,5 +1,5 @@
 import { HEADERS, selected } from "@/lib/api/client"
-import { REFUSALS, parseEvent, parseView } from "./wire"
+import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, REFUSALS, parseEvent, parseView } from "./wire"
 import type { ProposalState, Refusal, Turn, WireEvent } from "./wire"
 
 // The welcome screen's side of the assistant (issue #236): a small client of our own over this app's
@@ -10,6 +10,15 @@ import type { ProposalState, Refusal, Turn, WireEvent } from "./wire"
 
 /** How many times a dropped turn reconnects before it gives up. */
 const RECONNECTS = 3
+/**
+ * How long the screen waits on a turn, reconnects included: the Worker's own limit (90 seconds,
+ * `TURN_TIMEOUT_MS` in assistant/src/limits.ts) and some room, so its plain notice usually comes first.
+ */
+export const TURN_DEADLINE_MS = 120_000
+/** How long one read may hear nothing at all. The Worker sends a heartbeat every 15 seconds. */
+export const READ_IDLE_MS = 45_000
+/** The most of a frame held while it waits for its end: well over the Worker's largest event (64 KiB). */
+export const MAX_PENDING = 256 * 1024
 
 const path = (conversation: string, rest = "") => `/assistant/conversations/${conversation}${rest}`
 
@@ -61,6 +70,8 @@ export async function openConversation(conversation: string): Promise<Opened> {
 export type Ended =
   | { kind: "done" }
   | { kind: "failed" }
+  /** The turn ran past `TURN_DEADLINE_MS`; the screen says so plainly. */
+  | { kind: "timed_out" }
   /** The turn never started; `refusal` says why, in a code the screen puts in words. */
   | { kind: "refused"; refusal: Refusal | "unknown" }
   | { kind: "off" }
@@ -79,23 +90,84 @@ function frameOf(block: string): Frame | null {
 }
 
 /**
- * Reads one turn's stream, handing each checked event to `onEvent`. Answers how it ended: done, failed,
- * or dropped part way, with the last event it had.
+ * What one turn may still take, and what it has carried so far. It is shared by every connection the
+ * turn makes, so a reconnect neither starts the caps again nor moves the deadline.
+ */
+export type Budget = {
+  text: number
+  blocks: number
+  proposals: number
+  /** When the screen gives up on the turn (ms since the epoch). */
+  until: number
+  /** How long one read may hear nothing. */
+  idleMs: number
+}
+
+export const budget = (now = Date.now()): Budget => ({
+  text: 0,
+  blocks: 0,
+  proposals: 0,
+  until: now + TURN_DEADLINE_MS,
+  idleMs: READ_IDLE_MS,
+})
+
+/** Counts `event` against the reply's caps; false once it would pass one (the Worker keeps to them). */
+function within(given: Budget, event: WireEvent): boolean {
+  if (event.type === "text") return (given.text += [...event.delta].length) <= MAX_REPLY
+  if (event.type === "block") return ++given.blocks <= MAX_BLOCKS
+  if (event.type === "proposal") return ++given.proposals <= MAX_PROPOSALS
+  return true
+}
+
+/** The next read, or why there is none in time: nothing heard for `idleMs`, or the deadline. */
+async function nextRead(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  given: Budget,
+): Promise<ReadableStreamReadResult<Uint8Array> | "idle" | "late"> {
+  const left = given.until - Date.now()
+  if (left <= 0) return "late"
+  const late = left <= given.idleMs
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const waited = new Promise<"idle" | "late">((resolve) => {
+    timer = setTimeout(() => resolve(late ? "late" : "idle"), late ? left : given.idleMs)
+  })
+  try {
+    return await Promise.race([reader.read(), waited])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Reads one turn's stream, handing each checked event to `onEvent`. Answers how it ended: done,
+ * failed, dropped part way (with the last event it had), cut off for passing a cap, or timed out.
  */
 export async function readStream(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: WireEvent) => void,
-): Promise<{ ended: "done" | "failed" | "dropped"; last: number | null; turn: string | null }> {
+  given: Budget = budget(),
+): Promise<{
+  ended: "done" | "failed" | "dropped" | "cut" | "timed_out"
+  last: number | null
+  turn: string | null
+}> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
   let last: number | null = null
   let turn: string | null = null
+  // Stops reading; the connection is let go, so nothing more of it is held.
+  const stop = (ended: "dropped" | "cut" | "timed_out") => {
+    void reader.cancel().catch(() => {})
+    return { ended, last, turn }
+  }
   try {
     for (;;) {
-      const { done, value } = await reader.read()
-      if (done) return { ended: "dropped", last, turn }
-      buffer += decoder.decode(value, { stream: true })
+      const read = await nextRead(reader, given)
+      if (read === "idle") return stop("dropped")
+      if (read === "late") return stop("timed_out")
+      if (read.done) return { ended: "dropped", last, turn }
+      buffer += decoder.decode(read.value, { stream: true })
       const blocks = buffer.split("\n\n")
       buffer = blocks.pop() ?? ""
       for (const frame of blocks.map(frameOf)) {
@@ -103,18 +175,20 @@ export async function readStream(
         if (frame.event === "done") return { ended: "done", last, turn }
         if (frame.event === "error") return { ended: "failed", last, turn }
         if (frame.event !== null || frame.data === null) continue
-        if (frame.id !== null && Number.isSafeInteger(frame.id)) last = frame.id
         let raw: unknown
         try {
           raw = JSON.parse(frame.data)
         } catch {
-          continue
+          raw = null
         }
         const event = parseEvent(raw)
+        if (event !== null && !within(given, event)) return stop("cut")
+        if (frame.id !== null && Number.isSafeInteger(frame.id)) last = frame.id
         if (event === null) continue
         if (event.type === "turn") turn = event.turn
         onEvent(event)
       }
+      if (buffer.length > MAX_PENDING) return stop("cut")
     }
   } catch {
     return { ended: "dropped", last, turn }
@@ -129,9 +203,11 @@ export async function followTurn(
   turn: string,
   last: number | null,
   onEvent: (event: WireEvent) => void,
-): Promise<"done" | "failed"> {
+  given: Budget = budget(),
+): Promise<"done" | "failed" | "timed_out"> {
   let from = last
   for (let attempt = 0; attempt < RECONNECTS; attempt++) {
+    if (Date.now() >= given.until) return "timed_out"
     let response: Response
     try {
       response = await send(path(conversation, `/turns/${turn}/events`), {
@@ -141,7 +217,8 @@ export async function followTurn(
       continue
     }
     if (response.status !== 200 || !response.body) return "failed"
-    const read = await readStream(response.body, onEvent)
+    const read = await readStream(response.body, onEvent, given)
+    if (read.ended === "cut") return "failed"
     if (read.ended !== "dropped") return read.ended
     from = read.last ?? from
   }
@@ -153,6 +230,7 @@ export async function sendTurn(
   conversation: string,
   text: string,
   onEvent: (event: WireEvent) => void,
+  given: Budget = budget(),
 ): Promise<Ended> {
   let response: Response
   try {
@@ -172,10 +250,12 @@ export async function sendTurn(
     if (code === "assistant_not_configured" || code === "not_found") return { kind: "off" }
     return { kind: "refused", refusal: "unknown" }
   }
-  const read = await readStream(response.body, onEvent)
+  const read = await readStream(response.body, onEvent, given)
+  // A stream that passed a cap is not followed again: it would only send the same again.
+  if (read.ended === "cut") return { kind: "failed" }
   if (read.ended !== "dropped") return { kind: read.ended }
   if (read.turn === null) return { kind: "failed" }
-  return { kind: await followTurn(conversation, read.turn, read.last, onEvent) }
+  return { kind: await followTurn(conversation, read.turn, read.last, onEvent, given) }
 }
 
 /** Tells the assistant the person has answered a proposal; the action itself was the API's. */
@@ -210,5 +290,7 @@ export const REFUSAL_TEXT: Record<Refusal | "unknown", string> = {
 export const NOTICE_TEXT = {
   tool_limit: "I stopped looking things up: one message may take only a few lookups.",
   reply_limit: "I stopped there: that reply reached its length limit.",
+  timed_out:
+    "I ran out of time on that one, so this answer is incomplete. Try again, or ask for less at once.",
   failed: "Something went wrong part way through, so this answer is incomplete.",
 } as const

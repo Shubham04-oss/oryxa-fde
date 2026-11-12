@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { assistantPath, signBinding } from "./assistant"
 import server, { assistant } from "./server"
 import type { Env } from "./server"
@@ -73,7 +73,32 @@ function claimsOf(binding: string | null) {
   >
 }
 
+// The routes are live only in a build with the new workspace on (src/lib/workspace/flag.ts).
+beforeEach(() => vi.stubEnv("VITE_FDE_WORKSPACE", "1"))
+afterEach(() => vi.unstubAllEnvs())
+
 describe("the assistant's routes on this app", () => {
+  it("are not there at all unless the build turns the new workspace on", async () => {
+    for (const flag of ["0", "", "true"]) {
+      vi.stubEnv("VITE_FDE_WORKSPACE", flag)
+      const { env, api, assistant: helper } = setup()
+      for (const request of [
+        turn(),
+        new Request(`${APP}/assistant/conversations/c_1`, { headers: { cookie: COOKIE } }),
+        new Request(`${APP}/assistant/companies/cmp_kestrel/conversations/c_1/turns/t_1/events`, {
+          headers: { cookie: COOKIE },
+        }),
+      ]) {
+        const response = await call(request, env)
+        expect(response.status, flag).toBe(404)
+        expect(await response.json()).toEqual({ error: "not_found" })
+      }
+      // Configured or not, nothing is asked of the API or the assistant.
+      expect(api).not.toHaveBeenCalled()
+      expect(helper).not.toHaveBeenCalled()
+    }
+  })
+
   it("parse only the conversation routes, with the platform's id rule", () => {
     const at = (path: string) => assistantPath(new URL(`${APP}${path}`))
     expect(at("/assistant/conversations/c_1")).toEqual({
@@ -155,6 +180,44 @@ describe("the assistant's routes on this app", () => {
     const other = await call(turn("/assistant/companies/cmp_other/conversations/c_2/turns"), env)
     expect(other.status).toBe(404)
     expect(helper).toHaveBeenCalledTimes(1)
+  })
+
+  it("lend the assistant the session cookie alone, never the browser's other cookies", async () => {
+    const {
+      env,
+      api,
+      assistant: helper,
+    } = setup(
+      apiBinding((request) =>
+        request.headers.get("cookie")?.includes(COOKIE)
+          ? Response.json(ME)
+          : Response.json({ error: "unauthorized" }, { status: 401 }),
+      ),
+    )
+    const response = await call(
+      turn(undefined, { cookie: `theme=dark; ${COOKIE}; __Host-fde_signin=pending; other=1` }),
+      env,
+    )
+    expect(response.status).toBe(200)
+    // The API still checks the person with the browser's own header.
+    expect(api.mock.calls[0]![0].headers.get("cookie")).toContain("theme=dark")
+    expect(helper.mock.calls[0]![0].headers.get("x-assistant-session")).toBe(COOKIE)
+  })
+
+  it("refuse a turn with no session cookie, or two, before the assistant hears of it", async () => {
+    for (const cookie of ["theme=dark; other=1", `${COOKIE}; __Host-fde_session=another`]) {
+      // The API is not what refuses here: it is told the person is known.
+      const { env, assistant: helper } = setup(
+        apiBinding((request) =>
+          new URL(request.url).pathname === "/v1/me"
+            ? Response.json(ME)
+            : Response.json({ error: "not_found" }, { status: 404 }),
+        ),
+      )
+      const response = await call(turn(undefined, { cookie }), env)
+      expect(response.status, cookie).toBe(401)
+      expect(helper).not.toHaveBeenCalled()
+    }
   })
 
   it("check on every reconnect, and pass on where the stream resumes, with no session", async () => {
