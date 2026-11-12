@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import type { DragEvent, KeyboardEvent, ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Card, Quiet } from "./page"
@@ -20,6 +20,7 @@ import {
 import { api, queries } from "@/lib/api/client"
 import type {
   AccessRequestOut,
+  CriterionOut,
   Project,
   ProjectScope,
   StakeholderOut,
@@ -34,11 +35,14 @@ import {
   fieldsOf,
   inColumn,
   isOverdue,
+  placeAt,
   problem,
   recentDone,
+  stays,
   summarise,
 } from "@/lib/board"
-import type { Fields } from "@/lib/board"
+import type { Fields, Place } from "@/lib/board"
+import { clip } from "@/lib/access"
 import { commitRemoved, reason, refusalNote } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -54,10 +58,14 @@ const DOT: Record<TaskState, string> = {
 
 type Dialogs = { kind: "new"; status: TaskState } | { kind: "edit"; task: TaskOut }
 
+/** Where a dragged card would land: a column, and for one that keeps an order, the index among its other cards. */
+type Over = { status: TaskState; index: number | null }
+
 /**
- * The project's tasks as a board (DESIGN.md §3): one column per status. A card moves by drag, or
- * by its menu, which also works by keyboard and is the way on a phone. Moving into Blocked asks
- * what blocks it and into Waiting on the customer asks who it waits on. Nothing moves until the
+ * The project's tasks as a board (DESIGN.md §3): one column per status, each in the project's order.
+ * A card moves by drag, to another column or to another place in its own, or by its menu (Move up,
+ * Move down, Move to), which also works by keyboard and is the way on a phone. Moving into Blocked
+ * asks what blocks it and into Waiting on the customer asks who it waits on. Nothing moves until the
  * API confirms it.
  */
 export function Board({ scope, project }: { scope: ProjectScope; project: Project }) {
@@ -67,7 +75,9 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const { saving } = mover
   const [dialog, setDialog] = useState<Dialogs | null>(null)
   const [dragging, setDragging] = useState<string | null>(null)
-  const [over, setOver] = useState<TaskState | null>(null)
+  const [over, setOver] = useState<Over | null>(null)
+  // A card moved from its menu gets the focus back once it has landed, so the next Move up is one key away.
+  const [refocus, setRefocus] = useState<string | null>(null)
   // Done is the longest and least urgent column, so it starts collapsed (DESIGN.md §3).
   const [doneOpen, setDoneOpen] = useState(false)
   const [doneAll, setDoneAll] = useState(false)
@@ -79,10 +89,30 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   })
 
   const people = new Map(project.stakeholders.map((s) => [s.id as string, s.name]))
+  const criteria = new Map(project.scope.criteria.map((c) => [c.id as string, c.description]))
   const today = localDay()
   const refused = mover.refusal
 
-  const requestMove = (task: TaskOut, to: TaskState) => mover.request(scope, task, to)
+  const requestMove = (task: TaskOut, to: TaskState, place?: Place) =>
+    mover.request(scope, task, to, place)
+
+  useEffect(() => {
+    if (!refocus || saving[refocus]) return
+    const trigger = [...document.querySelectorAll<HTMLElement>("[data-actions]")].find(
+      (el) => el.dataset.actions === refocus,
+    )
+    trigger?.focus()
+    setRefocus(null)
+  }, [refocus, saving, project.tasks])
+
+  /** Moves a card one place up or down its column, from its menu. */
+  async function step(task: TaskOut, by: -1 | 1) {
+    const column = inColumn(project.tasks, task.status)
+    const neighbour = column[column.findIndex((t) => t.id === task.id) + by]
+    if (!neighbour) return
+    const place: Place = { side: by < 0 ? "before" : "after", anchor: neighbour }
+    if (await requestMove(task, task.status, place)) setRefocus(task.id)
+  }
 
   async function discard(task: TaskOut) {
     try {
@@ -95,12 +125,53 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
     }
   }
 
+  /** Where a drop in column `to` would put `task`: none in Done, which lists the latest first. */
+  function landing(task: TaskOut, to: TaskState, index: number | null) {
+    if (to === "done") return undefined
+    const others = inColumn(project.tasks, to).filter((t) => t.id !== task.id)
+    return placeAt(others, index ?? others.length)
+  }
+
+  /** Whether dropping `task` in `to` at `index` would leave it where it is. */
+  function still(task: TaskOut, to: TaskState, index: number | null) {
+    if (task.status !== to) return false
+    return to === "done" || stays(inColumn(project.tasks, to), task, landing(task, to, index))
+  }
+
+  /** The line a drop would land on: above the card it goes before, or below the one it goes after. */
+  function dropMark(card: TaskOut) {
+    const task = project.tasks.find((t) => t.id === dragging)
+    if (!task || over?.status !== card.status || still(task, over.status, over.index)) return
+    const place = landing(task, over.status, over.index)
+    return place?.anchor.id === card.id ? place.side : undefined
+  }
+
   function onDrop(event: DragEvent, to: TaskState) {
     event.preventDefault()
     const task = project.tasks.find((t) => t.id === dragging)
+    const index = over?.status === to ? over.index : null
     setDragging(null)
     setOver(null)
-    if (task) requestMove(task, to)
+    if (!task || still(task, to, index)) return
+    void requestMove(task, to, landing(task, to, index))
+  }
+
+  /** A card under the pointer: the drop goes above it, or below it past its middle. */
+  function onCardOver(event: DragEvent, status: TaskState, target: TaskOut) {
+    const task = project.tasks.find((t) => t.id === dragging)
+    // Done keeps no order of its own: its column takes the drop.
+    if (!task || status === "done") return
+    event.preventDefault()
+    event.stopPropagation()
+    const column = inColumn(project.tasks, status)
+    const others = column.filter((t) => t.id !== task.id)
+    const box = event.currentTarget.getBoundingClientRect()
+    const below = event.clientY > box.top + box.height / 2
+    const index =
+      target.id === task.id
+        ? column.findIndex((t) => t.id === task.id)
+        : others.findIndex((t) => t.id === target.id) + (below ? 1 : 0)
+    setOver({ status, index })
   }
 
   /** Scrolls a column into view, and moves focus to it or to a card in it. */
@@ -128,6 +199,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   }
 
   const tasks = project.tasks
+  const dragged = tasks.find((t) => t.id === dragging)
   const summary = summarise(tasks, today)
   const finished = recentDone(tasks)
   return (
@@ -204,16 +276,19 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
                       if (element) columns.current.set(status, element)
                       else columns.current.delete(status)
                     }}
-                    active={over === status}
+                    // A card from another column; within its own, the line between cards says where.
+                    active={over?.status === status && dragged?.status !== status}
                     onDragOver={(event) => {
                       const task = tasks.find((t) => t.id === dragging)
-                      if (!task || task.status === status) return
+                      // Done takes a card from another column; any other column also reorders its own.
+                      if (!task || (isDone && task.status === status)) return
                       event.preventDefault()
-                      setOver(status)
+                      // Below the cards: the end of the column.
+                      setOver({ status, index: null })
                     }}
                     onDragLeave={(event) => {
                       if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-                        setOver((now) => (now === status ? null : now))
+                        setOver((now) => (now?.status === status ? null : now))
                     }}
                     onDrop={(event) => onDrop(event, status)}
                     more={
@@ -231,7 +306,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
                       ) : null
                     }
                   >
-                    {column.map((task) => (
+                    {column.map((task, i) => (
                       <TaskCard
                         key={task.id}
                         task={task}
@@ -239,8 +314,19 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
                         me={me.data?.user.id}
                         today={today}
                         person={(id) => people.get(id) ?? "a stakeholder no longer listed"}
+                        criterion={task.criterion ? criteria.get(task.criterion) : undefined}
+                        drop={dropMark(task)}
                         onOpen={() => setDialog({ kind: "edit", task })}
-                        onMove={(to) => requestMove(task, to)}
+                        onMove={(to) => void requestMove(task, to)}
+                        onStep={
+                          isDone
+                            ? undefined
+                            : {
+                                up: i > 0 ? () => void step(task, -1) : undefined,
+                                down: i < column.length - 1 ? () => void step(task, 1) : undefined,
+                              }
+                        }
+                        onDragOver={(event) => onCardOver(event, status, task)}
                         onDragStart={(event) => {
                           event.dataTransfer.setData("text/plain", task.id)
                           event.dataTransfer.effectAllowed = "move"
@@ -268,6 +354,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
             status={dialog.kind === "new" ? dialog.status : "todo"}
             people={project.stakeholders}
             requests={project.access}
+            criteria={project.scope.criteria}
             me={me.data?.user.id}
             send={(base, fields) => mover.send(scope, base, fields)}
             adopt={(current) => mover.adopt(scope, current)}
@@ -459,9 +546,13 @@ function TaskCard({
   me,
   today,
   person,
+  criterion,
+  drop,
   onOpen,
   onMove,
+  onStep,
   onDragStart,
+  onDragOver,
   onDragEnd,
 }: {
   task: TaskOut
@@ -470,9 +561,16 @@ function TaskCard({
   me: string | undefined
   today: string
   person: (id: string) => string
+  /** What the success criterion it works towards says. */
+  criterion: string | undefined
+  /** Where a dragged card would land beside this one. */
+  drop: "before" | "after" | undefined
   onOpen: () => void
   onMove: (to: TaskState) => void
+  /** Moves it one place within its column; absent where it cannot go, and in Done. */
+  onStep: { up: (() => void) | undefined; down: (() => void) | undefined } | undefined
   onDragStart: (event: DragEvent) => void
+  onDragOver: (event: DragEvent) => void
   onDragEnd: () => void
 }) {
   const pending = to !== undefined
@@ -494,6 +592,7 @@ function TaskCard({
     <li
       draggable={!pending}
       onDragStart={onDragStart}
+      onDragOver={onDragOver}
       onDragEnd={onDragEnd}
       aria-busy={pending}
       className={cn(
@@ -502,6 +601,17 @@ function TaskCard({
         pending && "opacity-60",
       )}
     >
+      {drop && (
+        // In the 8px gap between two cards, so the line never covers either.
+        <span
+          aria-hidden="true"
+          data-drop={drop}
+          className={cn(
+            "pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-tint",
+            drop === "before" ? "-top-[5px]" : "-bottom-[5px]",
+          )}
+        />
+      )}
       {/* Not a <button>: Firefox will not start a drag from one. */}
       <div
         role="button"
@@ -525,6 +635,11 @@ function TaskCard({
           {task.title}
         </span>
         {who && <span className="text-[11px] text-muted-foreground">{who}</span>}
+        {criterion && (
+          <span className="truncate text-[11px] text-muted-foreground" title={criterion}>
+            Towards: {criterion}
+          </span>
+        )}
         {detail.map((line) => (
           <span
             key={line.text}
@@ -540,12 +655,15 @@ function TaskCard({
           </span>
         ))}
         {pending && (
-          <span className="text-[11px] text-muted-foreground">Moving to {STATUS_LABEL[to]}…</span>
+          <span className="text-[11px] text-muted-foreground">
+            {to === task.status ? "Moving…" : `Moving to ${STATUS_LABEL[to]}…`}
+          </span>
         )}
       </div>
       <Menu>
         <MenuTrigger
           aria-label={`Actions for ${task.title}`}
+          data-actions={task.id}
           disabled={pending}
           className={cn(
             "absolute top-1 right-1 inline-flex size-6 items-center justify-center rounded-md bg-raised text-muted-foreground outline-none hover:bg-selected hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring data-popup-open:bg-selected max-[800px]:size-9 pointer-coarse:size-9",
@@ -564,6 +682,13 @@ function TaskCard({
               </MenuItem>
             ))}
           </MenuGroup>
+          {(onStep?.up || onStep?.down) && (
+            <>
+              <MenuSeparator />
+              {onStep.up && <MenuItem onClick={onStep.up}>Move up</MenuItem>}
+              {onStep.down && <MenuItem onClick={onStep.down}>Move down</MenuItem>}
+            </>
+          )}
           <MenuSeparator />
           <MenuItem onClick={onOpen}>Edit</MenuItem>
         </MenuContent>
@@ -582,6 +707,7 @@ export function TaskDialog({
   title,
   people,
   requests,
+  criteria,
   me,
   send,
   adopt,
@@ -593,6 +719,8 @@ export function TaskDialog({
   title?: string
   people: Array<StakeholderOut>
   requests: ReadonlyArray<AccessRequestOut>
+  /** The project's success criteria, one of which the task may work towards. */
+  criteria: ReadonlyArray<CriterionOut>
   me: string | undefined
   /** Saves over the copy the form opened on (null for a new task): throws what the API refused with. */
   send: (base: TaskOut | null, fields: Fields) => Promise<unknown>
@@ -615,6 +743,7 @@ export function TaskDialog({
           due: "",
           assignee: null,
           blockedBy: null,
+          criterion: null,
         },
     labels: TASK_LABELS,
     send: (base, fields) => send(base ?? null, fields),
@@ -713,6 +842,45 @@ export function TaskDialog({
           </select>
         </Labelled>
       </div>
+      <Criterion
+        value={fields.criterion}
+        criteria={criteria}
+        onChange={(criterion) => set({ criterion })}
+      />
     </FormDialog>
+  )
+}
+
+/**
+ * The success criterion a task works towards, from the project's. Nothing shows while the project has
+ * none and the task names none: there is nothing to choose.
+ */
+function Criterion({
+  value,
+  criteria,
+  onChange,
+}: {
+  value: string | null
+  criteria: ReadonlyArray<CriterionOut>
+  onChange: (id: string | null) => void
+}) {
+  if (criteria.length === 0 && value === null) return null
+  const listed = value === null || criteria.some((c) => c.id === value)
+  return (
+    <Labelled label="Works towards">
+      <select
+        className={FIELD}
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">No success criterion</option>
+        {!listed && <option value={value}>A criterion no longer listed</option>}
+        {criteria.map((c) => (
+          <option key={c.id} value={c.id}>
+            {clip(c.description, 60)}
+          </option>
+        ))}
+      </select>
+    </Labelled>
   )
 }

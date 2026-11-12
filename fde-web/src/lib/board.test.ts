@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, expectTypeOf, it } from "vitest"
+import type { components } from "./api/fde-api.gen"
 import { TaskId } from "./api/schemas"
 import type { TaskOut } from "./api/schemas"
 import {
@@ -6,12 +7,17 @@ import {
   fieldsOf,
   inColumn,
   isOverdue,
+  placeAt,
+  placed,
   problem,
   recentDone,
+  stays,
   summarise,
   toBody,
 } from "./board"
-import type { Fields } from "./board"
+import type { Fields, TaskBody, TaskSave } from "./board"
+
+type Spec = components["schemas"]
 
 const task = (over: Partial<TaskOut> = {}): TaskOut => ({
   id: TaskId.parse("tsk_1"),
@@ -37,7 +43,38 @@ describe("toBody", () => {
       blocker: null,
       blocked_by: null,
       waiting_on: null,
+      criterion: null,
     })
+  })
+
+  it("sends the criterion back on every save, so a save never unlinks it", () => {
+    const linked = fieldsOf(task({ criterion: "crt_1" as TaskOut["criterion"] }))
+    expect(toBody(linked).criterion).toBe("crt_1")
+    // A move or any other change keeps it.
+    expect(toBody({ ...linked, status: "done" }).criterion).toBe("crt_1")
+    expect(toBody({ ...linked, status: "blocked", blocker: "No VPN" }).criterion).toBe("crt_1")
+    // Left unlinked, it says so: null, never a missing key.
+    expect(toBody(fieldsOf(task()))).toHaveProperty("criterion", null)
+  })
+
+  it("names the place as one anchor, before or after", () => {
+    const anchor = task({ id: TaskId.parse("tsk_9") })
+    const fields = fieldsOf(task())
+    expect(toBody(fields, { side: "after", anchor })).toMatchObject({ after: "tsk_9" })
+    expect(toBody(fields, { side: "after", anchor })).not.toHaveProperty("before")
+    expect(toBody(fields, { side: "before", anchor })).toMatchObject({ before: "tsk_9" })
+    expect(toBody(fields)).not.toHaveProperty("after")
+    expect(toBody(fields)).not.toHaveProperty("before")
+  })
+
+  it("is the API's task body, with every replaced field required", () => {
+    expectTypeOf<keyof TaskBody>().toEqualTypeOf<Exclude<keyof Spec["TaskBody"], "version">>()
+    expectTypeOf<TaskSave>().toExtend<Spec["TaskBody"]>()
+    expectTypeOf<Pick<TaskSave, "criterion" | "assignee">>().toEqualTypeOf<{
+      criterion: string | null
+      assignee: string | null
+    }>()
+    expectTypeOf(toBody).returns.toEqualTypeOf<TaskSave>()
   })
 
   it("keeps the blocker and its access request only while blocked", () => {
@@ -94,11 +131,59 @@ describe("columns", () => {
     expect(asksFirst("waiting_on_customer")).toBe(true)
   })
 
-  it("list tasks in creation order, whatever order they arrive in", () => {
+  it("list tasks in the order the API gives them, not by when they were made", () => {
     const later = task({ id: TaskId.parse("tsk_2"), created_at: "2026-11-03T09:00:00Z" })
     const earlier = task({ id: TaskId.parse("tsk_3"), created_at: "2026-11-02T09:00:00Z" })
     const other = task({ id: TaskId.parse("tsk_4"), status: "done" })
-    expect(inColumn([later, other, earlier], "todo").map((t) => t.id)).toEqual(["tsk_3", "tsk_2"])
+    expect(inColumn([later, other, earlier], "todo").map((t) => t.id)).toEqual(["tsk_2", "tsk_3"])
+  })
+})
+
+describe("places", () => {
+  const t = (id: string, status: TaskOut["status"] = "todo") =>
+    task({ id: TaskId.parse(id), status })
+  const [a, b, c] = [t("tsk_a"), t("tsk_b"), t("tsk_c")]
+  const ids = (list: ReadonlyArray<TaskOut>) => list.map((x) => x.id)
+
+  it("puts a task first before the top card, anywhere else after the card above", () => {
+    expect(placeAt([a, b], 0)).toEqual({ side: "before", anchor: a })
+    expect(placeAt([a, b], 1)).toEqual({ side: "after", anchor: a })
+    expect(placeAt([a, b], 2)).toEqual({ side: "after", anchor: b })
+    // An empty column names no anchor: the API puts it at the end.
+    expect(placeAt([], 0)).toBeUndefined()
+  })
+
+  it("knows a place that leaves the task where it is", () => {
+    expect(stays([a, b, c], b, { side: "after", anchor: a })).toBe(true)
+    expect(stays([a, b, c], b, { side: "before", anchor: c })).toBe(true)
+    expect(stays([a, b, c], b, { side: "before", anchor: a })).toBe(false)
+    expect(stays([a, b, c], b, undefined)).toBe(true)
+    // Not in this column: a move, whatever the place.
+    expect(stays([a, c], b, undefined)).toBe(false)
+  })
+
+  it("orders the saved task as the API does", () => {
+    const d = t("tsk_d", "done")
+    // Beside its anchor.
+    expect(ids(placed([a, b, c, d], c, { side: "before", anchor: a }))).toEqual([
+      "tsk_c",
+      "tsk_a",
+      "tsk_b",
+      "tsk_d",
+    ])
+    expect(ids(placed([a, b, c, d], a, { side: "after", anchor: b }))).toEqual([
+      "tsk_b",
+      "tsk_a",
+      "tsk_c",
+      "tsk_d",
+    ])
+    // A change of status with no place: the end. Any other save keeps its place, with what was saved.
+    const moved = { ...a, status: "in_progress" as const }
+    expect(ids(placed([a, b, d], moved, undefined))).toEqual(["tsk_b", "tsk_d", "tsk_a"])
+    const renamed = { ...a, title: "Renamed" }
+    expect(placed([a, b], renamed, undefined)).toEqual([renamed, b])
+    // A new task: the end.
+    expect(ids(placed([a, b], c, undefined))).toEqual(["tsk_a", "tsk_b", "tsk_c"])
   })
 })
 

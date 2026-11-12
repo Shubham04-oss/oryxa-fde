@@ -194,6 +194,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
           handle={proofCard}
           scope={scope}
           criteria={p.scope.criteria}
+          tasks={p.tasks}
           me={me.data?.user.id}
         />
 

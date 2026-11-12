@@ -372,6 +372,7 @@ function MakeFromNote({
           title={making.title}
           people={project.stakeholders}
           requests={project.access}
+          criteria={project.scope.criteria}
           me={me.data?.user.id}
           send={async (_, fields) => {
             await mover.send(scope, null, fields)

@@ -33,6 +33,7 @@ const REFERRALS = scopeOf("cmp_brightwater", "prj_bw_referrals")
 const FNOL = scopeOf("cmp_atlas", "prj_atlas_fnol")
 const KESTREL = CompanyId.parse("cmp_kestrel")
 const REPLAY = "Replay last month's orders through the planner"
+const DRIVER_HOURS = "Add driver-hours checks to the eval suite"
 
 const dialog = (name: string) => screen.findByRole("dialog", { name })
 const field = (box: HTMLElement, label: string) => within(box).getByLabelText(label)
@@ -106,6 +107,35 @@ describe("a stale move of a task", () => {
     expect(within(note).queryByRole("button", { name: /^Move to/ })).toBeNull()
     expect(puts()).toHaveLength(1)
     expect((await api.project(DISPATCH)).tasks.find((t) => t.title === REPLAY)?.version).toBe(2)
+  })
+
+  it("within its column: says it changed, and offers the same move again on the current task", async () => {
+    await board()
+    someoneElse({ due_on: "2027-01-15", status: "todo" })
+    await pick(DRIVER_HOURS, "Move up")
+
+    const note = await alert()
+    expect(note).toHaveTextContent(
+      `“${DRIVER_HOURS}” changed since you last read it, so it was not moved. It is now To do.`,
+    )
+    // Nothing moved, and the card shows what is true.
+    expect(puts()).toHaveLength(1)
+    expect(titles("To do")).toEqual([REPLAY, DRIVER_HOURS])
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: `Edit ${DRIVER_HOURS}` })).toHaveTextContent(
+        /Due in \d+ days/,
+      ),
+    )
+
+    await userEvent.click(within(note).getByRole("button", { name: "Move it again" }))
+    await waitFor(() => expect(titles("To do")).toEqual([DRIVER_HOURS, REPLAY]))
+    expect(versionOf(puts()[1])).toBe(2)
+    expect(puts()[1]!.body).toMatchObject({
+      due_on: "2027-01-15",
+      status: "todo",
+      before: "tsk_k2",
+    })
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
   })
 
   it("on Today: the row says it changed and offers the move again", async () => {
