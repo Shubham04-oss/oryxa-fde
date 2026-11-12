@@ -14,7 +14,12 @@
     "API_URL": "http://localhost:8080",
   },
   // Live run output (src/live.ts): the realtime Worker, reached only through this binding. Its token is
-  // the secret REALTIME_SUBSCRIBE_TOKEN (`wrangler secret put`), never here.
-  "services": [{ "binding": "REALTIME", "service": "oryxa-fde-realtime" }],
+  // the secret REALTIME_SUBSCRIBE_TOKEN (`wrangler secret put`), never here. The workspace assistant
+  // (src/assistant.ts) likewise: its secrets ASSISTANT_SERVICE_TOKEN and ASSISTANT_BINDING_KEY are
+  // never here, and without them the welcome screen keeps its scripted answers.
+  "services": [
+    { "binding": "REALTIME", "service": "oryxa-fde-realtime" },
+    { "binding": "ASSISTANT", "service": "oryxa-fde-assistant" },
+  ],
   "observability": { "enabled": true },
 }

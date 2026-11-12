@@ -1,0 +1,29 @@
+{
+  "name": "@oryxa-fde/assistant",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "prettier --check . && tsc --noEmit && eslint && node scripts/catalogue.mjs --check",
+    "fmt": "prettier --write .",
+    "catalogue": "node scripts/catalogue.mjs",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "4.0.37",
+    "agents": "0.33.0",
+    "ai": "7.0.170",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.1",
+    "@cloudflare/workers-types": "5.20261103.1",
+    "eslint": "10.11.0",
+    "prettier": "3.6.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0",
+    "wrangler": "4.157.0"
+  }
+}

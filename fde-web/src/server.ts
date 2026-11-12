@@ -1,4 +1,6 @@
 import handler from "@tanstack/react-start/server-entry"
+import { assistantPath, openAssistant } from "./assistant"
+import type { Assistant } from "./assistant"
 import { apiPath, forward, sameOriginWrite } from "./forward"
 import type { Upstream } from "./forward"
 import { livePath, openLive } from "./live"
@@ -6,9 +8,10 @@ import type { Realtime } from "./live"
 import { newNonce, withSecurityHeaders } from "./security-headers"
 
 // The Worker (wrangler.jsonc `main`). It serves the app through TanStack Start, with a fresh CSP
-// nonce per page, forwards `/api/*` and `/auth/*` to the FDE API (src/forward.ts), and opens live
-// run output at `/live/*` (src/live.ts). Every answer but a WebSocket's leaves through one place
-// that sets the security headers, a failure included.
+// nonce per page, forwards `/api/*` and `/auth/*` to the FDE API (src/forward.ts), opens live
+// run output at `/live/*` (src/live.ts), and reaches the workspace assistant at `/assistant/*`
+// (src/assistant.ts). Every answer but a WebSocket's leaves through one place that sets the
+// security headers, a failure included.
 
 export type Env = {
   /** The API over the Workers VPC private link (`vpc_services`, infra `api_vpc_service_id`). */
@@ -19,6 +22,12 @@ export type Env = {
   REALTIME?: Fetcher
   /** What the realtime Worker takes from this Worker to subscribe a browser (its `SUBSCRIBE_TOKEN`). */
   REALTIME_SUBSCRIBE_TOKEN?: string
+  /** The assistant Worker (assistant/), by service binding. */
+  ASSISTANT?: Fetcher
+  /** What the assistant takes from this Worker on every call (its `SERVICE_TOKEN`). */
+  ASSISTANT_SERVICE_TOKEN?: string
+  /** The key this Worker signs conversation bindings with (the assistant's `BINDING_KEY`). */
+  ASSISTANT_BINDING_KEY?: string
 }
 
 /**
@@ -39,6 +48,20 @@ export function realtime(env: Env): Realtime | null {
   return binding && token ? { fetch: (request) => binding.fetch(request), token } : null
 }
 
+/** The shortest secret taken: a placeholder never configures the assistant. */
+const MIN_SECRET_LENGTH = 32
+
+/**
+ * The assistant Worker, or null when this Worker has no binding, token or key for it: the welcome
+ * screen then keeps its scripted answers.
+ */
+export function assistant(env: Env): Assistant | null {
+  const { ASSISTANT: binding, ASSISTANT_SERVICE_TOKEN: token, ASSISTANT_BINDING_KEY: key } = env
+  if (!binding || !token || !key) return null
+  if (token.length < MIN_SECRET_LENGTH || key.length < MIN_SECRET_LENGTH) return null
+  return { fetch: (request) => binding.fetch(request), token, key }
+}
+
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
 
 /** A call to another service that throws (it is down, or the request cannot be made) is a 502. */
@@ -54,11 +77,18 @@ async function respond(request: Request, env: Env, nonce: string): Promise<Respo
   const url = new URL(request.url)
   const live = livePath(url)
   const path = apiPath(url)
-  if (live === null && path === null) return handler.fetch(request, { context: { nonce } })
+  const asked = assistantPath(url)
+  if (live === null && path === null && asked === null)
+    return handler.fetch(request, { context: { nonce } })
   if (path !== null && !sameOriginWrite(request)) return refuse(403, "csrf")
   const api = upstream(env, import.meta.env.DEV)
   if (!api) return refuse(503, "api_not_configured")
   if (path !== null) return across(() => forward(request, path, api))
+  if (asked !== null) {
+    const helper = assistant(env)
+    if (!helper) return refuse(503, "assistant_not_configured")
+    return across(() => openAssistant(request, asked, api, helper))
+  }
   const channel = realtime(env)
   if (!channel || live === null) return refuse(503, "live_not_configured")
   return across(() => openLive(request, live, api, channel))

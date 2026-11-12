@@ -133,13 +133,13 @@ jobs:
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
   sandbox:
-    # The npm Workers and the agent harness (TypeScript): the sandbox gateway, the harness and the realtime
-    # Worker (live run output).
+    # The npm Workers and the agent harness (TypeScript): the sandbox gateway, the harness, the realtime
+    # Worker (live run output) and the assistant Worker (ADR 0009).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [sandbox/gateway, sandbox/harness, realtime]
+        package: [sandbox/gateway, sandbox/harness, realtime, assistant]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A package that has not landed on this branch yet passes as skipped.
