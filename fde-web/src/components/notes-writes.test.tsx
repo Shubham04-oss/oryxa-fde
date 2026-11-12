@@ -155,6 +155,11 @@ describe("writing a note", () => {
     await userEvent.click(within(await card()).getByRole("button", { name: "Write a note" }))
     const box = await writer()
     await userEvent.click(await within(box).findByRole("checkbox", { name: "Jonah Ade" }))
+    // A name is whole in its pill, wrapped, not cut behind a tooltip keyboard and touch cannot reach.
+    const name = within(box).getByText("Jonah Ade")
+    expect(name).not.toHaveClass("truncate")
+    expect(name).not.toHaveAttribute("title")
+    expect(name).toHaveClass("[overflow-wrap:anywhere]")
     await write(box, { title: "Claims sync", text: "Agreed the sample set." })
     await userEvent.click(within(box).getByRole("button", { name: "Save note" }))
     await closed()

@@ -260,9 +260,12 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     that offer people say plainly that names are unavailable. Nobody is ever an id alone. A nameless
     person is drawn quieter, with the outline of a person for initials.
   - **Names are untrusted text with no length cap.** They are rendered as text, never markup. In a row, a
-    pill or a card a long name is cut with an ellipsis (`truncate`), the whole of it on hover (`title`) and
-    to a screen reader (the text is all there); in a select's option, which cannot cut, it is clipped at
-    60 characters. A name is never logged, put in the address or kept in browser storage.
+    pill or a card a long name is shown whole and wraps where it does not fit (`[overflow-wrap:anywhere]`):
+    a name cut with its rest on hover only would hide it from keyboard and touch. A select's option holds
+    the whole name too, so a screen reader hears all of it; the browser fits it to the list. Our own words
+    for someone without a name ("a teammate …abc123") stay on one line. A person's id is checked with the
+    platform's rule before it goes into an address. A name is never logged, put in the address or kept in
+    browser storage.
   - **Picking teammates.** Who has a task (the task form) and who from the team attended a meeting (the
     note form) are chosen from whoever works on the place as the page can read it: you, the company's
     team and, on a project, its assignees, you first and the rest by name. The API also lets an
@@ -705,7 +708,7 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
   click on every visit. A card has the title, who has it, the success criterion it works towards
-  ("Towards: ..." on one line, cut short with the whole sentence as its title), why it is stuck (the
+  ("Towards: ...", whole and wrapped), why it is stuck (the
   blocker, or who it waits on and for how long) and when it is due; overdue and blocked get the
   amber dot.
   - **Summary line.** One line above the columns, always visible, says what is stuck, for example
@@ -767,7 +770,7 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     replaced fields are all required, so no move, edit, prompt or Today action can drop one; unlinking
     is choosing "No success criterion" in the form. Removing a criterion unlinks its tasks (the API's
     `on delete set null`). **Delete task** asks first. A card says who has it: "Assigned to you",
-    "Assigned to Jonah Ade" (one line, cut when long) or "Unassigned".
+    "Assigned to Jonah Ade" (whole, wrapped when long) or "Unassigned".
 - **Agent runs (project).** A card after Access: the project's runs, newest first, each with its
   state, and **Start a task**: what the agent should do and the GitHub repository and branch it
   starts from, prefilled from the latest run. The form checks the repository with the API's own

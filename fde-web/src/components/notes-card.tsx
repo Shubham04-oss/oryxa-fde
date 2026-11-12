@@ -734,10 +734,12 @@ function Choose({
                   )
                 }
               />
-              {/* A name has no length cap: cut to the pill, whole on hover and to a screen reader. */}
+              {/* A name has no length cap: whole and wrapped in the pill, for keyboard and touch too. */}
               <span
-                title={option.label}
-                className={cn("min-w-0 truncate", option.quiet && "text-muted-foreground")}
+                className={cn(
+                  "min-w-0 [overflow-wrap:anywhere]",
+                  option.quiet && "text-muted-foreground",
+                )}
               >
                 {option.label}
               </span>

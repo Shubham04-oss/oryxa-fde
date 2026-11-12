@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { parseView } from "../src/catalogue/wire.js";
 import type { Conversation } from "../src/conversation.js";
 import { MAX_TURNS } from "../src/catalogue/wire.js";
-import { PersonTurns, TURNS_PER_WINDOW } from "../src/limits.js";
+import { PersonTurns, TURNS_PER_WINDOW, TURN_TIMEOUT_MS } from "../src/limits.js";
+import { runTurn } from "../src/turn.js";
+import type { Folded } from "../src/turn.js";
+import type { WireEvent } from "../src/catalogue/wire.js";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { SESSION, SLOW_SESSION } from "./fake-api.js";
 import { PERSON, TENANT, bindingFor, call, freshConversation, readAll, readSome, replyText, say } from "./helpers.js";
 
@@ -197,5 +201,53 @@ describe("limits", () => {
     expect((await say(freshConversation(), "hello")).response.status).toBe(200);
     expect(PersonTurns).toBeDefined();
     expect(PERSON).not.toBe(person);
+  });
+});
+
+/** A model that starts its answer and then never finishes it, as a stuck provider would. */
+function stuckModel(): LanguageModelV4 {
+  return {
+    specificationVersion: "v4",
+    provider: "oryxa.test",
+    modelId: "stuck",
+    supportedUrls: {},
+    doGenerate: () => Promise.reject(new Error("streams only")),
+    doStream: () =>
+      Promise.resolve({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "text-start", id: "t" });
+            controller.enqueue({ type: "text-delta", id: "t", delta: "Looking " });
+          },
+        }),
+      }),
+  };
+}
+
+describe("a turn's time limit", () => {
+  it("ends a stuck turn with a plain notice, keeping what it had said", async () => {
+    const emitted: Array<WireEvent> = [];
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    const started = Date.now();
+    await runTurn({
+      model: stuckModel(),
+      binding: { conversation: "c_stuck", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: () => Promise.resolve(null),
+      emit: (event) => emitted.push(event),
+      out,
+      timeoutMs: 50,
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(out).toMatchObject({ text: "Looking ", notice: "timed_out" });
+    expect(emitted.map((e) => e.type)).toEqual(["text", "notice"]);
+    expect(emitted.at(-1)).toEqual({ v: 1, type: "notice", notice: "timed_out" });
+  });
+
+  it("is a few minutes at most, and longer than any one read", () => {
+    expect(TURN_TIMEOUT_MS).toBeGreaterThan(10_000);
+    expect(TURN_TIMEOUT_MS).toBeLessThanOrEqual(180_000);
   });
 });

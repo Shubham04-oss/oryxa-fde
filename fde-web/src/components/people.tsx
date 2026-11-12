@@ -80,13 +80,12 @@ export function useWorkingOn(place: NotePlace): Array<string> {
   ]
 }
 
-/** A person's name as text, cut with an ellipsis when it does not fit, the whole of it on hover and to a screen reader. */
+/** A person's name as text, whole and wrapped where it does not fit: a tooltip would hide the rest from keyboard and touch. */
 export function PersonName({ person, className }: { person: Person; className?: string }) {
   return (
     <span
-      title={person.label}
       className={cn(
-        "block min-w-0 truncate",
+        "block min-w-0 [overflow-wrap:anywhere]",
         person.nameless && "text-muted-foreground",
         className,
       )}

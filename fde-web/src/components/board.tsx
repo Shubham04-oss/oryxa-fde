@@ -629,9 +629,9 @@ function TaskCard({
           />
           {task.title}
         </span>
-        {/* One line: a long name is cut, and whole on hover and to a screen reader. */}
+        {/* Whole and wrapped, like the criterion below: a tooltip would hide a long name from keyboard and touch. */}
         {who && (
-          <span title={who} className="truncate text-[11px] text-muted-foreground">
+          <span className="text-[11px] leading-normal [overflow-wrap:anywhere] text-muted-foreground">
             {who}
           </span>
         )}
@@ -844,8 +844,9 @@ export function TaskDialog({
           >
             <option value="">Unassigned</option>
             {choices.map((p) => (
-              <option key={p.id} value={p.id} title={p.label}>
-                {clip(p.label, 60)}
+              // The whole name: a cut one would be all a screen reader hears.
+              <option key={p.id} value={p.id}>
+                {p.label}
               </option>
             ))}
           </select>

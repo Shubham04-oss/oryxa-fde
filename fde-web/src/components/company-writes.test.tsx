@@ -18,6 +18,8 @@ afterEach(resetWire)
 
 const KESTREL = CompanyId.parse("cmp_kestrel")
 const BRIGHTWATER = CompanyId.parse("cmp_brightwater")
+const LUMEN = CompanyId.parse("cmp_lumen")
+const AURELIA = "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo"
 const DISPATCH = { company: KESTREL, project: ProjectId.parse("prj_kestrel_dispatch") }
 const forbidden = () => Response.json({ error: "forbidden" }, { status: 403 })
 
@@ -651,18 +653,9 @@ describe("the team", () => {
       within(pick)
         .getAllByRole("option")
         .map((o) => o.textContent),
-    ).toEqual([
-      "Choose someone to add",
-      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-…",
-      "Sam Okafor",
-      "Tomoko Hale",
-      "Unnamed teammate",
-    ])
-    // A long name is cut in the list and whole on hover.
-    expect(within(pick).getByRole("option", { name: /^Aurelia/ })).toHaveAttribute(
-      "title",
-      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
-    )
+    ).toEqual(["Choose someone to add", AURELIA, "Sam Okafor", "Tomoko Hale", "Unnamed teammate"])
+    // A long name is whole in the list, so a screen reader hears all of it.
+    expect(within(pick).getByRole("option", { name: AURELIA })).toBeInTheDocument()
     await userEvent.selectOptions(pick, "usr_sam")
     await userEvent.selectOptions(within(team).getByLabelText("Their role"), "lead")
     await userEvent.click(within(team).getByRole("button", { name: "Add" }))
@@ -727,21 +720,34 @@ describe("the team", () => {
     }
   })
 
-  it("names a long name in full on hover, and someone with no name as unnamed, never by id", async () => {
-    renderWithRouter(<CompanyPage companyId={CompanyId.parse("cmp_lumen")} />)
+  it("shows a long name whole, wrapped, and someone with no name as unnamed, never by id", async () => {
+    renderWithRouter(<CompanyPage companyId={LUMEN} />)
     const team = await screen.findByRole("region", { name: "Team" })
-    const long = await within(team).findByText(/^Aurelia Montgomery/)
-    expect(long).toHaveAttribute(
-      "title",
-      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
-    )
-    expect(long).toHaveClass("truncate")
+    const long = await within(team).findByText(AURELIA)
+    // Whole for every reader: a cut name with a tooltip hides the rest from keyboard and touch.
+    expect(long).not.toHaveClass("truncate")
+    expect(long).toHaveClass("[overflow-wrap:anywhere]")
     expect(within(team).getByText("Unnamed teammate")).toBeInTheDocument()
     expect(team).not.toHaveTextContent("usr_quill")
     expect(team).not.toHaveTextContent("…")
     // Everyone in the organisation is on Lumen's team but Jonah and Tomoko.
     const pick = within(team).getByLabelText("Add from the organisation")
     expect(within(pick).getAllByRole("option")).toHaveLength(3)
+  })
+
+  it("checks the person's id itself before it goes into a URL", async () => {
+    renderWithRouter(<CompanyPage companyId={LUMEN} />)
+    const team = await screen.findByRole("region", { name: "Team" })
+    const pick = await within(team).findByLabelText("Add from the organisation")
+    // As if something on the page had slipped another value into the list.
+    const planted = document.createElement("option")
+    planted.value = "usr_x/../../admin"
+    planted.textContent = "Planted"
+    pick.appendChild(planted)
+    await userEvent.selectOptions(pick, planted)
+    await userEvent.click(within(team).getByRole("button", { name: "Add" }))
+    expect(await within(team).findByRole("alert")).toHaveTextContent("can't be added")
+    expect(wire.sent).toEqual([])
   })
 
   it("is read only for an engineer, who is told who changes it", async () => {
@@ -780,6 +786,28 @@ describe("who is assigned to a project", () => {
     await userEvent.click(within(card).getByRole("button", { name: "Assign" }))
     await waitFor(() => expect(within(card).getByText("Jonah Ade")).toBeInTheDocument())
     expect(wire.sent[1]).toMatchObject({ method: "PUT" })
+  })
+
+  it("checks the teammate's id itself before it goes into a URL", async () => {
+    renderWithRouter(<ProjectPage scope={DISPATCH} />)
+    const card = await screen.findByRole("region", { name: "Assigned" })
+    await userEvent.click(await within(card).findByRole("button", { name: "Remove Jonah Ade" }))
+    await userEvent.click(
+      within(within(card).getByRole("group", { name: /Confirm removing/ })).getByRole("button", {
+        name: "Remove",
+      }),
+    )
+    const pick = await within(card).findByLabelText("Assign from the team")
+    // As if something on the page had slipped another value into the list.
+    const planted = document.createElement("option")
+    planted.value = "usr_x/../../admin"
+    planted.textContent = "Planted"
+    pick.appendChild(planted)
+    await userEvent.selectOptions(pick, planted)
+    await userEvent.click(within(card).getByRole("button", { name: "Assign" }))
+    expect(await within(card).findByRole("alert")).toHaveTextContent("can't be added")
+    // Only the removal reached the API.
+    expect(wire.sent.map((w) => w.method)).toEqual(["DELETE"])
   })
 
   it("is read only for an engineer, who may still edit the project itself", async () => {

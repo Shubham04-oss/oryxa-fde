@@ -7,7 +7,7 @@ import { Block, Destination } from "./catalogue/blocks.js";
 import type { Block as BlockValue, Destination as DestinationValue } from "./catalogue/blocks.js";
 import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, Proposal, WIRE_VERSION, parseEvent } from "./catalogue/wire.js";
 import type { Notice, Proposal as ProposalValue, WireEvent } from "./catalogue/wire.js";
-import { MAX_STEPS, MAX_TOOL_CALLS } from "./limits.js";
+import { MAX_STEPS, MAX_TOOL_CALLS, TURN_TIMEOUT_MS } from "./limits.js";
 import { readTools } from "./tools.js";
 import type { Reader } from "./tools.js";
 
@@ -60,6 +60,8 @@ export interface TurnInput {
   readonly emit: (event: WireEvent) => void;
   /** Filled as the turn goes, so a turn that fails part way still keeps what it said. */
   readonly out: Folded;
+  /** How long the turn may run; `TURN_TIMEOUT_MS` unless a test says otherwise. */
+  readonly timeoutMs?: number;
 }
 
 /** Thrown when the model's stream fails; the turn ends with a plain notice and nothing from the error. */
@@ -100,7 +102,7 @@ export function mayShow(binding: Binding, block: BlockValue): boolean {
 
 /** Runs one turn: streams the reply as wire events through `emit`, and folds it into `out`. */
 export async function runTurn(input: TurnInput): Promise<void> {
-  const { binding, out } = input;
+  const { out } = input;
   const emit = (event: WireEvent) => {
     // The Worker's own check before anything is stored or sent.
     const checked = parseEvent(event);
@@ -112,6 +114,24 @@ export async function runTurn(input: TurnInput): Promise<void> {
     emit({ v: WIRE_VERSION, type: "notice", notice: n });
   };
 
+  // Ours, not the SDK's `timeout`, so the end is known to be the time limit and is said as such.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), input.timeoutMs ?? TURN_TIMEOUT_MS);
+  try {
+    await stream(input, deadline.signal, emit, notice);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The model loop itself, until it ends, fails, or `abortSignal` says the time is up. */
+async function stream(
+  input: TurnInput,
+  abortSignal: AbortSignal,
+  emit: (event: WireEvent) => void,
+  notice: (n: Notice) => void,
+): Promise<void> {
+  const { binding, out } = input;
   const result = streamText({
     model: input.model,
     instructions: instructions(binding),
@@ -122,12 +142,17 @@ export async function runTurn(input: TurnInput): Promise<void> {
       ({ steps }) => steps.reduce((n, s) => n + s.toolCalls.length, 0) >= MAX_TOOL_CALLS,
     ],
     maxRetries: 0,
+    abortSignal,
     // The default logs the whole error, which may carry the prompt. Ours logs nothing; the turn fails plainly.
     onError: () => {},
   });
 
   for await (const part of result.fullStream) {
     if (part.type === "error") throw new TurnFailed();
+    if (part.type === "abort") {
+      notice("timed_out");
+      break;
+    }
     if (part.type === "text-delta") {
       if ([...out.text].length + [...part.text].length > MAX_REPLY) {
         notice("reply_limit");

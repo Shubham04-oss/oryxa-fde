@@ -14,11 +14,11 @@ object answers no HTTP of its own.
 On every call (a turn, a reconnect, a view, a proposal's answer) fde-web asks the API who the person is
 (`/v1/me`) and, for a company's conversation, reads the company; then it signs a binding and calls with:
 
-| Header                                  | What                                                                                                                         |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `Authorization: Bearer <SERVICE_TOKEN>` | fde-web's `ASSISTANT_SERVICE_TOKEN`. Unset or shorter than 32 characters here: everyone is refused.                          |
-| `x-assistant-binding`                   | `base64url(JSON).base64url(HMAC-SHA256)` under `BINDING_KEY`: `{v:1, conv, tenant, person, company or null, exp}`, a minute. |
-| `x-assistant-session`                   | On a turn only: the person's session, as their browser sent it. Held in memory for that turn's API reads, then dropped.      |
+| Header                                  | What                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `Authorization: Bearer <SERVICE_TOKEN>` | fde-web's `ASSISTANT_SERVICE_TOKEN`. Unset or shorter than 32 characters here: everyone is refused.                             |
+| `x-assistant-binding`                   | `base64url(JSON).base64url(HMAC-SHA256)` under `BINDING_KEY`: `{v:1, conv, tenant, person, company or null, exp}`, a minute.    |
+| `x-assistant-session`                   | On a turn only: the person's session cookie alone (`__Host-fde_session=…`). Held in memory for that turn's reads, then dropped. |
 
 The first turn binds the conversation to its person, organisation and company (or none, for the home conversation);
 any later binding that names another is refused, as is one for another conversation, an expired one, or one that
@@ -42,7 +42,7 @@ All under `/internal/v1/conversations/<conversation>`, ids with the platform's r
 
 - `turn` (the turn's id and what the person said), then any number of `text` deltas, `block`s from the web's
   catalogue, `proposal`s from the action catalogue (`create_company`, `open_route`) with exact arguments, and a
-  `notice` when a reply stopped short (`tool_limit`, `reply_limit`, `failed`);
+  `notice` when a reply stopped short (`tool_limit`, `reply_limit`, `timed_out`, `failed`);
 - then the SDK's control frames: `up-to-date`, and `done` or `error`.
 
 The Worker checks every event before it stores it, and the web checks it again before it renders: an unknown or
@@ -51,8 +51,11 @@ malformed event, block or proposal is dropped. A proposal's id is the Worker's, 
 ## Limits
 
 `src/limits.ts`: ten turns a minute per person (a `PersonTurns` object per person), 50 turns a conversation, four
-tool calls a turn, 2,000 characters a message, 8,000 a reply. A refusal names the limit and the web says it plainly.
-The working copy is deleted after 24 hours idle.
+tool calls a turn, 90 seconds a turn, 2,000 characters a message, 8,000 a reply, 16 KiB (UTF-8) of each tool answer.
+A refusal names the limit and the web says it plainly; a turn that runs out of time ends with the `timed_out` notice.
+The web holds the stream to the same caps, reconnects when a read hears nothing (heartbeats included) for 45 seconds,
+and gives up on a turn after 120. The working copy is deleted after 24 hours idle. A limit per organisation waits for a
+real model (ADR 0009 leaves budgets per organisation open).
 
 ## Deploy
 

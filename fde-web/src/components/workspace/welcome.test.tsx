@@ -6,6 +6,7 @@ import { Welcome } from "./welcome"
 import { CompaniesHome } from "@/components/companies-home"
 import { mockApi } from "@/dev/mock-api"
 import { Home } from "@/components/home"
+import { NOTICE_TEXT, TURN_DEADLINE_MS } from "@/lib/workspace/assistant"
 import type { Block } from "@/lib/workspace/blocks"
 import { renderWithRouter } from "@/test/render"
 import { installWire, resetWire, wire } from "@/test/wire"
@@ -263,5 +264,64 @@ describe("the conversation with the assistant", () => {
     await suggested()
     const log = await said("new customer to set up")
     expect(await within(log).findByText("Let's set it up together.")).toBeInTheDocument()
+  })
+
+  it("says plainly when the assistant ran out of time on a turn", async () => {
+    turnAnswer = () =>
+      new Response(
+        frames([
+          { v: 1, type: "turn", turn: "t_1", said: "Plan my week" },
+          { v: 1, type: "text", delta: "Looking at your week. " },
+          { v: 1, type: "notice", notice: "timed_out" },
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("Plan my week")
+    expect(await within(log).findByText(NOTICE_TEXT.timed_out)).toBeInTheDocument()
+  })
+
+  it("gives up on a turn that never ends, heartbeats or not, and frees the box", async () => {
+    // A stuck turn: its first events, then only silence, on the first connection and on each reconnect.
+    const stuck = (events: Array<unknown>) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            const text = events.map((e, i) => `id: ${i}\ndata: ${JSON.stringify(e)}\n\n`).join("")
+            controller.enqueue(new TextEncoder().encode(text))
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    turnAnswer = () =>
+      stuck([
+        { v: 1, type: "turn", turn: "t_1", said: "Plan my week" },
+        { v: 1, type: "text", delta: "Looking at your week. " },
+      ])
+    const answer = mockApi.fetch
+    let reconnects = 0
+    mockApi.fetch = async (request) => {
+      if (!new URL(request.url).pathname.endsWith("/events")) return answer(request)
+      reconnects += 1
+      return stuck([])
+    }
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      renderWithRouter(<Welcome now={MORNING} />)
+      await suggested()
+      const log = await said("Plan my week")
+      expect(await within(log).findByText("Looking at your week.")).toBeInTheDocument()
+      for (let waited = 0; waited <= TURN_DEADLINE_MS; waited += 15_000)
+        await vi.advanceTimersByTimeAsync(15_000)
+      expect(await within(log).findByText(NOTICE_TEXT.timed_out)).toBeInTheDocument()
+      // It reconnected while the turn had time left, then stopped.
+      expect(reconnects).toBeGreaterThan(0)
+      expect(within(log).getByText("Looking at your week.")).toBeInTheDocument()
+      // The person can ask again.
+      expect(screen.getByRole("button", { name: "What needs me today?" })).toBeEnabled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

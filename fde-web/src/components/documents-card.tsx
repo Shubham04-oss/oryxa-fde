@@ -4,6 +4,7 @@ import { UploadDialog } from "./document-upload"
 import { Card, Quiet, Row, Rows, Status } from "./page"
 import { useNames } from "./people"
 import type { Names } from "./people"
+import type { Person } from "@/lib/people"
 import { Button } from "./ui/button"
 import { ApiError, SAFE_TEXT, queries } from "@/lib/api/client"
 import type { CompanyId, DocumentOut, SearchHitOut } from "@/lib/api/schemas"
@@ -37,6 +38,10 @@ const MIN_AUTO = 2
 const PAUSE_MS = 250
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+/** Who, as words that stay on one line when they are ours ("a teammate …x1"); a real name wraps as usual. */
+const together = (person: Person) =>
+  person.nameless ? person.phrase.replaceAll(" ", "\u00a0") : person.phrase
 
 export function DocumentsCard({ company }: { company: CompanyId }) {
   const names = useNames({ company })
@@ -431,7 +436,7 @@ function DocumentRow({ doc, names }: { doc: DocumentOut; names: Names }) {
               kindLabel(doc.content_type),
               formatBytes(doc.size_bytes),
               doc.status === "ingested" && plural(doc.chunks, "passage", "passages"),
-              `Added ${uploadedOn(doc)} by ${names.of(doc.uploaded_by).phrase}`,
+              `Added ${uploadedOn(doc)} by ${together(names.of(doc.uploaded_by))}`,
             ]
               .filter(Boolean)
               .join(" · ")}

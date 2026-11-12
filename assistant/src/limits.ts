@@ -12,6 +12,11 @@ export const RATE_WINDOW_MS = 60_000;
 export const MAX_TOOL_CALLS = 4;
 /** Model steps one turn may take: each tool call needs one, and the answer one more. */
 export const MAX_STEPS = MAX_TOOL_CALLS + 1;
+/**
+ * How long one turn may run, model and reads together. Past it the turn stops with a plain notice: the stream's
+ * heartbeats would otherwise keep a stuck turn open, and the person's composer busy, for as long as it hangs.
+ */
+export const TURN_TIMEOUT_MS = 90_000;
 /** The most bytes of a turn's request body (a message of `MAX_SAID` characters fits easily). */
 export const MAX_BODY_BYTES = 16 * 1024;
 /** The longest session header fde-web forwards. */
