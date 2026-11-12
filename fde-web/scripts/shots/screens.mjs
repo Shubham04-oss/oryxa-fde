@@ -18,6 +18,8 @@
 //   evalsOff  true: the API serves no eval routes, as where no sandbox gateway is set (the mock's
 //             `__fdeMockEvalsOff`, set before the app loads)
 //   signedOut true: no sign-in first (the sign-in screens themselves)
+//   workspace true: the new workspace (issue #209) on for this tab, whatever the dev server's
+//             VITE_FDE_WORKSPACE (the mock's `__fdeMockWorkspace`, set before the app loads)
 //   pendingStep "verify_email" or "choose_organisation": the mock starts with a sign-in waiting at that
 //             step, as Google's callback leaves it (the mock's `__fdeMockPendingStep`, set before the app loads)
 // Everything here runs inside the Playwright container; the page is the app's, not this repo's.
@@ -1262,6 +1264,128 @@ function ownSignInScreens() {
   )
 }
 
+// The new workspace (issue #209): the welcome screen and a new company made in a conversation, on
+// with `workspace: true` whatever the dev server's flag. Desktop and phone, light and dark.
+const WORKSPACE = { workspace: true, sizes: ["1440", "390"] }
+const question = (name) => (page) => page.getByRole("heading", { name, exact: true })
+const conversation = (page) => page.getByRole("region", { name: "Conversation" })
+async function cont(page, label = "Continue") {
+  await conversation(page).getByRole("button", { name: label, exact: true }).click()
+}
+/** Answers the conversation's first `n` steps with sample answers. */
+async function answer(page, n) {
+  const c = conversation(page)
+  if (n >= 1) {
+    await c.getByLabel("Company name").fill("Orion Rail")
+    await c
+      .getByLabel("What are you delivering?")
+      .fill("Automate claims intake for their freight team.")
+    await c.getByLabel("Industry").fill("Transport")
+    await c.getByLabel("Region").fill("UK")
+    await cont(page)
+    await question("How do you want to start?")(page).waitFor()
+  }
+  if (n >= 2) {
+    await c.getByLabel("Main contact at the company").fill("Dana Ortiz")
+    await c.getByLabel("What would show it worked?").fill("Claims triaged within two hours")
+    await cont(page)
+    await question("What may agents do here, and who approves?")(page).waitFor()
+  }
+  if (n >= 3) {
+    await cont(page)
+    await question("Who should be invited?")(page).waitFor()
+  }
+  if (n >= 4) {
+    await c.getByLabel("Email of person 1").fill("sam@example.com")
+    await c.getByRole("button", { name: "Add a person" }).click()
+    await c.getByLabel("Email of person 2").fill("dana.ortiz@example.com")
+    await c.getByLabel("Role of person 2").selectOption("sponsor")
+    await cont(page)
+    await question("Here is a plan to start with. Change anything.")(page).waitFor()
+  }
+  if (n >= 5) {
+    await cont(page, "Use this plan")
+    await question("Ready to create Orion Rail?")(page).waitFor()
+  }
+  // Settle the quiet motion, and leave no field focused.
+  await page.evaluate(
+    () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
+  )
+  await page.waitForTimeout(400)
+}
+const STEP_NAMES = ["company", "start", "rules", "people", "plan", "review"]
+
+function workspaceScreens() {
+  return [
+    {
+      name: "welcome",
+      path: "/",
+      ...WORKSPACE,
+      sizes: undefined,
+      ready: (page) => page.getByRole("button", { name: /^Not now:/ }).first(),
+    },
+    {
+      name: "welcome-empty",
+      path: "/",
+      ...WORKSPACE,
+      emptyWorkspace: true,
+      ready: (page) => page.getByRole("button", { name: "Start" }),
+    },
+    {
+      name: "welcome-reply",
+      path: "/",
+      ...WORKSPACE,
+      ready: (page) => page.getByRole("button", { name: /^Not now:/ }).first(),
+      act: async (page) => {
+        await page
+          .getByLabel("What do you want to work on?")
+          .fill("We have a new customer to set up")
+        await page.keyboard.press("Enter")
+        await page.getByText("Let's set it up together.").waitFor()
+        await page.waitForTimeout(400)
+      },
+    },
+    ...STEP_NAMES.map((step, i) => ({
+      name: `new-company-${i + 1}-${step}`,
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: (page) => answer(page, i),
+    })),
+    {
+      name: "new-company-plan-edited",
+      path: "/new-company",
+      ...WORKSPACE,
+      themes: ["light"],
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 4)
+        const plan = page.getByRole("list", { name: "Plan" })
+        await plan.getByRole("button", { name: "Move “Build” up" }).click()
+        await plan.getByRole("button", { name: "Remove “Hand off”" }).click()
+        await page.getByLabel("New step").fill("Train the claims team")
+        await page.getByLabel("New step").press("Enter")
+        await page.getByLabel("New step").blur()
+        await page.waitForTimeout(400)
+      },
+    },
+    {
+      name: "new-company-summary",
+      path: "/new-company",
+      ...WORKSPACE,
+      sizes: ["390"],
+      full: false,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 4)
+        await page.getByRole("button", { name: /^Summary/ }).click()
+        await page.getByRole("dialog", { name: "Summary" }).waitFor()
+        await page.waitForTimeout(500)
+      },
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -1281,6 +1405,7 @@ export const screens = [
         .or(page.getByRole("heading", { name: "Your account is not part of an organisation yet" })),
   },
   ...ownSignInScreens(),
+  ...workspaceScreens(),
   { name: "companies", path: "/", ready: heading("Companies") },
   { name: "today", path: "/today", ready: heading("Today") },
   {

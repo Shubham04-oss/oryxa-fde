@@ -14,7 +14,7 @@ family of products. When a decision changes, update this file in the same PR.
 | New chat, Requests, Knowledge, Tools               | Jump to, Today, Companies, and the FDE's companies                               | The FDE moves between customers, not conversations                     |
 | Screens in plain CSS per component                 | The shell in `src/shell.css`; screens in Tailwind utilities on the same tokens   | Less CSS to keep in step; one place for the shell                      |
 | The gateway mock answers HTTP routes in the Worker | The mock answers the API's routes in the browser, behind `src/lib/api/client.ts` | `dev:mock` needs no Worker or API; the spec's types keep the mock true |
-| A pixel cyclone on sign-in                         | The eight stages, fading in                                                      | The product's own shape                                                |
+| A pixel cyclone on sign-in                         | The paper page, our mark and one card, as the workspace looks                    | One product from signed out to signed in                               |
 
 ## 1. Colour
 
@@ -24,31 +24,63 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 
 | Token             | Light     | Dark      | Use                                                                                                                                                                                                                                                                                                                       |
 | ----------------- | --------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--base`          | `#f4f4f4` | `#111111` | Page surround, the sidebar, the header band                                                                                                                                                                                                                                                                               |
-| `--canvas`        | `#ffffff` | `#1e1e1e` | The central canvas, sign-in, overlays                                                                                                                                                                                                                                                                                     |
-| `--card`          | `#f7f7f7` | `#111111` | Cards on the canvas                                                                                                                                                                                                                                                                                                       |
-| `--raised`        | `#fafafa` | `#242424` | Fields, inner wells, the move confirmation                                                                                                                                                                                                                                                                                |
-| `--hover`         | `#ebebeb` | `#1d1d1d` | Hover on the base surface only                                                                                                                                                                                                                                                                                            |
-| `--selected`      | `#e4e4e4` | `#262626` | The current item; hover on the canvas and cards                                                                                                                                                                                                                                                                           |
-| `--border-quiet`  | `#e6e6e6` | `#353535` | Card, field and divider borders                                                                                                                                                                                                                                                                                           |
-| `--border-strong` | `#cccccc` | `#555555` | Hovered borders, a status dot with no tone                                                                                                                                                                                                                                                                                |
-| `--focus`         | `#8c8c8c` | `#d6d6d6` | Keyboard focus ring                                                                                                                                                                                                                                                                                                       |
-| `--text`          | `#111111` | `#f2f2f2` | Titles, body, the primary button                                                                                                                                                                                                                                                                                          |
-| `--text-soft`     | `#404040` | `#a8a8a8` | Navigation labels, secondary emphasis                                                                                                                                                                                                                                                                                     |
-| `--text-muted`    | `#737373` | `#999999` | Metadata and hints                                                                                                                                                                                                                                                                                                        |
-| `--text-inverse`  | `#ffffff` | `#111111` | Text on the primary button                                                                                                                                                                                                                                                                                                |
-| `--success`       | `#16a34a` | `#22c55e` | Granted, passing, signed off. Nothing else.                                                                                                                                                                                                                                                                               |
+| `--base`          | `#f4f2ee` | `#121110` | Page surround (paper), the sidebar, the header band, the signed-out page                                                                                                                                                                                                                                                  |
+| `--canvas`        | `#fffefc` | `#1a1917` | The central canvas, the sign-in card, overlays, the conversation box                                                                                                                                                                                                                                                      |
+| `--card`          | `#f8f7f4` | `#161514` | Cards on the canvas, the summary beside a conversation                                                                                                                                                                                                                                                                    |
+| `--raised`        | `#fbfaf7` | `#211f1d` | Fields, inner wells, the move confirmation                                                                                                                                                                                                                                                                                |
+| `--hover`         | `#ebe8e2` | `#1f1d1b` | Hover on the base surface only                                                                                                                                                                                                                                                                                            |
+| `--selected`      | `#e5e1d9` | `#2a2825` | The current item; hover on the canvas and cards                                                                                                                                                                                                                                                                           |
+| `--border-quiet`  | `#e7e3dc` | `#2f2d2a` | Card, field and divider borders                                                                                                                                                                                                                                                                                           |
+| `--border-strong` | `#cfc9bf` | `#4b4844` | Hovered borders, a status dot with no tone                                                                                                                                                                                                                                                                                |
+| `--focus`         | `#3b54c4` | `#8d9df5` | Keyboard focus ring (the tint)                                                                                                                                                                                                                                                                                            |
+| `--text`          | `#1b1a17` | `#f2f0eb` | Titles, body, the primary button                                                                                                                                                                                                                                                                                          |
+| `--text-soft`     | `#46423c` | `#bab5ac` | Navigation labels, secondary emphasis                                                                                                                                                                                                                                                                                     |
+| `--text-muted`    | `#75706a` | `#918c84` | Metadata and hints                                                                                                                                                                                                                                                                                                        |
+| `--text-inverse`  | `#fffefc` | `#161514` | Text on the primary button                                                                                                                                                                                                                                                                                                |
+| `--tint`          | `#3b54c4` | `#8d9df5` | Our one colour (lapis): focus, the current step, the workspace's voice, "ask first". Never a status.                                                                                                                                                                                                                      |
+| `--tint-soft`     | `#eceffa` | `#22263b` | A tinted well: the workspace's mark, a chosen option, a confirmation on sign-in                                                                                                                                                                                                                                           |
+| `--success`       | `#15803d` | `#4ade80` | Granted, passing, signed off. Nothing else.                                                                                                                                                                                                                                                                               |
 | `--attention`     | `#b45309` | `#fbbf24` | Blocked, overdue, failing, denied, revoked, an access request open for a week or more, a signed-off scope that has changed, a stage move held up by open checklist items, a save held back because the record changed, a criterion that is not met, a result that is out of date, a case that did not pass. Nothing else. |
 | `--destructive`   | `#dc2626` | `#f87171` | Errors and destructive actions. Nothing else.                                                                                                                                                                                                                                                                             |
 
-- Every grey is neutral (R=G=B). No decorative accent.
+- Warm paper and ink, not pure greys: every neutral leans a little warm, the same in both themes.
+  One colour of our own, `--tint`, used sparingly; no other decorative colour, no gradients.
 - A status is a dot and words, never colour alone.
 - Two themes, one set of token names. The theme follows the system by default; the profile menu
   cycles System, Light and Dark, kept in this browser (`src/lib/theme.ts`, key `fde.theme`). An
   inline script in `<head>` applies a saved choice before first paint.
-- The primary action is near-black with white text. One primary per area.
-- Shadows only on overlays (Jump to, menus, the phone sidebar). No gradients, no blur.
-- People are initials in a neutral circle.
+- The primary action is ink with paper text. One primary per view.
+- Shadows on overlays (`--shadow`), and one soft lift (`--lift`, `shadow-lift`) for the thing a
+  screen is for: the conversation box, the card a question is answered in, the sign-in card.
+- People are initials in a neutral circle; a company is its first letter on a quiet tile.
+
+### Type, radius, motion and icons
+
+The workspace's screens (the welcome screen, the conversation, sign-in) use only these, from
+`@theme` in `src/styles.css`. Older screens move to them as they are rebuilt.
+
+| Token          | Size / line | Use                                    |
+| -------------- | ----------- | -------------------------------------- |
+| `text-micro`   | 11 / 16     | Labels, metadata, a step's stage       |
+| `text-meta`    | 12 / 18     | Hints, secondary lines, small controls |
+| `text-body`    | 14 / 22     | Body text, fields, answers             |
+| `text-lead`    | 16 / 26     | The conversation box                   |
+| `text-title`   | 20 / 28     | A question in the conversation         |
+| `text-display` | 30 / 38     | The greeting (26 / 32 on a phone)      |
+
+- Spacing is the 4px scale, in these steps only: 4, 8, 12, 16, 24, 32, 48, 56. A column of the
+  workspace is 680px (the welcome screen) or 1120px with its summary; 16px gutters on a phone.
+- Radius: `rounded-field` (12px) for fields and choices, `rounded-card` (18px) for cards, 24px for
+  the sign-in card and a sheet, and every button is a pill.
+- Motion: `animate-rise` (a new turn, 240ms) and `animate-settle` (a card or a filled block,
+  320ms) on `--ease-calm`; a reordered plan step glides to its place. Every use is `motion-safe:`,
+  so none of it runs under `prefers-reduced-motion`. Buttons press in by 3%; that too is
+  `motion-safe:`.
+- States: every control has hover (a stronger border or `--selected`), focus (`--focus`, a 2px
+  outline or a 4px soft ring of the tint on fields), pressed and disabled (45% opacity).
+- Icons come only through `components/ui/icon.tsx` (`<Icon name="…" />`): Pikaicons' free set
+  (`@pikaicons/react` and `@pikaicons/core-free`, MIT, pinned), with lucide only where the free set
+  has nothing (today a bare tick). Never commit Pikaicons' paid files.
 
 ## 2. Shell
 
@@ -73,8 +105,9 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 
 ## 3. Screens
 
-- **Sign-in.** The one expressive screen: the full canvas, a compact card inset right, and the
-  eight stages beside it, each a little stronger than the last. Continue goes to AuthKit's hosted
+- **Sign-in.** The paper page with our mark at the top and one card in the middle
+  (`AuthPage` in `components/auth/frame.tsx`), the same frame as every step of our own sign-in.
+  Continue goes to AuthKit's hosted
   page through the API (`/auth/login`), which brings the FDE back to where they were. On the mock
   it says that no account is checked. `/sign-in?error=no_organisation` (from `/auth/callback`) says
   the account is not part of an organisation yet and to ask an admin for an invite, above Continue.
@@ -707,6 +740,36 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
     but names none, it still asks, under "Items are still open on Scope."
   - **Moving back never asks** for a reason and never sends one.
 
+### The workspace (issue #209, behind a flag)
+
+The first screens of the conversation-first workspace (`docs/direction.md` section 9, ADR 0008).
+Off by default: the build flag `VITE_FDE_WORKSPACE=1` turns them on, and on the dev mock
+`globalThis.__fdeMockWorkspace = true` (set before the app loads) does for one tab. With it on, the
+sidebar has **Home** first, `/` is the welcome screen, every company is at `/companies`, and New
+company opens `/new-company`. With it off, nothing changes and both new routes go back to `/`.
+
+- **Blocks.** The workspace shows only blocks from a fixed catalogue (`src/lib/workspace/blocks.ts`):
+  suggestion, brief, plan, rules, people, checklist. Each has a zod schema; `parseBlocks` drops an
+  unknown or malformed block, and `BlockView` draws nothing for a type it does not know. All text
+  is drawn as React text, never as markup; a block may send a person only to one of our own
+  screens, named (never a URL), and loads nothing from another host. A plan step is an ordinary
+  task: a title, one of the eight stages, and, where it proves something, a success criterion with
+  "How we will prove it" beside it (the place evals will fill).
+- **Welcome** (`/`): the date and a greeting (the screen's heading); the conversation box, the one
+  primary thing (Enter sends, Shift and Enter is a new line); two quiet prompts ("Set up a new
+  company", "What needs me today?"); **Suggested next**, up to three, each approved by opening where
+  it is done or put away (with Undo); and four companies with **See all**. Suggestions are fixed
+  templates over names, counts and days waiting; they never quote a record's own text. The
+  scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
+- **New company** (`/new-company`): the workspace asks one step at a time (the company and what is
+  delivered; how to start; rules for agents and who approves; who to invite, optional; the plan;
+  the review). Each answer fills a section of the **Summary** beside it (a sheet from **Summary** on
+  a narrow screen). The plan is proposed from the answers (a call first, scope first, or a pilot)
+  and can be reordered, renamed, added to and removed from, by buttons that keep focus on the step.
+  Any answer can be changed. Nothing is saved until **Create company** on the review, which calls
+  `api.createCompany` and opens the company; in this preview the plan, rules and invitations are
+  not kept, and the review says so. Real customer data is always "Never".
+
 ## 4. Data
 
 - `src/lib/api/client.ts` is the only way to the API. Screens use `api` and `queries` from it and
@@ -830,7 +893,7 @@ render, and leaves a `-FAILED.png` of it.
 - To add a screen, add an entry to `screens.mjs`: a `name`, a `path`, a `ready` locator that is visible
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
   `failWrites: true` makes the mock refuse every write, to see the failed-save states;
-  `emptyWorkspace: true` starts a workspace with no company; `pendingStep` starts a sign-in waiting at
+  `emptyWorkspace: true` starts a workspace with no company; `workspace: true` turns the new workspace on for that screen (the mock's `__fdeMockWorkspace`); `pendingStep` starts a sign-in waiting at
   that step, as Google's callback leaves it; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `staleChecklist: true` makes the project's
   checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). A screen that shows a stale save sets the mock's `__fdeMockSomeoneElse` from its `act`, between opening a form and saving it (`someoneElse` in `screens.mjs`). `sizes` and
   `themes` narrow an entry. The file's header lists every option.

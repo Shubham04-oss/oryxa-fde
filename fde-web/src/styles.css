@@ -4,35 +4,40 @@
 @import "@fontsource-variable/geist";
 @import "./shell.css";
 
-/* Design tokens (DESIGN.md §1). The only place a colour is written. The platform's neutral
-   palette, plus one status colour for FDE: --attention, for blocked, overdue and failing work.
-   Every grey is neutral (R=G=B). */
+/* Design tokens (DESIGN.md §1). The only place a colour is written. A warm paper-and-ink neutral,
+   one colour of our own (--tint, lapis) for focus, selection and the workspace's voice, and the
+   status colours. Type, radius, shadow and motion tokens are in @theme below. */
 :root {
   /* Surfaces */
-  --base: #f4f4f4; /* page surround, the sidebar, the header band */
-  --canvas: #ffffff; /* the central canvas, the sign-in page, overlays */
-  --card: #f7f7f7; /* cards on the canvas */
-  --raised: #fafafa; /* fields and inner wells */
-  --hover: #ebebeb; /* hover on the base surface */
-  --selected: #e4e4e4; /* the current item on the base surface */
-  --border-quiet: #e6e6e6; /* card, field and divider borders */
-  --border-strong: #cccccc; /* hovered borders */
-  --focus: #8c8c8c; /* keyboard focus ring */
+  --base: #f4f2ee; /* page surround, the sidebar, the header band */
+  --canvas: #fffefc; /* the central canvas, the sign-in page, overlays */
+  --card: #f8f7f4; /* cards on the canvas */
+  --raised: #fbfaf7; /* fields and inner wells */
+  --hover: #ebe8e2; /* hover on the base surface */
+  --selected: #e5e1d9; /* the current item on the base surface */
+  --border-quiet: #e7e3dc; /* card, field and divider borders */
+  --border-strong: #cfc9bf; /* hovered borders */
+  --focus: #3b54c4; /* keyboard focus ring: the tint */
 
   /* Text */
-  --text: #111111; /* titles, body, the primary button */
-  --text-soft: #404040; /* navigation labels and secondary emphasis */
-  --text-muted: #737373; /* metadata and hints */
-  --text-inverse: #ffffff; /* text on the primary button */
+  --text: #1b1a17; /* titles, body, the primary button */
+  --text-soft: #46423c; /* navigation labels and secondary emphasis */
+  --text-muted: #75706a; /* metadata and hints */
+  --text-inverse: #fffefc; /* text on the primary button */
+
+  /* The one colour of our own: focus, the current step, the workspace's voice. Never a status. */
+  --tint: #3b54c4;
+  --tint-soft: #eceffa; /* a tinted well: the workspace's suggestions, the current step */
 
   /* Status */
-  --success: #16a34a; /* granted, passing, done. Nothing else. */
+  --success: #15803d; /* granted, passing, done. Nothing else. */
   --attention: #b45309; /* blocked, overdue, failing, denied. Nothing else. */
   --destructive: #dc2626; /* errors and destructive actions. Nothing else. */
 
-  /* Depth: overlays only. */
-  --scrim: #00000033;
-  --shadow: 0 12px 34px #0000001f;
+  /* Depth: overlays, and the lift of the one thing a screen is for (the conversation box). */
+  --scrim: #1b1a1740;
+  --shadow: 0 16px 40px -8px #1b1a1729, 0 2px 6px #1b1a170f;
+  --lift: 0 1px 2px #1b1a170a, 0 12px 32px -16px #1b1a172e;
 
   --radius: 0.625rem;
 
@@ -56,49 +61,55 @@
   color-scheme: light;
 }
 
-/* Dark: the platform's dark roles. Applies when chosen, or when the system is dark and the FDE has
+/* Dark: the same paper and ink, at night. Applies when chosen, or when the system is dark and the FDE has
    not picked light. Same token names, so nothing else changes. */
 :root[data-theme="dark"] {
-  --base: #111111;
-  --canvas: #1e1e1e;
-  --card: #111111;
-  --raised: #242424;
-  --hover: #1d1d1d;
-  --selected: #262626;
-  --border-quiet: #353535;
-  --border-strong: #555555;
-  --focus: #d6d6d6;
-  --text: #f2f2f2;
-  --text-soft: #a8a8a8;
-  --text-muted: #999999;
-  --text-inverse: #111111;
-  --success: #22c55e;
+  --base: #121110;
+  --canvas: #1a1917;
+  --card: #161514;
+  --raised: #211f1d;
+  --hover: #1f1d1b;
+  --selected: #2a2825;
+  --border-quiet: #2f2d2a;
+  --border-strong: #4b4844;
+  --focus: #8d9df5;
+  --text: #f2f0eb;
+  --text-soft: #bab5ac;
+  --text-muted: #918c84;
+  --text-inverse: #161514;
+  --tint: #8d9df5;
+  --tint-soft: #22263b;
+  --success: #4ade80;
   --attention: #fbbf24;
   --destructive: #f87171;
-  --scrim: #000000a0;
-  --shadow: 0 12px 34px #00000066;
+  --scrim: #000000a6;
+  --shadow: 0 16px 40px -8px #000000b3, 0 0 0 1px #ffffff0a;
+  --lift: 0 0 0 1px #ffffff08, 0 12px 32px -16px #000000cc;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --base: #111111;
-    --canvas: #1e1e1e;
-    --card: #111111;
-    --raised: #242424;
-    --hover: #1d1d1d;
-    --selected: #262626;
-    --border-quiet: #353535;
-    --border-strong: #555555;
-    --focus: #d6d6d6;
-    --text: #f2f2f2;
-    --text-soft: #a8a8a8;
-    --text-muted: #999999;
-    --text-inverse: #111111;
-    --success: #22c55e;
+    --base: #121110;
+    --canvas: #1a1917;
+    --card: #161514;
+    --raised: #211f1d;
+    --hover: #1f1d1b;
+    --selected: #2a2825;
+    --border-quiet: #2f2d2a;
+    --border-strong: #4b4844;
+    --focus: #8d9df5;
+    --text: #f2f0eb;
+    --text-soft: #bab5ac;
+    --text-muted: #918c84;
+    --text-inverse: #161514;
+    --tint: #8d9df5;
+    --tint-soft: #22263b;
+    --success: #4ade80;
     --attention: #fbbf24;
     --destructive: #f87171;
-    --scrim: #000000a0;
-    --shadow: 0 12px 34px #00000066;
+    --scrim: #000000a6;
+    --shadow: 0 16px 40px -8px #000000b3, 0 0 0 1px #ffffff0a;
+    --lift: 0 0 0 1px #ffffff08, 0 12px 32px -16px #000000cc;
     color-scheme: dark;
   }
 }
@@ -135,7 +146,44 @@
   --color-success: var(--success);
   --color-attention: var(--attention);
   --color-scrim: var(--scrim);
+  --color-tint: var(--tint);
+  --color-tint-soft: var(--tint-soft);
   --shadow-overlay: var(--shadow);
+  --shadow-lift: var(--lift);
+  /* Type: six sizes, each with its line height. Screens of the workspace use only these. */
+  --text-micro: 11px;
+  --text-micro--line-height: 16px;
+  --text-meta: 12px;
+  --text-meta--line-height: 18px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-lead: 16px;
+  --text-lead--line-height: 26px;
+  --text-title: 20px;
+  --text-title--line-height: 28px;
+  --text-title--letter-spacing: -0.015em;
+  --text-display: 30px;
+  --text-display--line-height: 38px;
+  --text-display--letter-spacing: -0.028em;
+  /* Radius: a field, a card, and the pill every button is. */
+  --radius-field: 12px;
+  --radius-card: 18px;
+  /* Motion: short and quiet, and off under prefers-reduced-motion (motion-safe: on every use). */
+  --ease-calm: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --animate-rise: rise 240ms var(--ease-calm) both;
+  --animate-settle: settle 320ms var(--ease-calm) both;
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @keyframes settle {
+    from {
+      opacity: 0;
+      transform: scale(0.985);
+    }
+  }
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);

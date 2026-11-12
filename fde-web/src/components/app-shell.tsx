@@ -2,29 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useLocation, useNavigate, useParams } from "@tanstack/react-router"
-import {
-  Building2,
-  CalendarCheck,
-  LogOut,
-  Menu,
-  Monitor,
-  Moon,
-  MoreHorizontal,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Search,
-  Sun,
-  X,
-} from "lucide-react"
 import { QuickSwitch, useJumpShortcut } from "./quick-switch"
 import type { SwitchTarget } from "./quick-switch"
 import { api, queries } from "@/lib/api/client"
 import type { CompanySummary, Me } from "@/lib/api/schemas"
 import { applyTheme, nextTheme, readTheme } from "@/lib/theme"
+import { newWorkspace } from "@/lib/workspace/flag"
 import type { Theme } from "@/lib/theme"
+import { Icon } from "@/components/ui/icon"
 
 const THEME_LABEL: Record<Theme, string> = { system: "System", light: "Light", dark: "Dark" }
-const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const
+const THEME_ICON = { system: "system", light: "sun", dark: "moon" } as const
 
 /** Where the FDE's choice of a collapsed sidebar is kept, in this browser. */
 const SIDEBAR_KEY = "fde.sidebar"
@@ -75,7 +63,9 @@ function useTitle(companies: Array<CompanySummary> | undefined) {
   if (params.projectId)
     return company?.projects.find((p) => p.id === params.projectId)?.name ?? "Project"
   if (params.companyId) return company?.name ?? "Company"
-  return pathname === "/today" ? "Today" : "Companies"
+  if (pathname === "/today") return "Today"
+  if (pathname === "/new-company") return "New company"
+  return pathname === "/" && newWorkspace() ? "Home" : "Companies"
 }
 
 /**
@@ -98,11 +88,11 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const title = useTitle(companies.data?.companies)
   const expanded = isMobile || !collapsed
+  const workspace = newWorkspace()
 
   // Read after mount: the server render has no localStorage, so it always starts at "system".
   const [theme, setThemeState] = useState<Theme>("system")
   useEffect(() => setThemeState(readTheme()), [])
-  const ThemeIcon = THEME_ICON[theme]
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 800px)")
@@ -183,7 +173,6 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
     : collapsed
       ? "Expand sidebar"
       : "Collapse sidebar"
-  const ToggleIcon = isMobile ? X : collapsed ? PanelLeftOpen : PanelLeftClose
 
   return (
     <div className="app-shell" data-sidebar={!isMobile && collapsed ? "collapsed" : "expanded"}>
@@ -205,7 +194,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
               aria-expanded={isMobile ? true : !collapsed}
               onClick={isMobile ? closeMobileNav : toggleCollapsed}
             >
-              <ToggleIcon size={17} strokeWidth={1.7} />
+              <Icon name={isMobile ? "close" : "sidebar"} size={17} strokeWidth={1.7} />
             </button>
           </div>
 
@@ -217,7 +206,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
             title={expanded ? undefined : "Jump to (Ctrl K)"}
             onClick={openJump}
           >
-            <Search size={16} strokeWidth={1.7} aria-hidden="true" />
+            <Icon name="search" size={16} strokeWidth={1.7} aria-hidden="true" />
             {expanded && (
               <>
                 <span>Jump to</span>
@@ -227,23 +216,35 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
           </button>
 
           <nav className="app-nav" aria-label="Main">
+            {workspace && (
+              <Link
+                to="/"
+                activeOptions={{ exact: true }}
+                className="app-nav-item"
+                aria-label={expanded ? undefined : "Home"}
+                title={expanded ? undefined : "Home"}
+              >
+                <Icon name="home" size={17} strokeWidth={1.7} />
+                {expanded && <span className="app-nav-label">Home</span>}
+              </Link>
+            )}
             <Link
               to="/today"
               className="app-nav-item"
               aria-label={expanded ? undefined : "Today"}
               title={expanded ? undefined : "Today"}
             >
-              <CalendarCheck size={17} strokeWidth={1.7} aria-hidden="true" />
+              <Icon name="calendar-check" size={17} strokeWidth={1.7} aria-hidden="true" />
               {expanded && <span className="app-nav-label">Today</span>}
             </Link>
             <Link
-              to="/"
+              to={workspace ? "/companies" : "/"}
               activeOptions={{ exact: true }}
               className="app-nav-item"
               aria-label={expanded ? undefined : "Companies"}
               title={expanded ? undefined : "Companies"}
             >
-              <Building2 size={17} strokeWidth={1.7} aria-hidden="true" />
+              <Icon name="building" size={17} strokeWidth={1.7} aria-hidden="true" />
               {expanded && <span className="app-nav-label">Companies</span>}
               {expanded && companies.data && (
                 <span className="app-nav-count">{companies.data.companies.length}</span>
@@ -288,7 +289,8 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
                     setThemeState(next)
                   }}
                 >
-                  <ThemeIcon size={17} strokeWidth={1.7} /> Theme: {THEME_LABEL[theme]}
+                  <Icon name={THEME_ICON[theme]} size={17} strokeWidth={1.7} /> Theme:{" "}
+                  {THEME_LABEL[theme]}
                 </button>
                 <button
                   type="button"
@@ -296,7 +298,8 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
                   disabled={signingOut}
                   onClick={() => void signOut()}
                 >
-                  <LogOut size={17} strokeWidth={1.7} /> {signingOut ? "Signing out…" : "Sign out"}
+                  <Icon name="sign_out" size={17} strokeWidth={1.7} />{" "}
+                  {signingOut ? "Signing out…" : "Sign out"}
                 </button>
               </div>
             )}
@@ -315,7 +318,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
                     <strong>{me.user.name}</strong>
                     <small>{me.role === "admin" ? "Organisation admin" : "Engineer"}</small>
                   </span>
-                  <MoreHorizontal size={17} strokeWidth={1.7} />
+                  <Icon name="more" size={17} strokeWidth={1.7} />
                 </>
               )}
             </button>
@@ -344,7 +347,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
                 aria-expanded={mobileNavOpen}
                 onClick={() => setMobileNavOpen(true)}
               >
-                <Menu size={17} strokeWidth={1.7} />
+                <Icon name="menu" size={17} strokeWidth={1.7} />
               </button>
             )}
           </div>

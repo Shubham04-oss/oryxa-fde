@@ -2,7 +2,6 @@ import { useEffect, useId, useImperativeHandle, useRef, useState } from "react"
 import type { Ref } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useBlocker } from "@tanstack/react-router"
-import { ChevronDown, ChevronRight } from "lucide-react"
 import { TaskDialog } from "./board"
 import { DecisionDialog } from "./decisions-card"
 import { FormDialog, TextArea, TextField, useFieldProblem } from "./form-dialog"
@@ -39,6 +38,7 @@ import type { NoteFields } from "@/lib/notes"
 import { PART_LABEL, attempt, attemptAt } from "@/lib/records"
 import { localDay, shortDate } from "@/lib/time"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 // Meeting notes (DESIGN.md §3): written like a note, not filled in like a form, and the way from a
 // line of it to a task or a decision. A note is plain text: the API stores no markup, and nothing here
@@ -265,9 +265,21 @@ function NoteRow({
             className="flex w-full items-start gap-1.5 py-0.5 text-left max-[800px]:py-2"
           >
             {reading ? (
-              <ChevronDown size={14} strokeWidth={1.7} aria-hidden="true" className="mt-px" />
+              <Icon
+                name="chevron-down"
+                size={14}
+                strokeWidth={1.7}
+                aria-hidden="true"
+                className="mt-px"
+              />
             ) : (
-              <ChevronRight size={14} strokeWidth={1.7} aria-hidden="true" className="mt-px" />
+              <Icon
+                name="chevron-right"
+                size={14}
+                strokeWidth={1.7}
+                aria-hidden="true"
+                className="mt-px"
+              />
             )}
             <span className="min-w-0 [overflow-wrap:anywhere]">{note.title}</span>
           </button>

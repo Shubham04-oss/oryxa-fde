@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { AppShell } from "./app-shell"
 import { CompaniesHome } from "./companies-home"
 import { CompanyPage } from "./company-page"
@@ -32,6 +32,10 @@ async function fill(box: HTMLElement, label: string, text: string) {
 const writes = () => wire.sent.map(({ method, path }) => `${method} ${path}`)
 
 describe("a new company", () => {
+  // The company form, as a build without the new workspace (issue #209) has it.
+  beforeEach(() => vi.stubEnv("VITE_FDE_WORKSPACE", "0"))
+  afterEach(() => vi.unstubAllEnvs())
+
   it("is offered first to someone with none, and opens on its page once the API has made it", async () => {
     const { router, queryClient } = renderWithRouter(<CompaniesHome />, { empty: true })
     expect(await screen.findByText("Add your first company")).toBeInTheDocument()

@@ -172,6 +172,12 @@ importers:
       '@fontsource-variable/geist':
         specifier: 5.3.0
         version: 5.3.0
+      '@pikaicons/core-free':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@pikaicons/react':
+        specifier: 0.1.0
+        version: 0.1.0(react@19.3.0)
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.3.0(@types/node@20.19.43)(esbuild@0.28.1)(jiti@2.7.0))
@@ -1065,6 +1071,14 @@ packages:
 
   '@oxc-project/types@0.153.0':
     resolution: {integrity: sha512-jSNrRIyvPVLL5E1z/tS5zLAprosGz/FuI1PWwEOz59j3E4TTTzSpqKb/RDGqJhhW0QHYISGXxq582wGx6T11Tw==}
+
+  '@pikaicons/core-free@0.1.0':
+    resolution: {integrity: sha512-Ded8lc6xMpc6/Od4R/LulxBB2444lsUGMEW/7hMylS2RoGW5Ep5UuoT2DHV732AaiDhQtDPzyI9ISWzo1q4DuA==}
+
+  '@pikaicons/react@0.1.0':
+    resolution: {integrity: sha512-nsYPlDDKFCp34oRuVGGVTddOf+7iQpDR3Gue96ofLm6/TRsnRQpYkLhNZ0DrGcwXFe19WBhVKk+FaW9bHdEwwA==}
+    peerDependencies:
+      react: '>=17'
 
   '@poppinss/colors@4.1.6':
     resolution: {integrity: sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==}
@@ -4635,6 +4649,12 @@ snapshots:
   '@oozcitak/util@10.0.0': {}
 
   '@oxc-project/types@0.153.0': {}
+
+  '@pikaicons/core-free@0.1.0': {}
+
+  '@pikaicons/react@0.1.0(react@19.3.0)':
+    dependencies:
+      react: 19.3.0
 
   '@poppinss/colors@4.1.6':
     dependencies:

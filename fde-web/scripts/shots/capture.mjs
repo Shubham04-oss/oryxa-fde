@@ -44,6 +44,8 @@ async function shoot(screen, size, theme) {
     await page.addInitScript(() => (globalThis.__fdeMockStaleChecklist = true))
   // The API serves no eval routes (no sandbox gateway): they answer 404, so the Proof card says so.
   if (screen.evalsOff) await page.addInitScript(() => (globalThis.__fdeMockEvalsOff = true))
+  // The new workspace (issue #209) on for this tab, as `VITE_FDE_WORKSPACE=1` would be for a build.
+  if (screen.workspace) await page.addInitScript(() => (globalThis.__fdeMockWorkspace = true))
   // A sign-in waiting at a step, as Google's callback leaves it.
   if (screen.pendingStep)
     await page.addInitScript((step) => (globalThis.__fdeMockPendingStep = step), screen.pendingStep)

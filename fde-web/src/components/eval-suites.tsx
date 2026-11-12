@@ -1,5 +1,4 @@
 import { useState } from "react"
-import { ChevronDown, ChevronRight } from "lucide-react"
 import { LongText } from "./long-text"
 import { Quiet, Row, Rows, Status } from "./page"
 import { Button } from "./ui/button"
@@ -21,6 +20,7 @@ import {
 } from "@/lib/proof"
 import { dayOf, shortDate } from "@/lib/time"
 import { cn } from "@/lib/utils"
+import { Icon } from "@/components/ui/icon"
 
 // An eval suite and what hangs off it (DESIGN.md §3, Proof): its graders and where outputs come from, its runs, and
 // for a run its cases, the ones that did not pass first with each grader's reason. Everything from a case, a model
@@ -46,7 +46,6 @@ export function Disclosure({
   children: React.ReactNode
   className?: string
 }) {
-  const Chevron = open ? ChevronDown : ChevronRight
   return (
     <button
       type="button"
@@ -58,7 +57,8 @@ export function Disclosure({
         className,
       )}
     >
-      <Chevron
+      <Icon
+        name={open ? "chevron-down" : "chevron-right"}
         size={14}
         strokeWidth={1.7}
         aria-hidden="true"

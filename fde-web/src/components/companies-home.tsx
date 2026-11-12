@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Link } from "@tanstack/react-router"
+import { Link, useNavigate } from "@tanstack/react-router"
 import { CompanyDialog } from "./company-forms"
 import { Failed, Loading, Page, Quiet, Status } from "./page"
 import { Button } from "./ui/button"
@@ -10,6 +10,7 @@ import type { CompanyRole } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { localDay } from "@/lib/time"
 import { groupOf } from "@/lib/today"
+import { newWorkspace } from "@/lib/workspace/flag"
 
 export const ROLE_LABEL: Record<CompanyRole, string> = {
   lead: "Lead",
@@ -39,6 +40,9 @@ export function CompaniesHome() {
   // Optional: the cards still show if Today cannot be read.
   const today = useQuery(queries.today())
   const [creating, setCreating] = useState(false)
+  const navigate = useNavigate()
+  // With the new workspace (issue #209) a company is made in a conversation; otherwise the form.
+  const start = () => (newWorkspace() ? void navigate({ to: "/new-company" }) : setCreating(true))
 
   if (companies.isPending)
     return (
@@ -72,7 +76,7 @@ export function CompaniesHome() {
             the systems the work touches, then start a project. If your organisation adds you to a
             company, it shows here too.
           </Quiet>
-          <Button onClick={() => setCreating(true)}>New company</Button>
+          <Button onClick={start}>New company</Button>
         </div>
         {newCompany}
       </Page>
@@ -91,7 +95,7 @@ export function CompaniesHome() {
   return (
     <Page wide>
       <div className="flex justify-end">
-        <Button variant="outline" onClick={() => setCreating(true)}>
+        <Button variant="outline" onClick={start}>
           New company
         </Button>
       </div>
