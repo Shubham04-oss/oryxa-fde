@@ -229,4 +229,36 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
     ) -> Fut<'a, oryxa_fde_api::Attempt> {
         Box::pin(async { oryxa_fde_api::Attempt::Refused })
     }
+
+    /// Sends nothing, and says so, whatever the address.
+    fn send_code<'a>(&'a self, _: &'a str, client: &'a oryxa_fde_api::Client) -> Fut<'a, oryxa_fde_api::Sent> {
+        Box::pin(async move {
+            self.clients.lock().unwrap().push(client.clone());
+            oryxa_fde_api::Sent::Sent
+        })
+    }
+
+    /// `000000` signs in whoever `who` names; anything else is refused.
+    fn sign_in_with_code<'a>(
+        &'a self,
+        _: &'a str,
+        code: &'a str,
+        client: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Attempt> {
+        Box::pin(async move {
+            self.clients.lock().unwrap().push(client.clone());
+            if code != "000000" {
+                return oryxa_fde_api::Attempt::Refused;
+            }
+            let (org, user, role) = self.who.lock().unwrap().clone();
+            oryxa_fde_api::Attempt::SignedIn(oryxa_fde_api::Tokens {
+                access_token: token(org.as_deref(), &user, &role),
+                refresh_token: format!("refresh|{}|{user}|{role}", org.unwrap_or_default()),
+            })
+        })
+    }
+
+    fn resend_verification<'a>(&'a self, _: &'a str) -> Fut<'a, oryxa_fde_api::Sent> {
+        Box::pin(async { oryxa_fde_api::Sent::Sent })
+    }
 }

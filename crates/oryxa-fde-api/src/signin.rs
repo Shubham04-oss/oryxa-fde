@@ -34,14 +34,24 @@ use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::session::{
-    Attempt, Client, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie, set_cookie,
+    Attempt, Client, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie, set_cookie,
 };
 use crate::{ApiError, App, BoxFuture, ErrorBody, VerifyToken};
 
 pub const PASSWORD_PATH: &str = "/auth/sign-in/password";
 pub const VERIFY_EMAIL_PATH: &str = "/auth/sign-in/verify-email";
 pub const ORGANISATION_PATH: &str = "/auth/sign-in/organisation";
-const PATHS: [&str; 3] = [PASSWORD_PATH, VERIFY_EMAIL_PATH, ORGANISATION_PATH];
+pub const CODE_PATH: &str = "/auth/sign-in/code";
+pub const CODE_VERIFY_PATH: &str = "/auth/sign-in/code/verify";
+pub const RESEND_PATH: &str = "/auth/sign-in/verify-email/resend";
+const PATHS: [&str; 6] = [
+    PASSWORD_PATH,
+    VERIFY_EMAIL_PATH,
+    ORGANISATION_PATH,
+    CODE_PATH,
+    CODE_VERIFY_PATH,
+    RESEND_PATH,
+];
 
 /// Whether the session layer leaves `path` to its own checks.
 pub(crate) fn is_sign_in_path(path: &str) -> bool {
@@ -97,6 +107,19 @@ pub(crate) const STEP_CLIENT: Limit = Limit {
     kind: "step_client",
     window: MINUTES_5,
     limit: 30,
+};
+const MINUTES_15: Duration = Duration::from_secs(15 * 60);
+/// Codes emailed to one address (a sign-in code or a verification code sent again), so nobody can
+/// flood an inbox; WorkOS's own is 3 a minute per address.
+pub(crate) const SEND_ADDRESS: Limit = Limit {
+    kind: "send_address",
+    window: MINUTES_15,
+    limit: 3,
+};
+pub(crate) const SEND_CLIENT: Limit = Limit {
+    kind: "send_client",
+    window: MINUTES_15,
+    limit: 10,
 };
 /// Every sign-in call to WorkOS, from everyone: a fifth of WorkOS's environment-wide write limit
 /// (500 per 10 seconds), so a flood never uses up what session refresh needs.
@@ -177,6 +200,22 @@ pub struct ChooseOrganisationIn {
     pub organisation: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeRequestIn {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSignInIn {
+    pub email: String,
+    /// The one-time code we emailed to the address.
+    pub code: String,
+    /// Where to go once signed in: a path on the web app. Defaults to `/`.
+    pub return_to: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 pub struct OrganisationOut {
     pub id: String,
@@ -193,6 +232,8 @@ pub enum SignInStep {
     VerifyEmail,
     /// Post one of these to `/auth/sign-in/organisation`.
     ChooseOrganisation { organisations: Vec<OrganisationOut> },
+    /// If the address has an account, a code is on its way; post it to `/auth/sign-in/code/verify`.
+    EnterCode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +256,9 @@ struct Pending {
     address: [u8; 32],
     return_to: String,
     expires: u64,
+    /// WorkOS's id for the code a verification step waits on, for sending it again.
+    #[serde(default)]
+    verification: Option<String>,
 }
 
 /// The client as the Worker forwards it: the first `X-Forwarded-For` entry, which the Worker sets
@@ -279,6 +323,28 @@ async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits
     }
 }
 
+/// An emailed code as typed: 1 to 16 ASCII letters or digits, spaces around it aside.
+fn code_of(raw: &str) -> Option<&str> {
+    let code = raw.trim();
+    let ok =
+        !code.is_empty() && code.chars().count() <= MAX_CODE_CHARS && code.chars().all(|c| c.is_ascii_alphanumeric());
+    ok.then_some(code)
+}
+
+/// The answer to a request to email a code: `step` whether or not anything was sent, unless WorkOS
+/// is down. Whether a mail went out says whether the address has an account, so it is only logged.
+fn sent_answer(sent: Sent, step: SignInStep) -> Response {
+    match sent {
+        Sent::Sent => tracing::info!("sign-in code sent"),
+        Sent::NotSent(why) => tracing::info!(why = %why, "sign-in code not sent"),
+        Sent::Unavailable(why) => {
+            tracing::warn!(error = %why, "workos could not send a sign-in code");
+            return ApiError::Unavailable.into_response();
+        }
+    }
+    Json(step).into_response()
+}
+
 /// The address's keyed hash, from its lowercased form.
 fn address_key(sign_in: &SignIn, email: &EmailAddress) -> [u8; 32] {
     sign_in.limit_hash("address", &email.as_str().to_lowercase())
@@ -294,7 +360,7 @@ async fn conclude(
     refused: ApiError,
     keep_on_refusal: bool,
 ) -> Response {
-    let pending = |step, token, organisations| Pending {
+    let pending = |step, token, organisations, verification| Pending {
         purpose: PENDING_PURPOSE.into(),
         step,
         token,
@@ -302,6 +368,7 @@ async fn conclude(
         address,
         return_to: return_to.clone(),
         expires: now() + PENDING_TTL.as_secs(),
+        verification,
     };
     let result = match attempt {
         Attempt::SignedIn(tokens) => match session_cookie(ctx.tokens, ctx.sign_in, tokens).await {
@@ -317,9 +384,13 @@ async fn conclude(
             }
             Err(e) => Err((e, false)),
         },
-        Attempt::VerifyEmail { pending: token } => {
+        Attempt::VerifyEmail {
+            pending: token,
+            verification,
+        } => {
             tracing::info!("sign-in waits on email verification");
-            with_pending(ctx, &pending(Step::VerifyEmail, token, vec![]), SignInStep::VerifyEmail)
+            let p = pending(Step::VerifyEmail, token, vec![], verification);
+            with_pending(ctx, &p, SignInStep::VerifyEmail)
         }
         Attempt::ChooseOrganisation {
             pending: token,
@@ -333,7 +404,7 @@ async fn conclude(
                     .map(|(id, name)| OrganisationOut { id, name })
                     .collect(),
             };
-            with_pending(ctx, &pending(Step::ChooseOrganisation, token, ids), step)
+            with_pending(ctx, &pending(Step::ChooseOrganisation, token, ids, None), step)
         }
         Attempt::Refused => {
             tracing::info!("sign-in refused");
@@ -434,10 +505,9 @@ pub(crate) async fn verify_email_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw
         Ok(b) => b,
         Err(e) => return refuse(e),
     };
-    let code = input.code.trim();
-    if code.is_empty() || code.chars().count() > MAX_CODE_CHARS || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+    let Some(code) = code_of(&input.code) else {
         return refuse(ApiError::Invalid("code"));
-    }
+    };
     let Some(pending) = pending_of(ctx, headers, Step::VerifyEmail) else {
         return no_pending();
     };
@@ -496,6 +566,79 @@ pub(crate) async fn choose_organisation_sign_in(ctx: &Ctx<'_>, headers: &HeaderM
     padded(start, resp).await
 }
 
+pub(crate) async fn request_code(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: CodeRequestIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Ok(email) = EmailAddress::new(&input.email) else {
+        return refuse(ApiError::Invalid("email"));
+    };
+    let client = client_of(headers);
+    let address = address_key(ctx.sign_in, &email);
+    if let Err(e) = count(ctx, &client, Some(address), &[SEND_ADDRESS, SEND_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let sent = ctx.sign_in.authkit().send_code(email.as_str(), &client).await;
+    padded(start, sent_answer(sent, SignInStep::EnterCode)).await
+}
+
+pub(crate) async fn code_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let input: CodeSignInIn = match body(raw) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let Ok(email) = EmailAddress::new(&input.email) else {
+        return refuse(ApiError::Invalid("email"));
+    };
+    let Some(code) = code_of(&input.code) else {
+        return refuse(ApiError::Invalid("code"));
+    };
+    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+        return refuse(ApiError::Invalid("return_to"));
+    };
+    let client = client_of(headers);
+    let address = address_key(ctx.sign_in, &email);
+    if let Err(e) = count(ctx, &client, Some(address), &[CODE_ADDRESS, CODE_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let attempt = ctx
+        .sign_in
+        .authkit()
+        .sign_in_with_code(email.as_str(), code, &client)
+        .await;
+    // A wrong code and a code for an address with no account answer alike.
+    let resp = conclude(ctx, attempt, address, return_to, ApiError::InvalidCode, false).await;
+    padded(start, resp).await
+}
+
+pub(crate) async fn resend_verification(ctx: &Ctx<'_>, headers: &HeaderMap) -> Response {
+    let start = Instant::now();
+    if !ctx.sign_in.same_site(headers) {
+        return refuse(ApiError::Csrf);
+    }
+    let Some(pending) = pending_of(ctx, headers, Step::VerifyEmail) else {
+        return no_pending();
+    };
+    let client = client_of(headers);
+    if let Err(e) = count(ctx, &client, Some(pending.address), &[SEND_ADDRESS, SEND_CLIENT]).await {
+        return padded(start, e.into_response()).await;
+    }
+    let sent = match pending.verification.as_deref() {
+        Some(v) => ctx.sign_in.authkit().resend_verification(v).await,
+        None => Sent::NotSent("the step names no verification".into()),
+    };
+    padded(start, sent_answer(sent, SignInStep::VerifyEmail)).await
+}
+
 /// Sign in with an email address and password. A wrong password and an unknown address get the
 /// same 401 `invalid_credentials`; a limit reached gets 429 `too_many_attempts` with `Retry-After`,
 /// alike for every address.
@@ -540,6 +683,53 @@ pub(crate) async fn verify_email(State(app): State<Arc<App>>, headers: HeaderMap
 pub(crate) async fn choose_organisation(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
     match ctx(&app) {
         Ok(ctx) => choose_organisation_sign_in(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Email a one-time sign-in code. The answer is the same whether or not the address has an account;
+/// a limit reached is 429 `too_many_attempts`, alike for every address.
+#[utoipa::path(post, operation_id = "sign_in_request_code", path = "/auth/sign-in/code", tag = "auth",
+    security(()), request_body = CodeRequestIn,
+    responses((status = 200, body = SignInStep, description = "`enter_code`, whether or not a code was sent"),
+        (status = 400, body = ErrorBody), (status = 403, body = ErrorBody, description = "`csrf`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn code(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => request_code(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Sign in with the one-time code we emailed. A wrong code and an address with no account get the
+/// same 401 `invalid_code`.
+#[utoipa::path(post, operation_id = "sign_in_with_code", path = "/auth/sign-in/code/verify", tag = "auth",
+    security(()), request_body = CodeSignInIn,
+    responses((status = 200, body = SignInStep, description = "Signed in (`done`, with the session cookie), or the \
+        next step, with a short-lived pending cookie"),
+        (status = 400, body = ErrorBody), (status = 401, body = ErrorBody, description = "`invalid_code`"),
+        (status = 403, body = ErrorBody, description = "`csrf`; `no_organisation`; `sign_in_unsupported`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn code_verify(State(app): State<Arc<App>>, headers: HeaderMap, raw: Bytes) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => code_sign_in(&ctx, &headers, &raw).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Email the code of a pending email verification again. The step stays as it is.
+#[utoipa::path(post, operation_id = "sign_in_resend_verification", path = "/auth/sign-in/verify-email/resend",
+    tag = "auth", security(()),
+    responses((status = 200, body = SignInStep, description = "`verify_email`"),
+        (status = 400, body = ErrorBody, description = "`invalid_sign_in`: no pending verification (start again)"),
+        (status = 403, body = ErrorBody, description = "`csrf`"),
+        (status = 429, body = ErrorBody, description = "`too_many_attempts`; see `Retry-After`"),
+        (status = 503, body = ErrorBody)))]
+pub(crate) async fn resend(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    match ctx(&app) {
+        Ok(ctx) => resend_verification(&ctx, &headers).await,
         Err(e) => e.into_response(),
     }
 }
@@ -596,6 +786,8 @@ mod tests {
     struct Kit {
         on_password: Mutex<Attempt>,
         on_code: Mutex<Attempt>,
+        /// What sending a code to `KNOWN` answers; any other address gets `NotSent`.
+        on_send: Mutex<Sent>,
         calls: Mutex<Vec<(String, Client)>>,
     }
 
@@ -604,6 +796,7 @@ mod tests {
             Arc::new(Self {
                 on_password: Mutex::new(on_password),
                 on_code: Mutex::new(signed_in("user_1", "org_01A")),
+                on_send: Mutex::new(Sent::Sent),
                 calls: Mutex::new(vec![]),
             })
         }
@@ -673,6 +866,42 @@ mod tests {
                 } else {
                     Attempt::Refused
                 }
+            })
+        }
+        fn send_code<'a>(&'a self, email: &'a str, client: &'a Client) -> BoxFuture<'a, Sent> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("send".into(), client.clone()));
+                if email == KNOWN {
+                    // Mail for a real account takes longer to send.
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    return self.on_send.lock().unwrap().clone();
+                }
+                Sent::NotSent("status 404, code user_not_found".into())
+            })
+        }
+        fn sign_in_with_code<'a>(
+            &'a self,
+            email: &'a str,
+            code: &'a str,
+            client: &'a Client,
+        ) -> BoxFuture<'a, Attempt> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(("code".into(), client.clone()));
+                if email == KNOWN && code == "123456" {
+                    return self.on_code.lock().unwrap().clone();
+                }
+                let lookup = if email == KNOWN { 300 } else { 5 };
+                tokio::time::sleep(Duration::from_millis(lookup)).await;
+                Attempt::Refused
+            })
+        }
+        fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((format!("resend {verification}"), Client::default()));
+                Sent::Sent
             })
         }
     }
@@ -916,6 +1145,9 @@ mod tests {
                 password_sign_in(&w.ctx(), &h, &password_body(KNOWN, PASSWORD)).await,
                 verify_email_sign_in(&w.ctx(), &h, br#"{"code":"123456"}"#).await,
                 choose_organisation_sign_in(&w.ctx(), &h, br#"{"organisation":"org_01A"}"#).await,
+                request_code(&w.ctx(), &h, br#"{"email":"known@example.com"}"#).await,
+                code_sign_in(&w.ctx(), &h, br#"{"email":"known@example.com","code":"123456"}"#).await,
+                resend_verification(&w.ctx(), &h).await,
             ] {
                 let a = read(resp).await;
                 assert_eq!(
@@ -939,6 +1171,7 @@ mod tests {
     async fn email_verification_waits_in_a_sealed_cookie_and_a_mistyped_code_may_be_tried_again() {
         let w = World::new(Attempt::VerifyEmail {
             pending: "pt_verify".into(),
+            verification: Some("email_verification_1".into()),
         });
         let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
         assert_eq!(
@@ -1052,6 +1285,7 @@ mod tests {
             address: [0; 32],
             return_to: "/".into(),
             expires: now() - 1,
+            verification: None,
         };
         let cookie = format!("{PENDING_COOKIE}={}", w.sign_in.seal(&stale).unwrap());
         let a = read(verify_email_sign_in(&w.ctx(), &headers(&[&cookie]), br#"{"code":"123456"}"#).await).await;
@@ -1144,6 +1378,7 @@ mod tests {
             signed_in("user_1", ""),
             Attempt::VerifyEmail {
                 pending: "pt_verify".into(),
+                verification: Some("email_verification_1".into()),
             },
             Attempt::ChooseOrganisation {
                 pending: "pt_choose".into(),
@@ -1157,6 +1392,12 @@ mod tests {
             let ctx = w.ctx();
             let flow = async {
                 let mut answers = vec![];
+                for email in [KNOWN, "nobody@example.com"] {
+                    let body = format!(r#"{{"email":"{email}"}}"#);
+                    answers.push(read(request_code(&ctx, &headers(&[]), body.as_bytes()).await).await);
+                    let body = format!(r#"{{"email":"{email}","code":"123456"}}"#);
+                    answers.push(read(code_sign_in(&ctx, &headers(&[]), body.as_bytes()).await).await);
+                }
                 for password in [PASSWORD, "wrong password"] {
                     let a = read(password_sign_in(&ctx, &headers(&[]), &password_body(KNOWN, password)).await).await;
                     if let Some(p) = a.cookie(PENDING_COOKIE) {
@@ -1187,6 +1428,8 @@ mod tests {
             "tok|",
             "pt_verify",
             "pt_choose",
+            "123456",
+            "email_verification_1",
         ] {
             assert!(
                 !log.to_lowercase().contains(&secret.to_lowercase()),
@@ -1210,6 +1453,175 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    fn email_body(email: &str) -> Vec<u8> {
+        serde_json::json!({ "email": email }).to_string().into_bytes()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn asking_for_a_code_answers_alike_whether_or_not_the_address_has_an_account() {
+        let w = World::new(Attempt::Refused);
+        let mut answers = vec![];
+        for email in [KNOWN, "nobody@example.com"] {
+            let start = Instant::now();
+            let a = read(request_code(&w.ctx(), &headers(&[]), &email_body(email)).await).await;
+            answers.push((a.status, a.body, a.cookies, a.retry_after, start.elapsed()));
+        }
+        assert_eq!(answers[0].1, r#"{"next":"enter_code"}"#);
+        assert_eq!(answers[0], answers[1], "status, body, cookies and time are the same");
+        assert_eq!(answers[0].4, ANSWER_FLOOR);
+        let calls = w.kit.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].1.ip.as_deref(),
+            Some("203.0.113.7"),
+            "WorkOS is told the client"
+        );
+
+        // Each request counts as a code sent, per address and per client, then in the ceiling.
+        let seen = w.limits.seen.lock().unwrap().clone();
+        for b in &seen {
+            assert!(b.iter().any(|x| x.starts_with("send_address:")), "{b:?}");
+            assert!(b.iter().any(|x| x.starts_with("send_client:")), "{b:?}");
+            assert_eq!(b.last().map(String::as_str), Some("all:"));
+        }
+
+        // Over a limit, nothing is sent, and the answer is the same for every address.
+        *w.limits.answer.lock().unwrap() = Ok(Some(Duration::from_secs(600)));
+        for email in [KNOWN, "nobody@example.com"] {
+            let a = read(request_code(&w.ctx(), &headers(&[]), &email_body(email)).await).await;
+            assert_eq!(
+                (a.status, a.body.as_str()),
+                (StatusCode::TOO_MANY_REQUESTS, r#"{"error":"too_many_attempts"}"#)
+            );
+            assert_eq!(a.retry_after.as_deref(), Some("600"));
+        }
+        assert_eq!(w.kit.calls(), 2, "no mail over a limit");
+
+        // Only WorkOS being down is told apart, and that is not about the address.
+        *w.limits.answer.lock().unwrap() = Ok(None);
+        *w.kit.on_send.lock().unwrap() = Sent::NotSent("status 429, code rate_limit_exceeded".into());
+        let a = read(request_code(&w.ctx(), &headers(&[]), &email_body(KNOWN)).await).await;
+        assert_eq!(a.body, r#"{"next":"enter_code"}"#);
+        *w.kit.on_send.lock().unwrap() = Sent::Unavailable("status 503".into());
+        let a = read(request_code(&w.ctx(), &headers(&[]), &email_body(KNOWN)).await).await;
+        assert_eq!(a.status, StatusCode::SERVICE_UNAVAILABLE);
+        let a = read(request_code(&w.ctx(), &headers(&[]), br#"{"email":"not an address"}"#).await).await;
+        assert_eq!(a.body, r#"{"error":"invalid_email"}"#);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_code_signs_in_and_a_wrong_code_or_unknown_address_answer_alike() {
+        let w = World::new(Attempt::Refused);
+        let body = |email: &str, code: &str| {
+            serde_json::json!({ "email": email, "code": code, "return_to": "/companies" })
+                .to_string()
+                .into_bytes()
+        };
+        let stale = "__Host-fde_session=stale-or-someone-elses";
+        let a = read(code_sign_in(&w.ctx(), &headers(&[stale]), &body(KNOWN, " 123456 ")).await).await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_1".into(), "org_01A".into()))
+        );
+
+        let mut answers = vec![];
+        for (email, code) in [(KNOWN, "654321"), ("nobody@example.com", "123456")] {
+            let start = Instant::now();
+            let a = read(code_sign_in(&w.ctx(), &headers(&[]), &body(email, code)).await).await;
+            answers.push((a.status, a.body, a.cookies, start.elapsed()));
+        }
+        assert_eq!(answers[0].0, StatusCode::UNAUTHORIZED);
+        assert_eq!(answers[0].1, r#"{"error":"invalid_code"}"#);
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[0].3, ANSWER_FLOOR);
+
+        // Code guesses count per address and per client.
+        let seen = w.limits.seen.lock().unwrap().clone();
+        assert!(seen.iter().all(
+            |b| b.iter().any(|x| x.starts_with("code_address:")) && b.iter().any(|x| x.starts_with("code_client:"))
+        ));
+
+        // The pending steps follow a code sign-in as they follow a password.
+        *w.kit.on_code.lock().unwrap() = Attempt::ChooseOrganisation {
+            pending: "pt_choose".into(),
+            organisations: vec![("org_01B".into(), "Beta".into())],
+        };
+        let a = read(code_sign_in(&w.ctx(), &headers(&[]), &body(KNOWN, "123456")).await).await;
+        assert!(a.body.contains(r#""next":"choose_organisation""#), "{}", a.body);
+        let cookie = pending_cookie(&a);
+        let a =
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&cookie]), br#"{"organisation":"org_01B"}"#).await)
+                .await;
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_1".into(), "org_01B".into()))
+        );
+
+        for bad in [
+            r#"{"email":"x@example.com","code":""}"#,
+            r#"{"email":"bad","code":"123456"}"#,
+        ] {
+            let a = read(code_sign_in(&w.ctx(), &headers(&[]), bad.as_bytes()).await).await;
+            assert_eq!(a.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_verification_code_is_sent_again_for_the_pending_step_only_and_within_the_send_limits() {
+        let w = World::new(Attempt::VerifyEmail {
+            pending: "pt_verify".into(),
+            verification: Some("email_verification_1".into()),
+        });
+        let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+        let pending = pending_cookie(&a);
+
+        let a = read(resend_verification(&w.ctx(), &headers(&[&pending])).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::OK, r#"{"next":"verify_email"}"#)
+        );
+        assert!(a.cookies.is_empty(), "the step stays as it is: {:?}", a.cookies);
+        assert!(
+            w.kit
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(c, _)| c == "resend email_verification_1")
+        );
+        // Counted as a code sent to the address the step is for.
+        let seen = w.limits.seen.lock().unwrap().clone();
+        let hash =
+            |b: &Vec<String>, kind: &str| b.iter().find_map(|x| x.strip_prefix(kind).map(str::to_owned)).unwrap();
+        assert_eq!(hash(&seen[0], "password_address:"), hash(&seen[1], "send_address:"));
+
+        // Over the send limit nothing is sent.
+        *w.limits.answer.lock().unwrap() = Ok(Some(Duration::from_secs(60)));
+        let calls = w.kit.calls();
+        let a = read(resend_verification(&w.ctx(), &headers(&[&pending])).await).await;
+        assert_eq!(a.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(w.kit.calls(), calls);
+
+        // No pending verification: nothing to send again.
+        *w.limits.answer.lock().unwrap() = Ok(None);
+        let a = read(resend_verification(&w.ctx(), &headers(&[])).await).await;
+        assert_eq!(
+            (a.status, a.body.as_str()),
+            (StatusCode::BAD_REQUEST, r#"{"error":"invalid_sign_in"}"#)
+        );
+
+        // A step that names no verification answers the same and sends nothing.
+        let w = World::new(Attempt::VerifyEmail {
+            pending: "pt_verify".into(),
+            verification: None,
+        });
+        let a = read(password_sign_in(&w.ctx(), &headers(&[]), &password_body(KNOWN, PASSWORD)).await).await;
+        let a = read(resend_verification(&w.ctx(), &headers(&[&pending_cookie(&a)])).await).await;
+        assert_eq!(a.body, r#"{"next":"verify_email"}"#);
+        assert!(!w.kit.calls.lock().unwrap().iter().any(|(c, _)| c.starts_with("resend")));
     }
 
     #[test]
