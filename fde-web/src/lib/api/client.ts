@@ -16,6 +16,7 @@ import {
   DecisionOut,
   DocumentOut,
   Me,
+  MainContactOut,
   MeetingNoteOut,
   MemberOut,
   PersonOut,
@@ -44,7 +45,7 @@ import type {
   StakeholderBody,
   SystemBody,
 } from "../records"
-import type { CriterionBody, ScopeItemBody } from "../scope"
+import type { CriterionSave, ScopeItemBody } from "../scope"
 import type { SuiteBody } from "../suite"
 import type {
   AccessRequestId,
@@ -124,6 +125,10 @@ export const SAFE_TEXT: Record<string, string> = {
   invalid_metric: "What is measured is one line, up to 200 characters.",
   invalid_unit: "The unit is one line, up to 200 characters, such as % or s.",
   invalid_target: "The target must be a number.",
+  // A body the API could not read at all (axum's 422, plain text): a stage it does not know, say.
+  http_422: "The workspace could not read that save. Reload the page and try again.",
+  invalid_baseline: "The baseline must be a number, in the same unit as the target.",
+  invalid_proof: "How it will be proven is plain text, up to 500 characters.",
   rejected_target: "The target must be a number.",
   invalid_stakeholder: "That person is not a stakeholder at this company.",
   rejected_empty_scope:
@@ -535,6 +540,16 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
+    /** Makes one of the company's stakeholders its main contact, or none (`null`); whoever was it stops being it. */
+    setMainContact: (id: CompanyId, stakeholder: StakeholderId | null) =>
+      read(
+        MainContactOut,
+        client.PUT("/v1/companies/{company}/main-contact", {
+          params: { path: { company: id } },
+          body: { stakeholder },
+        }),
+      ),
+
     addSystem: (id: CompanyId, body: SystemBody) =>
       read(SystemOut, client.POST("/v1/companies/{company}/systems", { ...company(id), body })),
 
@@ -822,7 +837,7 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
-    addCriterion: (scope: ProjectScope, body: CriterionBody) =>
+    addCriterion: (scope: ProjectScope, body: CriterionSave) =>
       read(
         CriterionOut,
         client.POST("/v1/companies/{company}/projects/{project}/scope/criteria", {
@@ -835,7 +850,7 @@ function connect(transport: Transport) {
     updateCriterion: (
       scope: ProjectScope,
       criterion: CriterionId,
-      body: CriterionBody,
+      body: CriterionSave,
       version: number,
     ) =>
       save(
@@ -1066,6 +1081,7 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     updateStakeholder: async (id, stakeholder, body, version) =>
       (await use()).updateStakeholder(id, stakeholder, body, version),
     removeStakeholder: async (id, stakeholder) => (await use()).removeStakeholder(id, stakeholder),
+    setMainContact: async (id, stakeholder) => (await use()).setMainContact(id, stakeholder),
     addSystem: async (id, body) => (await use()).addSystem(id, body),
     updateSystem: async (id, system, body, version) =>
       (await use()).updateSystem(id, system, body, version),

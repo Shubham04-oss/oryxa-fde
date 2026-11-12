@@ -188,11 +188,17 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   - **Focus after an action** moves to the row that followed it (the one before, when it was last)
     once the API confirms, so the keyboard can work down the list. It waits for a prompt to close
     and does not take focus from someone who has moved elsewhere.
-  - **What is left.** The line above the groups counts everything and says where: "20 need you
-    across 5 companies: 5 blocked, 6 due, 9 waiting on the customer." Groups with none are left out
-    of the parts. "Nothing needs you today." appears only when the API has answered and every group
-    is empty; the three cards stay, each saying what is not there, so the page does not change
-    shape as the last row goes.
+  - **What is left.** The line above the groups counts everything and says where: "19 need you
+    across 5 companies: 5 blocked, 5 due, 9 waiting on the customer. 1 project has no next step."
+    Groups with none are left out of the parts. "Nothing needs you today." appears only when the API
+    has answered, every group is empty and every project has a next step; the three cards stay, each
+    saying what is not there, so the page does not change shape as the last row goes.
+  - **No next step.** The API's `projects_without_next_step` (the FDE's projects whose tasks are all
+    done, or that have none: direction §4 says such an engagement needs a next step or is over) is a
+    fourth card under the three, shown only when it has any. Each line is the project and its company,
+    and one link, **Add a next step**, to the project with New task open (`?add=task`, cleared from the
+    address once it has opened the form). These are not rows of the inbox: nothing here acts in place,
+    so J, K and E skip them.
   - **Phones.** The button and menu sit beside the text, at 36px, and the key hints are not shown.
   - Signals from other tools (ADR 0006) will be more row kinds: a row is a `TodayItem`, its actions
     come from `actionsOf` (`src/lib/today.ts`), and `TodayRow` draws any of them.
@@ -202,7 +208,15 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   heading, and a row opens its form. An empty card says what to add and why, so a new company reads
   as a list of next steps: "Add the people you work with at the customer: the sponsor who signs off,
   a champion, someone in IT."
-- **Project.** The company link, with **Edit project** at its right, the summary, the stage bar, the **stage
+  - **Main contact.** One stakeholder of a company at most, the one person to go to first. Their row
+    says "Main contact" under their part, and a quiet line under the list names them ("Main contact:
+    Mara Lindqvist, Head of operations.", or "No main contact yet") with **Change main contact** (or
+    **Choose a main contact**), a small dialog with the company's stakeholders and "No main contact".
+    It is its own route (`PUT .../main-contact`, `work`), not part of the stakeholder's form, because the
+    API keeps it apart from the record; whoever was it stops being it, and the company is read again (both
+    rows moved on a version). Nothing is sent when the choice is unchanged; a refusal (400
+    `invalid_stakeholder`: not one of this company's) stays in the dialog and the list is read again.
+- **Project.** The company link, with **Edit project** at its right, the **next step**, the summary, the stage bar, the **stage
   checklist** (see **The stage checklist** below), the **Board** (the one card that
   takes the canvas's full width, up to 1600px, once it has a task; empty, it stays in the 1040px page column
   with the others), Scope beside Success
@@ -211,6 +225,14 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   decisions** below), and so are Notes (see **Meeting notes** below). Access and waiting tasks name people and systems from the company's records. A project with nothing written in it yet
   starts with a dashed note, **A new project. Start here.**, that says to name the people at the
   customer, agree the scope, and add tasks as the work takes shape.
+  - **The next step comes first** (direction §4): the API's `next_step`, its first task in the board's
+    order that is not done, worked out on every read. A quiet card, "Next step", with the task's title
+    (the API's words, as text; a button that opens the task's own form, as its card does), who has it by
+    name and when it is due (the amber dot when it is late; "Unassigned" and "No due date" said rather than
+    left out). With none it says **No next step yet**, that every task is done or there are none, and offers
+    one action, **Add a task**, in ink: what the page most needs then. A task saved, moved or
+    deleted on the board or Today updates it at once by the same rule (`nextStepOf` in `lib/board.ts`),
+    so a move needs no read of the whole project.
 - **Writes: companies, projects and what they hold.** One form, `FormDialog` (`form-dialog.tsx`), is
   every create and edit in the workspace: the board's task form, the company, project, stakeholder
   and system forms. It checks what the API checks before it sends (`lib/records.ts`, in the API's
@@ -339,7 +361,16 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     "Met when plans accepted unchanged is at least 70%." The form is that sentence in parts (what
     must be true, what is measured, at least or at most, the target, the unit) and shows how it will
     read once there is enough to read. A target is typed as text and read as a number; zero is a
-    target. There is no baseline field in the API yet, so the page has none.
+    target. Under it, **Baseline** (typed as text and read as a number, in the target's unit, which its
+    hint names; blank is none, zero is one) and **How we will prove it** (a few words: an eval suite, a
+    result the customer shares; plain text, 1 to 500 characters once trimmed, newline and tab allowed,
+    shown as text). The card shows "Baseline 45 min." beside the target, or "No baseline measured yet."
+    (direction §4: a missing baseline is why value cannot be shown later), and the proof under it.
+  - **Every save sends the baseline and the proof.** The API's `PUT` clears either when it is left out, so
+    `criterionBody` returns `CriterionSave`, whose `unit`, `baseline` and `proof` are required (null to
+    clear). Both are part of what is signed: changing either bumps the scope's version like any other
+    change, and the form of a signed-off scope says so before it saves ("...the baseline and how it will
+    be proven are part of what was signed. Saving this change means it needs signing off again.").
   - **Empty states** say what a good scope has, in a line each: the outcome, what is out, and how
     done is measured. A scope with nothing in it offers no sign-off.
   - **Sign-off has three states**, said in the card's heading and again in a panel below the lists:
@@ -613,14 +644,16 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   (the API guards every eval route with it, except `eval-criteria`, which the page does not use). Where the API serves no
   evals, the cards say so (see **Where the API serves no evals**).
   - **A row is one glance.** What the criterion says (the customer's sentence), a status (a dot and words), the number
-    against the target ("**0.75** against at least 0.7"), how fresh it is ("Measured 5 Nov 2026, 5 days ago"), how many
+    against the target, from its baseline when it has one ("**0.75** against at least 0.7, from a baseline of 0.42";
+    with no result, "Target: at least 0.7 · Baseline: 0.42"), how fresh it is ("Measured 5 Nov 2026, 5 days ago"), how many
     cases passed, which suite it came from and whether the outputs were imported or run in the sandbox, and a trend: a
     row of up to eight small bars, one per recent finished result (height is the result's own rate, 0 to 1), the latest
     darker, neutral in colour, with every value in text for a screen reader and as the bars' title ("Recent results,
     oldest first: 0.58 (7 of 12), 0.67 (8 of 12), 0.75 (9 of 12)."). The bars need two results to show. The suite's name
     under the row opens it in the Eval suites card. Last, one quiet line names the tasks that work towards it, in the board's order, each
     with its status ("Tasks towards it: “Replay last month's orders” (to do), “Run the first replay” (done)."), the
-    first three and "and N more"; a criterion no task works towards has no such line.
+    first three and "and N more"; a criterion no task works towards has no such line. How it will be proven, when the
+    criterion says, is one quiet line ("How we will prove it: ..."), as text.
   - **The statuses.** **Met** (green) and **Not met** (amber, because it is failing) are the API's verdict and nothing
     else; **No result yet** (a suite measures it and no finished run has produced a value), **No eval suite** (nothing
     measures it) and **Not read yet** (the verdict could not be read) are neutral. A run that is going says "A run
@@ -700,14 +733,15 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     in this environment, so a suite cannot be created, run or given results here. What the API already holds is shown." with
     the room's verdicts, no error and no buttons that cannot work, and the Eval suites card is not shown. A criterion nothing
     measures says **Not measured** there rather than "No eval suite".
-  - **What it does not do.** No baseline (the API has none yet), no results from OpenTelemetry or JUnit (ADR 0006), no
+  - **What it does not do.** No trend from the baseline (it is one number, measured before the work), no results from OpenTelemetry or JUnit (ADR 0006), no
     customer view of proof (the customer room), no editing or deleting a suite or a case (the API has neither), and no
     trend from before the page's runs (the API keeps only each criterion's latest value; the trend is read from the runs
     list, which carries every run's report and so every case's output: one read of it per visit, no polling of it, #76).
 - **Board (project).** The project's tasks, one column per status: To do, In progress, Waiting on
   the customer, Blocked, Done. It replaces the old Tasks card and sits straight after the stage bar,
   not behind a tab: tasks are what an FDE touches all day, and a tab would hide them behind a
-  click on every visit. A card has the title, who has it, the success criterion it works towards
+  click on every visit. A card has the title, its stage and who has it ("Evaluate · Assigned to Jonah
+  Ade", the stage quiet and named "Stage:" to a screen reader; nothing for a task with none), the success criterion it works towards
   ("Towards: ...", whole and wrapped), why it is stuck (the
   blocker, or who it waits on and for how long) and when it is due; overdue and blocked get the
   amber dot.
@@ -762,13 +796,15 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     made the same move, and never says so.
   - **Create, edit, delete.** **New task** opens a form: title, status, the blocker or who it waits
     on when the status needs one, due date, who has it (unassigned, or anyone who works on the project,
-    by name: see **People**), and **Works towards**,
+    by name: see **People**), **Stage** (one of the eight, or "No stage"; beside Status, and a new task
+    starts in the project's stage), and **Works towards**,
     one of the project's success criteria or none (not shown while the project has none). Clicking a
     card opens the same form.
-  - **Every save sends the criterion back.** The API replaces `criterion` on each save, as it does
-    `assignee`, so a save that left it out would unlink the task. `toBody` returns `TaskSave`, whose
-    replaced fields are all required, so no move, edit, prompt or Today action can drop one; unlinking
-    is choosing "No success criterion" in the form. Removing a criterion unlinks its tasks (the API's
+  - **Every save sends the criterion and the stage back.** The API replaces `criterion` and `stage` on each
+    save, as it does `assignee`, so a save that left one out would unlink the task or clear its stage.
+    `toBody` returns `TaskSave`, whose replaced fields are all required, so no move, edit, prompt, Today
+    action or the next step's form can drop one; unlinking is choosing "No success criterion" in the form,
+    and clearing the stage is choosing "No stage". Removing a criterion unlinks its tasks (the API's
     `on delete set null`). **Delete task** asks first. A card says who has it: "Assigned to you",
     "Assigned to Jonah Ade" (whole, wrapped when long) or "Unassigned".
 - **Agent runs (project).** A card after Access: the project's runs, newest first, each with its
@@ -893,7 +929,7 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   `updateSystem`, `updateScopeItem` and `updateCriterion` take the version of the copy the save is based on as their last
   argument, as does `signOffScope` (the scope's); a 409 `stale_version` throws a `StaleSaveError` carrying `current`.
 - Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
-  `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
+  `addStakeholder`, `updateStakeholder`, `removeStakeholder`, `setMainContact`, the same three for systems,
   `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
   remove), `accessRequests` and `threads` (read when a prompt or the decisions need them), `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
   `people` (`GET /v1/people`, `queries.people`), `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`, and `moveStage(scope, to, reason?)`
@@ -917,7 +953,12 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   that replaces the note, attendees who work there and stakeholders who are at the company, 404 for a note that is not
   there; an access request starts requested or in progress, `blocked_by` is one of
   the project's, the decisions log takes no edit, and a decision's day is parsed as RFC 3339) (the scope's too: the version bump on every save, one sign-off per
-  version, no sign-off of an empty scope) (a lead or admin manages, any member works, anything else is a 403):
+  version, no sign-off of an empty scope) (a lead or admin manages, any member works, anything else is a 403)
+  (#238's fields: a task's `stage` and a criterion's `baseline` and `proof` cleared by a `PUT` that leaves them out, a
+  stage that is not one of the eight, or a baseline or proof of the wrong type, a 422 in plain text as axum's extractor
+  answers, a blank, long or control-character proof a 400 `invalid_proof`; a project's `next_step` worked out on every
+  read and Today's `projects_without_next_step`; one main contact per company, a stakeholder not the company's a 400
+  `invalid_stakeholder`, and only the rows that change moving on a version):
   The mock answers the stage checklist and the stage move with the API's rules
   (`CHECKS` in `mock-api.ts`: the same keys, words and tests as `oryxa-fde-store`'s `checklist.rs`,
   worked out from the sample data: stakeholders, meeting notes (a count), the scope and its sign-off,

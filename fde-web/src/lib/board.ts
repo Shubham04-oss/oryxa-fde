@@ -1,5 +1,5 @@
 import type { components } from "./api/fde-api.gen"
-import type { TaskOut, TaskState } from "./api/schemas"
+import type { Stage, TaskOut, TaskState } from "./api/schemas"
 import type { Labels } from "./stale"
 
 // The project board's rules (DESIGN.md §3): the columns, their order, and what each save sends. The
@@ -10,11 +10,14 @@ export type TaskBody = Omit<components["schemas"]["TaskBody"], "version">
 
 /**
  * What every save sends: each field the API replaces is always there, so a save that leaves one out
- * cannot clear it by accident (a missing `criterion` would unlink the task).
+ * cannot clear it by accident (a missing `criterion` would unlink the task, a missing `stage` clear it).
  */
 export type TaskSave = TaskBody &
   Required<
-    Pick<TaskBody, "assignee" | "due_on" | "blocker" | "blocked_by" | "waiting_on" | "criterion">
+    Pick<
+      TaskBody,
+      "assignee" | "due_on" | "blocker" | "blocked_by" | "waiting_on" | "criterion" | "stage"
+    >
   >
 
 /** Where a move puts a task: just before or just after another task of the column it goes to. */
@@ -50,6 +53,8 @@ export type Fields = {
   blockedBy: string | null
   /** The project's success criterion it works towards. */
   criterion: string | null
+  /** The stage of the plan it belongs to. */
+  stage: Stage | null
 }
 
 /** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
@@ -62,6 +67,7 @@ export const TASK_LABELS: Labels<Fields> = {
   assignee: "assignee",
   blockedBy: "access request it is blocked on",
   criterion: "success criterion it works towards",
+  stage: "stage",
 }
 
 export const MAX_TITLE = 200
@@ -76,6 +82,7 @@ export const fieldsOf = (task: TaskOut): Fields => ({
   assignee: task.assignee ?? null,
   blockedBy: task.blocked_by ?? null,
   criterion: task.criterion ?? null,
+  stage: task.stage ?? null,
 })
 
 /**
@@ -93,6 +100,7 @@ export function toBody(fields: Fields, place?: Place): TaskSave {
     blocked_by: blocked ? fields.blockedBy : null,
     waiting_on: fields.status === "waiting_on_customer" ? fields.waitingOn : null,
     criterion: fields.criterion,
+    stage: fields.stage,
     ...(place && { [place.side]: place.anchor.id }),
   }
 }
@@ -166,6 +174,30 @@ export function placed(
   if (anchor < 0) return [...rest, saved]
   rest.splice(place?.side === "after" ? anchor + 1 : anchor, 0, saved)
   return rest
+}
+
+type Steppable = {
+  id: string
+  title: string
+  status: TaskState
+  assignee?: string | null
+  due_on?: string | null
+}
+
+/**
+ * A project's next step, by the API's rule (`next_step` on a project): its first task in the project's
+ * order that is not done, or null when every task is done or there are none. The page takes the API's
+ * on a read and keeps it true with this after a task save, so a move needs no read of the whole project.
+ */
+export function nextStepOf<T extends Steppable>(tasks: ReadonlyArray<T>) {
+  const t = tasks.find((x) => x.status !== "done")
+  if (!t) return null
+  return {
+    task: t.id as T["id"],
+    title: t.title,
+    assignee: (t.assignee ?? null) as NonNullable<T["assignee"]> | null,
+    due_on: t.due_on ?? null,
+  }
 }
 
 /** Done tasks to list before "Show all": the board shows the latest, the rest sit behind a button. */

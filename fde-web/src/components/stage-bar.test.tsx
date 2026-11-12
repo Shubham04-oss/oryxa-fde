@@ -304,6 +304,8 @@ describe("moving a project's stage on the API", () => {
       comparator: "at_least",
       target: 95,
       unit: "%",
+      baseline: null,
+      proof: null,
     })
 
     await userEvent.click(screen.getByRole("button", { name: "Move to Evaluate" }))

@@ -148,6 +148,8 @@ describe("proof for each criterion", () => {
         comparator: "at_least",
         target: 85,
         unit: "%",
+        baseline: null,
+        proof: null,
       },
       l1.version,
     )

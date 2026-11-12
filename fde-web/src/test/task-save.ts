@@ -11,5 +11,6 @@ export const saveOf = (body: TaskBody): TaskSave => ({
   blocked_by: null,
   waiting_on: null,
   criterion: null,
+  stage: null,
   ...body,
 })

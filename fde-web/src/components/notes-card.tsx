@@ -373,6 +373,7 @@ function MakeFromNote({
         <TaskDialog
           task={null}
           status="todo"
+          stage={project.stage}
           title={making.title}
           people={project.stakeholders}
           requests={project.access}

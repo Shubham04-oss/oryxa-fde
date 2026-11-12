@@ -7,13 +7,20 @@ import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
 import { FIELD, Labelled } from "./task-move"
 import { StaleNotice, useVersionedForm } from "./versioned-form"
-import { api } from "@/lib/api/client"
-import type { CompanyId, StakeholderOut, StakeholderPart, SystemOut } from "@/lib/api/schemas"
+import { api, queries } from "@/lib/api/client"
+import type {
+  CompanyId,
+  StakeholderId,
+  StakeholderOut,
+  StakeholderPart,
+  SystemOut,
+} from "@/lib/api/schemas"
 import {
   PART_LABEL,
   STAKEHOLDER_LABELS,
   SYSTEM_LABELS,
   attempt,
+  commitMainContact,
   commitRecord,
   stakeholderBody,
   stakeholderFields,
@@ -67,6 +74,8 @@ export function StakeholdersCard({
 }) {
   // A person to edit, "new" for a blank form, or nothing.
   const [open, setOpen] = useState<StakeholderOut | "new" | null>(startOpen ? "new" : null)
+  const [choosing, setChoosing] = useState(false)
+  const main = people.find((p) => p.main_contact)
   return (
     <Card
       title="Stakeholders"
@@ -91,12 +100,40 @@ export function StakeholdersCard({
                   <p className="truncate text-xs">{person.name}</p>
                   {person.title && <Quiet className="truncate">{person.title}</Quiet>}
                 </div>
-                <span className="flex-none text-[11px] text-soft">{PART_LABEL[person.role]}</span>
+                <span className="grid flex-none justify-items-end text-[11px] text-soft">
+                  {PART_LABEL[person.role]}
+                  {person.main_contact && (
+                    <span className="text-muted-foreground">Main contact</span>
+                  )}
+                </span>
               </div>
             </EditRow>
           ))}
         </Rows>
       )}
+      {people.length > 0 && (
+        // One per company, set apart from the person's own record: the API keeps it on its own route.
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t pt-2.5">
+          <Quiet className="min-w-0 [overflow-wrap:anywhere]">
+            {main
+              ? `Main contact: ${main.name}${main.title ? `, ${main.title}` : ""}.`
+              : "No main contact yet: the one person to go to first."}
+          </Quiet>
+          <Button variant="ghost" size="sm" onClick={() => setChoosing(true)}>
+            {main ? "Change main contact" : "Choose a main contact"}
+          </Button>
+        </div>
+      )}
+      <Dialog open={choosing} onOpenChange={setChoosing}>
+        {choosing && (
+          <MainContactDialog
+            company={company}
+            people={people}
+            current={main?.id ?? null}
+            onClose={() => setChoosing(false)}
+          />
+        )}
+      </Dialog>
       <Dialog open={open !== null} onOpenChange={(next) => !next && setOpen(null)}>
         {open && (
           <StakeholderDialog
@@ -108,6 +145,57 @@ export function StakeholdersCard({
         )}
       </Dialog>
     </Card>
+  )
+}
+
+/** Chooses the company's one main contact from its stakeholders, or none. */
+function MainContactDialog({
+  company,
+  people,
+  current,
+  onClose,
+}: {
+  company: CompanyId
+  people: Array<StakeholderOut>
+  current: StakeholderId | null
+  onClose: () => void
+}) {
+  const client = useQueryClient()
+  const [chosen, setChosen] = useState<string>(current ?? "")
+  return (
+    <FormDialog
+      title="Main contact"
+      description="The one person at the customer to go to first. Whoever it was before stops being it."
+      save="Save"
+      onSubmit={async () => {
+        if (chosen === (current ?? "")) return null
+        const refused = await attempt(async () => {
+          const id = people.find((p) => p.id === chosen)?.id ?? null
+          const set = await api.setMainContact(company, id)
+          await commitMainContact(client, company, set.stakeholder ?? null)
+        }, "stakeholder")
+        // Refused (someone removed them, say): the list is read again, so the choices are current.
+        if (refused) void client.invalidateQueries({ queryKey: queries.company(company).queryKey })
+        return refused
+      }}
+      onClose={onClose}
+    >
+      <Labelled label="Main contact">
+        <select
+          autoFocus
+          className={FIELD}
+          value={chosen}
+          onChange={(e) => setChosen(e.target.value)}
+        >
+          <option value="">No main contact</option>
+          {people.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.title ? `${p.name}, ${p.title}` : p.name}
+            </option>
+          ))}
+        </select>
+      </Labelled>
+    </FormDialog>
   )
 }
 

@@ -167,6 +167,10 @@ export const StakeholderOut = z.object({
 })
 export type StakeholderOut = z.infer<typeof StakeholderOut>
 
+/** `PUT .../main-contact`'s answer: the company's main contact as they now stand, or null for none. */
+export const MainContactOut = z.object({ stakeholder: StakeholderOut.nullish() })
+export type MainContactOut = z.infer<typeof MainContactOut>
+
 /** A company's role for a person who works on it (the spec's `MemberRole`). */
 export const MemberRole = z.enum(["lead", "engineer"])
 export type MemberRole = z.infer<typeof MemberRole>

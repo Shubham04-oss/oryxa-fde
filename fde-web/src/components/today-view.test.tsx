@@ -72,7 +72,6 @@ describe("TodayView", () => {
       "Replay last month's orders through the planner",
       "Answer the security questionnaire",
       "Publish eval results to the customer room",
-      "Monthly accuracy spot check",
     ])
     expect(await titles("Waiting on the customer")).toEqual([
       "Access: Clinic directory export",
@@ -90,7 +89,7 @@ describe("TodayView", () => {
     expect(screen.queryByText(/Read replica of the planning database/)).toBeNull()
     expect(
       screen.getByText(
-        "20 need you across 5 companies: 5 blocked, 6 due, 9 waiting on the customer.",
+        "19 need you across 5 companies: 5 blocked, 5 due, 9 waiting on the customer. 1 project has no next step.",
       ),
     ).toBeInTheDocument()
   })
@@ -205,13 +204,13 @@ describe("Today as an inbox", () => {
     // Still there, dimmed and saying where it is going, with the count unchanged.
     expect(await screen.findByText("Moving to Done…")).toBeInTheDocument()
     expect(await titles("Due")).toContain(DUE)
-    expect(screen.getByText(/^20 need you/)).toBeInTheDocument()
+    expect(screen.getByText(/^19 need you/)).toBeInTheDocument()
     expect(screen.getByRole("button", { name: `Done: ${DUE}` })).toBeDisabled()
     answered()
 
     await waitFor(async () => expect(await titles("Due")).not.toContain(DUE))
     expect(
-      screen.getByText(/^19 need you across 5 companies: 5 blocked, 5 due, 9 waiting/),
+      screen.getByText(/^18 need you across 5 companies: 5 blocked, 4 due, 9 waiting/),
     ).toBeInTheDocument()
     expect(
       (
@@ -344,7 +343,7 @@ describe("Today as an inbox", () => {
     )
     expect(await titles("Due")).toContain(DUE)
     expect(screen.queryByText("Moving to Done…")).toBeNull()
-    expect(screen.getByText(/^20 need you/)).toBeInTheDocument()
+    expect(screen.getByText(/^19 need you/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Dismiss" }))
     expect(screen.queryByRole("alert")).toBeNull()
   })
@@ -591,6 +590,46 @@ describe("Today as an inbox", () => {
       await new Promise((resolve) => setTimeout(resolve, 20))
 
       expect(document.activeElement).toBe(elsewhere)
+    })
+  })
+
+  describe("projects with no next step", () => {
+    it("lists each with its company and one way to give it one: New task, open on the project", async () => {
+      renderWithRouter(<TodayView />)
+      const card = await screen.findByRole("region", { name: "No next step" })
+      expect(within(card).getByText("Outage report summaries")).toBeInTheDocument()
+      expect(within(card).getByText("Cobalt Grid")).toBeInTheDocument()
+      const link = within(card).getByRole("link", {
+        name: "Add a next step to Outage report summaries",
+      })
+      expect(link).toHaveAttribute(
+        "href",
+        "/companies/cmp_cobalt/projects/prj_cobalt_outage?add=task",
+      )
+      // Not a row of the inbox: J and K skip it, and it has no menu.
+      expect(card.querySelector("[data-row]")).toBeNull()
+    })
+
+    it("shows no card when every project has a next step", async () => {
+      wire.today = Response.json({ items: [], projects_without_next_step: [] })
+      renderWithRouter(<TodayView />)
+      expect(await screen.findByText("Nothing needs you today.")).toBeInTheDocument()
+      expect(screen.queryByRole("region", { name: "No next step" })).toBeNull()
+    })
+
+    it("is not all clear while a project has none", async () => {
+      wire.today = Response.json({
+        items: [],
+        projects_without_next_step: [
+          {
+            company: { id: "cmp_kestrel", name: "Kestrel Freight" },
+            project: { id: "prj_kestrel_claims", name: "Damage claims triage" },
+          },
+        ],
+      })
+      renderWithRouter(<TodayView />)
+      expect(await screen.findByText("1 project has no next step.")).toBeInTheDocument()
+      expect(screen.queryByText("Nothing needs you today.")).toBeNull()
     })
   })
 

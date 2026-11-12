@@ -7,6 +7,7 @@ import {
   fieldsOf,
   inColumn,
   isOverdue,
+  nextStepOf,
   placeAt,
   placed,
   problem,
@@ -44,7 +45,23 @@ describe("toBody", () => {
       blocked_by: null,
       waiting_on: null,
       criterion: null,
+      stage: null,
     })
+  })
+
+  it("sends the stage back on every save, so a save never clears it", () => {
+    const staged = fieldsOf(task({ stage: "build" }))
+    expect(staged.stage).toBe("build")
+    expect(toBody(staged).stage).toBe("build")
+    // A move, a blocker or a wait keeps it.
+    expect(toBody({ ...staged, status: "done" }).stage).toBe("build")
+    expect(toBody({ ...staged, status: "blocked", blocker: "No VPN" }).stage).toBe("build")
+    expect(toBody({ ...staged, status: "waiting_on_customer" }).stage).toBe("build")
+    expect(
+      toBody(staged, { side: "after", anchor: task({ id: TaskId.parse("tsk_9") }) }).stage,
+    ).toBe("build")
+    // None is said as null, never a missing key: the API clears a stage left out.
+    expect(toBody(fieldsOf(task()))).toHaveProperty("stage", null)
   })
 
   it("sends the criterion back on every save, so a save never unlinks it", () => {
@@ -70,9 +87,10 @@ describe("toBody", () => {
   it("is the API's task body, with every replaced field required", () => {
     expectTypeOf<keyof TaskBody>().toEqualTypeOf<Exclude<keyof Spec["TaskBody"], "version">>()
     expectTypeOf<TaskSave>().toExtend<Spec["TaskBody"]>()
-    expectTypeOf<Pick<TaskSave, "criterion" | "assignee">>().toEqualTypeOf<{
+    expectTypeOf<Pick<TaskSave, "criterion" | "assignee" | "stage">>().toEqualTypeOf<{
       criterion: string | null
       assignee: string | null
+      stage: Spec["ProjectStage"] | null
     }>()
     expectTypeOf(toBody).returns.toEqualTypeOf<TaskSave>()
   })
@@ -212,5 +230,35 @@ describe("summarise", () => {
     ]
     expect(summarise(tasks, "2026-11-10")).toEqual({ blocked: 1, waiting: 1, overdue: 2 })
     expect(isOverdue(tasks[4]!, "2026-11-10")).toBe(false)
+  })
+})
+
+describe("nextStepOf", () => {
+  const t = (id: string, over: Partial<TaskOut> = {}) =>
+    task({ id: TaskId.parse(id), title: `Task ${id}`, ...over })
+
+  it("is the first task in the project's order that is not done, as the API reads it", () => {
+    const tasks = [
+      t("tsk_a", { status: "done" }),
+      t("tsk_b", { status: "blocked", assignee: "usr_riya" as never, due_on: "2026-11-20" }),
+      t("tsk_c"),
+    ]
+    expect(nextStepOf(tasks)).toEqual({
+      task: "tsk_b",
+      title: "Task tsk_b",
+      assignee: "usr_riya",
+      due_on: "2026-11-20",
+    })
+    // Reordered, the next step follows the order, not the status.
+    expect(nextStepOf([tasks[2]!, tasks[1]!])?.task).toBe("tsk_c")
+  })
+
+  it("is none when every task is done, or there are none", () => {
+    expect(nextStepOf([])).toBeNull()
+    expect(nextStepOf([t("tsk_a", { status: "done" }), t("tsk_b", { status: "done" })])).toBeNull()
+  })
+
+  it("says no owner and no date as null", () => {
+    expect(nextStepOf([t("tsk_a")])).toMatchObject({ assignee: null, due_on: null })
   })
 })

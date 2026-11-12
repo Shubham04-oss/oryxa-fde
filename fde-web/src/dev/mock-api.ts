@@ -12,6 +12,7 @@ import type { Transport, UploadRequest } from "../lib/api/client"
 import type { components } from "../lib/api/fde-api.gen"
 import { STAGES } from "../lib/api/schemas"
 import type { Me, Stage } from "../lib/api/schemas"
+import { nextStepOf } from "../lib/board"
 import { canMove } from "../lib/stage"
 import { localDay } from "../lib/time"
 import { documentReads, documentSearch, documentUpload, seedDocuments } from "./mock-documents"
@@ -100,7 +101,8 @@ const person = (
   name: string,
   title: string | null,
   role: S["StakeholderPart"],
-): S["StakeholderOut"] => ({ id, name, title, role, updated_at: ago(30), version: 1 })
+  main_contact = false,
+): S["StakeholderOut"] => ({ id, name, title, role, main_contact, updated_at: ago(30), version: 1 })
 
 const system = (
   id: string,
@@ -129,6 +131,7 @@ function task(
     waitingOn?: string
     waitingDays?: number
     criterion?: string
+    stage?: Stage
   } = {},
 ): S["TaskOut"] {
   return {
@@ -142,6 +145,7 @@ function task(
     waiting_since: extra.waitingDays === undefined ? null : ago(extra.waitingDays),
     blocked_by: extra.blockedBy ?? null,
     criterion: extra.criterion ?? null,
+    stage: extra.stage ?? null,
     created_at: ago(daysAgo + 10),
     updated_at: ago(daysAgo),
     version: 1,
@@ -214,8 +218,20 @@ function criterion(
   comparator: S["TargetComparator"],
   target: number,
   unit: string | null,
+  proven: { baseline?: number; proof?: string } = {},
 ): S["CriterionOut"] {
-  return { id, description, metric, comparator, target, unit, updated_at: ago(30), version: 1 }
+  return {
+    id,
+    description,
+    metric,
+    comparator,
+    target,
+    unit,
+    baseline: proven.baseline ?? null,
+    proof: proven.proof ?? null,
+    updated_at: ago(30),
+    version: 1,
+  }
 }
 
 /** A scope; `signedOff` names who signed it, and whether it changed since (`current: false`). */
@@ -378,7 +394,7 @@ function seed() {
       ],
       members: [member(RIYA, "lead"), member(JONAH, "engineer")],
       stakeholders: [
-        person("stk_k1", "Mara Lindqvist", "Head of operations", "sponsor"),
+        person("stk_k1", "Mara Lindqvist", "Head of operations", "sponsor", true),
         person("stk_k2", "Ines Moreau", "Dispatch lead, Ghent", "champion"),
         person("stk_k3", "Tomas Becker", "Data platform manager", "it"),
         person("stk_k4", "Lea Novak", "Information security", "security"),
@@ -537,6 +553,10 @@ function seed() {
               "at_least",
               0.7,
               null,
+              {
+                baseline: 0.42,
+                proof: "The plan acceptance eval suite, on last month's orders",
+              },
             ),
             criterion(
               "crt_k2",
@@ -545,8 +565,12 @@ function seed() {
               "at_least",
               1,
               null,
+              { baseline: 0.9 },
             ),
-            criterion("crt_k3", "Time to a draft plan", "minutes per depot", "at_most", 2, "min"),
+            criterion("crt_k3", "Time to a draft plan", "minutes per depot", "at_most", 2, "min", {
+              baseline: 45,
+              proof: "Timed by the dispatchers at both pilot depots for a week",
+            }),
           ],
           { by: "stk_k1", daysAgo: 21, current: true },
         ),
@@ -568,22 +592,26 @@ function seed() {
             due: 1,
             assignee: RIYA,
             criterion: "crt_k2",
+            stage: "build",
           }),
           task("tsk_k2", "Replay last month's orders through the planner", "todo", 2, {
             due: 0,
             assignee: RIYA,
             criterion: "crt_k1",
+            stage: "build",
           }),
           task("tsk_k3", "Add driver-hours checks to the eval suite", "todo", 3, {
             due: -2,
             assignee: JONAH,
             criterion: "crt_k2",
+            stage: "evaluate",
           }),
           task("tsk_k4", "Agree the telematics alternative", "blocked", 3, {
             due: -1,
             assignee: RIYA,
             blocker: "Telematics export refused by the customer's security team",
             blockedBy: "acc_k3",
+            stage: "access",
           }),
           task("tsk_k5", "Dispatcher feedback session", "waiting_on_customer", 4, {
             due: 3,
@@ -901,7 +929,8 @@ function seed() {
           access("acc_c1", "Outage log, read only", "sys_c1", "stk_c2", "granted", 130, 125),
         ],
         tasks: [
-          task("tsk_c1", "Monthly accuracy spot check", "todo", 3, { due: 0, assignee: JONAH }),
+          // Every task done: in Operate with nothing next, so Today lists it as having no next step.
+          task("tsk_c1", "Monthly accuracy spot check", "done", 1, { due: -1, assignee: JONAH }),
           task("tsk_c2", "Handoff notes for the operations team", "done", 30, {
             due: -30,
             assignee: RIYA,
@@ -1037,6 +1066,12 @@ const LATENCY_MS = import.meta.env.MODE === "test" ? 0 : 150
 /** An answer as the API writes it: JSON, and a copy, so callers never share mock state. */
 const json = (body: unknown, status = 200) => Response.json(structuredClone(body), { status })
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
+/** A body the API's JSON extractor cannot read: a 422 with axum's plain-text reason, no error code. */
+const unreadable = (why: string) =>
+  new Response(`Failed to deserialize the JSON body into the target type: ${why}`, {
+    status: 422,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  })
 
 // ── Versions ───────────────────────────────────────────────────────────────
 // What the API does with the `version` of a whole-record save (#172): every change moves a record's
@@ -1090,6 +1125,12 @@ function someoneElse(): Record<string, unknown> | null {
 const projectsOf = (companyId: string) =>
   state.projects.filter((p) => p.project.company === companyId)
 
+/** A project as the API reads it: `next_step` is worked out from its tasks on every read. */
+const projectOut = (p: { project: S["ProjectOut"]; records: Records }): S["ProjectOut"] => ({
+  ...p.project,
+  next_step: nextStepOf(p.records.tasks),
+})
+
 /** The caller's role at a company: a member's, or `admin` for an organisation admin who is not one. */
 function roleAt(c: CompanySeed): S["CallerRole"] | null {
   const own = c.members.find((m) => m.user === state.me.user.id)?.role
@@ -1115,8 +1156,20 @@ function companyList(): Array<S["CompanySummaryOut"]> {
     }))
 }
 
-/** `GET /v1/today`: tasks not done and access not granted, with names to show them by. */
+/**
+ * `GET /v1/today`: tasks not done and access not granted, with names to show them by, and the projects
+ * with no next step (every task done, or none).
+ */
 function today(): S["TodayOut"] {
+  const mine = state.companies.filter((c) => roleAt(c) !== null)
+  const projects_without_next_step = mine.flatMap((c) =>
+    projectsOf(c.company.id)
+      .filter((p) => nextStepOf(p.records.tasks) === null)
+      .map(({ project: p }) => ({
+        company: { id: c.company.id, name: c.company.name },
+        project: { id: p.id, name: p.name },
+      })),
+  )
   const items = state.companies
     .filter((c) => roleAt(c) !== null)
     .flatMap((c) =>
@@ -1142,7 +1195,7 @@ function today(): S["TodayOut"] {
         ]
       }),
     )
-  return { items }
+  return { items, projects_without_next_step }
 }
 
 const TASK_FIELDS = [
@@ -1154,6 +1207,7 @@ const TASK_FIELDS = [
   "waiting_on",
   "blocked_by",
   "criterion",
+  "stage",
 ] as const
 const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
 let taskCount = 0
@@ -1185,6 +1239,9 @@ async function taskRoutes(
   if (!adding && !(method === "PUT" && taskId !== undefined)) return null
   const body = (await request.json().catch(() => null)) as Partial<S["TaskBody"]> | null
   if (!body) return refuse(400, "invalid")
+  // The API's body does not deserialize with a stage that is not one of the eight: axum's 422, in plain text.
+  const stage = body.stage ?? null
+  if (stage !== null && !STAGES.includes(stage)) return unreadable("stage: unknown variant")
   const version = claimed(body, adding)
   if (version instanceof Response) return version
   const status = TASK_STATES.find((one) => one === body.status)
@@ -1264,6 +1321,8 @@ async function taskRoutes(
     waiting_since: status === "waiting_on_customer" ? (before?.waiting_since ?? now) : null,
     blocked_by: blockedBy,
     criterion: towards,
+    // Left out, it is cleared, as every other replaced field is.
+    stage,
     created_at: before?.created_at ?? now,
     updated_at: now,
     version: (before?.version ?? 0) + 1,
@@ -1628,7 +1687,7 @@ async function projectWrites(
     state.projects.push({ project: created, records: emptyRecords() })
     // The API assigns no one to a new project; a lead or admin reaches it without.
     state.assignees[created.id] = []
-    return json(created, 201)
+    return json({ ...created, next_step: null }, 201)
   }
   const p = projectsOf(found.company.id).find((x) => x.project.id === projectId)
   if (!p) return refuse(404, "not_found")
@@ -1639,13 +1698,21 @@ async function projectWrites(
   if (typeof b.name === "string") p.project.name = b.name.trim()
   if (b.summary !== undefined) p.project.summary = trimmed(b.summary)
   p.project.updated_at = now
-  return json(p.project)
+  return json(projectOut(p))
 }
 
 let scopeCount = 0
 const KINDS = ["in", "out"] as const
 const ITEM_FIELDS = ["kind", "description"] as const
-const CRITERION_FIELDS = ["description", "metric", "comparator", "target", "unit"] as const
+const CRITERION_FIELDS = [
+  "description",
+  "metric",
+  "comparator",
+  "target",
+  "unit",
+  "baseline",
+  "proof",
+] as const
 const COMPARATORS = ["at_least", "at_most"] as const
 
 /** Every change to the items or criteria moves the version on, and the last sign-off no longer covers it. */
@@ -1747,6 +1814,13 @@ async function scopeRoutes(
       return refuse(400, "invalid_target")
     if (body.unit !== undefined && body.unit !== null && !plain(body.unit, 200, false))
       return refuse(400, "invalid_unit")
+    // Both are cleared when left out, as the API's `PUT` does. A baseline that is not a number does not
+    // deserialize (axum's 422); a proof is 1 to 500 characters once trimmed, newline and tab allowed.
+    const baseline = body.baseline ?? null
+    if (baseline !== null && typeof baseline !== "number") return unreadable("baseline")
+    const proof = body.proof ?? null
+    if (proof !== null && typeof proof !== "string") return unreadable("proof")
+    if (proof !== null && !plain(proof, 500, true)) return refuse(400, "invalid_proof")
     saved = {
       id: id ?? `crt_new${++scopeCount}`,
       description: (body.description as string).trim(),
@@ -1754,6 +1828,8 @@ async function scopeRoutes(
       comparator,
       target: body.target,
       unit: typeof body.unit === "string" ? body.unit.trim() : null,
+      baseline,
+      proof: proof?.trim() ?? null,
       updated_at: now,
       version: 1,
     }
@@ -1852,6 +1928,8 @@ async function stakeholderRoutes(
     // A new address is subscribed again; the same one keeps what its owner chose.
     digest_unsubscribed_at:
       email === (before?.email ?? null) ? (before?.digest_unsubscribed_at ?? null) : null,
+    // Not part of the record's body: only `PUT .../main-contact` changes it.
+    main_contact: before?.main_contact ?? false,
     updated_at: new Date().toISOString(),
     version: (before?.version ?? 0) + 1,
   }
@@ -1860,6 +1938,26 @@ async function stakeholderRoutes(
   if (before) found.stakeholders[at] = saved
   else found.stakeholders.push(saved)
   return json(saved, adding ? 201 : 200)
+}
+
+/**
+ * `PUT .../main-contact`: one of the company's stakeholders, or none. Only the rows that change are
+ * written, so only their versions move on. The body is `{ stakeholder }` and nothing else.
+ */
+async function mainContactRoute(found: CompanySeed, request: Request) {
+  const b = await readBody(request)
+  if (!b || Object.keys(b).some((k) => k !== "stakeholder")) return unreadable("stakeholder")
+  const id = b.stakeholder ?? null
+  if (id !== null && typeof id !== "string") return unreadable("stakeholder")
+  if (id !== null && !found.stakeholders.some((x) => x.id === id))
+    return refuse(400, "invalid_stakeholder")
+  const now = new Date().toISOString()
+  found.stakeholders.forEach((x, i) => {
+    const is = x.id === id
+    if (Boolean(x.main_contact) !== is)
+      found.stakeholders[i] = bump(x, { main_contact: is, updated_at: now })
+  })
+  return json({ stakeholder: found.stakeholders.find((x) => x.id === id) ?? null })
 }
 
 /** `POST`, `PUT` and `DELETE` on a company's systems. */
@@ -2092,7 +2190,7 @@ async function stageMove(
   }
   p.project.stage = to
   p.project.updated_at = new Date().toISOString()
-  return json(p.project)
+  return json(projectOut(p))
 }
 
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
@@ -2109,6 +2207,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (method === "PATCH" && collection === undefined) return patchCompany(found, request)
   if (collection === "stakeholders" && method !== "GET")
     return stakeholderRoutes(method, projectId, found, request)
+  if (collection === "main-contact" && method === "PUT" && projectId === undefined)
+    return mainContactRoute(found, request)
   if (collection === "systems" && method !== "GET")
     return systemRoutes(method, projectId, found, request)
   if (collection === "members" && method !== "GET")
@@ -2130,7 +2230,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
       return json(found.members.map((m) => ({ ...m, name: nameOf(m.user) })))
     if (collection === "stakeholders") return json(found.stakeholders)
     if (collection === "systems") return json(found.systems)
-    if (collection === "projects") return json(projectsOf(companyId).map((p) => p.project))
+    if (collection === "projects") return json(projectsOf(companyId).map(projectOut))
     return null
   }
   if (collection !== "projects" || projectId === undefined) return null
@@ -2162,7 +2262,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
         items: stale ? items.map((i) => ({ ...i, met: true })) : items,
       })
     }
-    if (record === undefined) return json(p.project)
+    if (record === undefined) return json(projectOut(p))
     if (record === "scope") return json(p.records.scope)
     if (record === "access-requests") return json(p.records.access)
     if (record === "tasks") {

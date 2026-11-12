@@ -22,6 +22,7 @@ import {
   valueText,
 } from "@/lib/proof"
 import type { Proof, TrendPoint } from "@/lib/proof"
+import { inUnit } from "@/lib/scope"
 import { reason } from "@/lib/task-move"
 import { dayOf, shortDate } from "@/lib/time"
 
@@ -418,16 +419,25 @@ function ProofRow({
           <Status tone={state.tone}>{state.label}</Status>
         </div>
         <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+          {/* Baseline, current and target, in that order: where it started, where it is, where it must get to. */}
           <p className="text-xs">
             {p.value !== null ? (
               <>
                 <strong className="text-[13px] font-semibold tabular-nums">
                   {valueText(p.value)}
                 </strong>{" "}
-                <span className="text-muted-foreground">against {targetText(p.criterion)}</span>
+                <span className="text-muted-foreground">
+                  against {targetText(p.criterion)}
+                  {p.criterion.baseline != null &&
+                    `, from a baseline of ${inUnit(p.criterion.baseline, p.criterion.unit)}`}
+                </span>
               </>
             ) : (
-              <span className="text-muted-foreground">Target: {targetText(p.criterion)}</span>
+              <span className="text-muted-foreground">
+                Target: {targetText(p.criterion)}
+                {p.criterion.baseline != null &&
+                  ` · Baseline: ${inUnit(p.criterion.baseline, p.criterion.unit)}`}
+              </span>
             )}
           </p>
           <Trend trend={p.trend} />
@@ -463,6 +473,11 @@ function ProofRow({
           </Quiet>
         )}
         {p.scale && <Quiet className="[overflow-wrap:anywhere]">{p.scale}</Quiet>}
+        {p.criterion.proof && (
+          <Quiet className="[overflow-wrap:anywhere] whitespace-pre-line">
+            How we will prove it: {p.criterion.proof}
+          </Quiet>
+        )}
         <Linked tasks={tasks} />
         {p.status === "no_suite" && !off && (
           <>

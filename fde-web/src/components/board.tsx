@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react"
-import type { DragEvent, KeyboardEvent, ReactNode } from "react"
+import { useEffect, useId, useImperativeHandle, useRef, useState } from "react"
+import type { DragEvent, KeyboardEvent, ReactNode, Ref } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Card, Quiet } from "./page"
 import { NamesUnavailable, assigneeLabel, useNames, useWorkingOn } from "./people"
@@ -25,10 +25,12 @@ import type {
   CriterionOut,
   Project,
   ProjectScope,
+  Stage,
   StakeholderOut,
   TaskOut,
   TaskState,
 } from "@/lib/api/schemas"
+import { STAGES } from "@/lib/api/schemas"
 import {
   COLUMNS,
   DONE_SHOWN,
@@ -46,6 +48,7 @@ import {
 import type { Fields, Place } from "@/lib/board"
 import { clip } from "@/lib/access"
 import { byName } from "@/lib/people"
+import { STAGE_LABEL } from "@/lib/stage"
 import { commitRemoved, reason, refusalNote } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -64,6 +67,12 @@ type Dialogs = { kind: "new"; status: TaskState } | { kind: "edit"; task: TaskOu
 /** Where a dragged card would land: a column, and for one that keeps an order, the index among its other cards. */
 type Over = { status: TaskState; index: number | null }
 
+/** What the project page asks of the board: its New task form, or a task's own (the next step's). */
+export type BoardHandle = {
+  add: () => void
+  open: (task: TaskOut) => void
+}
+
 /**
  * The project's tasks as a board (DESIGN.md §3): one column per status, each in the project's order.
  * A card moves by drag, to another column or to another place in its own, or by its menu (Move up,
@@ -71,7 +80,15 @@ type Over = { status: TaskState; index: number | null }
  * asks what blocks it and into Waiting on the customer asks who it waits on. Nothing moves until the
  * API confirms it.
  */
-export function Board({ scope, project }: { scope: ProjectScope; project: Project }) {
+export function Board({
+  scope,
+  project,
+  handle,
+}: {
+  scope: ProjectScope
+  project: Project
+  handle?: Ref<BoardHandle>
+}) {
   const queryClient = useQueryClient()
   const names = useNames(scope)
   const mover = useTaskMover()
@@ -85,6 +102,13 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
   const [doneOpen, setDoneOpen] = useState(false)
   const [doneAll, setDoneAll] = useState(false)
   const columns = useRef(new Map<TaskState, HTMLElement>())
+  useImperativeHandle(handle, () => ({
+    add: () => setDialog({ kind: "new", status: "todo" }),
+    // A task on its way somewhere opens once the API has answered, as a card does.
+    open: (task) => {
+      if (!mover.saving[task.id]) setDialog({ kind: "edit", task })
+    },
+  }))
 
   const remove = useMutation({
     mutationFn: (task: TaskOut) => api.removeTask(scope, task.id),
@@ -355,6 +379,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
             key={dialog.kind === "edit" ? dialog.task.id : "new"}
             task={dialog.kind === "edit" ? dialog.task : null}
             status={dialog.kind === "new" ? dialog.status : "todo"}
+            stage={project.stage}
             people={project.stakeholders}
             requests={project.access}
             criteria={project.scope.criteria}
@@ -629,9 +654,17 @@ function TaskCard({
           />
           {task.title}
         </span>
-        {/* Whole and wrapped, like the criterion below: a tooltip would hide a long name from keyboard and touch. */}
-        {who && (
+        {/* Whole and wrapped, like the criterion below: a tooltip would hide a long name from keyboard and touch.
+            The stage leads it, quietly: it says where in the plan the task sits, not what needs doing. */}
+        {(who || task.stage) && (
           <span className="text-[11px] leading-normal [overflow-wrap:anywhere] text-muted-foreground">
+            {task.stage && (
+              <span data-stage={task.stage}>
+                <span className="sr-only">Stage: </span>
+                {STAGE_LABEL[task.stage]}
+                {who && " · "}
+              </span>
+            )}
             {who}
           </span>
         )}
@@ -705,6 +738,7 @@ function TaskCard({
 export function TaskDialog({
   task,
   status,
+  stage,
   title,
   people,
   requests,
@@ -717,6 +751,8 @@ export function TaskDialog({
 }: {
   task: TaskOut | null
   status: TaskState
+  /** The project's stage: where a new task starts. */
+  stage: Stage
   title?: string
   people: Array<StakeholderOut>
   requests: ReadonlyArray<AccessRequestOut>
@@ -746,6 +782,7 @@ export function TaskDialog({
           assignee: null,
           blockedBy: null,
           criterion: null,
+          stage,
         },
     labels: TASK_LABELS,
     send: (base, fields) => send(base ?? null, fields),
@@ -789,19 +826,35 @@ export function TaskDialog({
           autoComplete="off"
         />
       </Labelled>
-      <Labelled label="Status">
-        <select
-          className={FIELD}
-          value={fields.status}
-          onChange={(e) => set({ status: e.target.value as TaskState })}
-        >
-          {COLUMNS.map((c) => (
-            <option key={c.status} value={c.status}>
-              {c.label}
-            </option>
-          ))}
-        </select>
-      </Labelled>
+      <div className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
+        <Labelled label="Status">
+          <select
+            className={FIELD}
+            value={fields.status}
+            onChange={(e) => set({ status: e.target.value as TaskState })}
+          >
+            {COLUMNS.map((c) => (
+              <option key={c.status} value={c.status}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </Labelled>
+        <Labelled label="Stage">
+          <select
+            className={FIELD}
+            value={fields.stage ?? ""}
+            onChange={(e) => set({ stage: STAGES.find((one) => one === e.target.value) ?? null })}
+          >
+            <option value="">No stage</option>
+            {STAGES.map((one) => (
+              <option key={one} value={one}>
+                {STAGE_LABEL[one]}
+              </option>
+            ))}
+          </select>
+        </Labelled>
+      </div>
       {fields.status === "blocked" && (
         <Labelled label="The blocker">
           <textarea

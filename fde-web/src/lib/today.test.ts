@@ -122,6 +122,15 @@ describe("summaryLine", () => {
     )
     expect(summaryLine(groupToday([], TODAY))).toBe("Nothing needs you today.")
   })
+
+  it("counts the projects with no next step, and is all clear only without any", () => {
+    const one = groupToday([task("a", { due_on: TODAY })], TODAY)
+    expect(summaryLine(one, 2)).toBe(
+      "1 needs you across 1 company: 1 due. 2 projects have no next step.",
+    )
+    expect(summaryLine(groupToday([], TODAY), 1)).toBe("1 project has no next step.")
+    expect(summaryLine(groupToday([], TODAY), 0)).toBe("Nothing needs you today.")
+  })
 })
 
 describe("itemKey", () => {

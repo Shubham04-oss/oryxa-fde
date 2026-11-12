@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { skipToken, useQuery } from "@tanstack/react-query"
-import { useNavigate } from "@tanstack/react-router"
+import { Link, useNavigate } from "@tanstack/react-router"
 import { Card, Failed, Loading, Page, Quiet, Rows } from "./page"
+import { buttonVariants } from "./ui/button"
 import { ActiveRunsCard } from "./runs"
 import { RefusalNote } from "./refusal-note"
 import type { Note } from "./refusal-note"
@@ -16,6 +17,7 @@ import { localDay } from "@/lib/time"
 import { ACCESS_LABEL, TODAY_GROUPS, groupToday, itemKey, summaryLine } from "@/lib/today"
 import type { RowAction } from "@/lib/today"
 import { refusalNote } from "@/lib/task-move"
+import { cn } from "@/lib/utils"
 
 const scopeOf = (item: TodayItem): ProjectScope => ({
   company: item.company.id,
@@ -146,6 +148,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
     )
 
   const groups = groupToday(items.data.items, today)
+  const stepless = items.data.projects_without_next_step ?? []
   const keys = TODAY_GROUPS.flatMap(({ key }) => groups[key].map(itemKey))
   const current = cursor && keys.includes(cursor) ? cursor : keys[0]
   // A refusal whose row has left (deleted or settled elsewhere) is said above the groups instead.
@@ -198,7 +201,7 @@ export function TodayView({ today = localDay() }: { today?: string }) {
     <Page>
       <div className="grid gap-1">
         <p aria-live="polite" className="text-xs text-muted-foreground">
-          {summaryLine(groups)}
+          {summaryLine(groups, stepless.length)}
         </p>
         {keys.length > 0 && (
           <Quiet className="flex flex-wrap items-center gap-x-3 gap-y-1 pointer-coarse:hidden">
@@ -282,6 +285,46 @@ export function TodayView({ today = localDay() }: { today?: string }) {
           </Card>
         ))}
       </div>
+      {stepless.length > 0 && (
+        // Not rows of the inbox: nothing here moves in place. Each goes to the project, with New task open.
+        <Card
+          title="No next step"
+          aside={<span className="text-[11px] text-muted-foreground">{stepless.length}</span>}
+        >
+          <Quiet className="mb-1.5">
+            Every task is done, or there are none. Give each one what comes next, or close it.
+          </Quiet>
+          <Rows>
+            {stepless.map(({ company, project }) => (
+              <li
+                key={project.id}
+                className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2 first:pt-0 last:pb-0"
+              >
+                <span className="grid min-w-0 gap-0.5">
+                  <span className="text-xs font-medium [overflow-wrap:anywhere]">
+                    {project.name}
+                  </span>
+                  <span className="text-[11px] [overflow-wrap:anywhere] text-muted-foreground">
+                    {company.name}
+                  </span>
+                </span>
+                <Link
+                  to="/companies/$companyId/projects/$projectId"
+                  params={{ companyId: company.id, projectId: project.id }}
+                  search={{ add: "task" }}
+                  aria-label={`Add a next step to ${project.name}`}
+                  className={cn(
+                    buttonVariants({ variant: "outline", size: "sm" }),
+                    "max-[800px]:h-9",
+                  )}
+                >
+                  Add a next step
+                </Link>
+              </li>
+            ))}
+          </Rows>
+        </Card>
+      )}
       <ActiveRunsCard />
       <MoveAsk
         mover={mover}

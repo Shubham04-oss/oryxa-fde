@@ -384,6 +384,29 @@ export async function commitRecord(
   refresh(client)
 }
 
+/**
+ * The company's main contact as the API set it (`now`, or null for none): that stakeholder in the page,
+ * and no one else marked. Both rows that changed have moved on a version, so the company is read again.
+ */
+export async function commitMainContact(
+  client: QueryClient,
+  company: CompanyId,
+  now: StakeholderOut | null,
+) {
+  await settle(client)
+  client.setQueryData(
+    queries.company(company).queryKey,
+    (old) =>
+      old && {
+        ...old,
+        stakeholders: old.stakeholders.map((s) =>
+          s.id === now?.id ? now : s.main_contact ? { ...s, main_contact: false } : s,
+        ),
+      },
+  )
+  refresh(client)
+}
+
 /** A change to who is on a company or a project: read again where it shows. */
 export async function commitPeople(client: QueryClient) {
   await settle(client)

@@ -19,6 +19,12 @@ import type { Labels } from "./stale"
 
 export type ScopeItemBody = Omit<components["schemas"]["ScopeItemBody"], "version">
 export type CriterionBody = Omit<components["schemas"]["CriterionBody"], "version">
+/**
+ * What every criterion save sends: the API's `PUT` clears a field it is not sent, so each optional one
+ * is always there (null to clear it), and a save can never drop a baseline or a proof by leaving it out.
+ */
+export type CriterionSave = CriterionBody &
+  Required<Pick<CriterionBody, "unit" | "baseline" | "proof">>
 
 export type ItemKind = ScopeItemOut["kind"]
 export type Comparator = CriterionOut["comparator"]
@@ -72,6 +78,10 @@ export type CriterionFields = {
   /** Typed as text and read as a number, so what is in the box is what is checked. */
   target: string
   unit: string
+  /** The value measured before the work, in the target's unit; typed as text, blank for none. */
+  baseline: string
+  /** How it will be proven, in a few words; blank for not said. */
+  proof: string
 }
 
 export const criterionFields = (c?: CriterionOut): CriterionFields => ({
@@ -80,9 +90,17 @@ export const criterionFields = (c?: CriterionOut): CriterionFields => ({
   comparator: c?.comparator ?? "at_least",
   target: c ? String(c.target) : "",
   unit: c?.unit ?? "",
+  baseline: c?.baseline == null ? "" : String(c.baseline),
+  proof: c?.proof ?? "",
 })
 
-/** The number in the target box, or null when it is not a finite one. */
+/** The API's limit on how a criterion will be proven. */
+export const MAX_PROOF = 500
+// Newlines and tabs only: Rust's `char::is_control` is C0, DEL and C1.
+// eslint-disable-next-line no-control-regex
+const PROOF_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
+
+/** The number in a number box (the target, the baseline), or null when it is not a finite one. */
 export function targetOf(text: string): number | null {
   const v = text.trim()
   if (!v) return null
@@ -95,21 +113,26 @@ export function criterionProblem(f: CriterionFields) {
   const said = checkText(f.description, "invalid_description")
   if (said) return said
   if (!f.metric.trim()) return "Say what is measured."
+  const proof = f.proof.trim()
   return (
     checkName(f.metric, "invalid_metric", true) ??
     (targetOf(f.target) === null ? say("invalid_target") : null) ??
-    checkName(f.unit, "invalid_unit", false)
+    checkName(f.unit, "invalid_unit", false) ??
+    (f.baseline.trim() && targetOf(f.baseline) === null ? say("invalid_baseline") : null) ??
+    ([...proof].length > MAX_PROOF || PROOF_CONTROL.test(proof) ? say("invalid_proof") : null)
   )
 }
 
-/** The API's body: every field, as `PUT` replaces the criterion. A blank unit is none. */
-export function criterionBody(f: CriterionFields): CriterionBody {
+/** The API's body: every field, as `PUT` replaces the criterion. A blank unit, baseline or proof is none. */
+export function criterionBody(f: CriterionFields): CriterionSave {
   return {
     description: f.description.trim(),
     metric: f.metric.trim(),
     comparator: f.comparator,
     target: targetOf(f.target) ?? 0,
     unit: f.unit.trim() || null,
+    baseline: targetOf(f.baseline),
+    proof: f.proof.trim() || null,
   }
 }
 
@@ -119,6 +142,8 @@ export const CRITERION_LABELS: Labels<CriterionFields> = {
   comparator: "comparison",
   target: "target",
   unit: "unit",
+  baseline: "baseline",
+  proof: "how it will be proven",
 }
 
 export const criterionChanged = (before: CriterionOut, f: CriterionFields) => {
@@ -128,14 +153,24 @@ export const criterionChanged = (before: CriterionOut, f: CriterionFields) => {
     was.metric.trim() !== f.metric.trim() ||
     was.comparator !== f.comparator ||
     before.target !== targetOf(f.target) ||
-    was.unit.trim() !== f.unit.trim()
+    was.unit.trim() !== f.unit.trim() ||
+    proofChanged(before, f)
   )
+}
+
+/** Whether the baseline or how it will be proven would change: both are part of what is signed off. */
+export const proofChanged = (before: CriterionOut | undefined, f: CriterionFields) =>
+  (before?.baseline ?? null) !== targetOf(f.baseline) ||
+  (before?.proof ?? "").trim() !== f.proof.trim()
+
+/** "70%", "2 min", "0.7": a number in a criterion's unit. */
+export function inUnit(n: number, unit: string | null | undefined) {
+  return `${n}${unit ? (unit === "%" ? "%" : ` ${unit}`) : ""}`
 }
 
 /** "plans accepted unchanged is at least 70%": what a criterion measures and how far it must go. */
 export function measure(c: Pick<CriterionOut, "metric" | "comparator" | "target" | "unit">) {
-  const unit = c.unit ? (c.unit === "%" ? "%" : ` ${c.unit}`) : ""
-  return `${c.metric} is ${COMPARATOR_LABEL[c.comparator].toLowerCase()} ${c.target}${unit}`
+  return `${c.metric} is ${COMPARATOR_LABEL[c.comparator].toLowerCase()} ${inUnit(c.target, c.unit)}`
 }
 
 // ── Sign-off ───────────────────────────────────────────────────────────────

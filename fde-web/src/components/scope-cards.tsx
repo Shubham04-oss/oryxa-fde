@@ -42,7 +42,9 @@ import {
   itemChanged,
   itemFields,
   itemProblem,
+  inUnit,
   measure,
+  proofChanged,
   scopeChanges,
   signOffState,
   signers,
@@ -72,11 +74,13 @@ function returnFocus(id: string | undefined, ...fallbacks: Array<RefObject<HTMLE
 }
 
 /** A signed-off scope that is about to change: it keeps its sign-off on record, but no longer covers it. */
-function NeedsSignOff() {
+function NeedsSignOff({ proof }: { proof?: boolean }) {
   return (
     <p role="note" className="flex items-start gap-2 rounded-xl border bg-raised px-3.5 py-2.5">
       <span aria-hidden="true" className="mt-1 size-1.5 flex-none rounded-full bg-attention" />
-      This scope is signed off. Saving a change means it needs signing off again.
+      {proof
+        ? "This scope is signed off, and the baseline and how it will be proven are part of what was signed. Saving this change means it needs signing off again."
+        : "This scope is signed off. Saving a change means it needs signing off again."}
     </p>
   )
 }
@@ -399,7 +403,19 @@ export function CriteriaCard({
               onOpen={() => setOpen(criterion)}
             >
               <p className="text-xs whitespace-pre-line">{criterion.description}</p>
-              <Quiet>Met when {measure(criterion)}.</Quiet>
+              <Quiet>
+                <span>Met when {measure(criterion)}.</span>{" "}
+                <span>
+                  {criterion.baseline == null
+                    ? "No baseline measured yet."
+                    : `Baseline ${inUnit(criterion.baseline, criterion.unit)}.`}
+                </span>
+              </Quiet>
+              {criterion.proof && (
+                <Quiet className="[overflow-wrap:anywhere] whitespace-pre-line">
+                  How we will prove it: {criterion.proof}
+                </Quiet>
+              )}
             </EditRow>
           ))}
         </Rows>
@@ -452,6 +468,7 @@ function CriterionDialog({
   const { fields, set } = form
 
   const number = targetOf(fields.target)
+  const baselineNumber = targetOf(fields.baseline)
   // The agreement, as the customer will read it, once there is enough to read.
   const reads =
     fields.metric.trim() && number !== null
@@ -527,14 +544,28 @@ function CriterionDialog({
           hint="Such as % or min."
         />
       </div>
+      <TextField
+        label="Baseline"
+        inputMode="decimal"
+        value={fields.baseline}
+        onChange={(baseline) => set({ baseline })}
+        hint={`Measured before the work, in ${fields.unit.trim() ? `the target's unit (${fields.unit.trim()})` : "the target's unit"}.`}
+      />
+      <TextArea
+        label="How we will prove it"
+        value={fields.proof}
+        onChange={(proof) => set({ proof })}
+        hint="In a few words: an eval suite, or a result the customer shares. Up to 500 characters."
+      />
       {reads && (
         <p className="rounded-xl border bg-raised px-3.5 py-2.5">
           <span className="text-[11px] text-muted-foreground">It will read</span>
           <br />
           Met when {reads}.
+          {baselineNumber !== null && ` Baseline ${inUnit(baselineNumber, fields.unit.trim())}.`}
         </p>
       )}
-      {signedOff && <NeedsSignOff />}
+      {signedOff && <NeedsSignOff proof={!!criterion && proofChanged(criterion, fields)} />}
     </FormDialog>
   )
 }

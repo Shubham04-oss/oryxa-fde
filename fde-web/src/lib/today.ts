@@ -65,11 +65,23 @@ export const itemKey = (item: TodayItem) =>
 export const companiesIn = (groups: Record<TodayGroup, Array<TodayItem>>) =>
   new Set(TODAY_GROUPS.flatMap(({ key }) => groups[key].map((item) => item.company.id))).size
 
-/** What is left, for the line above the groups: the total first, then each group that has rows. */
-export function summaryLine(groups: Record<TodayGroup, Array<TodayItem>>): string {
+/**
+ * What is left, for the line above the groups: the total first, then each group that has rows, then
+ * how many projects have no next step. "Nothing needs you today." only when all of it is none.
+ */
+export function summaryLine(
+  groups: Record<TodayGroup, Array<TodayItem>>,
+  withoutNextStep = 0,
+): string {
   const counts = Object.fromEntries(TODAY_GROUPS.map(({ key }) => [key, groups[key].length]))
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0)
-  if (total === 0) return "Nothing needs you today."
+  const projects =
+    withoutNextStep === 0
+      ? ""
+      : withoutNextStep === 1
+        ? "1 project has no next step."
+        : `${withoutNextStep} projects have no next step.`
+  if (total === 0) return projects || "Nothing needs you today."
   const companies = companiesIn(groups)
   const parts = [
     [counts.blocked, "blocked"],
@@ -79,7 +91,8 @@ export function summaryLine(groups: Record<TodayGroup, Array<TodayItem>>): strin
     .filter(([n]) => n)
     .map(([n, words]) => `${n} ${words}`)
     .join(", ")
-  return `${total} ${total === 1 ? "needs" : "need"} you across ${companies} ${companies === 1 ? "company" : "companies"}: ${parts}.`
+  const rows = `${total} ${total === 1 ? "needs" : "need"} you across ${companies} ${companies === 1 ? "company" : "companies"}: ${parts}.`
+  return projects ? `${rows} ${projects}` : rows
 }
 
 // What a row can do (DESIGN.md §3, Today). A task row has the board's moves; an access request

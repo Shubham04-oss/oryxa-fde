@@ -1574,14 +1574,18 @@ export const screens = [
     path: "/today",
     ready: todayReady,
     ...ONE,
+    // Every row acted on. Finishing every task leaves projects with no next step, so the end is the
+    // groups empty and the "No next step" card, not "Nothing needs you today.".
     act: async (page) => {
-      const clear = page.getByText("Nothing needs you today.")
-      for (let n = 0; n < 400 && !(await clear.isVisible()); n += 1) {
+      const rows = page.locator("[data-row]")
+      const clear = async () => (await rows.count()) === 0
+      for (let n = 0; n < 400 && !(await clear()); n += 1) {
         const next = page.locator("[data-primary]:not([disabled])").first()
         if (await next.isVisible()) await next.click()
         await page.waitForTimeout(80)
       }
-      if (!(await clear.isVisible())) {
+      await page.getByRole("region", { name: "No next step" }).waitFor()
+      if (!(await clear())) {
         const left = await page.locator("[data-row]").allInnerTexts()
         throw new Error(`rows left: ${left.join(" | ").replace(/\n/g, " ")}`)
       }
