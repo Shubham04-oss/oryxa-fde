@@ -14,6 +14,8 @@ describe("schemas", () => {
     expectTypeOf<z.input<typeof S.CompanyOut>>().toEqualTypeOf<Spec["CompanyOut"]>()
     expectTypeOf<z.input<typeof S.ProjectOut>>().toEqualTypeOf<Spec["ProjectOut"]>()
     expectTypeOf<z.input<typeof S.StakeholderOut>>().toEqualTypeOf<Spec["StakeholderOut"]>()
+    expectTypeOf<z.input<typeof S.MainContactOut>>().toEqualTypeOf<Spec["MainContactOut"]>()
+    expectTypeOf<z.input<typeof S.NextStepOut>>().toEqualTypeOf<Spec["NextStepOut"]>()
     expectTypeOf<z.input<typeof S.SystemOut>>().toEqualTypeOf<Spec["SystemOut"]>()
     expectTypeOf<z.input<typeof S.MemberOut>>().toEqualTypeOf<Spec["MemberOut"]>()
     expectTypeOf<z.input<typeof S.AssigneeOut>>().toEqualTypeOf<Spec["AssigneeOut"]>()

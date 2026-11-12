@@ -93,6 +93,7 @@ describe("the mock's people", () => {
       due_on: null,
       blocked_by: null,
       criterion: null,
+      stage: null,
     }
     const task = await api.addTask(scope, { ...base, assignee: "usr_jonah" })
     expect(task.assignee).toBe("usr_jonah")

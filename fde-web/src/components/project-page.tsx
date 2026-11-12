@@ -1,9 +1,11 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Failed, Loading, NotFound, Page, Quiet, isNotFound } from "./page"
 import { Board } from "./board"
+import type { BoardHandle } from "./board"
+import { NextStep } from "./next-step"
 import { ProjectDialog } from "./company-forms"
 import { AccessCard } from "./access-card"
 import type { AccessCardHandle } from "./access-card"
@@ -36,10 +38,11 @@ function Column({ children }: { children: ReactNode }) {
 }
 
 /**
- * A project (DESIGN.md §3): the stage bar, scope and success criteria, the access tracker, tasks
- * and decisions.
+ * A project (DESIGN.md §3): its next step first, then the stage bar, scope and success criteria, the
+ * access tracker, tasks and decisions. `addTask` opens New task once the project is read (Today's
+ * "Add a next step").
  */
-export function ProjectPage({ scope }: { scope: ProjectScope }) {
+export function ProjectPage({ scope, addTask }: { scope: ProjectScope; addTask?: boolean }) {
   const queryClient = useQueryClient()
   const project = useQuery(queries.project(scope))
   const me = useQuery(queries.me())
@@ -53,6 +56,12 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
   const accessCard = useRef<HTMLElement>(null)
   const accessHandle = useRef<AccessCardHandle>(null)
   const notesHandle = useRef<NotesHandle>(null)
+  const board = useRef<BoardHandle>(null)
+  const read = project.isSuccess
+  // Once: the board takes the request when it is there to take it.
+  useEffect(() => {
+    if (addTask && read) board.current?.add()
+  }, [addTask, read])
   const move = useMutation({
     mutationFn: ({ to, reason }: { to: Stage; reason?: string }) =>
       api.moveStage(scope, to, reason),
@@ -144,6 +153,12 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
               Edit project
             </Button>
           </div>
+          <NextStep
+            scope={scope}
+            project={p}
+            onOpen={(task) => board.current?.open(task)}
+            onAdd={() => board.current?.add()}
+          />
           {p.summary && <p className="text-xs leading-relaxed text-soft">{p.summary}</p>}
           {fresh && (
             <div className="rounded-[14px] border border-dashed border-strong px-5 py-3.5 max-[800px]:p-4">
@@ -177,7 +192,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
         )}
       </Column>
 
-      <Board scope={scope} project={p} />
+      <Board handle={board} scope={scope} project={p} />
 
       <Column>
         <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">

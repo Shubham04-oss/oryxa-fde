@@ -1,7 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query"
 import { ApiError, queries } from "./api/client"
-import type { ProjectScope, TaskOut, TaskState } from "./api/schemas"
-import { STATUS_LABEL, placed } from "./board"
+import type { Project, ProjectScope, TaskOut, TaskState } from "./api/schemas"
+import { STATUS_LABEL, nextStepOf, placed } from "./board"
 import type { Place } from "./board"
 
 // What the board and Today share when a task changes: how a refusal reads, and how a saved or
@@ -51,6 +51,13 @@ async function settle(client: QueryClient, scope: ProjectScope) {
   ])
 }
 
+/** The project with `tasks`, and its next step as the API would now read it (`nextStepOf`). */
+const withTasks = (project: Project, tasks: Array<TaskOut>): Project => ({
+  ...project,
+  tasks,
+  next_step: nextStepOf(tasks),
+})
+
 /**
  * Puts a task the API has confirmed into the project, where `place` put it (`placed`), and into Today,
  * then reads Today again.
@@ -64,7 +71,7 @@ export async function commitTask(
   await settle(client, scope)
   client.setQueryData(
     queries.project(scope).queryKey,
-    (old) => old && { ...old, tasks: placed(old.tasks, saved, place) },
+    (old) => old && withTasks(old, placed(old.tasks, saved, place)),
   )
   client.setQueryData(
     queries.today().queryKey,
@@ -84,7 +91,12 @@ export async function commitRemoved(client: QueryClient, scope: ProjectScope, ta
   await settle(client, scope)
   client.setQueryData(
     queries.project(scope).queryKey,
-    (old) => old && { ...old, tasks: old.tasks.filter((t) => t.id !== task.id) },
+    (old) =>
+      old &&
+      withTasks(
+        old,
+        old.tasks.filter((t) => t.id !== task.id),
+      ),
   )
   client.setQueryData(
     queries.today().queryKey,

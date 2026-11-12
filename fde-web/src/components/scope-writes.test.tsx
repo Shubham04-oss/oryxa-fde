@@ -651,6 +651,8 @@ describe("the API mock's scope routes", () => {
       comparator: "at_most",
       target: 2,
       unit: null,
+      baseline: null,
+      proof: null,
     } as const
     expect(await refused(api.addCriterion(FNOL, { ...crit, metric: long }))).toMatchObject({
       code: "invalid_metric",
