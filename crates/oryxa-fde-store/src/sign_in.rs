@@ -46,10 +46,12 @@ impl Hit {
 }
 
 impl Store {
-    /// Counts one attempt in every bucket of `hits`, and answers how long to wait when any of them
-    /// is now over its limit (`None`: go ahead). The caller refuses the attempt on an error.
-    pub async fn sign_in_hits(&self, hits: &[Hit]) -> Result<Option<Duration>, StoreError> {
-        let mut sorted: Vec<&Hit> = hits.iter().collect();
+    /// Counts one attempt in every bucket of `keyed` (per address, per client) and, only when none of
+    /// them is over its limit, in `ceiling`, the bucket shared by everyone: an attempt already refused
+    /// for its own address or client never uses up what everyone else needs. Answers how long to wait
+    /// when a bucket is over (`None`: go ahead). One transaction; the caller refuses on an error.
+    pub async fn sign_in_hits(&self, keyed: &[Hit], ceiling: &Hit) -> Result<Option<Duration>, StoreError> {
+        let mut sorted: Vec<&Hit> = keyed.iter().filter(|h| h.bucket != ceiling.bucket).collect();
         // One order for every transaction, so two attempts never wait on each other's rows.
         sorted.sort_by(|a, b| a.bucket.cmp(&b.bucket));
         sorted.dedup_by(|a, b| a.bucket == b.bucket);
@@ -57,29 +59,13 @@ impl Store {
         sqlx::query("set local role oryxa_fde_relay").execute(&mut *tx).await?;
         let mut wait: Option<Duration> = None;
         for hit in sorted {
-            let secs = hit.window.as_secs_f64();
-            let row = sqlx::query(
-                "insert into sign_in_limits as l (bucket, window_start, hits) values ($1, now(), 1)
-                 on conflict (bucket) do update set
-                     window_start = case when l.window_start <= now() - make_interval(secs => $2)
-                                    then now() else l.window_start end,
-                     hits = case when l.window_start <= now() - make_interval(secs => $2)
-                            then 1 else least(l.hits + 1, $3) end
-                 returning hits,
-                     greatest(extract(epoch from (window_start + make_interval(secs => $2) - now())), 0)::float8 as left_secs",
-            )
-            .bind(&hit.bucket)
-            .bind(secs)
-            .bind(MAX_HITS)
-            .fetch_one(&mut *tx)
-            .await?;
-            let count: i32 = row.try_get("hits")?;
-            let left: f64 = row.try_get("left_secs")?;
-            if i64::from(count) > i64::from(hit.limit) {
-                // At least a second, so a client told to wait never retries at once.
-                let left = Duration::from_secs_f64(left.max(1.0).min(secs.max(1.0)));
+            if let Some(left) = bump(&mut tx, hit).await? {
                 wait = Some(wait.map_or(left, |w| w.max(left)));
             }
+        }
+        // The shared row is taken last, so it is held only for the end of the transaction.
+        if wait.is_none() {
+            wait = bump(&mut tx, ceiling).await?;
         }
         sqlx::query(
             "delete from sign_in_limits where bucket in (
@@ -93,6 +79,33 @@ impl Store {
         tx.commit().await?;
         Ok(wait)
     }
+}
+
+/// Counts one attempt in `hit`'s bucket; how long until its window ends when it is now over its limit.
+async fn bump(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, hit: &Hit) -> Result<Option<Duration>, StoreError> {
+    let secs = hit.window.as_secs_f64();
+    let row = sqlx::query(
+        "insert into sign_in_limits as l (bucket, window_start, hits) values ($1, now(), 1)
+         on conflict (bucket) do update set
+             window_start = case when l.window_start <= now() - make_interval(secs => $2)
+                            then now() else l.window_start end,
+             hits = case when l.window_start <= now() - make_interval(secs => $2)
+                    then 1 else least(l.hits + 1, $3) end
+         returning hits,
+             greatest(extract(epoch from (window_start + make_interval(secs => $2) - now())), 0)::float8 as left_secs",
+    )
+    .bind(&hit.bucket)
+    .bind(secs)
+    .bind(MAX_HITS)
+    .fetch_one(&mut **tx)
+    .await?;
+    let count: i32 = row.try_get("hits")?;
+    let left: f64 = row.try_get("left_secs")?;
+    if i64::from(count) <= i64::from(hit.limit) {
+        return Ok(None);
+    }
+    // At least a second, so a client told to wait never retries at once.
+    Ok(Some(Duration::from_secs_f64(left.max(1.0).min(secs.max(1.0)))))
 }
 
 #[cfg(test)]
@@ -122,25 +135,38 @@ mod tests {
         let store = crate::testing::store().await;
         let mut key = [0u8; 32];
         key[..8].copy_from_slice(&rand_bytes());
+        // Room enough that the ceiling never decides here.
+        key[29] ^= 1;
+        let ceiling = Hit::new("test_ceiling", Some(&key), Duration::from_secs(60), 1000).unwrap();
+        key[29] ^= 1;
         let mine = Hit::new("test_address", Some(&key), Duration::from_secs(60), 2).unwrap();
         key[31] ^= 1;
         let other = Hit::new("test_address", Some(&key), Duration::from_secs(60), 2).unwrap();
-        assert_eq!(store.sign_in_hits(std::slice::from_ref(&mine)).await.unwrap(), None);
-        assert_eq!(store.sign_in_hits(std::slice::from_ref(&mine)).await.unwrap(), None);
-        let wait = store.sign_in_hits(std::slice::from_ref(&mine)).await.unwrap();
+        assert_eq!(
+            store.sign_in_hits(std::slice::from_ref(&mine), &ceiling).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            store.sign_in_hits(std::slice::from_ref(&mine), &ceiling).await.unwrap(),
+            None
+        );
+        let wait = store.sign_in_hits(std::slice::from_ref(&mine), &ceiling).await.unwrap();
         assert!(
             wait.is_some_and(|w| w >= Duration::from_secs(1) && w <= Duration::from_secs(60)),
             "{wait:?}"
         );
         assert_eq!(
-            store.sign_in_hits(std::slice::from_ref(&other)).await.unwrap(),
+            store
+                .sign_in_hits(std::slice::from_ref(&other), &ceiling)
+                .await
+                .unwrap(),
             None,
             "another address is not slowed"
         );
         // An attempt naming both is refused while either is over.
         assert!(
             store
-                .sign_in_hits(&[other.clone(), mine.clone()])
+                .sign_in_hits(&[other.clone(), mine.clone()], &ceiling)
                 .await
                 .unwrap()
                 .is_some()
@@ -149,16 +175,66 @@ mod tests {
         // A lapsed window starts again from one.
         key[30] ^= 1;
         let short = Hit::new("test_address", Some(&key), Duration::from_millis(1100), 1).unwrap();
-        assert_eq!(store.sign_in_hits(std::slice::from_ref(&short)).await.unwrap(), None);
+        assert_eq!(
+            store
+                .sign_in_hits(std::slice::from_ref(&short), &ceiling)
+                .await
+                .unwrap(),
+            None
+        );
         assert!(
             store
-                .sign_in_hits(std::slice::from_ref(&short))
+                .sign_in_hits(std::slice::from_ref(&short), &ceiling)
                 .await
                 .unwrap()
                 .is_some()
         );
         tokio::time::sleep(Duration::from_millis(1300)).await;
-        assert_eq!(store.sign_in_hits(std::slice::from_ref(&short)).await.unwrap(), None);
+        assert_eq!(
+            store
+                .sign_in_hits(std::slice::from_ref(&short), &ceiling)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Postgres (DATABASE_URL)"]
+    async fn a_client_over_its_own_limit_does_not_use_up_the_ceiling_for_everyone() {
+        let store = crate::testing::store().await;
+        let mut key = [0u8; 32];
+        key[..8].copy_from_slice(&rand_bytes());
+        let flooder = Hit::new("test_client", Some(&key), Duration::from_secs(60), 2).unwrap();
+        key[31] ^= 1;
+        let someone = Hit::new("test_client", Some(&key), Duration::from_secs(60), 2).unwrap();
+        // A ceiling of its own for this test, so other tests' counts do not matter.
+        key[30] ^= 1;
+        let ceiling = Hit::new("test_ceiling", Some(&key), Duration::from_secs(60), 5).unwrap();
+        for _ in 0..20 {
+            store
+                .sign_in_hits(std::slice::from_ref(&flooder), &ceiling)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .sign_in_hits(std::slice::from_ref(&someone), &ceiling)
+                .await
+                .unwrap(),
+            None,
+            "only the flooder's two allowed attempts count against the ceiling"
+        );
+        // The ceiling still holds for attempts that pass their own limits.
+        for n in 0..3 {
+            key[28] = n + 1;
+            let fresh = Hit::new("test_client", Some(&key), Duration::from_secs(60), 2).unwrap();
+            let wait = store
+                .sign_in_hits(std::slice::from_ref(&fresh), &ceiling)
+                .await
+                .unwrap();
+            assert_eq!(wait.is_some(), n == 2, "attempt {n} past the ceiling of 5");
+        }
     }
 
     fn rand_bytes() -> [u8; 8] {

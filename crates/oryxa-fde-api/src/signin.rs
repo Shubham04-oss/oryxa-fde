@@ -6,7 +6,9 @@
 //!   paths), and success always sets a new one;
 //! - limits per address, per client and one ceiling across all sign-in calls, counted in Postgres
 //!   before WorkOS is asked, so a limit reached answers alike for every address; a counter that
-//!   cannot be counted refuses the attempt;
+//!   cannot be counted refuses the attempt. The ceiling counts only attempts that passed their own
+//!   limits. An address's limit counts every attempt at it, so one client can keep a chosen address
+//!   slowed (never locked) for a window;
 //! - one answer for a wrong password and an unknown address, every answer padded to
 //!   [`ANSWER_FLOOR`] so its timing says no more than its body;
 //! - a pending step (verify the email, choose an organisation) travels in the short-lived sealed
@@ -106,13 +108,22 @@ pub(crate) const CEILING: Limit = Limit {
 
 /// Counts sign-in attempts; Postgres in the service.
 pub(crate) trait Limiter: Send + Sync {
-    /// Counts one attempt in each bucket; how long to wait when any is over its limit.
-    fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>>;
+    /// Counts one attempt in each of `keyed` and, only if none is over its limit, in `ceiling`; how
+    /// long to wait when any is over.
+    fn hit<'a>(
+        &'a self,
+        keyed: &'a [SignInHit],
+        ceiling: &'a SignInHit,
+    ) -> BoxFuture<'a, Result<Option<Duration>, String>>;
 }
 
 impl Limiter for Store {
-    fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>> {
-        Box::pin(async move { self.sign_in_hits(hits).await.map_err(|e| e.to_string()) })
+    fn hit<'a>(
+        &'a self,
+        keyed: &'a [SignInHit],
+        ceiling: &'a SignInHit,
+    ) -> BoxFuture<'a, Result<Option<Duration>, String>> {
+        Box::pin(async move { self.sign_in_hits(keyed, ceiling).await.map_err(|e| e.to_string()) })
     }
 }
 
@@ -155,7 +166,7 @@ pub struct PasswordSignInIn {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyEmailIn {
-    /// The code WorkOS emailed to the address.
+    /// The code we emailed to the address.
     pub code: String,
 }
 
@@ -243,7 +254,9 @@ async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits
     let client_key = ctx
         .sign_in
         .limit_hash("client", client.ip.as_deref().unwrap_or("unknown"));
-    let mut hits = vec![hit(CEILING, None)?];
+    // The ceiling counts only attempts their own limits let through, so one client cannot use it up.
+    let ceiling = hit(CEILING, None)?;
+    let mut hits = vec![];
     for l in limits {
         let key = if l.kind.ends_with("_address") {
             address
@@ -252,7 +265,7 @@ async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits
         };
         hits.push(hit(*l, key)?);
     }
-    match ctx.limits.hit(&hits).await {
+    match ctx.limits.hit(&hits, &ceiling).await {
         Ok(None) => Ok(()),
         Ok(Some(wait)) => {
             tracing::info!(wait_secs = wait.as_secs(), "sign-in limit reached");
@@ -502,7 +515,7 @@ pub(crate) async fn password(State(app): State<Arc<App>>, headers: HeaderMap, ra
     }
 }
 
-/// Continue a sign-in that waits on email verification, with the code WorkOS emailed.
+/// Continue a sign-in that waits on email verification, with the code we emailed.
 #[utoipa::path(post, operation_id = "sign_in_verify_email", path = "/auth/sign-in/verify-email", tag = "auth",
     security(()), request_body = VerifyEmailIn,
     responses((status = 200, body = SignInStep),
@@ -680,12 +693,17 @@ mod tests {
     }
 
     impl Limiter for Limits {
-        fn hit<'a>(&'a self, hits: &'a [SignInHit]) -> BoxFuture<'a, Result<Option<Duration>, String>> {
+        fn hit<'a>(
+            &'a self,
+            keyed: &'a [SignInHit],
+            ceiling: &'a SignInHit,
+        ) -> BoxFuture<'a, Result<Option<Duration>, String>> {
             Box::pin(async move {
-                self.seen
-                    .lock()
-                    .unwrap()
-                    .push(hits.iter().map(|h| h.bucket().to_owned()).collect());
+                assert_eq!(ceiling.bucket(), "all:", "the ceiling is passed as the ceiling");
+                assert!(keyed.iter().all(|h| h.bucket() != "all:"), "and not as a keyed bucket");
+                let mut seen: Vec<String> = keyed.iter().map(|h| h.bucket().to_owned()).collect();
+                seen.push(ceiling.bucket().to_owned());
+                self.seen.lock().unwrap().push(seen);
                 self.answer.lock().unwrap().clone()
             })
         }

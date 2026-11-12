@@ -105,7 +105,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Continue a sign-in that waits on email verification, with the code WorkOS emailed. */
+        /** Continue a sign-in that waits on email verification, with the code we emailed. */
         post: operations["sign_in_verify_email"];
         delete?: never;
         options?: never;
@@ -2728,7 +2728,7 @@ export interface components {
         /** @enum {string} */
         UpdateState: "draft" | "approved" | "discarded";
         VerifyEmailIn: {
-            /** @description The code WorkOS emailed to the address. */
+            /** @description The code we emailed to the address. */
             code: string;
         };
     };
