@@ -7,7 +7,8 @@ import { Card, Failed, Loading, Quiet, Row, Rows, Status, reveal } from "./page"
 import { Button } from "./ui/button"
 import { api, evalsOff, queries } from "@/lib/api/client"
 import type { EvalRunOut, SuiteOut } from "@/lib/api/evals"
-import type { CriterionOut, ProjectScope } from "@/lib/api/schemas"
+import type { CriterionOut, ProjectScope, TaskOut } from "@/lib/api/schemas"
+import { STATUS_LABEL } from "@/lib/board"
 import { pollDelay } from "@/lib/documents"
 import { commitRun, commitRunFinished } from "@/lib/proof-cache"
 import {
@@ -45,11 +46,14 @@ type Dialog =
 export function ProofSection({
   scope,
   criteria,
+  tasks,
   me,
   handle,
 }: {
   scope: ProjectScope
   criteria: ReadonlyArray<CriterionOut>
+  /** The project's tasks, in its order: a row names those that work towards its criterion. */
+  tasks: ReadonlyArray<TaskOut>
   me: string | undefined
   handle?: Ref<ProofHandle>
 }) {
@@ -202,6 +206,7 @@ export function ProofSection({
                   <ProofRow
                     key={p.criterion.id}
                     proof={p}
+                    tasks={tasks.filter((t) => t.criterion === p.criterion.id)}
                     suites={list}
                     off={off}
                     starting={start.isPending}
@@ -358,8 +363,27 @@ function Trend({ trend }: { trend: ReadonlyArray<TrendPoint> }) {
   )
 }
 
+/** How many linked tasks a row names before "and N more". */
+const TASKS_SHOWN = 3
+
+/** The tasks that work towards a criterion, in one line: each title with its status. */
+function Linked({ tasks }: { tasks: ReadonlyArray<TaskOut> }) {
+  if (tasks.length === 0) return null
+  const named = tasks
+    .slice(0, TASKS_SHOWN)
+    .map((t) => `“${t.title}” (${STATUS_LABEL[t.status].toLowerCase()})`)
+  const more = tasks.length - TASKS_SHOWN
+  return (
+    <Quiet className="[overflow-wrap:anywhere]">
+      {tasks.length === 1 ? "Task towards it" : "Tasks towards it"}: {named.join(", ")}
+      {more > 0 ? `, and ${more} more` : ""}.
+    </Quiet>
+  )
+}
+
 function ProofRow({
   proof: p,
+  tasks,
   suites,
   off,
   starting,
@@ -368,6 +392,8 @@ function ProofRow({
   onShowSuite,
 }: {
   proof: Proof
+  /** The project's tasks linked to this criterion. */
+  tasks: ReadonlyArray<TaskOut>
   suites: ReadonlyArray<SuiteOut>
   off: boolean
   starting: boolean
@@ -440,6 +466,7 @@ function ProofRow({
           </Quiet>
         )}
         {p.scale && <Quiet className="[overflow-wrap:anywhere]">{p.scale}</Quiet>}
+        <Linked tasks={tasks} />
         {p.status === "no_suite" && !off && (
           <>
             <Quiet>

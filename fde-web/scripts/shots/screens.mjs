@@ -1544,6 +1544,33 @@ export const screens = [
     full: false,
     act: (page) => openMenu(page, REPLAY),
   },
+  // Mid-drag within a column: the line shows where the card would land (DESIGN.md, Board, Moving).
+  {
+    name: "board-drop-line",
+    path: DISPATCH,
+    ready: board,
+    full: false,
+    act: async (page) => {
+      const from = "Add driver-hours checks to the eval suite"
+      await card(page, from).scrollIntoViewIfNeeded()
+      const li = (title) =>
+        page.locator("li").filter({ has: page.getByRole("button", { name: `Edit ${title}` }) })
+      // Two steps: the board learns which card is dragged on dragstart, before any dragover.
+      await li(from).evaluate((el) => {
+        window.__shotDrag = new DataTransfer()
+        el.dispatchEvent(
+          new DragEvent("dragstart", { bubbles: true, dataTransfer: window.__shotDrag }),
+        )
+      })
+      await page.waitForTimeout(100)
+      await li(REPLAY).evaluate((el) => {
+        const clientY = el.getBoundingClientRect().top + 2
+        const init = { bubbles: true, cancelable: true, dataTransfer: window.__shotDrag, clientY }
+        el.dispatchEvent(new DragEvent("dragover", init))
+      })
+      await page.locator("[data-drop]").waitFor()
+    },
+  },
   {
     name: "board-done-open",
     path: DISPATCH,

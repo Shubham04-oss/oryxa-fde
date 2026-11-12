@@ -2,11 +2,23 @@ import type { components } from "./api/fde-api.gen"
 import type { TaskOut, TaskState } from "./api/schemas"
 import type { Labels } from "./stale"
 
-// The project board's rules (DESIGN.md §3): the columns, and what each save sends. The API's
-// `PUT .../tasks/{task}` replaces the whole task, so every save sends every field.
+// The project board's rules (DESIGN.md §3): the columns, their order, and what each save sends. The
+// API's `PUT .../tasks/{task}` replaces the whole task, so every save sends every field.
 
 /** A save's fields. The `version` is not one of them: only the call that updates adds it, so a create cannot send one. */
 export type TaskBody = Omit<components["schemas"]["TaskBody"], "version">
+
+/**
+ * What every save sends: each field the API replaces is always there, so a save that leaves one out
+ * cannot clear it by accident (a missing `criterion` would unlink the task).
+ */
+export type TaskSave = TaskBody &
+  Required<
+    Pick<TaskBody, "assignee" | "due_on" | "blocker" | "blocked_by" | "waiting_on" | "criterion">
+  >
+
+/** Where a move puts a task: just before or just after another task of the column it goes to. */
+export type Place = { side: "before" | "after"; anchor: TaskOut }
 
 /** One column per status, in the order a task usually travels. */
 export const COLUMNS: ReadonlyArray<{ status: TaskState; label: string }> = [
@@ -36,6 +48,8 @@ export type Fields = {
   assignee: string | null
   /** The access request it is blocked on; kept, never chosen here. */
   blockedBy: string | null
+  /** The project's success criterion it works towards. */
+  criterion: string | null
 }
 
 /** Each field's name in a sentence, when a stale save says which differ (`lib/stale.ts`). */
@@ -47,6 +61,7 @@ export const TASK_LABELS: Labels<Fields> = {
   due: "due date",
   assignee: "assignee",
   blockedBy: "access request it is blocked on",
+  criterion: "success criterion it works towards",
 }
 
 export const MAX_TITLE = 200
@@ -60,10 +75,14 @@ export const fieldsOf = (task: TaskOut): Fields => ({
   due: task.due_on ?? "",
   assignee: task.assignee ?? null,
   blockedBy: task.blocked_by ?? null,
+  criterion: task.criterion ?? null,
 })
 
-/** The request body for `fields`, clearing what the status does not use (the API refuses a stray `blocked_by`). */
-export function toBody(fields: Fields): TaskBody {
+/**
+ * The request body for `fields`, clearing what the status does not use (the API refuses a stray
+ * `blocked_by`), and with `place`, where the task goes.
+ */
+export function toBody(fields: Fields, place?: Place): TaskSave {
   const blocked = fields.status === "blocked"
   return {
     title: fields.title.trim(),
@@ -73,6 +92,8 @@ export function toBody(fields: Fields): TaskBody {
     blocker: blocked ? fields.blocker.trim() : null,
     blocked_by: blocked ? fields.blockedBy : null,
     waiting_on: fields.status === "waiting_on_customer" ? fields.waitingOn : null,
+    criterion: fields.criterion,
+    ...(place && { [place.side]: place.anchor.id }),
   }
 }
 
@@ -101,11 +122,50 @@ export function problem(fields: Fields): string | null {
 export const asksFirst = (status: TaskState): status is "blocked" | "waiting_on_customer" =>
   status === "blocked" || status === "waiting_on_customer"
 
-/** A column's tasks in creation order: the API has no position, so the board does not invent one. */
+/** A column's tasks in the project's order, which is the order the API lists them in. */
 export function inColumn(tasks: ReadonlyArray<TaskOut>, status: TaskState): Array<TaskOut> {
-  return tasks
-    .filter((t) => t.status === status)
-    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+  return tasks.filter((t) => t.status === status)
+}
+
+/**
+ * The place for `task` at `index` of the column `others` (that column without the task): before the
+ * first, or after the one above it. None in an empty column, where it goes to the end.
+ */
+export function placeAt(others: ReadonlyArray<TaskOut>, index: number): Place | undefined {
+  const above = others[index - 1]
+  if (above) return { side: "after", anchor: above }
+  const first = others[0]
+  return first && { side: "before", anchor: first }
+}
+
+/** Whether `place` leaves `task` where it already is in `column`, so there is nothing to send. */
+export function stays(column: ReadonlyArray<TaskOut>, task: TaskOut, place: Place | undefined) {
+  const self = column.findIndex((t) => t.id === task.id)
+  if (self < 0) return false
+  if (!place) return true
+  const anchor = column.findIndex((t) => t.id === place.anchor.id)
+  return place.side === "after" ? self === anchor + 1 : self === anchor - 1
+}
+
+/**
+ * The project's tasks once the API has saved `saved`, in the order the API now has them (PR #190): a
+ * place puts it beside its anchor; without one a new task, or one whose status changed, goes to the
+ * end, and any other save keeps its place.
+ */
+export function placed(
+  tasks: ReadonlyArray<TaskOut>,
+  saved: TaskOut,
+  place: Place | undefined,
+): Array<TaskOut> {
+  const was = tasks.find((t) => t.id === saved.id)
+  if (was && !place && was.status === saved.status)
+    return tasks.map((t) => (t.id === saved.id ? saved : t))
+  const rest = tasks.filter((t) => t.id !== saved.id)
+  const anchor = place ? rest.findIndex((t) => t.id === place.anchor.id) : -1
+  // An anchor the page no longer has: the end, until the project is read again.
+  if (anchor < 0) return [...rest, saved]
+  rest.splice(place?.side === "after" ? anchor + 1 : anchor, 0, saved)
+  return rest
 }
 
 /** Done tasks to list before "Show all": the board shows the latest, the rest sit behind a button. */

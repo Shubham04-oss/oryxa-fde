@@ -6,6 +6,7 @@ import { mockApi } from "@/dev/mock-api"
 import { api } from "@/lib/api/client"
 import type { ApiError } from "@/lib/api/client"
 import { CompanyId, ProjectId, TaskId } from "@/lib/api/schemas"
+import { fieldsOf, toBody } from "@/lib/board"
 import { renderWithRouter } from "@/test/render"
 
 // Lets a test hold a write on the wire, or have it refused, before the mock answers. The client
@@ -16,9 +17,12 @@ const wire: {
   refuse: Response | null
   /** Holds a read's answer, already taken, so it arrives late with what was true when it was asked. */
   holdReads: Promise<void> | null
-} = { hold: null, refuse: null, holdReads: null }
+  /** The body of every write sent, in order. */
+  sent: Array<Record<string, unknown>>
+} = { hold: null, refuse: null, holdReads: null, sent: [] }
 mockApi.fetch = async (request) => {
   const write = request.method !== "GET"
+  if (write) wire.sent.push(JSON.parse((await request.clone().text()) || "null") ?? {})
   if (write && wire.hold) await wire.hold
   if (write && wire.refuse) return wire.refuse.clone()
   const response = await answer(request)
@@ -29,6 +33,7 @@ afterEach(() => {
   wire.hold = null
   wire.refuse = null
   wire.holdReads = null
+  wire.sent = []
 })
 
 const scope = {
@@ -64,6 +69,20 @@ async function pick(card: string, entry: string) {
 
 const REPLAY = "Replay last month's orders through the planner"
 const TELEMATICS = "Agree the telematics alternative"
+const DRIVER_HOURS = "Add driver-hours checks to the eval suite"
+const DEPOT_RULES = "Load depot rules into the context pack"
+const cardOf = (title: string) =>
+  screen.getByRole("button", { name: `Edit ${title}`, hidden: true }).closest("li")!
+
+/**
+ * A drag event at height `y`. jsdom has no DragEvent, so it is a mouse event carrying `dataTransfer`,
+ * and lays nothing out, so every card's box is at 0 with no height: 0 is its upper half, 1 its lower.
+ */
+function drag(type: "dragover" | "drop", target: Element, y = 0) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientY: y })
+  Object.defineProperty(event, "dataTransfer", { value: { setData: () => {}, effectAllowed: "" } })
+  fireEvent(target, event)
+}
 
 describe("Board", () => {
   it("shows a column for each status, each card with who has it and why it is stuck", async () => {
@@ -78,8 +97,8 @@ describe("Board", () => {
         "Done6",
       ]),
     )
-    // Creation order.
-    expect(titles("To do")).toEqual(["Add driver-hours checks to the eval suite", REPLAY])
+    // The API's order, not creation order: the replay was made later and sits first.
+    expect(titles("To do")).toEqual([REPLAY, DRIVER_HOURS])
     const blocked = column("Blocked")
     expect(within(blocked).getByText(/Telematics export refused/)).toBeInTheDocument()
     expect(within(blocked).getByText("Overdue by 1 day")).toBeInTheDocument()
@@ -201,16 +220,121 @@ describe("Board", () => {
     expect(titles("Done")).toContain(REPLAY)
   })
 
-  it("does nothing when a card is dropped on its own column", async () => {
+  it("does nothing when a card is dropped back where it is", async () => {
     await board()
-    const card = screen.getByRole("button", { name: `Edit ${REPLAY}` }).closest("li")!
+    const card = cardOf(DRIVER_HOURS)
     const dataTransfer = { setData: () => {}, effectAllowed: "" }
 
     fireEvent.dragStart(card, { dataTransfer })
+    // Over its own card, and below the column's last card, which it already is.
+    fireEvent.dragOver(card, { dataTransfer })
+    expect(document.querySelector("[data-drop]")).toBeNull()
+    fireEvent.dragOver(column("To do"), { dataTransfer })
+    expect(document.querySelector("[data-drop]")).toBeNull()
     fireEvent.drop(column("To do"), { dataTransfer })
 
-    expect(screen.queryByText(/^Moving to/)).toBeNull()
-    expect(titles("To do")).toContain(REPLAY)
+    expect(screen.queryByText(/^Moving/)).toBeNull()
+    expect(wire.sent).toEqual([])
+    expect(titles("To do")).toEqual([REPLAY, DRIVER_HOURS])
+  })
+
+  it("moves a card to a place in its column by drag and drop, beside the card it lands on", async () => {
+    await board()
+    const dataTransfer = { setData: () => {}, effectAllowed: "" }
+
+    fireEvent.dragStart(cardOf(DRIVER_HOURS), { dataTransfer })
+    drag("dragover", cardOf(REPLAY), 0)
+    // The line shows where it would land, above the card.
+    expect(cardOf(REPLAY).querySelector("[data-drop]")).toHaveAttribute("data-drop", "before")
+    drag("drop", cardOf(REPLAY), 0)
+
+    await waitFor(() => expect(titles("To do")).toEqual([DRIVER_HOURS, REPLAY]))
+    expect(wire.sent).toEqual([expect.objectContaining({ status: "todo", before: "tsk_k2" })])
+    expect(wire.sent[0]).not.toHaveProperty("after")
+    // The API has the same order.
+    const tasks = (await api.project(scope)).tasks.filter((t) => t.status === "todo")
+    expect(tasks.map((t) => t.title)).toEqual([DRIVER_HOURS, REPLAY])
+    expect(
+      screen.getByText(`Moved “${DRIVER_HOURS}” above “${REPLAY}”.`, { selector: "[role=status]" }),
+    ).toBeInTheDocument()
+  })
+
+  it("moves a card into another column at the place it is dropped", async () => {
+    await board()
+    const dataTransfer = { setData: () => {}, effectAllowed: "" }
+
+    fireEvent.dragStart(cardOf(REPLAY), { dataTransfer })
+    // Past the middle of the one card in In progress: below it.
+    drag("dragover", cardOf(DEPOT_RULES), 1)
+    expect(cardOf(DEPOT_RULES).querySelector("[data-drop]")).toHaveAttribute("data-drop", "after")
+    drag("drop", cardOf(DEPOT_RULES), 1)
+
+    await waitFor(() => expect(titles("In progress")).toEqual([DEPOT_RULES, REPLAY]))
+    expect(wire.sent).toEqual([expect.objectContaining({ status: "in_progress", after: "tsk_k1" })])
+  })
+
+  it("moves a card up and down its column by keyboard, and keeps the focus on it", async () => {
+    await board()
+    // The top card cannot go up, the bottom one cannot go down, and Done keeps no order of its own.
+    await userEvent.click(screen.getByRole("button", { name: `Actions for ${REPLAY}` }))
+    expect(await screen.findByRole("menuitem", { name: "Move down" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: "Move up" })).toBeNull()
+    await userEvent.keyboard("{Escape}")
+
+    const actions = screen.getByRole("button", { name: `Actions for ${DRIVER_HOURS}` })
+    actions.focus()
+    await userEvent.keyboard("{Enter}")
+    ;(await screen.findByRole("menuitem", { name: "Move up" })).focus()
+    expect(screen.queryByRole("menuitem", { name: "Move down" })).toBeNull()
+    await userEvent.keyboard("{Enter}")
+
+    await waitFor(() => expect(titles("To do")).toEqual([DRIVER_HOURS, REPLAY]))
+    expect(wire.sent).toEqual([expect.objectContaining({ status: "todo", before: "tsk_k2" })])
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: `Actions for ${DRIVER_HOURS}` })).toHaveFocus(),
+    )
+
+    // And back down, from the same place.
+    await userEvent.keyboard("{Enter}")
+    ;(await screen.findByRole("menuitem", { name: "Move down" })).focus()
+    await userEvent.keyboard("{Enter}")
+    await waitFor(() => expect(titles("To do")).toEqual([REPLAY, DRIVER_HOURS]))
+    expect(wire.sent[1]).toMatchObject({ status: "todo", after: "tsk_k2" })
+  })
+
+  it("offers no Move up or Move down in Done", async () => {
+    await board()
+    await openDone()
+    await userEvent.click(
+      screen.getByRole("button", { name: "Actions for Share the pilot plan with the dispatchers" }),
+    )
+    expect(await screen.findByRole("menuitem", { name: "In progress" })).toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: /^Move (up|down)$/ })).toBeNull()
+  })
+
+  it("shows the criterion a task works towards, and links one from the form", async () => {
+    await board()
+    expect(within(cardOf(REPLAY)).getByText(/^Towards:/)).toHaveTextContent(
+      "Towards: Plans dispatchers accept with no changes",
+    )
+    expect(within(cardOf(TELEMATICS)).queryByText(/^Towards:/)).toBeNull()
+
+    await userEvent.click(screen.getByRole("button", { name: `Edit ${TELEMATICS}` }))
+    const box = await screen.findByRole("dialog", { name: "Edit task" })
+    const works = within(box).getByLabelText("Works towards")
+    expect(works).toHaveValue("")
+    await userEvent.selectOptions(works, "Time to a draft plan")
+    await userEvent.click(within(box).getByRole("button", { name: "Save" }))
+
+    await waitFor(() =>
+      expect(within(cardOf(TELEMATICS)).getByText(/^Towards:/)).toHaveTextContent(
+        "Towards: Time to a draft plan",
+      ),
+    )
+    expect(wire.sent).toEqual([expect.objectContaining({ criterion: "crt_k3" })])
+    // It stays in its place: an edit names none.
+    expect(wire.sent[0]).not.toHaveProperty("before")
+    expect(wire.sent[0]).not.toHaveProperty("after")
   })
 
   it("asks what blocks a task before moving it to Blocked", async () => {
@@ -505,6 +629,60 @@ describe("Board", () => {
 })
 
 describe("the API mock", () => {
+  const put = (id: string, body: object) =>
+    api.updateTask(scope, TaskId.parse(id), { title: "x", status: "todo", ...body }, 1)
+
+  it("orders tasks as the API does, and a repeated move changes nothing", async () => {
+    renderWithRouter(<p />)
+    const todo = async () =>
+      (await api.project(scope)).tasks.filter((t) => t.status === "todo").map((t) => t.id)
+    const replay = (await api.project(scope)).tasks.find((t) => t.id === "tsk_k2")!
+    const after = { side: "after" as const, anchor: { ...replay, id: TaskId.parse("tsk_k3") } }
+    const fields = fieldsOf(replay)
+
+    const moved = await api.updateTask(scope, replay.id, toBody(fields, after), 1)
+    expect(await todo()).toEqual(["tsk_k3", "tsk_k2"])
+    expect(moved.version).toBe(2)
+    // The same move again: it is already there, so nothing changes, its version included.
+    const again = await api.updateTask(scope, replay.id, toBody(fields, after), 2)
+    expect(again.version).toBe(2)
+    // A save with no place keeps the place; a change of status with none goes to the end.
+    await api.updateTask(scope, replay.id, toBody({ ...fields, title: "Renamed" }), 2)
+    expect(await todo()).toEqual(["tsk_k3", "tsk_k2"])
+    await api.updateTask(scope, TaskId.parse("tsk_k1"), { title: "Back", status: "todo" }, 1)
+    expect(await todo()).toEqual(["tsk_k3", "tsk_k2", "tsk_k1"])
+  })
+
+  it("refuses a place the API refuses, and a criterion of another project", async () => {
+    renderWithRouter(<p />)
+    const refused = (id: string, body: object) => put(id, body).catch((e: unknown) => e as ApiError)
+    expect(await refused("tsk_k2", { before: "tsk_k3", after: "tsk_k3" })).toMatchObject({
+      status: 400,
+      code: "invalid_place",
+    })
+    // Another status, itself, another project's, none at all.
+    expect(await refused("tsk_k2", { after: "tsk_k1" })).toMatchObject({ code: "invalid_after" })
+    expect(await refused("tsk_k2", { before: "tsk_k2" })).toMatchObject({ code: "invalid_before" })
+    expect(await refused("tsk_k2", { after: "tsk_b2" })).toMatchObject({ code: "invalid_after" })
+    expect(await refused("tsk_k2", { after: "tsk_nope" })).toMatchObject({ code: "invalid_after" })
+    expect(await refused("tsk_k2", { criterion: "crt_b1" })).toMatchObject({
+      status: 400,
+      code: "invalid_criterion",
+    })
+  })
+
+  it("lists the tasks linked to a criterion, and unlinks them when it is removed", async () => {
+    renderWithRouter(<p />)
+    const path = `/api/v1/companies/${scope.company}/projects/${scope.project}/tasks?criterion=crt_k1`
+    const linked = await (await mockApi.fetch(new Request(`http://localhost${path}`))).json()
+    expect((linked as Array<{ id: string }>).map((t) => t.id)).toEqual(["tsk_k2", "tsk_k10"])
+
+    await api.removeCriterion(scope, "crt_k1" as never)
+    const tasks = (await api.project(scope)).tasks
+    expect(tasks.find((t) => t.id === "tsk_k2")).toMatchObject({ criterion: null, version: 2 })
+    expect(tasks.find((t) => t.id === "tsk_k1")).toMatchObject({ criterion: "crt_k2", version: 1 })
+  })
+
   it("refuses what the API refuses on a task", async () => {
     renderWithRouter(<p />)
     const body = { title: "x", status: "todo" as const }

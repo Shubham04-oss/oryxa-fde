@@ -77,6 +77,7 @@ function task(
     blockedBy?: string
     waitingOn?: string
     waitingDays?: number
+    criterion?: string
   } = {},
 ): S["TaskOut"] {
   return {
@@ -89,6 +90,7 @@ function task(
     waiting_on: extra.waitingOn ?? null,
     waiting_since: extra.waitingDays === undefined ? null : ago(extra.waitingDays),
     blocked_by: extra.blockedBy ?? null,
+    criterion: extra.criterion ?? null,
     created_at: ago(daysAgo + 10),
     updated_at: ago(daysAgo),
     version: 1,
@@ -508,14 +510,17 @@ function seed() {
           task("tsk_k1", "Load depot rules into the context pack", "in_progress", 1, {
             due: 1,
             assignee: RIYA,
+            criterion: "crt_k2",
           }),
           task("tsk_k2", "Replay last month's orders through the planner", "todo", 2, {
             due: 0,
             assignee: RIYA,
+            criterion: "crt_k1",
           }),
           task("tsk_k3", "Add driver-hours checks to the eval suite", "todo", 3, {
             due: -2,
             assignee: JONAH,
+            criterion: "crt_k2",
           }),
           task("tsk_k4", "Agree the telematics alternative", "blocked", 3, {
             due: -1,
@@ -540,6 +545,7 @@ function seed() {
           task("tsk_k9", "Write the first depot rules summary", "done", 9, { assignee: RIYA }),
           task("tsk_k10", "Run the first planner replay on sample orders", "done", 6, {
             assignee: JONAH,
+            criterion: "crt_k1",
           }),
           task("tsk_k11", "Share the pilot plan with the dispatchers", "done", 3, {
             assignee: RIYA,
@@ -1089,6 +1095,7 @@ const TASK_FIELDS = [
   "assignee",
   "waiting_on",
   "blocked_by",
+  "criterion",
 ] as const
 const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
 let taskCount = 0
@@ -1125,6 +1132,8 @@ async function taskRoutes(
   const status = TASK_STATES.find((one) => one === body.status)
   if (!plain(body.title, 200, false)) return refuse(400, "invalid_title")
   if (!status) return refuse(400, "invalid_status")
+  // A place is next to one task: never both sides.
+  if (body.before != null && body.after != null) return refuse(400, "invalid_place")
   const blocker = body.blocker ?? null
   if (blocker !== null && !plain(blocker, 4000, true)) return refuse(400, "invalid_blocker")
   const due = body.due_on ?? null
@@ -1165,6 +1174,26 @@ async function taskRoutes(
     }
     if (version !== before.version) return refuseStale(before)
   }
+  // Checked after the version, as the API's store does: one of this project's own criteria.
+  const towards = body.criterion ?? null
+  if (towards !== null && !records.scope.criteria.some((c) => c.id === towards))
+    return refuse(400, "invalid_criterion")
+  // The anchor is another task of this project, with the status this one will have.
+  const side = body.before != null ? "before" : body.after != null ? "after" : null
+  const anchorId = body.before ?? body.after ?? null
+  if (side) {
+    const anchor = tasks.find((t) => t.id === anchorId)
+    if (!anchor || anchor.id === before?.id || anchor.status !== status)
+      return refuse(400, `invalid_${side}`)
+  }
+  // Whether it already stands there: no place named, or right beside the anchor in its own column.
+  let atPlace = side === null
+  if (side && before?.status === status) {
+    const column = tasks.filter((t) => t.status === status)
+    const self = column.findIndex((t) => t.id === before.id)
+    const next = column.findIndex((t) => t.id === anchorId)
+    atPlace = side === "after" ? self === next + 1 : self === next - 1
+  }
   const saved: S["TaskOut"] = {
     id: before?.id ?? `tsk_new${++taskCount}`,
     title: body.title!.trim(),
@@ -1176,14 +1205,24 @@ async function taskRoutes(
     // The API keeps the first time a task started waiting.
     waiting_since: status === "waiting_on_customer" ? (before?.waiting_since ?? now) : null,
     blocked_by: blockedBy,
+    criterion: towards,
     created_at: before?.created_at ?? now,
     updated_at: now,
     version: (before?.version ?? 0) + 1,
   }
-  // A save that changes nothing is not a change: the task is answered as it is, version and all.
-  if (before && sameFields(before, saved, TASK_FIELDS)) return json(before)
-  if (before) tasks[at] = saved
-  else tasks.push(saved)
+  // A save that changes nothing, where it already stands, is not a change: the task is answered as it
+  // is, version and all. A repeated move is one.
+  if (before && atPlace && sameFields(before, saved, TASK_FIELDS)) return json(before)
+  // The array is the project's order. A place puts it beside its anchor; without one, a new task or a
+  // change of status goes to the end, and any other save keeps its place.
+  if (before && atPlace && before.status === status) {
+    tasks[at] = saved
+  } else {
+    if (before) tasks.splice(at, 1)
+    const anchor = tasks.findIndex((t) => t.id === anchorId)
+    if (side) tasks.splice(side === "after" ? anchor + 1 : anchor, 0, saved)
+    else tasks.push(saved)
+  }
   return json(saved, adding ? 201 : 200)
 }
 
@@ -1557,6 +1596,7 @@ async function scopeRoutes(
   rest: Array<string>,
   found: CompanySeed,
   current: S["ScopeOut"],
+  tasks: Array<S["TaskOut"]>,
   request: Request,
 ) {
   const [collection, id] = rest
@@ -1606,6 +1646,11 @@ async function scopeRoutes(
     if (at < 0) return refuse(404, "not_found")
     list.splice(at, 1)
     bumped(current)
+    // Removing a criterion unlinks its tasks (`on delete set null`), a change to each: their versions move on.
+    if (collection === "criteria")
+      tasks.forEach((t, i) => {
+        if (t.criterion === id) tasks[i] = bump(t, { criterion: null })
+      })
     return noContent()
   }
   const adding = method === "POST" && id === undefined
@@ -2052,7 +2097,13 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === undefined) return json(p.project)
     if (record === "scope") return json(p.records.scope)
     if (record === "access-requests") return json(p.records.access)
-    if (record === "tasks") return json(p.records.tasks)
+    if (record === "tasks") {
+      // In the project's order; `?criterion=` keeps the tasks linked to that criterion.
+      const linked = new URL(request.url).searchParams.get("criterion")
+      return json(
+        linked === null ? p.records.tasks : p.records.tasks.filter((t) => t.criterion === linked),
+      )
+    }
     if (record === "decisions") return json(newestFirst(p.records.decisions))
     if (record === "threads") return json(p.records.threads ?? [])
     // The company's lists, read through the project, as assignees do.
@@ -2060,7 +2111,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
     if (record === "systems") return json(found.systems)
     return null
   }
-  if (record === "scope") return scopeRoutes(method, rest, found, p.records.scope, request)
+  if (record === "scope")
+    return scopeRoutes(method, rest, found, p.records.scope, p.records.tasks, request)
   if (record === "tasks") return taskRoutes(method, rest[0], found, p.records, request)
   if (record === "access-requests") return accessRoutes(method, rest[0], found, p.records, request)
   if (record === "decisions") return decisionRoutes(method, rest[0], p.records, request)
