@@ -584,7 +584,8 @@ workflows (Deploys, below), not from the owner's machine.
     upload you want searchable: a subscriber delivers events published after it exists.
 13. **Cloudflare Workers.** Run the `deploy-workers` workflow on `main`. Then set the gateway's Worker secrets
     once, from `sandbox/gateway` (`npx wrangler secret put SERVICE_TOKEN`, and `DEV_SECRETS` per its
-    README); until then the gateway refuses every call. Secrets survive later deploys.
+    README); until then the gateway refuses every call. Then set the assistant's four secrets, on both Workers, the
+    assistant first (Deploys, The assistant's secrets); until then `/assistant/*` answers 503. Secrets survive later deploys.
 14. **Smoke test.** The `oryxa-fde-api` service has one running task whose `api` container reports
     `HEALTHY` (`aws ecs describe-tasks`, `containers[].healthStatus`), `oryxa-fde-ingest` has one running task, the tunnel `oryxa-fde-dev-api`
     shows healthy in the Cloudflare dashboard, `https://<web_hostname>` reaches the API through the
@@ -1062,7 +1063,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
 | `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`, `oryxa-fde-mcp`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, then rolls the API service and then each deployed worker onto it (the tunnel sidecar included in the API's new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
-| `deploy-workers` | `wrangler deploy` for `sandbox/gateway` and `realtime/` (skipped until it exists), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN` |
+| `deploy-workers` | `wrangler deploy` for `sandbox/gateway`, `realtime/` and `assistant/` (with dev's API binding), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
 apply (Apply order, step 3):
@@ -1082,6 +1083,15 @@ apply (Apply order, step 3):
   for this account and zone only, with Account: Workers Scripts Edit and Containers Edit (the
   gateway's sandbox image), and Zone: Workers Routes Edit. Not the OpenTofu token. Only the
   `wrangler deploy` steps see it; installs (`npm ci --ignore-scripts`) and builds run without it.
+  A Durable Object needs nothing more: Cloudflare gives Durable Objects no roles of their own, and access to one
+  comes from the role on the Worker that implements it ([Durable Objects roles and permissions](https://developers.cloudflare.com/workers/authorization/durable-objects/)),
+  so this token deploys `realtime/` and `assistant/` with their objects. **Creating a Worker is different:** Cloudflare's
+  [Workers roles and permissions](https://developers.cloudflare.com/workers/authorization/workers/) page says creating a
+  new Worker needs `Admin` at the Workers product scope, and maps the legacy Workers Scripts Edit to `Editor`, which "cannot
+  create or delete Workers". It does not say whether a token that still holds the legacy permission can create one. So
+  the first run that creates a Worker (the first run of all, and the first after a new Worker such as `assistant/` is
+  added) may be refused. If it is, give the token `Admin` at the Workers product scope for that one run, then put it back
+  to Workers Scripts Edit: `Admin` can also delete every Worker in the account, which a routine deploy never needs.
 
 There is no AWS key anywhere. The `deploy` job of `deploy-api` gets a one-hour session for
 `oryxa-fde-dev-github-deploy` through GitHub OIDC. Its trust needs both claims to match exactly:
@@ -1235,6 +1245,67 @@ The web build's flags come from an explicit list of `dev` variables, one per fla
 passed through, because every `VITE_` value is baked into the public bundle and must never be a secret. The
 job summary lists each flag and whether it is on. The mock-only `VITE_FDE_WORKSPACE` is not passed.
 Worker secrets are set by hand with `wrangler secret put` and are never in the workflow.
+
+**Deploy order, and why fde-web waits.** `sandbox/gateway`, `realtime/` and `assistant/` deploy in parallel; `fde-web`
+`needs` both jobs and runs only when they all succeeded. fde-web's config binds `REALTIME` to `oryxa-fde-realtime` and
+`ASSISTANT` to `oryxa-fde-assistant`. Cloudflare's [service bindings page](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/#deployment)
+says the target Worker "must be deployed first": otherwise "deployment will fail, because Worker A declares a binding to
+Worker B, which does not yet exist" (upload error 10056, "Binding not found", on the [errors page](https://developers.cloudflare.com/workers/observability/errors/)).
+So a web deploy before the assistant exists is refused outright, not deployed with a dead binding, and when the
+assistant job fails the web job does not run and the web already deployed stays as it was. For later changes the same
+page says to deploy the target first, compatible with the caller still running: a change to `assistant/` must keep
+accepting what the deployed fde-web sends until fde-web is deployed after it.
+
+**The assistant Worker** (`assistant/`, ADR 0009). Its job installs from the lockfile without install scripts, runs `npm
+run check` (prettier, tsc, eslint and the catalogue copy; CI's `sandbox` job runs the tests), then writes the deploy
+config `wrangler.deploy.json` from `wrangler.jsonc` and deploys it with `wrangler deploy --config`. The config adds the
+`API` binding to the same Workers VPC service fde-web uses (`API_VPC_SERVICE_ID`), the only host the assistant reaches;
+without it every read tool answers that it could not read. It forces `workers_dev` and preview URLs off and drops any
+route, so fde-web's service binding is the only way in. TypeScript, a pinned devDependency, parses the JSONC, since jq
+cannot.
+
+Its two Durable Object classes, `Conversation` and `PersonTurns`, are declared in `exports` with SQLite storage, the
+declarative replacement for the `migrations` list: on each deploy Cloudflare compares the declared classes with the
+namespaces already provisioned for the Worker and creates the missing ones ([Durable Object class exports](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)).
+So the first deploy creates both namespaces with no extra step, and a later deploy changes nothing unless `exports`
+changes. Deleting or renaming a class is a `state` change there, and a delete removes its stored data (the working copy
+only; the record is in Postgres).
+
+**The assistant's secrets.** Two shared values, each set on both Workers by hand, never in the workflow, the repository
+or a GitHub secret:
+
+| Worker | Secret | Same value as | Read by |
+| --- | --- | --- | --- |
+| `oryxa-fde-assistant` | `SERVICE_TOKEN` | fde-web's `ASSISTANT_SERVICE_TOKEN` | `assistant/src/index.ts`: a call without it is refused (401) |
+| `oryxa-fde-assistant` | `BINDING_KEY` | fde-web's `ASSISTANT_BINDING_KEY` | `assistant/src/index.ts`: verifies the binding fde-web signed |
+| `oryxa-fde-web` | `ASSISTANT_SERVICE_TOKEN` | the assistant's `SERVICE_TOKEN` | `fde-web/src/server.ts`: sent on every call |
+| `oryxa-fde-web` | `ASSISTANT_BINDING_KEY` | the assistant's `BINDING_KEY` | `fde-web/src/server.ts`: signs each conversation binding |
+
+Each value is at least 32 random bytes from a secure generator, for example `openssl rand -hex 32` (64 characters), and
+the token and the key are two different values. Both Workers treat a value shorter than 32 characters as unset. Until
+fde-web has both, it answers 503 `assistant_not_configured` on `/assistant/*` and the welcome screen keeps its scripted
+answers; until the assistant has both, it refuses every call. A `wrangler secret put` creates a new version of the Worker
+and deploys it at once ([Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)), and "secrets are
+never deleted by a deployment" ([`wrangler deploy`](https://developers.cloudflare.com/workers/wrangler/commands/workers/#deploy)),
+so they are set once and survive every later run. Setting a secret needs `Editor` on that Worker.
+
+Set them after the first `deploy-workers` run has created both Workers, the assistant first, so fde-web never calls an
+assistant that would refuse it. From a checkout of `main`, signed in to Wrangler as yourself (not with the deploy token);
+the values stay in two shell variables and are piped, never typed or echoed:
+
+```bash
+token=$(openssl rand -hex 32); key=$(openssl rand -hex 32)
+(cd assistant && npm ci --ignore-scripts --no-audit --no-fund \
+  && printf %s "$token" | npx wrangler secret put SERVICE_TOKEN --name oryxa-fde-assistant \
+  && printf %s "$key" | npx wrangler secret put BINDING_KEY --name oryxa-fde-assistant)
+(cd fde-web && pnpm install --frozen-lockfile \
+  && printf %s "$token" | pnpm exec wrangler secret put ASSISTANT_SERVICE_TOKEN --name oryxa-fde-web \
+  && printf %s "$key" | pnpm exec wrangler secret put ASSISTANT_BINDING_KEY --name oryxa-fde-web)
+unset token key
+```
+
+To rotate, run the same with new values. Between the assistant's change and fde-web's, the assistant refuses fde-web's
+calls (fail closed), so rotate when nobody is mid-conversation.
 
 **Teardown.**
 
@@ -1620,7 +1691,8 @@ These could not be checked without an account. Each one is flagged at the place 
   VPC service) and the zone route on `<web_hostname>` to the built config at deploy time, so
   `wrangler.jsonc` keeps no dev values. `realtime/` deploys like the gateway: `npm ci` with a
   `package-lock.json`, `wrangler` in its devDependencies and `wrangler deploy` from its directory,
-  before `fde-web`.
+  before `fde-web`. `assistant/` deploys the same way, also before `fde-web`, with the `API` binding added to its config
+  at deploy time; its `wrangler.jsonc` keeps no dev values either, and `npm run check` must pass on `main`.
 - **Agent (`sandbox/`)** The gateway deploys as its `wrangler.jsonc` says; its Worker secrets are set
   by hand. Its hostname and an AWS identity for the outbound handler's Bedrock calls are follow-ups
   when that stream needs them.
