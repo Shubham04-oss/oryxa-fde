@@ -2,6 +2,8 @@ import type { QueryClient } from "@tanstack/react-query"
 import { queries } from "./api/client"
 import type { components } from "./api/fde-api.gen"
 import type { MeetingNoteOut, NotePlace } from "./api/schemas"
+import { listOf } from "./people"
+import type { Person } from "./people"
 import { at, checkName, say } from "./records"
 import type { Problem } from "./records"
 import { localDay } from "./time"
@@ -144,17 +146,18 @@ export const latestFirst = (list: ReadonlyArray<MeetingNoteOut>) =>
       a.id.localeCompare(b.id),
   )
 
-/** Who of the workspace was there, as far as the page knows: "You and 2 teammates". Null when no one is named. */
-export function attendeesLine(note: MeetingNoteOut, me: string | undefined): string | null {
-  const you = me !== undefined && (note.attendees as ReadonlyArray<string>).includes(me)
-  const others = note.attendees.length - (you ? 1 : 0)
-  const parts = [
-    ...(you ? ["You"] : []),
-    ...(others > 0 ? [others === 1 ? "a teammate" : `${others} teammates`] : []),
-  ]
-  if (parts.length === 0) return null
-  const line = parts.join(" and ")
-  return line.charAt(0).toUpperCase() + line.slice(1)
+/**
+ * Who of the workspace was there, by name: "You, Jonah Ade and Sam Ortiz", "You, Jonah Ade and 3 others".
+ * Null when no one is named.
+ */
+export function attendeesLine(
+  note: MeetingNoteOut,
+  of: (id: string) => Pick<Person, "label" | "phrase" | "you">,
+): string | null {
+  const people = note.attendees.map(of)
+  const ordered = [...people.filter((p) => p.you), ...people.filter((p) => !p.you)]
+  if (ordered.length === 0) return null
+  return listOf(ordered.map((p, i) => (i === 0 ? p.label : p.phrase)))
 }
 
 /** The customer's people who were there, by name; one the company no longer lists is left out. */

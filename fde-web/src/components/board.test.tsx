@@ -107,7 +107,7 @@ describe("Board", () => {
       within(column("Waiting on the customer")).getByText("Waiting 4 days on Mara Lindqvist"),
     ).toBeInTheDocument()
     expect(within(column("To do")).getByText("Due today")).toBeInTheDocument()
-    expect(within(column("To do")).getByText("Assigned to a teammate")).toBeInTheDocument()
+    expect(within(column("To do")).getByText("Assigned to Jonah Ade")).toBeInTheDocument()
     expect(within(column("Blocked")).getByText("Assigned to you")).toBeInTheDocument()
   })
 
@@ -556,7 +556,7 @@ describe("Board", () => {
       blocked.version,
     )
     await queryClient.invalidateQueries()
-    await within(column("Blocked")).findByText("Assigned to a teammate")
+    await within(column("Blocked")).findByText("Assigned to Jonah Ade")
 
     await userEvent.click(screen.getByRole("button", { name: `Edit ${TELEMATICS}` }))
     const dialog = await screen.findByRole("dialog", { name: "Edit task" })
@@ -568,6 +568,48 @@ describe("Board", () => {
       assignee: "usr_jonah",
       blocked_by: "acc_k1",
     })
+  })
+
+  it("picks who has a task from whoever works on the project, by name", async () => {
+    await board()
+    await userEvent.click(screen.getByRole("button", { name: `Edit ${DRIVER_HOURS}` }))
+    const dialog = await screen.findByRole("dialog", { name: "Edit task" })
+    const who = within(dialog).getByLabelText("Assigned to")
+    await within(who).findByRole("option", { name: "Jonah Ade" })
+    // You first, then the rest by name; never someone who does not work here.
+    expect(
+      within(who)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["Unassigned", "You", "Jonah Ade"])
+    await userEvent.selectOptions(who, "usr_riya")
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }))
+    await waitFor(() =>
+      expect(within(cardOf(DRIVER_HOURS)).getByText("Assigned to you")).toBeInTheDocument(),
+    )
+    expect(wire.sent[0]).toMatchObject({ assignee: "usr_riya" })
+  })
+
+  it("keeps offering a teammate by the end of their id when names are unavailable, and says so", async () => {
+    const g = globalThis as Record<string, unknown>
+    g.__fdeMockPeople = "unavailable"
+    try {
+      renderWithRouter(<ProjectPage scope={scope} />)
+      await screen.findAllByText("Assigned to you")
+      expect(
+        within(cardOf(DRIVER_HOURS)).getByText("Assigned to a teammate …_jonah"),
+      ).toBeInTheDocument()
+      await userEvent.click(screen.getByRole("button", { name: `Edit ${DRIVER_HOURS}` }))
+      const dialog = await screen.findByRole("dialog", { name: "Edit task" })
+      expect(within(dialog).getByText(/Names are unavailable right now/)).toBeInTheDocument()
+      expect(
+        within(within(dialog).getByLabelText("Assigned to")).getByRole("option", {
+          name: "A teammate …_jonah",
+        }),
+      ).toBeInTheDocument()
+    } finally {
+      delete g.__fdeMockPeople
+    }
   })
 
   it("asks for the blocker when an edit makes a task blocked, and shows the API's refusal", async () => {

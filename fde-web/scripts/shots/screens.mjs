@@ -17,6 +17,8 @@
 //   `__fdeMockSomeoneElse`, set from `act`, to show a stale save)
 //   evalsOff  true: the API serves no eval routes, as where no sandbox gateway is set (the mock's
 //             `__fdeMockEvalsOff`, set before the app loads)
+//   people    "unavailable" or "forbidden": `/v1/people` answers 503 or 403 (the mock's
+//             `__fdeMockPeople`, set before the app loads), so the screens without names can be shown
 //   signedOut true: no sign-in first (the sign-in screens themselves)
 //   workspace true: the new workspace (issue #209) on for this tab, whatever the dev server's
 //             VITE_FDE_WORKSPACE (the mock's `__fdeMockWorkspace`, set before the app loads)
@@ -202,6 +204,90 @@ const toCard = (find) => (page) =>
     document.querySelector(".app-canvas")?.scrollBy(0, -16)
   })
 const accessRow = (page, text) => accessCard(page).getByRole("listitem").filter({ hasText: text })
+const teamCard = (page) => page.getByRole("region", { name: "Team", exact: true })
+const assignedCard = (page) => page.getByRole("region", { name: "Assigned", exact: true })
+// Lumen's team has a long name and someone WorkOS has no name for; Kestrel's leaves most people to add.
+function peopleScreens() {
+  const TEAM = { ready: (page) => teamCard(page).getByRole("listitem").first(), full: false }
+  const ASSIGNED = {
+    ready: (page) => assignedCard(page).getByRole("listitem").first(),
+    full: false,
+  }
+  return [
+    { name: "people-team", path: "/companies/cmp_lumen", ...TEAM, act: toCard(teamCard) },
+    {
+      name: "people-team-add",
+      path: KESTREL,
+      ...TEAM,
+      act: async (page) => {
+        await toCard(teamCard)(page)
+        await teamCard(page).getByLabel("Add from the organisation").selectOption("usr_sam")
+      },
+    },
+    { name: "people-assigned", path: LUMEN, ...ASSIGNED, act: toCard(assignedCard) },
+    {
+      name: "people-unavailable",
+      path: KESTREL,
+      ...TEAM,
+      people: "unavailable",
+      act: async (page) => {
+        await toCard(teamCard)(page)
+        await teamCard(page)
+          .getByText(/Names are unavailable/)
+          .waitFor()
+      },
+    },
+    {
+      name: "people-forbidden",
+      path: KESTREL,
+      ...TEAM,
+      people: "forbidden",
+      act: async (page) => {
+        await toCard(teamCard)(page)
+        await teamCard(page)
+          .getByText(/Names are not available/)
+          .waitFor()
+      },
+    },
+    {
+      name: "people-task-assignee",
+      path: LUMEN,
+      ready: board,
+      full: false,
+      act: async (page) => {
+        await card(page, "Buyer review of week 3 forecasts").click()
+        await dialog(page, "Edit task").waitFor()
+      },
+    },
+    {
+      name: "people-task-unavailable",
+      path: DISPATCH,
+      ready: board,
+      full: false,
+      people: "unavailable",
+      act: async (page) => {
+        await card(page, REPLAY).click()
+        await dialog(page, "Edit task")
+          .getByText(/Names are unavailable/)
+          .waitFor()
+      },
+    },
+    {
+      name: "people-note-attendees",
+      path: LUMEN,
+      ready: (page) => notesCard(page),
+      full: false,
+      act: async (page) => {
+        await toCard(notesCard)(page)
+        await notesCard(page).getByRole("button", { name: "Write a note", exact: true }).click()
+        await dialog(page, "Write a note")
+          .getByRole("checkbox", { name: /^Aurelia/ })
+          .check()
+      },
+    },
+  ]
+}
+
 async function openAccessForm(page) {
   await toCard(accessCard)(page)
   await accessCard(page).getByRole("button", { name: "Request access", exact: true }).click()
@@ -1943,6 +2029,9 @@ export const screens = [
       await box.getByRole("alert").waitFor()
     },
   },
+
+  // People by name: the team, adding someone, picking teammates, and the screens when names are unavailable.
+  ...peopleScreens(),
 
   // Access requests and decisions on the project page.
   ...accessScreens(),

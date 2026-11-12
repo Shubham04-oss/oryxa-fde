@@ -63,7 +63,7 @@ describe("the notes list", () => {
     const notes = await card()
     const rows = await within(notes).findAllByRole("listitem")
     expect(rows.map((row) => row.querySelector("h3")?.textContent)).toEqual([WORKSHOP, IT_CALL])
-    expect(rows[0]).toHaveTextContent("Attended: You and a teammate")
+    await waitFor(() => expect(rows[0]).toHaveTextContent("Attended: You and Jonah Ade"))
     expect(rows[0]).toHaveTextContent("With Mara Lindqvist, Ines Moreau")
     // Someone at the customer was there and no one else from the team: nothing is said of the team.
     expect(rows[1]).toHaveTextContent("Attended: You")
@@ -145,8 +145,37 @@ describe("writing a note", () => {
     expect(field(box, "Held on")).toHaveValue(localDay())
     expect(within(box).getByRole("checkbox", { name: "You" })).toBeChecked()
     expect(box).toHaveTextContent("0 of 20,000 characters")
-    // The customer's people can be ticked; the company's four are offered.
-    expect(within(box).getAllByRole("checkbox")).toHaveLength(1 + 4)
+    // Whoever works on the project can be ticked, by name; and the company's four at the customer.
+    expect(await within(box).findByRole("checkbox", { name: "Jonah Ade" })).not.toBeChecked()
+    expect(within(box).getAllByRole("checkbox")).toHaveLength(2 + 4)
+  })
+
+  it("picks a teammate who works on the project as an attendee, by name", async () => {
+    renderWithRouter(<ProjectPage scope={CLAIMS} />)
+    await userEvent.click(within(await card()).getByRole("button", { name: "Write a note" }))
+    const box = await writer()
+    await userEvent.click(await within(box).findByRole("checkbox", { name: "Jonah Ade" }))
+    await write(box, { title: "Claims sync", text: "Agreed the sample set." })
+    await userEvent.click(within(box).getByRole("button", { name: "Save note" }))
+    await closed()
+    expect(wire.sent[0]).toMatchObject({ body: { attendees: ["usr_riya", "usr_jonah"] } })
+    const rows = await within(await card()).findAllByRole("listitem")
+    expect(rows[0]).toHaveTextContent("Attended: You and Jonah Ade")
+  })
+
+  it("says plainly when names are unavailable, and still offers who works there by the end of their id", async () => {
+    ;(globalThis as Record<string, unknown>).__fdeMockPeople = "unavailable"
+    try {
+      renderWithRouter(<ProjectPage scope={CLAIMS} />)
+      await userEvent.click(within(await card()).getByRole("button", { name: "Write a note" }))
+      const box = await writer()
+      expect(await within(box).findByText(/Names are unavailable right now/)).toBeInTheDocument()
+      expect(
+        await within(box).findByRole("checkbox", { name: "A teammate …_jonah" }),
+      ).toBeInTheDocument()
+    } finally {
+      delete (globalThis as Record<string, unknown>).__fdeMockPeople
+    }
   })
 
   it("saves a note once the API confirms it, with every field, and the checklist is read again", async () => {
@@ -408,13 +437,13 @@ describe("changing and removing a note", () => {
     )
   })
 
-  it("keeps a teammate attendee on a save, by id, because there is no name to show", async () => {
+  it("keeps a teammate attendee on a save, shown by name", async () => {
     renderWithRouter(<ProjectPage scope={DISPATCH} />)
     await userEvent.click(
       await within(await card()).findByRole("button", { name: `Edit ${WORKSHOP}` }),
     )
     const box = await editor()
-    const teammate = within(box).getByRole("checkbox", { name: "A teammate …_jonah" })
+    const teammate = await within(box).findByRole("checkbox", { name: "Jonah Ade" })
     expect(teammate).toBeChecked()
     await userEvent.type(field(box, "Title"), "!")
     await userEvent.click(within(box).getByRole("button", { name: "Save" }))
@@ -724,8 +753,9 @@ describe("notes on the company", () => {
     const notes = await card()
     await userEvent.click(within(notes).getByRole("button", { name: "Write a note" }))
     const box = await writer()
-    // The company's four people can be ticked.
-    expect(within(box).getAllByRole("checkbox")).toHaveLength(1 + 4)
+    // The company's team and its four people at the customer can be ticked.
+    await within(box).findByRole("checkbox", { name: "Jonah Ade" })
+    expect(within(box).getAllByRole("checkbox")).toHaveLength(2 + 4)
     expect(within(box).queryByRole("button", { name: "Make a task" })).toBeNull()
     await write(box, { title: "Steering call", text: "General points." })
     await userEvent.click(within(box).getByRole("button", { name: "Save note" }))

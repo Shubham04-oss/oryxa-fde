@@ -170,6 +170,10 @@ export type MemberOut = z.infer<typeof MemberOut>
 export const AssigneeOut = z.object({ user: UserId, name: z.string().nullish(), added_at: instant })
 export type AssigneeOut = z.infer<typeof AssigneeOut>
 
+/** One of the organisation's own people (`GET /v1/people`): a name when WorkOS has one, never an email. */
+export const PersonOut = z.object({ id: UserId, name: z.string().nullish() })
+export type PersonOut = z.infer<typeof PersonOut>
+
 export const SystemOut = z.object({
   id: SystemId,
   name: z.string(),

@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query"
 import { describe, expect, it, vi } from "vitest"
 import { queries } from "./api/client"
 import type { MeetingNoteOut } from "./api/schemas"
+import { personOf } from "./people"
 import {
   MAX_NOTE,
   attendeesLine,
@@ -137,15 +138,23 @@ describe("what the list says", () => {
     expect(latestFirst(list).map((n) => n.id)).toEqual(["c", "b", "a"])
   })
 
-  it("says who was there, as far as it knows: you, and teammates by number", () => {
-    expect(attendeesLine(note("a", { attendees: ["usr_a", "usr_b", "usr_c"] }), "usr_a")).toBe(
-      "You and 2 teammates",
-    )
-    expect(attendeesLine(note("a", { attendees: ["usr_b"] }), "usr_a")).toBe("A teammate")
-    expect(attendeesLine(note("a", { attendees: ["usr_a"] }), "usr_a")).toBe("You")
-    expect(attendeesLine(note("a", { attendees: [] }), "usr_a")).toBeNull()
-    // Before it knows who you are, it does not guess.
-    expect(attendeesLine(note("a", { attendees: ["usr_a"] }), undefined)).toBe("A teammate")
+  it("says who was there by name, you first, and how many more past three", () => {
+    const book = new Map([
+      ["usr_b", "Jonah Ade"],
+      ["usr_c", "Sam Ortiz"],
+      ["usr_d", null],
+    ])
+    const of = (id: string) => personOf(id, { book, state: "listed", me: "usr_a" })
+    const line = (...attendees: Array<string>) => attendeesLine(note("a", { attendees }), of)
+    expect(line("usr_b", "usr_a", "usr_c")).toBe("You, Jonah Ade and Sam Ortiz")
+    expect(line("usr_b", "usr_a", "usr_c", "usr_d")).toBe("You, Jonah Ade and 2 others")
+    expect(line("usr_d")).toBe("Unnamed teammate")
+    expect(line("usr_b", "usr_d")).toBe("Jonah Ade and an unnamed teammate")
+    expect(line("usr_a")).toBe("You")
+    expect(line()).toBeNull()
+    // Before it knows who you are, it does not guess you are anyone.
+    const blind = (id: string) => personOf(id, { book, state: "listed" })
+    expect(attendeesLine(note("a", { attendees: ["usr_a"] }), blind)).toBe("A teammate …usr_a")
   })
 
   it("names the customer's people, and leaves out one the company no longer lists", () => {

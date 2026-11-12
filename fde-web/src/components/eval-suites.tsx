@@ -1,10 +1,10 @@
 import { useState } from "react"
 import { LongText } from "./long-text"
 import { Quiet, Row, Rows, Status } from "./page"
+import { useNames } from "./people"
 import { Button } from "./ui/button"
 import type { Case, CaseResult, EvalRunOut, SuiteOut } from "@/lib/api/evals"
 import type { CriterionOut } from "@/lib/api/schemas"
-import { uploader } from "@/lib/documents"
 import {
   OUTCOME,
   counts,
@@ -82,7 +82,6 @@ export function SuiteItem({
   suite,
   runs,
   criteria,
-  me,
   open,
   onToggle,
   actions,
@@ -91,7 +90,6 @@ export function SuiteItem({
   /** This suite's runs, newest first. */
   runs: ReadonlyArray<EvalRunOut>
   criteria: ReadonlyArray<CriterionOut>
-  me: string | undefined
   open: boolean
   onToggle: () => void
   actions: SuiteActions
@@ -162,7 +160,7 @@ export function SuiteItem({
                 No cases yet. Add them from a CSV: columns input, expected, id and criteria.
               </Quiet>
             )}
-            <Runs suite={suite} runs={runs} criteria={criteria} me={me} />
+            <Runs suite={suite} runs={runs} criteria={criteria} />
             {suite.cases.length > 0 && <CaseList cases={suite.cases} />}
           </div>
         )}
@@ -227,12 +225,10 @@ function Runs({
   suite,
   runs,
   criteria,
-  me,
 }: {
   suite: SuiteOut
   runs: ReadonlyArray<EvalRunOut>
   criteria: ReadonlyArray<CriterionOut>
-  me: string | undefined
 }) {
   const [chosen, setChosen] = useState<string | null>(null)
   if (runs.length === 0)
@@ -267,7 +263,7 @@ function Runs({
           )
         })}
       </Rows>
-      <RunPanel suite={suite} run={run} criteria={criteria} me={me} />
+      <RunPanel suite={suite} run={run} criteria={criteria} />
     </div>
   )
 }
@@ -277,13 +273,12 @@ export function RunPanel({
   suite,
   run,
   criteria,
-  me,
 }: {
   suite: SuiteOut
   run: EvalRunOut
   criteria: ReadonlyArray<CriterionOut>
-  me: string | undefined
 }) {
+  const names = useNames()
   const report = run.report
   const c = counts(run)
   return (
@@ -294,7 +289,7 @@ export function RunPanel({
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <Status tone="neutral">{isRunning(run) ? "Running" : "Finished"}</Status>
         <Quiet>
-          Started {dayText(run.created_at)} by {uploader(run.created_by, me)} · {runSource(run)}
+          Started {dayText(run.created_at)} by {names.of(run.created_by).phrase} · {runSource(run)}
         </Quiet>
       </div>
       {isRunning(run) ? (
