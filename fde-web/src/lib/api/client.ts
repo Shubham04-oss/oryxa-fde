@@ -33,7 +33,7 @@ import {
   TodayOut,
 } from "./schemas"
 import type { AccessBody, DecisionBody } from "../access"
-import type { TaskBody } from "../board"
+import type { TaskSave } from "../board"
 import type { NoteBody } from "../notes"
 import type {
   CompanyBody,
@@ -621,7 +621,7 @@ function connect(transport: Transport) {
     },
 
     /** Adds a task; the API answers with it as saved. */
-    addTask: (scope: ProjectScope, body: TaskBody) =>
+    addTask: (scope: ProjectScope, body: TaskSave) =>
       read(
         TaskOut,
         client.POST("/v1/companies/{company}/projects/{project}/tasks", {
@@ -631,7 +631,7 @@ function connect(transport: Transport) {
       ),
 
     /** Replaces a task: every field, so a change to one sends them all (`toBody`). */
-    updateTask: (scope: ProjectScope, task: TaskId, body: TaskBody, version: number) =>
+    updateTask: (scope: ProjectScope, task: TaskId, body: TaskSave, version: number) =>
       save(
         TaskOut,
         client.PUT("/v1/companies/{company}/projects/{project}/tasks/{task}", {
