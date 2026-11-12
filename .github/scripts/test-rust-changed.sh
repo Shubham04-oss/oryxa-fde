@@ -16,6 +16,7 @@ expect() {
 expect false "docs only" docs/ci.md
 expect false "web only" fde-web/src/routes/index.tsx
 expect false "docs, web, realtime, README together" docs/plan.md fde-web/package.json realtime/src/index.ts README.md
+expect false "assistant Worker (no Rust reads it)" assistant/src/index.ts assistant/wrangler.jsonc assistant/package-lock.json
 expect false "harness source" sandbox/harness/src/session.ts sandbox/harness/package-lock.json
 expect false "infra modules and scripts" infra/modules/vpc/main.tf infra/envs/dev/main.tf infra/scripts/x.sh
 
@@ -36,6 +37,7 @@ expect true "crates file" crates/oryxa-fde-api/src/lib.rs
 expect true "vendor file" vendor/oryxa-platform/crates/oryxa-core/src/lib.rs
 expect true "one Rust path among skippable ones" docs/ci.md fde-web/package.json crates/oryxa-fde-api/openapi.json
 expect true "unknown path hidden by a skippable-looking prefix" docs-extra/x.md
+expect true "unknown path hidden by the assistant prefix" assistant-extra/x.md
 # The skip list is anchored at the repo root: a skippable name inside crates/ or vendor/ still runs Rust.
 expect true "skippable names nested in crates/" crates/oryxa-fde-api/README.md crates/oryxa-fde-agent/docs/x.md
 expect true "skippable names nested in vendor/" vendor/oryxa-platform/LICENSE vendor/oryxa-platform/docs/x.md

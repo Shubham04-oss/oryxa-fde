@@ -1,7 +1,8 @@
 name: deploy-workers
-# Deploys the Cloudflare Workers with Wrangler: the sandbox gateway and realtime/ first (fde-web may
-# bind their Durable Objects), then fde-web. Manual, main only, dev only. The Cloudflare API token is
-# a `dev` environment secret that only the deploy steps see; installs and builds never get it.
+# Deploys the Cloudflare Workers with Wrangler: the sandbox gateway, realtime/ and assistant/ first
+# (fde-web binds them, and Cloudflare refuses a service binding to a Worker that does not exist yet),
+# then fde-web. Manual, main only, dev only. The Cloudflare API token is a `dev` environment secret
+# that only the deploy steps see; installs, checks and builds never get it.
 # Setup: infra/README.md, Deploys.
 on:
   workflow_dispatch:
@@ -47,8 +48,57 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy
 
+  assistant:
+    # The workspace assistant (ADR 0009). Reached only through fde-web's ASSISTANT service binding.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        working-directory: assistant
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: assistant/package-lock.json
+      # Lockfile-exact install with no install scripts, and without the Cloudflare token.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      # prettier, tsc, eslint and the catalogue copy, on the commit being deployed. The tests run in CI's sandbox job.
+      - run: npm run check
+      # The deploy config is wrangler.jsonc plus dev's API binding (the Workers VPC service fde-web uses), with
+      # workers.dev, preview URLs and any route forced off, so fde-web's binding is the only way in. TypeScript
+      # (a pinned devDependency) parses the JSONC; jq cannot.
+      - name: Add the API binding
+        env:
+          API_VPC_SERVICE_ID: ${{ vars.API_VPC_SERVICE_ID }}
+        run: |
+          : "${API_VPC_SERVICE_ID:?set API_VPC_SERVICE_ID on the dev environment}"
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            import ts from "typescript";
+            const { config, error } = ts.parseConfigFileTextToJson("wrangler.jsonc", readFileSync("wrangler.jsonc", "utf8"));
+            if (error || typeof config !== "object" || config === null) throw new Error("wrangler.jsonc does not parse");
+            delete config.route;
+            delete config.routes;
+            config.workers_dev = false;
+            config.preview_urls = false;
+            config.vpc_services = [{ binding: "API", service_id: process.env.API_VPC_SERVICE_ID }];
+            writeFileSync("wrangler.deploy.json", JSON.stringify(config, null, 2) + "\n");
+          '
+      # Only this step sees the token. On the first deploy Cloudflare creates the Conversation and PersonTurns
+      # Durable Object namespaces from the `exports` block; later deploys keep them and keep the Worker's secrets.
+      - env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy --config wrangler.deploy.json
+
   web:
-    needs: workers
+    # fde-web binds oryxa-fde-realtime and oryxa-fde-assistant, so it deploys only after both succeeded.
+    needs: [workers, assistant]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
