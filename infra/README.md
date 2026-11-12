@@ -280,7 +280,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
 | `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none: no company key named, every file under the environment key | `context/src/lib.rs:130` (name: `context/src/keys.rs:18`, parsed at `keys.rs:40`, Region compared at `keys.rs:93`) | output `company_key_alias_arn_prefix`, always (Company keys): `arn:<partition>:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/`. A malformed prefix, or one in another Region than `AWS_REGION`, stops startup; `tests/code` reads the parser from the source and checks the value on the task against it |
-| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:322`; blank counts as unset) | `main.rs:57` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:496`; blank counts as unset) | `main.rs:57` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
 | `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:75` | not set; add a secret when rotating |
 | `RUST_LOG` | optional | config | `info` | `main.rs:44` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
@@ -438,7 +438,7 @@ WorkOS bearer token as the API does (`Principal::from_bearer`). A variable that 
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
 | `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | not set: no tool reads or writes a file, and the role has no KMS permission. The binary builds the same context as the API, so it would parse a value if given one, but it never names a key or asks KMS |
-| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:322`; blank counts as unset) | `mcp.rs:35` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:496`; blank counts as unset) | `mcp.rs:35` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
 | `RUST_LOG` | optional | config | `info` | `mcp.rs:26` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
 
@@ -1521,7 +1521,7 @@ These could not be checked without an account. Each one is flagged at the place 
 - **RDS in Mumbai.** AWS has no per-Region table for PostgreSQL 17 on `db.t4g.micro`; the
   `describe-orderable-db-instance-options` command in Mumbai (ap-south-1) answers it before the first apply.
 - **`WORKOS_ISSUER`.** The token's `iss` is pinned exactly (`oryxa-authn/src/workos_jwt.rs:57`). Unset, the API and
-  the MCP server derive it from the client id (`session.rs:322`): `https://api.workos.com/user_management/<client id>`,
+  the MCP server derive it from the client id (`session.rs:496`): `https://api.workos.com/user_management/<client id>`,
   which a standard WorkOS environment (no custom auth domain) issues, as
   `https://api.workos.com/user_management/<client id>/.well-known/openid-configuration` shows. Leave `workos_issuer`
   null there; setting it to that value is harmless. If the WorkOS environment uses a custom auth domain, the issuer is
