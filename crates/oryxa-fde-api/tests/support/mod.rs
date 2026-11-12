@@ -95,6 +95,8 @@ pub struct FakeAuthKit {
     challenges: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// The client each password sign-in named to WorkOS.
     pub clients: std::sync::Mutex<Vec<oryxa_fde_api::Client>>,
+    /// Addresses an account was created for.
+    pub created: std::sync::Mutex<Vec<String>>,
 }
 
 type Fut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -150,6 +152,10 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
             let [_, org, user, role] = parts[..] else {
                 return Err(RefreshError::Refused("bad refresh token".into()));
             };
+            // A revoked session refreshes no more, as at WorkOS.
+            if self.revoked.lock().unwrap().contains(&format!("session_of_{user}")) {
+                return Err(RefreshError::Refused("invalid_grant".into()));
+            }
             assert_eq!(org, organisation, "refresh names the session's organisation");
             Ok(oryxa_fde_api::Tokens {
                 access_token: token(Some(org), user, role),
@@ -258,7 +264,76 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
         })
     }
 
-    fn resend_verification<'a>(&'a self, _: &'a str) -> Fut<'a, oryxa_fde_api::Sent> {
+    fn resend_verification<'a>(&'a self, _: &'a oryxa_fde_api::ProviderId) -> Fut<'a, oryxa_fde_api::Sent> {
         Box::pin(async { oryxa_fde_api::Sent::Sent })
+    }
+
+    /// `invite-ok` is an open invitation for `invited@example.com`; any other token names none.
+    /// Each user has one WorkOS session, named after them.
+    fn sessions_of<'a>(&'a self, user: &'a oryxa_fde_api::ProviderId) -> Fut<'a, Result<Vec<String>, String>> {
+        Box::pin(async move { Ok(vec![format!("session_of_{}", user.as_str())]) })
+    }
+
+    fn invitation<'a>(
+        &'a self,
+        token: &'a oryxa_fde_api::ProviderId,
+    ) -> Fut<'a, Result<Option<oryxa_fde_api::Invitation>, String>> {
+        Box::pin(async move {
+            Ok((token.as_str() == "invite-ok").then(|| oryxa_fde_api::Invitation {
+                email: "invited@example.com".into(),
+                organisation: None,
+                pending: true,
+            }))
+        })
+    }
+
+    fn has_account<'a>(&'a self, _: &'a str) -> Fut<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn create_account<'a>(
+        &'a self,
+        email: &'a str,
+        _: &'a str,
+        _: (Option<&'a str>, Option<&'a str>),
+        _: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Created> {
+        Box::pin(async move {
+            self.created.lock().unwrap().push(email.to_owned());
+            oryxa_fde_api::Created::Created
+        })
+    }
+
+    /// Signs in whoever `who` names, accepting the invitation.
+    fn accept_with_password<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a str,
+        _: &'a oryxa_fde_api::Client,
+    ) -> Fut<'a, oryxa_fde_api::Attempt> {
+        Box::pin(async move {
+            let (org, user, role) = self.who.lock().unwrap().clone();
+            oryxa_fde_api::Attempt::SignedIn(oryxa_fde_api::Tokens {
+                access_token: token(org.as_deref(), &user, &role),
+                refresh_token: format!("refresh|{}|{user}|{role}", org.unwrap_or_default()),
+            })
+        })
+    }
+
+    fn send_password_reset<'a>(&'a self, _: &'a str) -> Fut<'a, oryxa_fde_api::Sent> {
+        Box::pin(async { oryxa_fde_api::Sent::Sent })
+    }
+
+    /// `reset-ok` resets; any other token is refused.
+    fn reset_password<'a>(&'a self, token: &'a str, _: &'a str) -> Fut<'a, oryxa_fde_api::Reset> {
+        Box::pin(async move {
+            if token == "reset-ok" {
+                let user = self.who.lock().unwrap().1.clone();
+                oryxa_fde_api::Reset::Done { user }
+            } else {
+                oryxa_fde_api::Reset::Refused("invalid_token".into())
+            }
+        })
     }
 }

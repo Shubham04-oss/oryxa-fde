@@ -75,6 +75,164 @@
         ]
       }
     },
+    "/auth/invitation": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The invitation a link's token names: its address, organisation and whether the address has an\naccount, for the accept screen. A token that names no open invitation is 400 `invalid_invitation`.",
+        "operationId": "look_up_invitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_invitation`: unknown, accepted, expired or revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/invitation/accept": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Accept an invitation and sign in. The address is the invitation's own: a new account gets this\npassword and name, and an existing one signs in with its own password.",
+        "operationId": "accept_invitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_invitation`; `weak_password`: the password does not meet the policy; `invalid_password`, `invalid_name`, `invalid_return_to`, `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`invalid_credentials`: the existing account's password is wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`; `no_organisation`; `sign_in_unsupported`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/auth/login": {
       "get": {
         "tags": [
@@ -149,6 +307,154 @@
           {
             "session": []
           }
+        ]
+      }
+    },
+    "/auth/password/forgot": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Email a password reset link. The answer is the same whether or not the address has an account.",
+        "operationId": "forgot_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgotPasswordIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`check_email`, whether or not a link was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetRequested"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/auth/password/reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Set a new password with the token from a reset link. It signs nobody in: the account's existing\nsessions are revoked and end at their next refresh, and the person signs in with the new password.",
+        "operationId": "reset_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`sign_in`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasswordChanged"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_reset_token`: wrong, spent or expired; `weak_password`; `invalid_password`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`csrf`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_attempts`; see `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
         ]
       }
     },
@@ -9033,6 +9339,44 @@
   },
   "components": {
     "schemas": {
+      "AcceptInvitationIn": {
+        "type": "object",
+        "required": [
+          "token",
+          "password"
+        ],
+        "properties": {
+          "first_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "description": "A new password, or the account's own when the address already has one."
+          },
+          "return_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to go once signed in: a path on the web app. Defaults to `/`."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token from the invitation link."
+          }
+        },
+        "additionalProperties": false
+      },
       "AccessRequestBody": {
         "type": "object",
         "required": [
@@ -9951,6 +10295,18 @@
           }
         }
       },
+      "ForgotPasswordIn": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "GitHubClaimBody": {
         "type": "object",
         "required": [
@@ -10044,6 +10400,44 @@
           "url": {
             "type": "string",
             "description": "Where to send the admin: the install page, carrying a state that works once, for 10 minutes."
+          }
+        }
+      },
+      "InvitationIn": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token from the invitation link."
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvitationOut": {
+        "type": "object",
+        "description": "An open invitation, for its screen. Only the link's holder learns it.",
+        "required": [
+          "email",
+          "has_account"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address it was sent to; the only one that can accept it."
+          },
+          "has_account": {
+            "type": "boolean",
+            "description": "The address has an account already: accepting takes its password, and names are ignored."
+          },
+          "organisation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The organisation's name, when it could be read."
           }
         }
       },
@@ -10368,6 +10762,25 @@
           }
         }
       },
+      "PasswordChanged": {
+        "type": "object",
+        "description": "The answer to a new password set: `{\"next\":\"sign_in\"}`. The account's existing sessions are\nrevoked and end at their next refresh; the person signs in with the new password.",
+        "required": [
+          "next"
+        ],
+        "properties": {
+          "next": {
+            "$ref": "#/components/schemas/PasswordChangedNext"
+          }
+        }
+      },
+      "PasswordChangedNext": {
+        "type": "string",
+        "description": "Sign in with the new password.",
+        "enum": [
+          "sign_in"
+        ]
+      },
       "PasswordSignInIn": {
         "type": "object",
         "required": [
@@ -10684,6 +11097,43 @@
           }
         },
         "additionalProperties": false
+      },
+      "ResetPasswordIn": {
+        "type": "object",
+        "required": [
+          "token",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "format": "password"
+          },
+          "token": {
+            "type": "string",
+            "description": "The token from the reset link."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ResetRequested": {
+        "type": "object",
+        "description": "The one answer to a forgotten password: `{\"next\":\"check_email\"}`, whether or not the address\nhas an account.",
+        "required": [
+          "next"
+        ],
+        "properties": {
+          "next": {
+            "$ref": "#/components/schemas/ResetRequestedNext"
+          }
+        }
+      },
+      "ResetRequestedNext": {
+        "type": "string",
+        "description": "If the address has an account, a reset link is on its way.",
+        "enum": [
+          "check_email"
+        ]
       },
       "RoomCriterionOut": {
         "type": "object",

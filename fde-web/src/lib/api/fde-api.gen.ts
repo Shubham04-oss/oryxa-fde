@@ -21,6 +21,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/invitation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The invitation a link's token names: its address, organisation and whether the address has an
+         *     account, for the accept screen. A token that names no open invitation is 400 `invalid_invitation`.
+         */
+        post: operations["look_up_invitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/invitation/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept an invitation and sign in. The address is the invitation's own: a new account gets this
+         *     password and name, and an existing one signs in with its own password.
+         */
+        post: operations["accept_invitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -52,6 +92,43 @@ export interface paths {
          *     It never refreshes or reissues the cookie, whatever state the session is in.
          */
         post: operations["sign_out"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password/forgot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Email a password reset link. The answer is the same whether or not the address has an account. */
+        post: operations["forgot_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set a new password with the token from a reset link. It signs nobody in: the account's existing
+         *     sessions are revoked and end at their next refresh, and the person signs in with the new password.
+         */
+        post: operations["reset_password"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1751,6 +1828,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptInvitationIn: {
+            first_name?: string | null;
+            last_name?: string | null;
+            /**
+             * Format: password
+             * @description A new password, or the account's own when the address already has one.
+             */
+            password: string;
+            /** @description Where to go once signed in: a path on the web app. Defaults to `/`. */
+            return_to?: string | null;
+            /** @description The token from the invitation link. */
+            token: string;
+        };
         AccessRequestBody: {
             /** @description What access is needed. */
             description: string;
@@ -2055,6 +2145,9 @@ export interface components {
             /** @description The company's own threads, each with its comments, and meeting notes. */
             threads: components["schemas"]["ThreadWithComments"][];
         };
+        ForgotPasswordIn: {
+            email: string;
+        };
         GitHubClaimBody: {
             /** @description From GitHub's redirect after the install. */
             code: string;
@@ -2083,6 +2176,19 @@ export interface components {
         InstallStartOut: {
             /** @description Where to send the admin: the install page, carrying a state that works once, for 10 minutes. */
             url: string;
+        };
+        InvitationIn: {
+            /** @description The token from the invitation link. */
+            token: string;
+        };
+        /** @description An open invitation, for its screen. Only the link's holder learns it. */
+        InvitationOut: {
+            /** @description The address it was sent to; the only one that can accept it. */
+            email: string;
+            /** @description The address has an account already: accepting takes its password, and names are ignored. */
+            has_account: boolean;
+            /** @description The organisation's name, when it could be read. */
+            organisation?: string | null;
         };
         /** @enum {string} */
         ItemKind: "in" | "out";
@@ -2181,6 +2287,18 @@ export interface components {
             id: string;
             name: string;
         };
+        /**
+         * @description The answer to a new password set: `{"next":"sign_in"}`. The account's existing sessions are
+         *     revoked and end at their next refresh; the person signs in with the new password.
+         */
+        PasswordChanged: {
+            next: components["schemas"]["PasswordChangedNext"];
+        };
+        /**
+         * @description Sign in with the new password.
+         * @enum {string}
+         */
+        PasswordChangedNext: "sign_in";
         PasswordSignInIn: {
             email: string;
             /** Format: password */
@@ -2265,6 +2383,24 @@ export interface components {
              */
             installation_id: number;
         };
+        ResetPasswordIn: {
+            /** Format: password */
+            password: string;
+            /** @description The token from the reset link. */
+            token: string;
+        };
+        /**
+         * @description The one answer to a forgotten password: `{"next":"check_email"}`, whether or not the address
+         *     has an account.
+         */
+        ResetRequested: {
+            next: components["schemas"]["ResetRequestedNext"];
+        };
+        /**
+         * @description If the address has an account, a reset link is on its way.
+         * @enum {string}
+         */
+        ResetRequestedNext: "check_email";
         RoomCriterionOut: {
             criterion: components["schemas"]["CriterionOut"];
             /**
@@ -2954,6 +3090,135 @@ export interface operations {
             };
         };
     };
+    look_up_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InvitationIn"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationOut"];
+                };
+            };
+            /** @description `invalid_invitation`: unknown, accepted, expired or revoked */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    accept_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInvitationIn"];
+            };
+        };
+        responses: {
+            /** @description Signed in (`done`, with the session cookie), or the next step, with a short-lived pending cookie */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInStep"];
+                };
+            };
+            /** @description `invalid_invitation`; `weak_password`: the password does not meet the policy; `invalid_password`, `invalid_name`, `invalid_return_to`, `invalid_body` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `invalid_credentials`: the existing account's password is wrong */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf`; `no_organisation`; `sign_in_unsupported` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     sign_in: {
         parameters: {
             query?: {
@@ -3011,6 +3276,126 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    forgot_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForgotPasswordIn"];
+            };
+        };
+        responses: {
+            /** @description `check_email`, whether or not a link was sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResetRequested"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    reset_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetPasswordIn"];
+            };
+        };
+        responses: {
+            /** @description `sign_in` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasswordChanged"];
+                };
+            };
+            /** @description `invalid_reset_token`: wrong, spent or expired; `weak_password`; `invalid_password` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `csrf` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `too_many_attempts`; see `Retry-After` */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

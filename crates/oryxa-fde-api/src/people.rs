@@ -234,9 +234,10 @@ mod tests {
         fn sign_in_with_code<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
             Box::pin(async { Attempt::Unavailable("unused".into()) })
         }
-        fn resend_verification<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Sent> {
+        fn resend_verification<'a>(&'a self, _: &'a crate::session::ProviderId) -> BoxFuture<'a, Sent> {
             Box::pin(async { Sent::Unavailable("unused".into()) })
         }
+        crate::session::unused_invitation_and_reset!();
     }
 
     #[test]
