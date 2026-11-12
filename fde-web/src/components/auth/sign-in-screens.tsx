@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import {
   AuthForm,
   Field,
@@ -9,6 +9,7 @@ import {
   Secondary,
   StepLink,
   Submit,
+  TextButton,
 } from "./fields"
 import { AuthFrame } from "./frame"
 import { carried, codeOf, emailProblem, useCall, useFlow, useNote, waitText } from "./flow"
@@ -25,31 +26,18 @@ type Props = { returnTo: string }
 // What the dev mock accepts, written only into a dev build: `import.meta.env.DEV` is `false` in a
 // production build, so these strings are dropped from it.
 const SAMPLES = import.meta.env.DEV
-  ? "Sign in as riya@example.com with sample-password. Also try two-orgs@, unverified@, no-org@, mfa@ and locked@example.com."
+  ? "Sign in as riya@example.com with sample-password, or with the code 123456. Also try two-orgs@, unverified@, unverified-two-orgs@, unverified-mfa@, no-org@, mfa@ and locked@example.com."
   : undefined
 const SAMPLE_CODE = import.meta.env.DEV ? "The code is 123456." : undefined
 
 /**
- * A refusal the person can act on, with the way on where there is one. `restart` offers to start
- * again, on a later step that a refusal has ended.
+ * A refusal the person can act on, with the way on where there is one. A later step that a refusal
+ * ends already has its own way back to the start, so this does not add another.
  */
-function Refusal({
-  error,
-  returnTo,
-  restart = false,
-}: {
-  error: SignInError
-  returnTo: string
-  restart?: boolean
-}) {
+function Refusal({ error, returnTo }: { error: SignInError; returnTo: string }) {
   return (
     <FormError>
       {waitText(error)}{" "}
-      {restart && error.code === "sign_in_unsupported" && (
-        <StepLink step="password" returnTo={returnTo}>
-          Start again
-        </StepLink>
-      )}
       {error.code === "too_many_attempts" && LATER.forgot && (
         <StepLink step="forgot" returnTo={returnTo}>
           Reset your password
@@ -63,7 +51,9 @@ function Refusal({
 export function PasswordScreen({ returnTo }: Props) {
   const { follow, go, ended } = useFlow(returnTo)
   const { working, error, setError, run } = useCall(ended)
+  const sending = useCall(ended)
   const note = useNote()
+  const noteId = useId()
   const [noted, setNoted] = useState(note !== null)
   const [email, setEmail] = useState(carried.email)
   const [password, setPassword] = useState("")
@@ -74,10 +64,16 @@ export function PasswordScreen({ returnTo }: Props) {
   async function submit() {
     const found = {
       email: emailProblem(email) ?? undefined,
-      password: password === "" ? "Enter your password." : undefined,
+      password:
+        password === ""
+          ? LATER.code
+            ? "Enter your password, or choose Email me a code below."
+            : "Enter your password."
+          : undefined,
     }
     setProblems(found)
     setError(null)
+    sending.setError(null)
     setNoted(false)
     if (found.email) return emailField.current?.focus()
     if (found.password) return passwordField.current?.focus()
@@ -89,13 +85,46 @@ export function PasswordScreen({ returnTo }: Props) {
     else passwordField.current?.focus()
   }
 
+  /**
+   * The way in with no password: with an address typed, the code is asked for at once and the next
+   * screen takes it; with none, the next screen asks for the address.
+   */
+  async function emailCode() {
+    const to = email.trim()
+    setError(null)
+    setNoted(false)
+    if (to === "") return go("code")
+    const problem = emailProblem(to)
+    setProblems({ email: problem ?? undefined })
+    if (problem) return emailField.current?.focus()
+    carried.email = to
+    const sent = await sending.run(async () => {
+      await signInApi.requestCode(to)
+      return true
+    })
+    if (!sent) return
+    carried.codeSentTo = to
+    go("code")
+  }
+
+  const busy = working || sending.working
+  const refused = error ?? sending.error
+
   return (
     <AuthFrame
       title="Sign in"
-      lead="Sign in to your FDE workspace with your work account."
+      lead={
+        LATER.code
+          ? "Sign in to your FDE workspace with your password, or with a code we email you."
+          : "Sign in to your FDE workspace with your work account."
+      }
+      // A note from an interrupted sign-in is read out with the title, which takes focus for it.
+      focusTitle={noted && note !== null}
+      describedBy={noted && note ? noteId : undefined}
       mockNote={SAMPLES}
     >
       <div className="grid gap-4">
+        {noted && note && <Notice id={noteId}>{SIGN_IN_TEXT[note]}</Notice>}
         <AuthForm label="Sign in with email and password" onSubmit={() => void submit()}>
           <Field
             ref={emailField}
@@ -106,7 +135,9 @@ export function PasswordScreen({ returnTo }: Props) {
             autoComplete="username"
             value={email}
             onChange={setEmail}
-            error={problems.email ?? (error?.code === "invalid_email" ? error.message : undefined)}
+            error={
+              problems.email ?? (refused?.code === "invalid_email" ? refused.message : undefined)
+            }
           />
           <PasswordField
             ref={passwordField}
@@ -126,29 +157,22 @@ export function PasswordScreen({ returnTo }: Props) {
               )
             }
           />
-          {noted && note && <Notice>{SIGN_IN_TEXT[note]}</Notice>}
-          {error && !["invalid_email", "invalid_password"].includes(error.code) && (
-            <Refusal error={error} returnTo={returnTo} />
+          {refused && !["invalid_email", "invalid_password"].includes(refused.code) && (
+            <Refusal error={refused} returnTo={returnTo} />
           )}
-          <Submit working={working} busy="Signing in…">
+          <Submit working={working} disabled={sending.working} busy="Signing in…">
             Sign in
           </Submit>
         </AuthForm>
         {(LATER.code || LATER.google) && <Or />}
         {LATER.code && (
-          <Secondary
-            disabled={working}
-            onClick={() => {
-              carried.email = email.trim()
-              go("code")
-            }}
-          >
-            Email me a code instead
+          <Secondary disabled={busy} onClick={() => void emailCode()}>
+            {sending.working ? "Sending a code…" : "Email me a code"}
           </Secondary>
         )}
         {LATER.google && (
           <Secondary
-            disabled={working}
+            disabled={busy}
             onClick={() =>
               void run(async () => {
                 await signInApi.withGoogle(returnTo)
@@ -167,16 +191,24 @@ export function PasswordScreen({ returnTo }: Props) {
   )
 }
 
-/** An emailed one-time code: ask for it, then type it. */
+/**
+ * An emailed one-time code: ask for it, then type it. When the first screen has just asked for one,
+ * this opens on typing it.
+ */
 export function CodeScreen({ returnTo }: Props) {
   const { follow, ended } = useFlow(returnTo)
   const { working, error, setError, run } = useCall(ended)
   const [email, setEmail] = useState(carried.email)
-  const [sentTo, setSentTo] = useState<string | null>(null)
+  const [sentTo, setSentTo] = useState<string | null>(() => carried.codeSentTo)
   const [code, setCode] = useState("")
   const [problem, setProblem] = useState<string | undefined>()
   const [resent, setResent] = useState(false)
   const field = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    // Read once: going back to this step later asks for the address again.
+    carried.codeSentTo = null
+  }, [])
 
   useEffect(() => {
     if (sentTo) field.current?.focus()
@@ -273,7 +305,12 @@ export function CodeScreen({ returnTo }: Props) {
             error={problem}
           />
           {error && <Refusal error={error} returnTo={returnTo} />}
-          {resent && !error && <Notice>A new code is on its way. Use the newest one.</Notice>}
+          {resent && !error && (
+            // Worded so it says nothing about whether the address has an account.
+            <Notice>
+              If an account uses that address, a new code is on its way. Use the newest one.
+            </Notice>
+          )}
           <Submit working={working} busy="Signing in…">
             Sign in
           </Submit>
@@ -281,18 +318,17 @@ export function CodeScreen({ returnTo }: Props) {
         <Secondary disabled={working} onClick={() => void send(sentTo)}>
           Send a new code
         </Secondary>
-        <button
-          type="button"
-          className="justify-self-start text-[12px] underline underline-offset-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        <TextButton
           onClick={() => {
             setSentTo(null)
             setCode("")
+            setProblem(undefined)
             setError(null)
             setResent(false)
           }}
         >
           Use a different address
-        </button>
+        </TextButton>
       </div>
     </AuthFrame>
   )
@@ -357,7 +393,7 @@ export function VerifyEmailScreen({ returnTo }: Props) {
             onChange={setCode}
             error={problem}
           />
-          {error && <Refusal error={error} returnTo={returnTo} restart />}
+          {error && <Refusal error={error} returnTo={returnTo} />}
           {resent && !error && <Notice>A new code is on its way. Use the newest one.</Notice>}
           <Submit working={working} busy="Checking…">
             Confirm and sign in
@@ -413,7 +449,7 @@ export function OrganisationScreen({ returnTo }: Props) {
             </li>
           ))}
         </ul>
-        {error && <Refusal error={error} returnTo={returnTo} restart />}
+        {error && <Refusal error={error} returnTo={returnTo} />}
         <StepLink step="password" returnTo={returnTo}>
           Use a different account
         </StepLink>

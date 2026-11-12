@@ -1,8 +1,9 @@
 // The API's sign-in routes (crates/oryxa-fde-api/src/signin.rs), answered on invented accounts with
 // the API's rules and exact answers, so the screens' tests prove the contract: the same checks in the
 // same order, one answer for a wrong password and an unknown address, limits counted on every
-// attempt with `Retry-After`, and a pending step that the API would keep in its sealed cookie.
-// The routes still to come (`LATER` in sign-in-api.ts) are answered on their assumed contract.
+// attempt with `Retry-After`, a code asked for that answers alike for every address, and a pending
+// step that the API would keep in its sealed cookie. The routes still to come (`LATER` in
+// sign-in-api.ts) are answered on their assumed contract.
 // Dev and test only, like the rest of the mock.
 
 /** Every sample account's password. Invented, and only ever accepted by this mock. */
@@ -13,21 +14,51 @@ export const SAMPLE_CODE = "123456"
 export const SAMPLE_INVITE = "invite-sample"
 export const SAMPLE_RESET = "reset-sample"
 
-/** The API's limits: attempts per address and per client in a fixed window (signin.rs). */
-export const LIMITS = { address: 10, client: 30, windowSeconds: 300 }
+/**
+ * The API's limits (signin.rs), in fixed windows: password attempts and code guesses per address and
+ * per client, and codes emailed (a sign-in code, or a verification code sent again) per address and
+ * per client.
+ */
+export const LIMITS = {
+  address: 10,
+  client: 30,
+  windowSeconds: 300,
+  sendAddress: 3,
+  sendClient: 10,
+  sendWindowSeconds: 900,
+}
 /** How long the API keeps a pending step. */
 const PENDING_SECONDS = 600
 
-/** What each sample address leads to after a right password. Any other address is unknown. */
+type Outcome =
+  "done" | "verify_email" | "choose_organisation" | "no_organisation" | "sign_in_unsupported"
+
+/**
+ * What each sample address leads to after a right password or code. Any other address is unknown.
+ * The `unverified` ones go on to their own outcome once the email is confirmed (`AFTER_VERIFY`).
+ */
 export const SAMPLE_ACCOUNTS = {
   "riya@example.com": "done",
   "two-orgs@example.com": "choose_organisation",
   "unverified@example.com": "verify_email",
+  "unverified-two-orgs@example.com": "verify_email",
+  "unverified-mfa@example.com": "verify_email",
   "no-org@example.com": "no_organisation",
-  "locked@example.com": "too_many_attempts",
   "mfa@example.com": "sign_in_unsupported",
-} as const
+} as const satisfies Record<string, Outcome>
 type Account = keyof typeof SAMPLE_ACCOUNTS
+
+/** Where an account goes once its email is confirmed, when that is not `done`. */
+const AFTER_VERIFY: Partial<Record<Account, Outcome>> = {
+  "unverified-two-orgs@example.com": "choose_organisation",
+  "unverified-mfa@example.com": "sign_in_unsupported",
+}
+
+/**
+ * An address whose limit is already reached: every attempt at it answers 429 before anything else
+ * is looked at, whatever the password or code, as the API counts before it asks WorkOS.
+ */
+export const LOCKED_ADDRESS = "locked@example.com"
 
 export const SAMPLE_ORGANISATIONS = [
   { id: "org_sample_northwind", name: "Northwind Field Engineering" },
@@ -75,6 +106,8 @@ const ending = (status: number, error: string) => {
   return refuse(status, error)
 }
 const accepted = () => new Response(null, { status: 202 })
+const limited = (seconds: number) =>
+  refuse(429, "too_many_attempts", { "Retry-After": String(Math.max(1, Math.ceil(seconds))) })
 
 /** `EmailAddress::new` in oryxa-fde-store. */
 function emailOk(value: string): boolean {
@@ -128,30 +161,55 @@ async function bodyOf(
   )
 }
 
+type Kind = "password" | "code" | "send" | "step"
+
+/** Each kind's limits per address and per client, and its window in seconds. */
+const KINDS: Record<Kind, { address: number; client: number; window: number }> = {
+  password: { address: LIMITS.address, client: LIMITS.client, window: LIMITS.windowSeconds },
+  code: { address: LIMITS.address, client: LIMITS.client, window: LIMITS.windowSeconds },
+  send: {
+    address: LIMITS.sendAddress,
+    client: LIMITS.sendClient,
+    window: LIMITS.sendWindowSeconds,
+  },
+  // Organisation choices are counted per client only.
+  step: { address: Infinity, client: LIMITS.client, window: LIMITS.windowSeconds },
+}
+
 /**
- * Counts an attempt in every one of its buckets, as the API does before WorkOS is asked, and the
- * 429 for the first one over its limit, with the seconds left in its window.
+ * Counts an attempt of `kind` from this client and, when there is one, at `address` (lowercased), as
+ * the API does before WorkOS is asked, and the 429 when either is over its limit, with the seconds
+ * left in its window. `LOCKED_ADDRESS` is over its limit already.
  */
-function count(...hits: Array<[bucket: string, limit: number]>): Response | null {
+function count(kind: Kind, address: string | null): Response | null {
+  const { window, ...limit } = KINDS[kind]
+  if (address === LOCKED_ADDRESS) return limited(window)
   const now = Date.now()
-  const window = LIMITS.windowSeconds * 1000
   let wait = 0
-  for (const [bucket, limit] of hits) {
+  const hits: Array<[bucket: string, max: number]> = [[`${kind}_client`, limit.client]]
+  if (address !== null) hits.push([`${kind}_address:${address}`, limit.address])
+  for (const [bucket, max] of hits) {
     let b = buckets.get(bucket)
-    if (!b || now - b.start >= window) b = { start: now, count: 0 }
+    if (!b || now - b.start >= window * 1000) b = { start: now, count: 0 }
     b.count += 1
     buckets.set(bucket, b)
-    if (b.count > limit) wait = Math.max(wait, b.start + window - now)
+    if (b.count > max) wait = Math.max(wait, b.start + window * 1000 - now)
   }
-  if (wait === 0) return null
-  return refuse(429, "too_many_attempts", {
-    "Retry-After": String(Math.max(1, Math.ceil(wait / 1000))),
-  })
+  return wait === 0 ? null : limited(wait / 1000)
 }
+
+/** The API's `code_of`: 1 to 16 ASCII letters or digits, spaces around it aside, or null. */
+function codeOf(raw: string): string | null {
+  const code = raw.trim()
+  return /^[A-Za-z0-9]{1,16}$/.test(code) ? code : null
+}
+
+/** An address as the API keys its limits: lowercased. */
+const keyOf = (email: string) => email.trim().toLowerCase()
 
 /** The account at `email`, or null for an unknown address. */
 const accountOf = (email: string): Account | null => {
-  const key = email.trim().toLowerCase()
+  const key = keyOf(email)
   return Object.hasOwn(SAMPLE_ACCOUNTS, key) ? (key as Account) : null
 }
 
@@ -160,7 +218,7 @@ function conclude(
   account: Account,
   returnTo: string,
   setSession: (on: boolean) => void,
-  outcome: (typeof SAMPLE_ACCOUNTS)[Account] = SAMPLE_ACCOUNTS[account],
+  outcome: Outcome = SAMPLE_ACCOUNTS[account],
 ): Response {
   const expires = Date.now() + PENDING_SECONDS * 1000
   switch (outcome) {
@@ -183,8 +241,6 @@ function conclude(
     case "no_organisation":
     case "sign_in_unsupported":
       return ending(403, outcome)
-    case "too_many_attempts":
-      return refuse(429, "too_many_attempts", { "Retry-After": String(LIMITS.windowSeconds) })
   }
 }
 
@@ -216,11 +272,8 @@ export async function signInRoutes(
         return refuse(400, "invalid_password")
       const returnTo = body.return_to ?? "/"
       if (!returnToOk(returnTo)) return refuse(400, "invalid_return_to")
-      const limited = count(
-        [`password_address:${email.trim().toLowerCase()}`, LIMITS.address],
-        ["password_client", LIMITS.client],
-      )
-      if (limited) return limited
+      const over = count("password", keyOf(email))
+      if (over) return over
       const account = accountOf(email)
       // An unknown address and a wrong password answer alike, and end any earlier pending step.
       if (!account || password !== SAMPLE_PASSWORD) return ending(401, "invalid_credentials")
@@ -230,18 +283,15 @@ export async function signInRoutes(
       if (!sameSite) return refuse(403, "csrf")
       const body = await bodyOf(request, ["code"])
       if (!body) return refuse(400, "invalid_body")
-      const code = body.code!.trim()
-      if (!/^[A-Za-z0-9]{1,16}$/.test(code)) return refuse(400, "invalid_code")
+      const code = codeOf(body.code!)
+      if (!code) return refuse(400, "invalid_code")
       const at = pendingAt("verify_email")
       if (!at) return ending(400, "invalid_sign_in")
-      const limited = count(
-        [`code_address:${at.account}`, LIMITS.address],
-        ["code_client", LIMITS.client],
-      )
-      if (limited) return limited
+      const over = count("code", at.account)
+      if (over) return over
       // A wrong or expired code keeps the step open.
       if (code !== SAMPLE_CODE) return refuse(401, "invalid_code")
-      return conclude(at.account, at.returnTo, setSession, "done")
+      return conclude(at.account, at.returnTo, setSession, AFTER_VERIFY[at.account] ?? "done")
     }
     case "sign-in/organisation": {
       if (!sameSite) return refuse(403, "csrf")
@@ -250,9 +300,47 @@ export async function signInRoutes(
       const at = pendingAt("choose_organisation")
       if (!at) return ending(400, "invalid_sign_in")
       if (!at.organisations.includes(body.organisation!)) return refuse(400, "invalid_organisation")
-      const limited = count(["step_client", LIMITS.client])
-      if (limited) return limited
+      const over = count("step", null)
+      if (over) return over
       return conclude(at.account, at.returnTo, setSession, "done")
+    }
+    case "sign-in/code": {
+      if (!sameSite) return refuse(403, "csrf")
+      const body = await bodyOf(request, ["email"])
+      if (!body) return refuse(400, "invalid_body")
+      const email = body.email!
+      if (!emailOk(email)) return refuse(400, "invalid_email")
+      const over = count("send", keyOf(email))
+      if (over) return over
+      // Sent or not, whether the address has an account: the answer is the same.
+      return json({ next: "enter_code" })
+    }
+    case "sign-in/code/verify": {
+      if (!sameSite) return refuse(403, "csrf")
+      const body = await bodyOf(request, ["email", "code"], ["return_to"])
+      if (!body) return refuse(400, "invalid_body")
+      const email = body.email!
+      if (!emailOk(email)) return refuse(400, "invalid_email")
+      const code = codeOf(body.code!)
+      if (!code) return refuse(400, "invalid_code")
+      const returnTo = body.return_to ?? "/"
+      if (!returnToOk(returnTo)) return refuse(400, "invalid_return_to")
+      const over = count("code", keyOf(email))
+      if (over) return over
+      const account = accountOf(email)
+      // A wrong code and an address with no account answer alike, and end any earlier pending step.
+      if (!account || code !== SAMPLE_CODE) return ending(401, "invalid_code")
+      return conclude(account, returnTo, setSession)
+    }
+    case "sign-in/verify-email/resend": {
+      // The route reads no body.
+      if (!sameSite) return refuse(403, "csrf")
+      const at = pendingAt("verify_email")
+      if (!at) return ending(400, "invalid_sign_in")
+      const over = count("send", at.account)
+      if (over) return over
+      // The step stays as it is.
+      return json({ next: "verify_email" })
     }
   }
 
@@ -263,23 +351,12 @@ export async function signInRoutes(
     return typeof value === "string" ? value : ""
   }
   switch (route) {
-    case "code":
     case "password/forgot": {
       const email = text("email")
       if (!emailOk(email)) return refuse(400, "invalid_email")
-      if (accountOf(email) === "locked@example.com")
-        return refuse(429, "too_many_attempts", { "Retry-After": String(LIMITS.windowSeconds) })
+      if (keyOf(email) === LOCKED_ADDRESS) return limited(LIMITS.windowSeconds)
       // Sent, or not: the answer is the same.
       return accepted()
-    }
-    case "code/verify": {
-      const email = text("email")
-      if (!emailOk(email)) return refuse(400, "invalid_email")
-      const limited = count([`code_address:${email.trim().toLowerCase()}`, LIMITS.address])
-      if (limited) return limited
-      const account = accountOf(email)
-      if (!account || text("code") !== SAMPLE_CODE) return refuse(401, "invalid_code")
-      return conclude(account, text("return_to") || "/", setSession)
     }
     case "invite/lookup":
       return text("token") === SAMPLE_INVITE
@@ -294,8 +371,6 @@ export async function signInRoutes(
       setSession(true)
       return json({ next: "done", return_to: text("return_to") || "/" })
     }
-    case "verify-email/resend":
-      return pendingAt("verify_email") ? accepted() : ending(400, "invalid_sign_in")
     case "password/reset":
       if (text("token") !== SAMPLE_RESET) return refuse(410, "link_expired")
       if (text("password").length < 10) return refuse(422, "password_rejected")

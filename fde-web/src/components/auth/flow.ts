@@ -26,18 +26,20 @@ export function stepOf(value: unknown): Step {
 }
 
 /**
- * What one step hands the next, in memory only: the address typed, the organisations offered, a note
- * for the first screen, and an emailed link's token once it is out of the address bar. A reload
- * forgets them. Never the password.
+ * What one step hands the next, in memory only: the address typed, the address a code was just
+ * asked for, the organisations offered, a note for the first screen, and an emailed link's token once
+ * it is out of the address bar. A reload forgets them. Never the password.
  */
 export const carried: {
   email: string
+  codeSentTo: string | null
   organisations: Organisation[]
   note: SignInCode | null
   token: string
   tokenFor: Step | null
 } = {
   email: "",
+  codeSentTo: null,
   organisations: [],
   note: null,
   token: "",
@@ -47,6 +49,7 @@ export const carried: {
 /** Forgets everything a sign-in carried between its steps. */
 function forget() {
   carried.email = ""
+  carried.codeSentTo = null
   carried.organisations = []
   carried.note = null
   carried.token = ""

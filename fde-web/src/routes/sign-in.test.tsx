@@ -13,7 +13,6 @@ import { carried } from "@/components/auth/flow"
 import { resetMockApi } from "@/dev/mock-api"
 import { createQueryClient } from "@/lib/session"
 import { LATER } from "@/lib/api/sign-in-api"
-import type { Later } from "@/lib/api/sign-in-api"
 import type * as SignInModule from "@/lib/api/sign-in-api"
 
 // The flag is a build-time constant; here it is switched per test, read live by the route.
@@ -59,6 +58,9 @@ function open(at: string) {
   return router
 }
 
+/** The ways in as this build has them: the served ones on, the ones still to come off. */
+const SERVED = { ...LATER }
+
 /** Turns on the emailed-link steps, as when their API routes are served. */
 function withLinks() {
   beforeEach(() => {
@@ -69,7 +71,7 @@ function withLinks() {
 
 afterEach(() => {
   flag.on = false
-  for (const k of Object.keys(LATER) as Later[]) LATER[k] = false
+  Object.assign(LATER, SERVED)
   carried.token = ""
   carried.tokenFor = null
 })
@@ -99,11 +101,12 @@ describe("tokenOf", () => {
 })
 
 describe("validateSearch, while the emailed-link routes are still to come", () => {
-  it.each(["code", "forgot", "reset", "invite"])("drops step=%s and any token", (step) => {
+  it.each(["forgot", "reset", "invite"])("drops step=%s and any token", (step) => {
     expect(validate({ step, token: "t-1", return_to: "/today" })).toEqual({ return_to: "/today" })
   })
 
   it("keeps the steps the API serves, never with a token", () => {
+    expect(validate({ step: "code", token: "t-1" })).toEqual({ step: "code", return_to: "/" })
     expect(validate({ step: "verify-email", token: "t-1" })).toEqual({
       step: "verify-email",
       return_to: "/",

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { carried, stepOf, useLinkToken } from "./flow"
 import { OwnSignIn } from "./own-sign-in"
 import { resetMockApi } from "@/dev/mock-api"
-import { LIMITS, SAMPLE_PASSWORD, mockPendingStep } from "@/dev/mock-sign-in"
+import { LIMITS, LOCKED_ADDRESS, SAMPLE_PASSWORD, mockPendingStep } from "@/dev/mock-sign-in"
 import { api, safeReturnTo } from "@/lib/api/client"
 import { LATER, SIGN_IN_TEXT } from "@/lib/api/sign-in-api"
 import type { Later } from "@/lib/api/sign-in-api"
@@ -48,18 +48,20 @@ async function signIn(email: string, password = SAMPLE_PASSWORD) {
 
 const where = (router: ReturnType<typeof open>["router"]) => router.state.location
 
+/** The ways in as this build has them: the served ones on, the ones still to come off. */
+const SERVED = { ...LATER }
+
 /** Turns on every way in whose API route is still to come, for the tests of their screens. */
 function withLater() {
   beforeEach(() => {
     for (const k of Object.keys(LATER) as Later[]) LATER[k] = true
   })
-  afterEach(() => {
-    for (const k of Object.keys(LATER) as Later[]) LATER[k] = false
-  })
+  afterEach(() => void Object.assign(LATER, SERVED))
 }
 
 beforeEach(() => {
   carried.email = ""
+  carried.codeSentTo = null
   carried.organisations = []
   carried.note = null
   carried.token = ""
@@ -145,7 +147,9 @@ describe("sign in with email and password", () => {
 
     await userEvent.type(email, ".com")
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
-    expect(screen.getByLabelText("Password")).toHaveAccessibleDescription("Enter your password.")
+    expect(screen.getByLabelText("Password")).toHaveAccessibleDescription(
+      "Enter your password, or choose Email me a code below.",
+    )
     expect(screen.getByLabelText("Password")).toHaveFocus()
   })
 
@@ -207,13 +211,12 @@ describe("sign in with email and password", () => {
   it("offers no way in whose route is still to come", async () => {
     open()
     await screen.findByRole("heading", { name: "Sign in" })
-    for (const name of ["Email me a code instead", "Continue with Google"])
-      expect(screen.queryByRole("button", { name })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Continue with Google" })).toBeNull()
     expect(screen.queryByRole("link", { name: "Forgotten password?" })).toBeNull()
-    expect(screen.queryByText("or")).toBeNull()
+    expect(screen.queryByRole("link", { name: /sign up|invite/i })).toBeNull()
   })
 
-  it.each(["code", "forgot", "reset&token=reset-sample", "invite&token=invite-sample"])(
+  it.each(["forgot", "reset&token=reset-sample", "invite&token=invite-sample"])(
     "opens the first screen for step=%s until its route is served",
     async (step) => {
       open(`/sign-in?step=${step}`)
@@ -252,8 +255,6 @@ describe("the steps after a password", () => {
     const code = screen.getByLabelText("Code")
     expect(code).toHaveAttribute("autocomplete", "one-time-code")
     expect(code).toHaveAttribute("inputmode", "numeric")
-    // No resend until its route is served.
-    expect(screen.queryByRole("button", { name: "Send a new code" })).toBeNull()
 
     await userEvent.type(code, "12")
     await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
@@ -289,8 +290,11 @@ describe("the steps after a password", () => {
     await userEvent.type(await screen.findByLabelText("Code"), "123456")
     await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
 
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+    const title = await screen.findByRole("heading", { name: "Sign in" })
     expect(screen.getByRole("status")).toHaveTextContent(SIGN_IN_TEXT.invalid_sign_in)
+    // The note is read out with the title, which takes focus for it.
+    await waitFor(() => expect(title).toHaveFocus())
+    expect(title).toHaveAccessibleDescription(SIGN_IN_TEXT.invalid_sign_in)
     expect(screen.getByLabelText("Email")).toHaveValue("unverified@example.com")
     expect(where(router).search).toEqual({ return_to: "/today" })
 
@@ -299,6 +303,44 @@ describe("the steps after a password", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
     await screen.findByRole("alert")
     expect(screen.queryByRole("status")).toBeNull()
+    expect(title).not.toHaveAccessibleDescription()
+  })
+
+  it("leaves focus alone on the first screen when there is no note", async () => {
+    open()
+    const title = await screen.findByRole("heading", { name: "Sign in" })
+    expect(title).not.toHaveFocus()
+    expect(title).not.toHaveAccessibleDescription()
+  })
+
+  it("goes on from a confirmed email to choosing an organisation", async () => {
+    const { router } = open()
+    await signIn("unverified-two-orgs@example.com")
+    await userEvent.type(await screen.findByLabelText("Code"), "123456")
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
+
+    expect(await screen.findByRole("heading", { name: "Choose an organisation" })).toHaveFocus()
+    await userEvent.click(screen.getByRole("button", { name: "Northwind Field Engineering" }))
+    await waitFor(() => expect(where(router).pathname).toBe("/today"))
+  })
+
+  it("offers one way to start again when a confirmed email needs a step we do not support", async () => {
+    open()
+    await signIn("unverified-mfa@example.com")
+    await userEvent.type(await screen.findByLabelText("Code"), "123456")
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and sign in" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(SIGN_IN_TEXT.sign_in_unsupported)
+    expect(screen.getAllByRole("link", { name: "Start again" })).toHaveLength(1)
+    await expect(api.me()).rejects.toMatchObject({ status: 401 })
+  })
+
+  it("answers too many attempts for a locked address whatever the password", async () => {
+    open()
+    await signIn(LOCKED_ADDRESS, WRONG)
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Wait 5 minutes, then try again.",
+    )
   })
 
   it("ends with no organisation: what to do next and back to sign in, no sign-out", async () => {
@@ -343,51 +385,138 @@ describe("continue with Google, once its route is served", () => {
   })
 })
 
-describe("a new verification code, once its route is served", () => {
-  withLater()
-
-  it("sends one while the step waits", async () => {
+describe("a new verification code", () => {
+  it("sends one while the step waits, and starts again once the step has lapsed", async () => {
     resetMockApi({ signedIn: false })
     mockPendingStep("verify_email")
-    renderWithRouter(<Harness />, { at: "/sign-in?step=verify-email", signedIn: false, keep: true })
+    const { router } = renderWithRouter(<Harness />, {
+      at: "/sign-in?step=verify-email",
+      signedIn: false,
+      keep: true,
+    })
     await userEvent.click(await screen.findByRole("button", { name: "Send a new code" }))
-    expect(await screen.findByRole("status")).toHaveTextContent("A new code is on its way.")
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "A new code is on its way. Use the newest one.",
+    )
+
+    resetMockApi({ signedIn: false })
+    await userEvent.click(screen.getByRole("button", { name: "Send a new code" }))
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+    expect(screen.getByRole("status")).toHaveTextContent(SIGN_IN_TEXT.invalid_sign_in)
+    expect(where(router).search).toEqual({ return_to: "/" })
   })
 })
 
-describe("sign in with an emailed code, once its route is served", () => {
-  withLater()
+describe("sign in with an emailed code", () => {
+  it("is a choice of its own on the first screen, beside the one main button", async () => {
+    open()
+    await screen.findByRole("heading", { name: "Sign in" })
+    expect(screen.getByRole("button", { name: "Email me a code" })).toBeInTheDocument()
+    expect(screen.getByText("or")).toBeInTheDocument()
+    expect(
+      screen.getAllByRole("button").filter((b) => b.getAttribute("type") === "submit"),
+    ).toHaveLength(1)
+  })
 
-  it("asks for the address, says the same whatever it is, then signs in with the code", async () => {
+  it("signs in with no password: the address on the first screen, then the code", async () => {
     const { router } = open()
     await userEvent.type(await screen.findByLabelText("Email"), "riya@example.com")
-    await userEvent.click(screen.getByRole("button", { name: "Email me a code instead" }))
-
-    expect(await screen.findByRole("heading", { name: "Sign in with a code" })).toHaveFocus()
-    // The address typed on the first screen comes along.
-    expect(screen.getByLabelText("Email")).toHaveValue("riya@example.com")
-    expect(screen.getByLabelText("Email")).toHaveAttribute("autocomplete", "email")
     await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
 
     expect(await screen.findByRole("heading", { name: "Enter your code" })).toBeInTheDocument()
+    expect(where(router).search).toEqual({ step: "code", return_to: "/today" })
     expect(screen.getByText(/If an account uses/)).toHaveTextContent(
       "If an account uses riya@example.com, we have emailed it a 6-digit code.",
     )
-    await userEvent.type(screen.getByLabelText("Code"), "123456")
+    const code = screen.getByLabelText("Code")
+    expect(code).toHaveFocus()
+    expect(code).toHaveAttribute("autocomplete", "one-time-code")
+    await userEvent.type(code, "123 456")
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
     await waitFor(() => expect(where(router).pathname).toBe("/today"))
+    expect((await api.me()).user.name).toBe("Riya Kapoor")
+    expect(carried).toMatchObject({ email: "", codeSentTo: null })
   })
 
-  it("answers an unknown address as it would a known one, and refuses its code", async () => {
-    open("/sign-in?step=code")
-    await userEvent.type(await screen.findByLabelText("Email"), "nobody@example.com")
+  it("asks for the address when none was typed, then says the same whatever it is", async () => {
+    open()
+    await userEvent.click(await screen.findByRole("button", { name: "Email me a code" }))
+
+    expect(await screen.findByRole("heading", { name: "Sign in with a code" })).toHaveFocus()
+    expect(screen.getByLabelText("Email")).toHaveAttribute("autocomplete", "email")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    expect(screen.getByLabelText("Email")).toHaveAccessibleDescription("Enter your email address.")
+
+    await userEvent.type(screen.getByLabelText("Email"), "nobody@example.com")
     await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
     expect(await screen.findByText(/If an account uses/)).toHaveTextContent(
-      "If an account uses nobody@example.com",
+      "If an account uses nobody@example.com, we have emailed it a 6-digit code.",
     )
     await userEvent.type(screen.getByLabelText("Code"), "123456")
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
     expect(await screen.findByRole("alert")).toHaveTextContent(SIGN_IN_TEXT.invalid_code)
+  })
+
+  it("says what is wrong with a typed address before sending a code to it", async () => {
+    open()
+    await userEvent.type(await screen.findByLabelText("Email"), "riya@example")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    expect(screen.getByLabelText("Email")).toHaveAccessibleDescription(
+      "Enter an email address like name@example.com.",
+    )
+    expect(screen.getByLabelText("Email")).toHaveFocus()
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+  })
+
+  it("sends a new code without saying whether the address has an account", async () => {
+    open("/sign-in?step=code")
+    await userEvent.type(await screen.findByLabelText("Email"), "nobody@example.com")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    await userEvent.click(await screen.findByRole("button", { name: "Send a new code" }))
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "If an account uses that address, a new code is on its way. Use the newest one.",
+    )
+
+    await userEvent.click(screen.getByRole("button", { name: "Use a different address" }))
+    expect(await screen.findByRole("heading", { name: "Sign in with a code" })).toBeInTheDocument()
+    expect(screen.getByLabelText("Email")).toHaveValue("nobody@example.com")
+  })
+
+  it("says how long to wait once too many codes were asked for", async () => {
+    open("/sign-in?step=code")
+    await userEvent.type(await screen.findByLabelText("Email"), "riya@example.com")
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    for (let i = 1; i <= LIMITS.sendAddress; i++)
+      await userEvent.click(await screen.findByRole("button", { name: "Send a new code" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Wait 15 minutes, then try again.",
+    )
+  })
+
+  it("shows the first screen's refusal when the code cannot be asked for", async () => {
+    open()
+    await userEvent.type(await screen.findByLabelText("Email"), LOCKED_ADDRESS)
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("Too many attempts.")
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+  })
+
+  it.each([
+    ["unverified@example.com", "Check your email"],
+    ["two-orgs@example.com", "Choose an organisation"],
+  ])("takes %s on to its next step", async (email, title) => {
+    open()
+    await userEvent.type(await screen.findByLabelText("Email"), email)
+    await userEvent.click(screen.getByRole("button", { name: "Email me a code" }))
+    await userEvent.type(await screen.findByLabelText("Code"), "123456")
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
+    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument()
+    if (email.startsWith("unverified")) expect(screen.getByText(email)).toBeInTheDocument()
+  })
+
+  it("asks for the address again after a reload", async () => {
+    open("/sign-in?step=code")
+    expect(await screen.findByRole("heading", { name: "Sign in with a code" })).toBeInTheDocument()
   })
 })
 

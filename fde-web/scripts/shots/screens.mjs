@@ -1053,8 +1053,8 @@ function proofScreens() {
 
 // Our own sign-in screens (ADR 0007), on the mock's sample accounts (src/dev/mock-sign-in.ts). Each
 // screen at every size; each refusal or later state at the widest and at phone width. Only the steps
-// the API serves are here: the code, invite, reset and Google screens stay hidden (`LATER` in
-// src/lib/api/sign-in-api.ts) and come back here with their routes.
+// the API serves are here: the invite, reset, forgotten password and Google screens stay hidden
+// (`LATER` in src/lib/api/sign-in-api.ts) and come back here with their routes.
 function ownSignInScreens() {
   const STATE = { signedOut: true, sizes: ["1440", "390"] }
   // These pages are server-rendered: typing before React hydrates is lost, so every act waits for it.
@@ -1072,8 +1072,16 @@ function ownSignInScreens() {
     await field(page, "Password").fill(secret)
     await press(page, "Sign in")
   }
+  // Nothing to do but wait for the page to hydrate, so the main button is drawn enabled.
+  const settled = async () => {}
   const screens = [
-    { name: "auth-password", path: "/sign-in", signedOut: true, ready: title("Sign in") },
+    {
+      name: "auth-password",
+      path: "/sign-in",
+      signedOut: true,
+      ready: title("Sign in"),
+      act: settled,
+    },
     {
       name: "auth-password-missing",
       path: "/sign-in",
@@ -1117,6 +1125,7 @@ function ownSignInScreens() {
       signedOut: true,
       pendingStep: "verify_email",
       ready: title("Check your email"),
+      act: settled,
     },
     {
       name: "auth-verify-email-wrong",
@@ -1138,6 +1147,62 @@ function ownSignInScreens() {
       act: async (page) => {
         await password(page, "two-orgs@example.com", "sample-password")
         await page.getByRole("list", { name: "Your organisations" }).waitFor()
+      },
+    },
+    {
+      name: "auth-verify-email-resent",
+      path: "/sign-in?step=verify-email",
+      ...STATE,
+      pendingStep: "verify_email",
+      ready: title("Check your email"),
+      act: async (page) => {
+        await press(page, "Send a new code")
+        await page.getByRole("status").waitFor()
+      },
+    },
+    // Sign in with an emailed code: asked for from the first screen, or on its own screen when no
+    // address was typed.
+    {
+      name: "auth-code",
+      path: "/sign-in?step=code",
+      signedOut: true,
+      ready: title("Sign in with a code"),
+      act: settled,
+    },
+    {
+      name: "auth-code-enter",
+      path: "/sign-in",
+      signedOut: true,
+      ready: title("Sign in"),
+      act: async (page) => {
+        await field(page, "Email").fill("riya@example.com")
+        await press(page, "Email me a code")
+        await title("Enter your code")(page).waitFor()
+      },
+    },
+    {
+      name: "auth-code-wrong",
+      path: "/sign-in",
+      ...STATE,
+      ready: title("Sign in"),
+      act: async (page) => {
+        await field(page, "Email").fill("riya@example.com")
+        await press(page, "Email me a code")
+        await field(page, "Code").fill("654321")
+        await press(page, "Sign in")
+        await alert(page).waitFor()
+      },
+    },
+    {
+      name: "auth-code-resent",
+      path: "/sign-in?step=code",
+      ...STATE,
+      ready: title("Sign in with a code"),
+      act: async (page) => {
+        await field(page, "Email").fill("riya@example.com")
+        await press(page, "Email me a code")
+        await press(page, "Send a new code")
+        await page.getByRole("status").waitFor()
       },
     },
     {

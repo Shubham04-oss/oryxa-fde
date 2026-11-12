@@ -59,12 +59,15 @@ export function AuthTitle({
   id,
   ref,
   focusable,
+  describedBy,
   children,
   lead,
 }: {
   id?: string
   ref?: Ref<HTMLHeadingElement>
   focusable?: boolean
+  /** The id of a note read with the title when it takes focus. */
+  describedBy?: string
   children: ReactNode
   lead?: ReactNode
 }) {
@@ -74,6 +77,7 @@ export function AuthTitle({
         id={id}
         ref={ref}
         tabIndex={focusable ? -1 : undefined}
+        aria-describedby={describedBy}
         className="text-[28px] leading-[34px] font-semibold tracking-[-0.025em] text-balance outline-none max-[560px]:text-[24px] max-[560px]:leading-[30px]"
       >
         {children}
@@ -97,18 +101,21 @@ export function MockNote({ children }: { children: ReactNode }) {
  * sign-in screens starts here and in `fields.tsx`.
  *
  * `focusTitle` moves focus to the heading when the screen opens, so a screen reader announces a new
- * step; the first screen leaves focus where the browser put it.
+ * step; the first screen leaves focus where the browser put it. `describedBy` names a note read with
+ * the heading.
  */
 export function AuthFrame({
   title,
   lead,
   focusTitle = false,
+  describedBy,
   children,
   mockNote,
 }: {
   title: string
   lead?: ReactNode
   focusTitle?: boolean
+  describedBy?: string
   children: ReactNode
   /** What the dev mock accepts on this screen, shown only on the mock. */
   mockNote?: ReactNode
@@ -120,7 +127,7 @@ export function AuthFrame({
 
   return (
     <AuthPage labelledBy="auth-title">
-      <AuthTitle id="auth-title" ref={heading} focusable lead={lead}>
+      <AuthTitle id="auth-title" ref={heading} focusable describedBy={describedBy} lead={lead}>
         {title}
       </AuthTitle>
       <div className="mt-8">{children}</div>

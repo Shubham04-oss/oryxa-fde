@@ -1,11 +1,17 @@
 import { describe, expect, expectTypeOf, it } from "vitest"
 import type { z } from "zod"
 import type { Transport } from "./client"
-import type { components } from "./fde-api.gen"
+import type { components, operations } from "./fde-api.gen"
 import { SIGN_IN_TEXT, SignInError, ownSignInOn, signInOver } from "./sign-in-api"
-import type { Next } from "./sign-in-api"
+import type { CodeRequested, Next, Resent } from "./sign-in-api"
 
 type Spec = components["schemas"]
+/** What `TOperation` answers with a 200, as the OpenAPI spec says. */
+type Answer<TOperation extends keyof operations> = operations[TOperation] extends {
+  responses: { 200: { content: { "application/json": infer T } } }
+}
+  ? T
+  : never
 
 const PASSWORD = "a password 9c1f"
 
@@ -41,6 +47,27 @@ describe("the sign-in contract", () => {
   // Checked by `pnpm typecheck`: when the API's answer changes, `pnpm api:generate` changes this.
   it("reads exactly the answer the OpenAPI spec says a step is", () => {
     expectTypeOf<z.input<typeof Next>>().toEqualTypeOf<Spec["SignInStep"]>()
+    expectTypeOf<Answer<"sign_in_with_password">>().toEqualTypeOf<z.input<typeof Next>>()
+    expectTypeOf<Answer<"sign_in_verify_email">>().toEqualTypeOf<z.input<typeof Next>>()
+    expectTypeOf<Answer<"sign_in_choose_organisation">>().toEqualTypeOf<z.input<typeof Next>>()
+    expectTypeOf<Answer<"sign_in_with_code">>().toEqualTypeOf<z.input<typeof Next>>()
+  })
+
+  it("reads exactly the answers the OpenAPI spec gives the code routes", () => {
+    expectTypeOf<z.input<typeof CodeRequested>>().toEqualTypeOf<Answer<"sign_in_request_code">>()
+    // The spec types the resend as any step; the route only ever answers this one.
+    expectTypeOf<z.input<typeof Resent>>().toEqualTypeOf<
+      Extract<Answer<"sign_in_resend_verification">, { next: "verify_email" }>
+    >()
+    expectTypeOf<
+      operations["sign_in_resend_verification"]["requestBody"]
+    >().toEqualTypeOf<undefined>()
+    expectTypeOf<
+      operations["sign_in_request_code"]["requestBody"]["content"]["application/json"]
+    >().toEqualTypeOf<{ email: string }>()
+    expectTypeOf<
+      operations["sign_in_with_code"]["requestBody"]["content"]["application/json"]
+    >().toEqualTypeOf<{ email: string; code: string; return_to?: string | null }>()
   })
 
   it("posts the password in a JSON body to the API's route, never in the address", async () => {
@@ -88,32 +115,95 @@ describe("the sign-in contract", () => {
     for (const { request } of seen) expect(request.headers.get("X-Oryxa-Request")).toBe("1")
   })
 
+  it("asks for a code, signs in with it, and sends a verification code again on the API's routes", async () => {
+    const { seen, api } = over((r) =>
+      r.url.endsWith("/sign-in/code")
+        ? Response.json({ next: "enter_code" })
+        : r.url.endsWith("/resend")
+          ? Response.json({ next: "verify_email" })
+          : Response.json(DONE),
+    )
+    expect(await api.requestCode("a@example.com")).toBeUndefined()
+    expect(await api.withCode("a@example.com", "123456", "//evil.example")).toEqual(DONE)
+    expect(await api.resendVerification()).toBeUndefined()
+
+    expect(
+      seen.map(({ request, body }) => [new URL(request.url).pathname, body && JSON.parse(body)]),
+    ).toEqual([
+      ["/auth/sign-in/code", { email: "a@example.com" }],
+      ["/auth/sign-in/code/verify", { email: "a@example.com", code: "123456", return_to: "/" }],
+      // The route takes no body, so none is sent.
+      ["/auth/sign-in/verify-email/resend", ""],
+    ])
+    for (const { request } of seen) {
+      expect(request.method).toBe("POST")
+      expect(request.headers.get("X-Oryxa-Request")).toBe("1")
+      expect(request.credentials).toBe("same-origin")
+      expect(request.url).not.toContain("example.com")
+    }
+    expect(seen[2]!.request.headers.get("Content-Type")).toBeNull()
+  })
+
+  it.each([
+    ["the old 202 with no body", () => new Response(null, { status: 202 })],
+    ["another step", ok({ next: "verify_email" })],
+    ["nothing to go on", ok({})],
+  ])("refuses an answer to asking for a code it does not understand: %s", async (_, answer) => {
+    await expect(over(answer).api.requestCode("a@example.com")).rejects.toMatchObject({
+      code: "failed",
+    })
+  })
+
+  it.each([
+    ["done", ok(DONE)],
+    ["the old 202 with no body", () => new Response(null, { status: 202 })],
+  ])("refuses an answer to a resend it does not understand: %s", async (_, answer) => {
+    await expect(over(answer).api.resendVerification()).rejects.toMatchObject({ code: "failed" })
+  })
+
+  it("reads every step a code sign-in can answer", async () => {
+    const organisations = [{ id: "org_01A", name: "Harbor Labs" }]
+    for (const step of [
+      DONE,
+      { next: "verify_email" },
+      { next: "choose_organisation", organisations },
+    ])
+      expect(await over(ok(step)).api.withCode("a@example.com", "123456", "/today")).toEqual(step)
+  })
+
+  it.each([
+    [401, "invalid_code"],
+    [400, "invalid_email"],
+    [403, "sign_in_unsupported"],
+    [403, "no_organisation"],
+    [429, "too_many_attempts"],
+    [503, "unavailable"],
+  ] as const)("gives a code sign-in's %i %s its own words", async (status, code) => {
+    await expect(
+      over(refused(status, code)).api.withCode("a@example.com", "123456", "/"),
+    ).rejects.toMatchObject({ code, message: SIGN_IN_TEXT[code] })
+  })
+
   it("keeps the routes still to come on their assumed paths, tokens in the body only", async () => {
     const { seen, api } = over((r) =>
       r.url.endsWith("/lookup")
         ? Response.json({ email: "a@example.com" })
         : r.url.endsWith("/reset")
           ? new Response(null, { status: 204 })
-          : /\/(forgot|code|resend)$/.test(r.url)
+          : r.url.endsWith("/forgot")
             ? new Response(null, { status: 202 })
             : Response.json(DONE),
     )
-    await api.requestCode("a@example.com")
-    await api.withCode("a@example.com", "123456", "/today")
     await api.invite("tok")
     await api.acceptInvite("tok", "Asha Rao", PASSWORD, "/today")
-    await api.resendVerification()
     await api.forgotPassword("a@example.com")
     await api.resetPassword("tok", PASSWORD)
 
     expect(
       seen.map(({ request, body }) => [new URL(request.url).pathname, JSON.parse(body)]),
     ).toEqual([
-      ["/auth/code", { email: "a@example.com" }],
-      ["/auth/code/verify", { email: "a@example.com", code: "123456", return_to: "/today" }],
       ["/auth/invite/lookup", { token: "tok" }],
       ["/auth/invite", { token: "tok", name: "Asha Rao", password: PASSWORD, return_to: "/today" }],
-      ["/auth/verify-email/resend", {}],
       ["/auth/password/forgot", { email: "a@example.com" }],
       ["/auth/password/reset", { token: "tok", password: PASSWORD }],
     ])
