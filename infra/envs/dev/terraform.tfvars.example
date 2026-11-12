@@ -9,9 +9,9 @@ cloudflare_zone_id     = "<zone id>"
 cloudflare_zone_name   = "example.com" # the zone's own name: use your zone's, never commit it
 admin_emails           = ["owner@example.com"]
 workos_client_id       = "<WorkOS client id (public)>"
-# Without a custom auth domain, WorkOS issues tokens with this issuer, and the API refuses them until it is set
-# (infra/README.md, Verify before apply). With a custom auth domain, it is that domain (https://auth.example.com/).
-workos_issuer = "https://api.workos.com/user_management/<WorkOS client id>"
+# Only with a custom auth domain in WorkOS: that domain. Unset, the API derives
+# https://api.workos.com/user_management/<WorkOS client id> (infra/README.md, Verify before apply).
+# workos_issuer = "https://auth.example.com/"
 
 # The environment's host names, chosen here and required: no default, so nobody takes the production names (the zone
 # itself, app., admin., mcp.) by accident. Each is the zone or exactly one label under it: Cloudflare's Universal SSL

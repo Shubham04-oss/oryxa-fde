@@ -385,7 +385,7 @@ variable "slack_client_id" {
 }
 
 variable "workos_issuer" {
-  description = "The WorkOS token issuer (WORKOS_ISSUER): the API pins every token's `iss` to it. Without a custom auth domain it is https://api.workos.com/user_management/<client id>, and must be set until the API derives it (#199); with one, it is that domain. Null: the API's default, https://api.workos.com/."
+  description = "The WorkOS token issuer (WORKOS_ISSUER): the API pins every token's `iss` to it. Needed only with a custom auth domain: that domain. Null: the API derives https://api.workos.com/user_management/<client id>, the issuer without a custom auth domain."
   type        = string
   default     = null
   validation {
