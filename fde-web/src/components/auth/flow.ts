@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query"
 import { useRouter } from "@tanstack/react-router"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { safeReturnTo } from "@/lib/api/client"
 import { LATER, SignInError } from "@/lib/api/sign-in-api"
 import type { Later, Next, Organisation, SignInCode } from "@/lib/api/sign-in-api"
@@ -145,6 +145,40 @@ export function useCall(ended?: (error: SignInError) => boolean) {
   )
   return { working, error, setError, run }
 }
+
+/**
+ * Holds a way of asking for a code once the API has said to wait (`too_many_attempts` with
+ * `Retry-After`), until that wait has passed, so clicks meanwhile do not add counted attempts. The
+ * hold is for the address refused: the API counts each address apart.
+ */
+export function useHold() {
+  const [heldFor, setHeldFor] = useState<string | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+
+  /** Runs `call` for `address`, holding it when the answer is to wait. Any refusal still throws. */
+  const watch = useCallback(async (address: string, call: () => Promise<unknown>) => {
+    try {
+      await call()
+    } catch (failure) {
+      if (
+        failure instanceof SignInError &&
+        failure.code === "too_many_attempts" &&
+        failure.retryAfter
+      ) {
+        clearTimeout(timer.current)
+        setHeldFor(keyOf(address))
+        timer.current = setTimeout(() => setHeldFor(null), failure.retryAfter * 1000)
+      }
+      throw failure
+    }
+  }, [])
+
+  const held = (address: string) => heldFor !== null && heldFor === keyOf(address)
+  return { watch, held }
+}
+
+const keyOf = (address: string) => address.trim().toLowerCase()
 
 /** The note `useFlow` left for the first screen, read once. */
 export function useNote(): SignInCode | null {

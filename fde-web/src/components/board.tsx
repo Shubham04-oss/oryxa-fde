@@ -1,7 +1,9 @@
 import { useEffect, useId, useRef, useState } from "react"
 import type { DragEvent, KeyboardEvent, ReactNode } from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Card, Quiet } from "./page"
+import { NamesUnavailable, assigneeLabel, useNames, useWorkingOn } from "./people"
+import type { Names } from "./people"
 import { Button } from "./ui/button"
 import { FormDialog } from "./form-dialog"
 import { RefusalNote } from "./refusal-note"
@@ -17,7 +19,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "./ui/menu"
-import { api, queries } from "@/lib/api/client"
+import { api } from "@/lib/api/client"
 import type {
   AccessRequestOut,
   CriterionOut,
@@ -43,6 +45,7 @@ import {
 } from "@/lib/board"
 import type { Fields, Place } from "@/lib/board"
 import { clip } from "@/lib/access"
+import { byName } from "@/lib/people"
 import { commitRemoved, reason, refusalNote } from "@/lib/task-move"
 import { dayOf, daysBetween, dueLabel, localDay, waitingLabel } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -70,7 +73,7 @@ type Over = { status: TaskState; index: number | null }
  */
 export function Board({ scope, project }: { scope: ProjectScope; project: Project }) {
   const queryClient = useQueryClient()
-  const me = useQuery(queries.me())
+  const names = useNames(scope)
   const mover = useTaskMover()
   const { saving } = mover
   const [dialog, setDialog] = useState<Dialogs | null>(null)
@@ -311,7 +314,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
                         key={task.id}
                         task={task}
                         to={saving[task.id]}
-                        me={me.data?.user.id}
+                        names={names}
                         today={today}
                         person={(id) => people.get(id) ?? "a stakeholder no longer listed"}
                         criterion={task.criterion ? criteria.get(task.criterion) : undefined}
@@ -355,7 +358,7 @@ export function Board({ scope, project }: { scope: ProjectScope; project: Projec
             people={project.stakeholders}
             requests={project.access}
             criteria={project.scope.criteria}
-            me={me.data?.user.id}
+            scope={scope}
             send={(base, fields) => mover.send(scope, base, fields)}
             adopt={(current) => mover.adopt(scope, current)}
             onDelete={dialog.kind === "edit" ? () => discard(dialog.task) : undefined}
@@ -516,15 +519,7 @@ function Column({
   )
 }
 
-/** A card's lines under the title: who has it, why it is stuck or who it waits on, and when it is due. */
-// ponytail: the API returns only the assignee's WorkOS user id, so a teammate can't be named yet.
-function assigneeLabel(assignee: string | null | undefined, me: string | undefined) {
-  if (!assignee) return "Unassigned"
-  // Until we know who you are, a card does not guess.
-  if (!me) return ""
-  return assignee === me ? "Assigned to you" : "Assigned to a teammate"
-}
-
+/** A card's lines under the title: why it is stuck or who it waits on, and when it is due. */
 function lines(task: TaskOut, today: string, person: (id: string) => string) {
   const out: Array<{ text: string; attention: boolean }> = []
   if (task.status === "blocked" && task.blocker) out.push({ text: task.blocker, attention: true })
@@ -543,7 +538,7 @@ function lines(task: TaskOut, today: string, person: (id: string) => string) {
 function TaskCard({
   task,
   to,
-  me,
+  names,
   today,
   person,
   criterion,
@@ -558,7 +553,7 @@ function TaskCard({
   task: TaskOut
   /** Where it is on its way to, while the API has not answered. */
   to: TaskState | undefined
-  me: string | undefined
+  names: Names
   today: string
   person: (id: string) => string
   /** What the success criterion it works towards says. */
@@ -576,7 +571,7 @@ function TaskCard({
   const pending = to !== undefined
   const late = isOverdue(task, today)
   const detail = lines(task, today, person)
-  const who = assigneeLabel(task.assignee, me)
+  const who = assigneeLabel(task.assignee, names)
 
   // A card whose move is not confirmed shows the old status: the form would save it and undo the move.
   const open = () => {
@@ -634,9 +629,15 @@ function TaskCard({
           />
           {task.title}
         </span>
-        {who && <span className="text-[11px] text-muted-foreground">{who}</span>}
+        {/* One line: a long name is cut, and whole on hover and to a screen reader. */}
+        {who && (
+          <span title={who} className="truncate text-[11px] text-muted-foreground">
+            {who}
+          </span>
+        )}
         {criterion && (
-          <span className="truncate text-[11px] text-muted-foreground" title={criterion}>
+          // Whole and wrapped: a tooltip would hide the rest from keyboard and touch.
+          <span className="text-[11px] leading-normal [overflow-wrap:anywhere] text-muted-foreground">
             Towards: {criterion}
           </span>
         )}
@@ -708,7 +709,7 @@ export function TaskDialog({
   people,
   requests,
   criteria,
-  me,
+  scope,
   send,
   adopt,
   onDelete,
@@ -721,7 +722,8 @@ export function TaskDialog({
   requests: ReadonlyArray<AccessRequestOut>
   /** The project's success criteria, one of which the task may work towards. */
   criteria: ReadonlyArray<CriterionOut>
-  me: string | undefined
+  /** The project: whose people may have the task. */
+  scope: ProjectScope
   /** Saves over the copy the form opened on (null for a new task): throws what the API refused with. */
   send: (base: TaskOut | null, fields: Fields) => Promise<unknown>
   /** Puts the task a stale save was answered with where the page shows it. */
@@ -752,8 +754,12 @@ export function TaskDialog({
   })
   const { fields, set } = form
 
-  // A teammate has no name here yet, only an id, so they are kept as "a teammate".
-  const teammate = fields.assignee !== null && fields.assignee !== me
+  const names = useNames(scope)
+  const working = useWorkingOn(scope)
+  // Whoever has it now stays a choice, even when they no longer work on the project.
+  const choices = byName(
+    [...new Set([...working, ...(fields.assignee ? [fields.assignee] : [])])].map(names.of),
+  )
 
   return (
     <FormDialog
@@ -837,11 +843,15 @@ export function TaskDialog({
             onChange={(e) => set({ assignee: e.target.value || null })}
           >
             <option value="">Unassigned</option>
-            {me && <option value={me}>You</option>}
-            {teammate && <option value={fields.assignee!}>A teammate</option>}
+            {choices.map((p) => (
+              <option key={p.id} value={p.id} title={p.label}>
+                {clip(p.label, 60)}
+              </option>
+            ))}
           </select>
         </Labelled>
       </div>
+      <NamesUnavailable names={names} />
       <Criterion
         value={fields.criterion}
         criteria={criteria}

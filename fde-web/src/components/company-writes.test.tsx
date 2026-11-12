@@ -553,9 +553,9 @@ describe("the team", () => {
     renderWithRouter(<CompanyPage companyId={KESTREL} />)
     const team = await screen.findByRole("region", { name: "Team" })
     expect(await within(team).findByText("You")).toBeInTheDocument()
-    expect(within(team).getByText("A teammate")).toBeInTheDocument()
+    expect(within(team).getByText("Jonah Ade")).toBeInTheDocument()
 
-    const role = within(team).getByLabelText(/Role of teammate/)
+    const role = within(team).getByLabelText("Role of Jonah Ade")
     expect(role).toHaveValue("engineer")
     await userEvent.selectOptions(role, "lead")
     await waitFor(() =>
@@ -565,7 +565,9 @@ describe("the team", () => {
         body: { role: "lead" },
       }),
     )
-    await waitFor(() => expect(within(team).getByLabelText(/Role of teammate/)).toHaveValue("lead"))
+    await waitFor(() =>
+      expect(within(team).getByLabelText("Role of Jonah Ade")).toHaveValue("lead"),
+    )
   })
 
   it("keeps the old role and says why when the API refuses", async () => {
@@ -573,26 +575,33 @@ describe("the team", () => {
     const team = await screen.findByRole("region", { name: "Team" })
     await within(team).findByText("You")
     wire.refuse = forbidden()
-    await userEvent.selectOptions(within(team).getByLabelText(/Role of teammate/), "lead")
+    await userEvent.selectOptions(within(team).getByLabelText("Role of Jonah Ade"), "lead")
     expect(await within(team).findByRole("alert")).toHaveTextContent("You are not allowed")
-    expect(within(team).getByLabelText(/Role of teammate/)).toHaveValue("engineer")
+    expect(within(team).getByLabelText("Role of Jonah Ade")).toHaveValue("engineer")
   })
 
   it("removes someone only after asking", async () => {
     renderWithRouter(<CompanyPage companyId={KESTREL} />)
     const team = await screen.findByRole("region", { name: "Team" })
     await within(team).findByText("You")
-    await userEvent.click(within(team).getByRole("button", { name: /Remove teammate/ }))
+    await userEvent.click(within(team).getByRole("button", { name: "Remove Jonah Ade" }))
     await userEvent.click(within(team).getByRole("button", { name: "Keep" }))
     expect(writes()).toEqual([])
-    await userEvent.click(within(team).getByRole("button", { name: /Remove teammate/ }))
+    await userEvent.click(within(team).getByRole("button", { name: "Remove Jonah Ade" }))
     await userEvent.click(
       within(within(team).getByRole("group", { name: /Confirm removing/ })).getByRole("button", {
         name: "Remove",
       }),
     )
-    await waitFor(() => expect(within(team).queryByText("A teammate")).toBeNull())
+    const rows = within(team).getByRole("list", { name: "Team" })
+    await waitFor(() => expect(within(rows).queryByText("Jonah Ade")).toBeNull())
     expect(writes()).toEqual(["DELETE /companies/cmp_kestrel/members/usr_jonah"])
+    // Off the team, they can be added again.
+    expect(
+      within(within(team).getByLabelText("Add from the organisation")).getByRole("option", {
+        name: "Jonah Ade",
+      }),
+    ).toBeInTheDocument()
   })
 
   it("never offers to remove or demote the only lead, and asks before a lead steps down", async () => {
@@ -604,7 +613,7 @@ describe("the team", () => {
     expect(within(team).queryByRole("button", { name: "Remove yourself" })).toBeNull()
     expect(within(team).getByText(/A company always has a lead/)).toBeInTheDocument()
 
-    await userEvent.selectOptions(within(team).getByLabelText(/Role of teammate/), "lead")
+    await userEvent.selectOptions(within(team).getByLabelText("Role of Jonah Ade"), "lead")
     const mine = await within(team).findByLabelText("Role of you")
     expect(within(team).queryByText(/A company always has a lead/)).toBeNull()
     wire.sent = []
@@ -630,7 +639,109 @@ describe("the team", () => {
       },
     ])
     // Jonah is now the only lead.
-    expect(within(team).queryByLabelText(/Role of teammate/)).toBeNull()
+    expect(within(team).queryByLabelText("Role of Jonah Ade")).toBeNull()
+  })
+
+  it("adds someone from the organisation's people, with a role, once the API confirms", async () => {
+    renderWithRouter(<CompanyPage companyId={KESTREL} />)
+    const team = await screen.findByRole("region", { name: "Team" })
+    const pick = await within(team).findByLabelText("Add from the organisation")
+    // Everyone of the organisation not on the team, by name, the unnamed last; never a guest.
+    expect(
+      within(pick)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual([
+      "Choose someone to add",
+      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-…",
+      "Sam Okafor",
+      "Tomoko Hale",
+      "Unnamed teammate",
+    ])
+    // A long name is cut in the list and whole on hover.
+    expect(within(pick).getByRole("option", { name: /^Aurelia/ })).toHaveAttribute(
+      "title",
+      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
+    )
+    await userEvent.selectOptions(pick, "usr_sam")
+    await userEvent.selectOptions(within(team).getByLabelText("Their role"), "lead")
+    await userEvent.click(within(team).getByRole("button", { name: "Add" }))
+    const rows = within(team).getByRole("list", { name: "Team" })
+    expect(await within(rows).findByText("Sam Okafor")).toBeInTheDocument()
+    expect(wire.sent[0]).toMatchObject({
+      method: "PUT",
+      path: "/companies/cmp_kestrel/members/usr_sam",
+      body: { role: "lead" },
+    })
+    expect(within(team).getByLabelText("Role of Sam Okafor")).toHaveValue("lead")
+  })
+
+  it("keeps the choice and says why when the API refuses an addition", async () => {
+    renderWithRouter(<CompanyPage companyId={KESTREL} />)
+    const team = await screen.findByRole("region", { name: "Team" })
+    await userEvent.selectOptions(
+      await within(team).findByLabelText("Add from the organisation"),
+      "usr_tomoko",
+    )
+    wire.refuse = forbidden()
+    await userEvent.click(within(team).getByRole("button", { name: "Add" }))
+    expect(await within(team).findByRole("alert")).toHaveTextContent("You are not allowed")
+    expect(within(team).getByLabelText("Add from the organisation")).toHaveValue("usr_tomoko")
+  })
+
+  it("says plainly when names are unavailable, and offers no one to add rather than an empty list", async () => {
+    const g = globalThis as Record<string, unknown>
+    g.__fdeMockPeople = "unavailable"
+    try {
+      renderWithRouter(<CompanyPage companyId={KESTREL} />)
+      const team = await screen.findByRole("region", { name: "Team" })
+      expect(await within(team).findByText(/Names are unavailable right now/)).toBeInTheDocument()
+      expect(within(team).getByText(/No one can be added to the team/)).toBeInTheDocument()
+      expect(within(team).queryByLabelText("Add from the organisation")).toBeNull()
+      // The team shows as before names: you, and a teammate by the end of their id.
+      expect(within(team).getByText("A teammate …_jonah")).toBeInTheDocument()
+
+      // Names come back: Try again reads them.
+      delete g.__fdeMockPeople
+      await userEvent.click(within(team).getByRole("button", { name: "Try again" }))
+      expect(await within(team).findByLabelText("Add from the organisation")).toBeInTheDocument()
+      expect(within(team).queryByText(/Names are unavailable/)).toBeNull()
+    } finally {
+      delete g.__fdeMockPeople
+    }
+  })
+
+  it("says names are not available to someone refused the list, and offers no Try again", async () => {
+    const g = globalThis as Record<string, unknown>
+    g.__fdeMockPeople = "forbidden"
+    try {
+      renderWithRouter(<CompanyPage companyId={KESTREL} />)
+      const team = await screen.findByRole("region", { name: "Team" })
+      expect(
+        await within(team).findByText(/Names are not available to you here/),
+      ).toBeInTheDocument()
+      expect(within(team).queryByRole("button", { name: "Try again" })).toBeNull()
+      expect(within(team).queryByLabelText("Add from the organisation")).toBeNull()
+    } finally {
+      delete g.__fdeMockPeople
+    }
+  })
+
+  it("names a long name in full on hover, and someone with no name as unnamed, never by id", async () => {
+    renderWithRouter(<CompanyPage companyId={CompanyId.parse("cmp_lumen")} />)
+    const team = await screen.findByRole("region", { name: "Team" })
+    const long = await within(team).findByText(/^Aurelia Montgomery/)
+    expect(long).toHaveAttribute(
+      "title",
+      "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
+    )
+    expect(long).toHaveClass("truncate")
+    expect(within(team).getByText("Unnamed teammate")).toBeInTheDocument()
+    expect(team).not.toHaveTextContent("usr_quill")
+    expect(team).not.toHaveTextContent("…")
+    // Everyone in the organisation is on Lumen's team but Jonah and Tomoko.
+    const pick = within(team).getByLabelText("Add from the organisation")
+    expect(within(pick).getAllByRole("option")).toHaveLength(3)
   })
 
   it("is read only for an engineer, who is told who changes it", async () => {
@@ -650,13 +761,13 @@ describe("who is assigned to a project", () => {
     renderWithRouter(<ProjectPage scope={DISPATCH} />)
     const card = await screen.findByRole("region", { name: "Assigned" })
     expect(await within(card).findByText("You")).toBeInTheDocument()
-    await userEvent.click(within(card).getByRole("button", { name: /Remove teammate/ }))
+    await userEvent.click(within(card).getByRole("button", { name: "Remove Jonah Ade" }))
     await userEvent.click(
       within(within(card).getByRole("group", { name: /Confirm removing/ })).getByRole("button", {
         name: "Remove",
       }),
     )
-    await waitFor(() => expect(within(card).queryByText("A teammate")).toBeNull())
+    await waitFor(() => expect(within(card).queryByText("Jonah Ade")).toBeNull())
     expect(wire.sent[0]).toMatchObject({
       method: "DELETE",
       path: "/companies/cmp_kestrel/projects/prj_kestrel_dispatch/assignees/usr_jonah",
@@ -664,10 +775,10 @@ describe("who is assigned to a project", () => {
 
     await userEvent.selectOptions(
       await within(card).findByLabelText("Assign from the team"),
-      within(card).getByRole("option", { name: /A teammate/ }),
+      within(card).getByRole("option", { name: /Jonah Ade/ }),
     )
     await userEvent.click(within(card).getByRole("button", { name: "Assign" }))
-    await waitFor(() => expect(within(card).getByText("A teammate")).toBeInTheDocument())
+    await waitFor(() => expect(within(card).getByText("Jonah Ade")).toBeInTheDocument())
     expect(wire.sent[1]).toMatchObject({ method: "PUT" })
   })
 

@@ -8,6 +8,7 @@ import type { Note } from "./refusal-note"
 import { MoveAsk, useTaskMover } from "./task-move"
 import { useAccessMover } from "./access-move"
 import { Key, TodayRow } from "./today-row"
+import { assigneeLabel, useNames } from "./people"
 import { queries } from "@/lib/api/client"
 import type { ProjectScope, TodayItem } from "@/lib/api/schemas"
 import { STATUS_LABEL } from "@/lib/board"
@@ -35,6 +36,7 @@ function typingIn(target: EventTarget | null) {
  */
 export function TodayView({ today = localDay() }: { today?: string }) {
   const items = useQuery(queries.today())
+  const names = useNames()
   const navigate = useNavigate()
   const list = useRef<HTMLDivElement>(null)
   // The row the keyboard is on; Tab lands there. Null until a row is focused.
@@ -259,6 +261,13 @@ export function TodayView({ today = localDay() }: { today?: string }) {
                       current={itemKey(item) === current}
                       moving={moving}
                       refused={refused}
+                      assignee={
+                        item.kind === "task" &&
+                        item.task.assignee &&
+                        item.task.assignee !== names.dir.me
+                          ? assigneeLabel(item.task.assignee, names)
+                          : undefined
+                      }
                       onAct={(action) => act(item, action)}
                       onOpen={() => open(item)}
                       onDismiss={() => {

@@ -147,10 +147,6 @@ export function notSearchable(list: ReadonlyArray<Pick<DocumentOut, "status">> |
   return `${parts.join(". ")}.`
 }
 
-/** Who uploaded it, as far as the page knows: the API names people by id only (#110). */
-export const uploader = (id: string, me: string | undefined) =>
-  id === me ? "You" : `A teammate …${id.slice(-6)}`
-
 /** "3 Nov 2026": the day it was uploaded, where the browser is. */
 export const uploadedOn = (doc: Pick<DocumentOut, "created_at">) => shortDate(dayOf(doc.created_at))
 

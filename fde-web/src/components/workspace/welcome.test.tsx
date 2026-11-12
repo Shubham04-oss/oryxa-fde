@@ -1,9 +1,10 @@
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { BlockView } from "./blocks"
 import { Welcome } from "./welcome"
 import { CompaniesHome } from "@/components/companies-home"
+import { mockApi } from "@/dev/mock-api"
 import { Home } from "@/components/home"
 import type { Block } from "@/lib/workspace/blocks"
 import { renderWithRouter } from "@/test/render"
@@ -116,5 +117,151 @@ describe("a block", () => {
       <BlockView block={{ type: "html", html: "<b>x</b>" } as unknown as Block} />,
     )
     expect(container).toBeEmptyDOMElement()
+  })
+})
+
+describe("the conversation with the assistant", () => {
+  const original = { fetch: mockApi.fetch }
+  const asked: Array<{ method: string; path: string; body: unknown }> = []
+  const frames = (events: Array<unknown>) =>
+    `${events.map((e, i) => `id: ${i}\ndata: ${JSON.stringify(e)}\n\n`).join("")}event: done\ndata: {}\n\n`
+  let turnAnswer: () => Response = () => new Response(null, { status: 500 })
+
+  beforeEach(() => {
+    asked.length = 0
+    original.fetch = mockApi.fetch
+    // The assistant's routes, as this app's server answers them once it has checked the person.
+    mockApi.fetch = async (request) => {
+      const { pathname } = new URL(request.url)
+      if (!pathname.startsWith("/assistant/")) return original.fetch(request)
+      const text = request.method === "POST" ? await request.text() : ""
+      asked.push({ method: request.method, path: pathname, body: text ? JSON.parse(text) : null })
+      if (/^\/assistant\/conversations\/c_\w+$/.test(pathname))
+        return Response.json({ error: "no_conversation" }, { status: 404 })
+      if (pathname.endsWith("/turns")) return turnAnswer()
+      if (pathname.includes("/proposals/")) return new Response(null, { status: 204 })
+      return Response.json({ error: "not_found" }, { status: 404 })
+    }
+  })
+  afterEach(() => {
+    mockApi.fetch = original.fetch
+  })
+
+  const said = async (text: string) => {
+    const box = await screen.findByRole("textbox", { name: "What do you want to work on?" })
+    await userEvent.type(box, `${text}{Enter}`)
+    return screen.getByRole("log", { name: "Conversation" })
+  }
+
+  it("renders the block and shows the proposal from its arguments, dropping what is unknown", async () => {
+    turnAnswer = () =>
+      new Response(
+        frames([
+          { v: 1, type: "turn", turn: "t_1", said: "Set up Kestrel" },
+          // The model's words name another company: the card must not take them.
+          { v: 1, type: "text", delta: "I'll create Harbor Health for you." },
+          {
+            v: 1,
+            type: "block",
+            block: {
+              type: "brief",
+              items: [{ label: "Company", value: "<b>Kestrel</b> Logistics" }],
+            },
+          },
+          {
+            v: 1,
+            type: "block",
+            block: { type: "html", html: "<img src=https://evil.example/x>" },
+          },
+          { v: 1, type: "block", block: { type: "suggestion", id: "s", title: "No approve" } },
+          {
+            v: 1,
+            type: "proposal",
+            proposal: { id: "p_bad", action: "delete_company", args: { company: "cmp_kestrel" } },
+          },
+          {
+            v: 1,
+            type: "proposal",
+            proposal: { id: "p_1", action: "create_company", args: { name: "Kestrel Logistics" } },
+          },
+          {
+            v: 1,
+            type: "proposal",
+            proposal: {
+              id: "p_2",
+              action: "open_route",
+              args: { to: { screen: "company", company: "cmp_unseen" } },
+            },
+          },
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    const { container, router } = renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("Set up a new company called Kestrel Logistics")
+
+    expect(await within(log).findByText("I'll create Harbor Health for you.")).toBeInTheDocument()
+    // Text is text: the block's markup is shown as typed, never rendered.
+    expect(within(log).getByText("<b>Kestrel</b> Logistics")).toBeInTheDocument()
+    expect(container.querySelector("b, img, script")).toBeNull()
+    expect(within(log).queryByRole("article", { name: "No approve" })).toBeNull()
+
+    const proposals = within(log).getAllByRole("article", { name: /^Proposed:/ })
+    expect(proposals).toHaveLength(2)
+    expect(proposals[0]).toHaveTextContent("Create a company")
+    expect(proposals[0]).toHaveTextContent("It will be saved as “Kestrel Logistics”")
+    expect(proposals[0]).not.toHaveTextContent("Harbor")
+    // A record the person cannot read is named as such, and cannot be opened.
+    expect(proposals[1]).toHaveTextContent("Open a record you can't see")
+    expect(within(proposals[1]!).queryByRole("button", { name: "Open" })).toBeNull()
+    expect(asked.find((a) => a.path.endsWith("/turns"))?.body).toEqual({
+      text: "Set up a new company called Kestrel Logistics",
+    })
+    // Nothing was written: proposing is not doing.
+    expect(wire.sent).toEqual([])
+
+    await userEvent.click(within(proposals[0]!).getByRole("button", { name: "Create company" }))
+    await waitFor(() => expect(router.state.location.pathname).toMatch(/^\/companies\/cmp_/))
+    // The web ran it, with the person's session, through the API's own route.
+    expect(wire.sent).toEqual([
+      {
+        method: "POST",
+        path: "/companies",
+        body: expect.objectContaining({ name: "Kestrel Logistics" }),
+      },
+    ])
+    expect(asked.filter((a) => a.path.includes("/proposals/"))).toEqual([
+      {
+        method: "POST",
+        path: expect.stringMatching(/\/proposals\/p_1$/),
+        body: { outcome: "confirmed" },
+      },
+    ])
+  })
+
+  it("says plainly why a turn was refused", async () => {
+    turnAnswer = () => Response.json({ error: "rate_limited" }, { status: 429 })
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("hello")
+    expect(
+      await within(log).findByText(
+        "You've sent several messages in the last minute. Wait a moment, then try again.",
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it("keeps the scripted answers where the assistant is not configured", async () => {
+    turnAnswer = () => Response.json({ error: "assistant_not_configured" }, { status: 503 })
+    mockApi.fetch = async (request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname.startsWith("/assistant/"))
+        return Response.json({ error: "assistant_not_configured" }, { status: 503 })
+      return original.fetch(request)
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("new customer to set up")
+    expect(await within(log).findByText("Let's set it up together.")).toBeInTheDocument()
   })
 })

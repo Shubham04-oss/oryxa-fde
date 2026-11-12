@@ -1,0 +1,29 @@
+{
+  "name": "oryxa-fde-assistant",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Reached only by fde-web's service binding: no workers.dev URL, no preview URLs, no route.
+  "workers_dev": false,
+  "preview_urls": false,
+  // One object per conversation, and one per person for the turn rate. Both keep a working copy only.
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONVERSATIONS", "class_name": "Conversation" },
+      { "name": "PERSON_TURNS", "class_name": "PersonTurns" },
+    ],
+  },
+  "exports": {
+    "Conversation": { "type": "durable-object", "storage": "sqlite" },
+    "PersonTurns": { "type": "durable-object", "storage": "sqlite" },
+  },
+  // The scripted model is the only one enabled (src/model/provider.ts). SERVICE_TOKEN and BINDING_KEY are Worker
+  // secrets, and the API binding (`vpc_services`) comes with the deploy (infra); none of them is set here.
+  "vars": { "ASSISTANT_MODEL": "fake" },
+  // Logs carry ids only, and invocation logs and traces are off: prompts and answers are never logged (ADR 0009).
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false },
+  },
+}

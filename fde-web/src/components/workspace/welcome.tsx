@@ -4,23 +4,22 @@ import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
-import { Suggestion } from "./blocks"
+import { BlockView, Suggestion } from "./blocks"
+import { ProposalCard } from "./proposal"
+import { useConversation } from "./use-conversation"
+import type { ThreadTurn } from "./use-conversation"
 import { queries } from "@/lib/api/client"
 import type { CompanySummary } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { localDay } from "@/lib/time"
 import type { SuggestionBlock } from "@/lib/workspace/blocks"
 import { NEW_COMPANY, replyTo, suggestionsFrom } from "@/lib/workspace/welcome"
-import type { Reply } from "@/lib/workspace/welcome"
+import { MAX_SAID } from "@/lib/workspace/wire"
 import { cn } from "@/lib/utils"
 
 // The welcome screen (issue #209, DESIGN.md "The workspace"): a greeting, the conversation box as
-// the one main thing, what the workspace suggests next, and the companies, compact.
-
-/** The longest message the box takes. */
-const MAX_SAID = 2000
-// A short pause before the scripted reply, so it reads as an answer; none in tests.
-const THINK_MS = import.meta.env.MODE === "test" ? 0 : 450
+// the one main thing, what the workspace suggests next, and the companies, compact. The box talks
+// to the assistant where it is configured (issue #236), and answers from a script where it is not.
 
 export function greeting(now: Date) {
   const hour = now.getHours()
@@ -36,17 +35,11 @@ export function greeting(now: Date) {
 const dateLine = (now: Date) =>
   new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long" }).format(now)
 
-type Turn =
-  ({ id: number; who: "you" } & { text: string }) | ({ id: number; who: "workspace" } & Reply)
-
 export function Welcome({ now = new Date() }: { now?: Date }) {
   const me = useQuery(queries.me())
   const companies = useQuery(queries.companies())
   const today = useQuery(queries.today())
   const [dismissed, setDismissed] = useState<Array<SuggestionBlock>>([])
-  const [turns, setTurns] = useState<Array<Turn>>([])
-  const [thinking, setThinking] = useState(false)
-  const turnId = useRef(0)
   const first = me.data?.user.name.trim().split(/\s+/)[0]
 
   const all =
@@ -57,15 +50,7 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         : []
   const shown = all.filter((s) => !dismissed.some((d) => d.id === s.id))
   const lastDismissed = dismissed.at(-1)
-
-  function say(text: string) {
-    setTurns((t) => [...t, { id: ++turnId.current, who: "you", text }])
-    setThinking(true)
-    window.setTimeout(() => {
-      setTurns((t) => [...t, { id: ++turnId.current, who: "workspace", ...replyTo(text, shown) }])
-      setThinking(false)
-    }, THINK_MS)
-  }
+  const { turns, thinking, say, settle } = useConversation((text) => replyTo(text, shown))
 
   return (
     // One rhythm: 24 inside the opening, 48 between sections (40 on a phone).
@@ -82,10 +67,10 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
           </h2>
         </hgroup>
 
-        {turns.length > 0 && <Thread turns={turns} thinking={thinking} />}
+        {turns.length > 0 && <Thread turns={turns} thinking={thinking} onSettle={settle} />}
 
         <div className="grid gap-3">
-          <Composer onSend={say} busy={thinking} />
+          <Composer onSend={(text) => void say(text)} busy={thinking} />
           {/* One row; on a phone each takes the full width, so they never wrap unevenly. */}
           <div className="flex gap-2 max-[560px]:grid">
             <Chip to="/new-company" icon="plus">
@@ -94,7 +79,7 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
             <button
               type="button"
               disabled={thinking}
-              onClick={() => say("What needs me today?")}
+              onClick={() => void say("What needs me today?")}
               className={CHIP}
             >
               <Icon name="calendar-check" size={14} className="flex-none text-muted-foreground" />
@@ -228,11 +213,28 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
   )
 }
 
-function Thread({ turns, thinking }: { turns: Array<Turn>; thinking: boolean }) {
+function Thread({
+  turns,
+  thinking,
+  onSettle,
+}: {
+  turns: Array<ThreadTurn>
+  thinking: boolean
+  onSettle: (turn: number, proposal: string, outcome: "confirmed" | "dismissed") => void
+}) {
+  // A reply still waiting for its first words shows as the dots below, not as an empty turn.
+  const answering = turns.some(
+    (t) =>
+      t.who === "workspace" && t.streaming && !t.text && !t.blocks.length && !t.proposals.length,
+  )
   return (
     <div role="log" aria-label="Conversation" className="grid gap-5">
       {turns.map((turn, t) =>
-        turn.who === "you" ? (
+        turn.who === "workspace" &&
+        !turn.text &&
+        !turn.blocks.length &&
+        !turn.proposals.length &&
+        !turn.notice ? null : turn.who === "you" ? (
           <p
             key={turn.id}
             className="ml-auto max-w-[85%] rounded-[18px] rounded-br-md border bg-card px-4 py-2.5 break-words whitespace-pre-wrap motion-safe:animate-rise"
@@ -242,28 +244,49 @@ function Thread({ turns, thinking }: { turns: Array<Turn>; thinking: boolean }) 
           </p>
         ) : (
           <div key={turn.id} className="grid gap-3 motion-safe:animate-rise">
-            <p className="flex items-start gap-2.5">
-              <Voice />
-              <span className="pt-0.5">
-                <span className="sr-only">The workspace said: </span>
-                {turn.text}
-              </span>
-            </p>
+            {turn.text && (
+              <p className="flex items-start gap-2.5">
+                <Voice />
+                <span className="pt-0.5 break-words whitespace-pre-wrap">
+                  <span className="sr-only">The workspace said: </span>
+                  {turn.text}
+                </span>
+              </p>
+            )}
             {turn.blocks.length > 0 && (
               <ul className="ml-8 divide-y overflow-hidden rounded-card border bg-canvas">
-                {turn.blocks.map((block, i) =>
-                  block.type === "suggestion" ? (
-                    <li key={block.id}>
+                {turn.blocks.map((block, i) => (
+                  <li
+                    key={block.type === "suggestion" ? block.id : `${block.type}-${i}`}
+                    className={block.type === "suggestion" ? undefined : "px-5 py-4"}
+                  >
+                    {block.type === "suggestion" ? (
                       <Suggestion block={block} lead={i === 0 && t === turns.length - 1} />
-                    </li>
-                  ) : null,
-                )}
+                    ) : (
+                      <BlockView block={block} />
+                    )}
+                  </li>
+                ))}
               </ul>
             )}
+            {turn.proposals.length > 0 && (
+              <ul className="ml-8 divide-y overflow-hidden rounded-card border bg-canvas">
+                {turn.proposals.map(({ proposal, state }) => (
+                  <li key={proposal.id}>
+                    <ProposalCard
+                      proposal={proposal}
+                      state={state}
+                      onSettle={(outcome) => onSettle(turn.id, proposal.id, outcome)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+            {turn.notice && <p className="ml-8 text-meta text-muted-foreground">{turn.notice}</p>}
           </div>
         ),
       )}
-      {thinking && (
+      {thinking && (answering || !turns.some((t) => t.who === "workspace" && t.streaming)) && (
         <p role="status" className="flex items-center gap-2.5 text-muted-foreground">
           <Voice />
           <span className="sr-only">The workspace is answering</span>

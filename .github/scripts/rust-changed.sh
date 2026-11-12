@@ -7,7 +7,7 @@ set -uo pipefail
 
 # Paths that may skip the Rust jobs. Any file Rust code reads from outside crates/ (include_str!, fs reads,
 # build.rs) must stay off this list; see docs/ci.md for the ones found today.
-SKIP='^(docs/|fde-web/|realtime/|sandbox/gateway/|sandbox/image/|sandbox/harness/(src/|README\.md$|package(-lock)?\.json$|tsconfig[^/]*\.json$)|infra/(envs|modules|docker|scripts)/|infra/README\.md$|README\.md$|LICENSE$|CLAUDE\.md$)'
+SKIP='^(docs/|fde-web/|realtime/|assistant/|sandbox/gateway/|sandbox/image/|sandbox/harness/(src/|README\.md$|package(-lock)?\.json$|tsconfig[^/]*\.json$)|infra/(envs|modules|docker|scripts)/|infra/README\.md$|README\.md$|LICENSE$|CLAUDE\.md$)'
 
 if [ "${1:-}" = - ]; then
   files=$(cat) || { echo rust=true; exit 0; }

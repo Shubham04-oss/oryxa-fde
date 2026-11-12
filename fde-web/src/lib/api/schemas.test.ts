@@ -17,6 +17,7 @@ describe("schemas", () => {
     expectTypeOf<z.input<typeof S.SystemOut>>().toEqualTypeOf<Spec["SystemOut"]>()
     expectTypeOf<z.input<typeof S.MemberOut>>().toEqualTypeOf<Spec["MemberOut"]>()
     expectTypeOf<z.input<typeof S.AssigneeOut>>().toEqualTypeOf<Spec["AssigneeOut"]>()
+    expectTypeOf<z.input<typeof S.PersonOut>>().toEqualTypeOf<Spec["PersonOut"]>()
     expectTypeOf<z.input<typeof S.ScopeItemOut>>().toEqualTypeOf<Spec["ScopeItemOut"]>()
     expectTypeOf<z.input<typeof S.CriterionOut>>().toEqualTypeOf<Spec["CriterionOut"]>()
     expectTypeOf<z.input<typeof S.SignOffOut>>().toEqualTypeOf<Spec["SignOffOut"]>()

@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+package-lock.json
+# Copied from fde-web, in its own style (scripts/catalogue.mjs).
+src/catalogue/

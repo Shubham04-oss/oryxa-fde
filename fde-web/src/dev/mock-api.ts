@@ -32,6 +32,57 @@ const SESSION_KEY = "fde.mock.session"
 
 const RIYA = "usr_riya"
 const JONAH = "usr_jonah"
+const SAM = "usr_sam"
+const AURELIA = "usr_aurelia"
+const QUILL = "usr_quill"
+
+/**
+ * The organisation's people as WorkOS has them (invented): a name or none, and the membership's role.
+ * A guest is not one of its own people, so `/v1/people` leaves them out. Names are looked up when an
+ * answer is written, as the API does, so a member or an assignee carries the name of the moment.
+ */
+const DIRECTORY: ReadonlyArray<{
+  id: string
+  name: string | null
+  role: "admin" | "member" | "guest"
+}> = [
+  { id: RIYA, name: "Riya Kapoor", role: "admin" },
+  { id: JONAH, name: "Jonah Ade", role: "member" },
+  { id: "usr_sam", name: "Sam Okafor", role: "member" },
+  { id: "usr_tomoko", name: "Tomoko Hale", role: "member" },
+  {
+    id: "usr_aurelia",
+    name: "Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
+    role: "member",
+  },
+  // WorkOS has neither a first nor a last name for them.
+  { id: "usr_quill", name: null, role: "member" },
+  { id: "usr_visitor", name: "Visiting Auditor", role: "guest" },
+]
+
+/**
+ * Dev and test only, like everything here: `globalThis.__fdeMockPeople = "unavailable"` makes WorkOS
+ * unreachable (`/v1/people` answers 503 and members and assignees carry no names, as the API fails soft),
+ * and `"forbidden"` makes `/v1/people` answer 403, as it does to a guest.
+ */
+const peopleSwitch = () => (globalThis as Record<string, unknown>).__fdeMockPeople
+
+/** A user's name as an answer carries it: none when WorkOS cannot be reached. */
+const nameOf = (user: string) =>
+  peopleSwitch() === "unavailable" ? null : (DIRECTORY.find((p) => p.id === user)?.name ?? null)
+
+/** `GET /v1/people`: the organisation's own people by name, the unnamed last, ids breaking ties. */
+function peopleList() {
+  if (peopleSwitch() === "unavailable") return refuse(503, "unavailable")
+  if (peopleSwitch() === "forbidden") return refuse(403, "forbidden")
+  const key = (p: (typeof DIRECTORY)[number]) =>
+    [p.name === null ? 1 : 0, p.name?.toLowerCase() ?? "", p.id] as const
+  const list = DIRECTORY.filter((p) => p.role !== "guest").sort((a, b) => {
+    const [x, y] = [key(a), key(b)]
+    return x[0] - y[0] || (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0) || (x[2] < y[2] ? -1 : 1)
+  })
+  return json(list.map((p): S["PersonOut"] => ({ id: p.id, name: p.name })))
+}
 
 /** `days` (and `hours`) ago, as the API writes an instant. */
 const ago = (days: number, hours = 0) =>
@@ -369,7 +420,13 @@ function seed() {
         70,
       ),
       notes: [],
-      members: [member(RIYA, "lead")],
+      // A long name and no name at all, as WorkOS can have them.
+      members: [
+        member(RIYA, "lead"),
+        member(SAM, "engineer"),
+        member(AURELIA, "engineer"),
+        member(QUILL, "engineer"),
+      ],
       stakeholders: [
         person("stk_l1", "Carlos Mendes", "VP supply chain", "sponsor"),
         person("stk_l2", "Priya Raman", "Fresh produce buyer", "champion"),
@@ -728,6 +785,7 @@ function seed() {
           }),
           task("tsk_l2", "Buyer review of week 3 forecasts", "waiting_on_customer", 7, {
             due: -1,
+            assignee: AURELIA,
             waitingOn: "stk_l2",
             waitingDays: 7,
           }),
@@ -1139,7 +1197,7 @@ async function taskRoutes(
   const due = body.due_on ?? null
   if (due !== null && !/^\d{4}-\d{2}-\d{2}$/.test(due)) return refuse(400, "invalid_due_on")
   const assignee = body.assignee ?? null
-  if (assignee !== null && !found.members.some((m) => m.user === assignee))
+  if (assignee !== null && !worksOn(found, records, assignee))
     return refuse(400, "invalid_assignee")
   const waitingOn = body.waiting_on ?? null
   if (waitingOn !== null && !found.stakeholders.some((x) => x.id === waitingOn))
@@ -1395,6 +1453,13 @@ const worksAt = (found: CompanySeed, user: unknown) =>
   found.members.some((m) => m.user === user) ||
   (user === state.me.user.id && state.me.role === "admin")
 
+/** Whether a user works on a project: on its company, or assigned to it (the API's `fde_project.work`). */
+function worksOn(found: CompanySeed, records: Records, user: unknown) {
+  if (worksAt(found, user)) return true
+  const p = state.projects.find((x) => x.records === records)
+  return p !== undefined && assigneesOf(found, p.project.id).some((a) => a.user === user)
+}
+
 /**
  * A company's or a project's meeting notes, with the API's rules: a `PUT` replaces the whole note, the
  * fields are checked one by one in the API's order, each attendee must work on the company and each
@@ -1406,6 +1471,7 @@ async function noteRoutes(
   found: CompanySeed,
   notes: Array<S["MeetingNoteOut"]>,
   request: Request,
+  records?: Records,
 ) {
   const at = id === undefined ? -1 : notes.findIndex((n) => n.id === id)
   if (method === "GET") {
@@ -1434,7 +1500,9 @@ async function noteRoutes(
   const text = typeof b.body === "string" ? b.body.trim() : ""
   if ([...text].length < 1 || [...text].length > 20_000 || NOTE_CONTROL.test(text))
     return refuse(400, "invalid_body")
-  if (!attendees.every((user) => worksAt(found, user))) return refuse(400, "invalid_attendees")
+  // On a project, its assignees work there too.
+  const works = (user: unknown) => (records ? worksOn(found, records, user) : worksAt(found, user))
+  if (!attendees.every(works)) return refuse(400, "invalid_attendees")
   if (!stakeholders.every((one) => found.stakeholders.some((x) => x.id === one)))
     return refuse(400, "invalid_stakeholders")
   if (!adding && at < 0) return refuse(404, "not_found")
@@ -1848,9 +1916,6 @@ async function systemRoutes(
   return json(saved, adding ? 201 : 200)
 }
 
-/** The people of the organisation, by id: the API only invites someone it knows. */
-const ORG_USERS: ReadonlyArray<string> = [RIYA, JONAH]
-
 /** `PUT` and `DELETE` on a company's members: the API's `manage`. */
 async function memberRoutes(
   method: string,
@@ -1874,7 +1939,8 @@ async function memberRoutes(
   const b = await readBody(request)
   const role = b && (b.role === "lead" || b.role === "engineer" ? b.role : null)
   if (!role) return refuse(400, "invalid_role")
-  if (!ORG_USERS.includes(user)) return refuse(404, "not_found")
+  // The API adds only the organisation's own people.
+  if (!DIRECTORY.some((p) => p.id === user && p.role !== "guest")) return refuse(404, "not_found")
   if (at >= 0) found.members[at] = { ...found.members[at]!, role }
   else found.members.push({ user, role, added_at: new Date().toISOString() })
   return noContent()
@@ -1896,7 +1962,8 @@ function assigneeRoutes(
   projectId: string,
 ) {
   const list = assigneesOf(found, projectId)
-  if (method === "GET" && user === undefined) return json(list)
+  if (method === "GET" && user === undefined)
+    return json(list.map((a) => ({ ...a, name: nameOf(a.user) })))
   if (user === undefined) return null
   if (!mayManage(found)) return refuse(403, "forbidden")
   const at = list.findIndex((a) => a.user === user)
@@ -2059,7 +2126,8 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   if (collection === "projects" && method === "PATCH" && record === undefined)
     return projectWrites(method, projectId, found, request)
   if (method === "GET" && projectId === undefined) {
-    if (collection === "members") return json(found.members)
+    if (collection === "members")
+      return json(found.members.map((m) => ({ ...m, name: nameOf(m.user) })))
     if (collection === "stakeholders") return json(found.stakeholders)
     if (collection === "systems") return json(found.systems)
     if (collection === "projects") return json(projectsOf(companyId).map((p) => p.project))
@@ -2081,7 +2149,7 @@ async function companyRoutes(method: string, parts: Array<string>, request: Requ
   }
   if (record === "assignees") return assigneeRoutes(method, rest[0], found, projectId)
   if (record === "meeting-notes")
-    return noteRoutes(method, rest[0], found, p.records.notes, request)
+    return noteRoutes(method, rest[0], found, p.records.notes, request, p.records)
   if (method === "GET") {
     if (record === "stage-checklist") {
       const items = checklist(p.project.stage, found, p.records)
@@ -2139,6 +2207,7 @@ async function answer(request: Request): Promise<Response> {
     return refuse(503, "unavailable")
   const [root, ...parts] = pathname.slice("/api/v1/".length).split("/")
   if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
+  if (method === "GET" && parts.length === 0 && root === "people") return peopleList()
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())
   if (method === "GET" && root === "room" && parts[0] === "companies" && parts[2] === "projects")
     return roomRead(parts[1], parts[3])

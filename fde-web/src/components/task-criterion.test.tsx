@@ -75,6 +75,20 @@ describe("every task save sends its criterion back", () => {
     await keptLinked(REPLAY, "crt_k1", 1)
   })
 
+  it("the Waiting prompt", async () => {
+    await board()
+    await pick(REPLAY, "Waiting on the customer")
+    const box = await screen.findByRole("dialog", { name: "Who is this waiting on?" })
+    await userEvent.selectOptions(
+      within(box).getByLabelText("Waiting on"),
+      "Ines Moreau, Dispatch lead, Ghent",
+    )
+    await userEvent.click(
+      within(box).getByRole("button", { name: "Move to Waiting on the customer" }),
+    )
+    await keptLinked(REPLAY, "crt_k1", 1)
+  })
+
   it("a row's action on Today", async () => {
     renderWithRouter(<TodayView />)
     await userEvent.click(await screen.findByRole("button", { name: `Done: ${REPLAY}` }))

@@ -47,14 +47,12 @@ export function ProofSection({
   scope,
   criteria,
   tasks,
-  me,
   handle,
 }: {
   scope: ProjectScope
   criteria: ReadonlyArray<CriterionOut>
   /** The project's tasks, in its order: a row names those that work towards its criterion. */
   tasks: ReadonlyArray<TaskOut>
-  me: string | undefined
   handle?: Ref<ProofHandle>
 }) {
   const client = useQueryClient()
@@ -249,7 +247,6 @@ export function ProofSection({
                   suite={suite}
                   runs={history.filter((r) => r.suite === suite.id)}
                   criteria={criteria}
-                  me={me}
                   open={opened.has(suite.id)}
                   onToggle={() =>
                     setOpened((now) => {
