@@ -18,6 +18,7 @@ import {
   Me,
   MeetingNoteOut,
   MemberOut,
+  PersonOut,
   ProjectOut,
   ScopeItemOut,
   CriterionOut,
@@ -554,6 +555,9 @@ function connect(transport: Transport) {
       if (!response.ok) throw refusal(response.status, error)
     },
 
+    /** The organisation's own people by name: 403 outside the workspace, 503 when WorkOS cannot say. */
+    people: () => read(z.array(PersonOut), client.GET("/v1/people")),
+
     members: (id: CompanyId) =>
       read(z.array(MemberOut), client.GET("/v1/companies/{company}/members", company(id))),
 
@@ -1066,6 +1070,7 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     updateSystem: async (id, system, body, version) =>
       (await use()).updateSystem(id, system, body, version),
     removeSystem: async (id, system) => (await use()).removeSystem(id, system),
+    people: async () => (await use()).people(),
     members: async (id) => (await use()).members(id),
     setMember: async (id, user, role) => (await use()).setMember(id, user, role),
     removeMember: async (id, user) => (await use()).removeMember(id, user),
@@ -1278,14 +1283,26 @@ export const queries = {
     }),
   activeRuns: () =>
     queryOptions({ queryKey: ["runs", "active"], queryFn: api.activeRuns, ...read }),
-  /** A company's leads and engineers, by id: the API has no names for them yet. */
+  /**
+   * The organisation's people, read gently: the API keeps them five minutes, so the page does too, and a
+   * 403 or 503 is an answer (names are unavailable), not something to hammer with retries.
+   */
+  people: () =>
+    queryOptions({
+      queryKey: ["people"],
+      queryFn: api.people,
+      retry: false,
+      staleTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
+    }),
+  /** A company's leads and engineers, with their names when WorkOS has them. */
   members: (id: CompanyId) =>
     queryOptions({
       queryKey: ["companies", id, "members"],
       queryFn: () => api.members(id),
       ...read,
     }),
-  /** The engineers assigned to a project, by id. */
+  /** The engineers assigned to a project, with their names when WorkOS has them. */
   assignees: (scope: ProjectScope) =>
     queryOptions({
       queryKey: ["companies", scope.company, "projects", scope.project, "assignees"],

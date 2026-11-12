@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { UploadDialog } from "./document-upload"
 import { Card, Quiet, Row, Rows, Status } from "./page"
+import { useNames } from "./people"
+import type { Names } from "./people"
 import { Button } from "./ui/button"
 import { ApiError, SAFE_TEXT, queries } from "@/lib/api/client"
 import type { CompanyId, DocumentOut, SearchHitOut } from "@/lib/api/schemas"
@@ -20,7 +22,6 @@ import {
   searchTerms,
   statusOf,
   uploadedOn,
-  uploader,
   whereIn,
 } from "@/lib/documents"
 import { cn } from "@/lib/utils"
@@ -38,7 +39,7 @@ const PAUSE_MS = 250
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
 export function DocumentsCard({ company }: { company: CompanyId }) {
-  const me = useQuery(queries.me())
+  const names = useNames({ company })
   // When the first document still being read was first seen, so the polling can slow down and stop.
   const watching = useRef<number | null>(null)
   const documents = useQuery({
@@ -168,7 +169,7 @@ export function DocumentsCard({ company }: { company: CompanyId }) {
           <>
             <Rows label="Documents">
               {(list ?? []).map((doc) => (
-                <DocumentRow key={doc.id} doc={doc} me={me.data?.user.id} />
+                <DocumentRow key={doc.id} doc={doc} names={names} />
               ))}
             </Rows>
             {stalled && (
@@ -408,7 +409,7 @@ function Hit({
   )
 }
 
-function DocumentRow({ doc, me }: { doc: DocumentOut; me: string | undefined }) {
+function DocumentRow({ doc, names }: { doc: DocumentOut; names: Names }) {
   const status = statusOf(doc)
   return (
     <Row>
@@ -430,8 +431,7 @@ function DocumentRow({ doc, me }: { doc: DocumentOut; me: string | undefined }) 
               kindLabel(doc.content_type),
               formatBytes(doc.size_bytes),
               doc.status === "ingested" && plural(doc.chunks, "passage", "passages"),
-              // One unit, so a narrow screen does not break "A teammate …" from the end of their id.
-              `Added ${uploadedOn(doc)} by ${uploader(doc.uploaded_by, me).replaceAll(" ", "\u00a0")}`,
+              `Added ${uploadedOn(doc)} by ${names.of(doc.uploaded_by).phrase}`,
             ]
               .filter(Boolean)
               .join(" · ")}

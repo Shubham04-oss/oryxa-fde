@@ -23,6 +23,7 @@ import {
   SparkleAi01Icon,
   SunIcon,
   ThreeDotsMenuHorizontalIcon,
+  UserIcon,
   UserPlusIcon,
 } from "@pikaicons/core-free"
 import type { IconSvgElement } from "@pikaicons/core-free"
@@ -47,6 +48,7 @@ const PIKA = {
   menu: BurgerMenuThreeIcon,
   more: ThreeDotsMenuHorizontalIcon,
   pencil: PencilEditIcon,
+  person: UserIcon,
   moon: MoonIcon,
   plus: PlusIcon,
   project: FolderIcon,

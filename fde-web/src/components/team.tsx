@@ -1,30 +1,31 @@
-import { useState } from "react"
+import { useId, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Avatar } from "./app-shell"
 import { Card, Failed, Loading, Quiet, Row, Rows } from "./page"
+import { NamesUnavailable, PersonAvatar, PersonName, useNames } from "./people"
+import type { Names } from "./people"
 import { Button } from "./ui/button"
 import { FIELD } from "./task-move"
 import { api, queries } from "@/lib/api/client"
 import type { CompanyId, MemberRole, ProjectScope, UserId } from "@/lib/api/schemas"
+import { clip } from "@/lib/access"
+import { byName } from "@/lib/people"
 import { attempt, commitPeople } from "@/lib/records"
 import { shortDate, dayOf } from "@/lib/time"
+import { cn } from "@/lib/utils"
 
-// Who works on a company and on a project (DESIGN.md §3). The API names people by id only, so
-// this says "You" and "A teammate" (the board does too) until it has names (#110).
+// Who works on a company and on a project (DESIGN.md §3), by name (lib/people.ts). A lead or admin
+// adds someone from the organisation's people, and assigns engineers from the company's team.
 
 const ROLE_LABEL: Record<MemberRole, string> = { lead: "Lead", engineer: "Engineer" }
 
-/** Who an id is, as far as this screen knows. */
-function Who({ user, me }: { user: string; me: string | undefined }) {
-  const you = user === me
+/** A person in a row: their initials and their name. */
+function Who({ user, names }: { user: string; names: Names }) {
+  const person = names.of(user)
+  const me = useQuery(queries.me())
   return (
     <div className="flex min-w-0 items-center gap-3">
-      <Avatar name={you ? "You" : "Teammate"} />
-      <div className="min-w-0">
-        <p className="truncate text-xs">{you ? "You" : "A teammate"}</p>
-        {/* The id's end tells two teammates apart until there are names. */}
-        {!you && <Quiet className="truncate">…{user.slice(-6)}</Quiet>}
-      </div>
+      <PersonAvatar person={person} me={me.data?.user.name} />
+      <PersonName person={person} className="text-xs" />
     </div>
   )
 }
@@ -104,6 +105,7 @@ export function MembersCard({
 }) {
   const client = useQueryClient()
   const members = useQuery(queries.members(company))
+  const names = useNames({ company })
   // The person a save is in flight for, and a refusal, kept in their row.
   const [saving, setSaving] = useState<string | null>(null)
   const [refused, setRefused] = useState<{ user: string; why: string } | null>(null)
@@ -144,12 +146,12 @@ export function MembersCard({
             return (
               <Row key={member.user}>
                 <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                  <Who user={member.user} me={me} />
+                  <Who user={member.user} names={names} />
                   <div className="flex items-center gap-2">
                     {manage && !onlyLead ? (
                       <select
-                        aria-label={`Role of ${you ? "you" : `teammate …${member.user.slice(-6)}`}`}
-                        className={`${FIELD} w-auto`}
+                        aria-label={`Role of ${names.of(member.user).phrase}`}
+                        className={cn(FIELD, "w-auto")}
                         value={member.role}
                         disabled={busy || (you && steppingDown)}
                         onChange={(e) => {
@@ -170,7 +172,7 @@ export function MembersCard({
                     )}
                     {manage && !onlyLead && (
                       <RemoveButton
-                        name={you ? "yourself" : `teammate …${member.user.slice(-6)}`}
+                        name={you ? "yourself" : names.of(member.user).phrase}
                         ask="Remove from this company?"
                         disabled={busy}
                         onRemove={() => void run(member.user, null)}
@@ -221,6 +223,10 @@ export function MembersCard({
           })}
         </Rows>
       )}
+      <NamesUnavailable names={names} className="mt-2" />
+      {manage && members.isSuccess && (
+        <AddMember company={company} team={members.data.map((m) => m.user)} names={names} />
+      )}
       {!manage && (
         <Quiet className="mt-2">Only a lead or an organisation admin changes the team.</Quiet>
       )}
@@ -243,6 +249,7 @@ export function AssigneesCard({
   // The company's team is who can be assigned. Someone who works only on this project cannot read
   // it (the API answers 403), and is not offered the choice.
   const team = useQuery({ ...queries.members(scope.company), enabled: manage })
+  const names = useNames(scope)
   const [choice, setChoice] = useState("")
   const [saving, setSaving] = useState<string | null>(null)
   const [refused, setRefused] = useState<{ user: string; why: string } | null>(null)
@@ -262,8 +269,11 @@ export function AssigneesCard({
     else if (add) setChoice("")
   }
 
-  const left = (team.data ?? []).filter(
-    (m) => !(assigned.data ?? []).some((a) => a.user === m.user),
+  const roles = new Map((team.data ?? []).map((m) => [m.user as string, m.role]))
+  const left = byName(
+    (team.data ?? [])
+      .filter((m) => !(assigned.data ?? []).some((a) => a.user === m.user))
+      .map((m) => names.of(m.user)),
   )
 
   return (
@@ -286,14 +296,14 @@ export function AssigneesCard({
           {assigned.data.map((a) => (
             <Row key={a.user}>
               <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                <Who user={a.user} me={me} />
+                <Who user={a.user} names={names} />
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-muted-foreground">
                     Since {shortDate(dayOf(a.added_at))}
                   </span>
                   {manage && (
                     <RemoveButton
-                      name={a.user === me ? "yourself" : `teammate …${a.user.slice(-6)}`}
+                      name={a.user === me ? "yourself" : names.of(a.user).phrase}
                       ask="Unassign?"
                       disabled={saving === a.user}
                       onRemove={() => void run(a.user, false)}
@@ -318,15 +328,14 @@ export function AssigneesCard({
         >
           <select
             aria-label="Assign from the team"
-            className={`${FIELD} w-auto min-w-44`}
+            className={cn(FIELD, "w-auto min-w-44")}
             value={choice}
             onChange={(e) => setChoice(e.target.value)}
           >
             <option value="">Choose from the team</option>
-            {left.map((m) => (
-              <option key={m.user} value={m.user}>
-                {m.user === me ? "You" : `A teammate …${m.user.slice(-6)}`},{" "}
-                {ROLE_LABEL[m.role].toLowerCase()}
+            {left.map((p) => (
+              <option key={p.id} value={p.id} title={p.label}>
+                {clip(p.label, 60)}, {ROLE_LABEL[roles.get(p.id) ?? "engineer"].toLowerCase()}
               </option>
             ))}
           </select>
@@ -338,6 +347,103 @@ export function AssigneesCard({
       {manage && refused && !assigned.data?.some((a) => a.user === refused.user) && (
         <Said text={refused.why} onDismiss={() => setRefused(null)} />
       )}
+      <NamesUnavailable names={names} className="mt-2" />
     </Card>
+  )
+}
+
+/**
+ * Adds someone from the organisation's people to the company, with a role. Only `/v1/people` says who
+ * they are, so when it cannot answer the card says so and offers nobody, never an empty list.
+ */
+function AddMember({
+  company,
+  team,
+  names,
+}: {
+  company: CompanyId
+  team: ReadonlyArray<string>
+  names: Names
+}) {
+  const client = useQueryClient()
+  const people = useQuery(queries.people())
+  const [choice, setChoice] = useState("")
+  const [role, setRole] = useState<MemberRole>("engineer")
+  const [saving, setSaving] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const heading = useId()
+  const add = useMutation({
+    mutationFn: async () => api.setMember(company, choice as UserId, role),
+    onSuccess: () => commitPeople(client),
+  })
+
+  async function run() {
+    setSaving(true)
+    setRefused(null)
+    const why = await attempt(() => add.mutateAsync(), "person")
+    setSaving(false)
+    if (why) setRefused(why)
+    else setChoice("")
+  }
+
+  if (people.isPending)
+    return <Quiet className="mt-3">Loading the organisation&apos;s people…</Quiet>
+  if (people.isError)
+    return (
+      <Quiet className="mt-3">
+        No one can be added to the team until the organisation&apos;s people can be read.
+      </Quiet>
+    )
+  const others = byName(people.data.filter((p) => !team.includes(p.id)).map((p) => names.of(p.id)))
+  if (others.length === 0)
+    return <Quiet className="mt-3">Everyone in the organisation is on this team.</Quiet>
+  return (
+    <form
+      aria-labelledby={heading}
+      className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (choice) void run()
+      }}
+    >
+      <h3 id={heading} className="basis-full text-[11px] text-muted-foreground">
+        Add to the team
+      </h3>
+      <select
+        aria-label="Add from the organisation"
+        className={cn(FIELD, "w-auto max-w-80 min-w-44")}
+        value={choice}
+        disabled={saving}
+        onChange={(e) => setChoice(e.target.value)}
+      >
+        <option value="">Choose someone to add</option>
+        {others.map((p) => (
+          <option key={p.id} value={p.id} title={p.label}>
+            {clip(p.label, 60)}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label="Their role"
+        className={cn(FIELD, "w-auto")}
+        value={role}
+        disabled={saving}
+        onChange={(e) => setRole(e.target.value as MemberRole)}
+      >
+        {(Object.keys(ROLE_LABEL) as Array<MemberRole>).map((r) => (
+          <option key={r} value={r}>
+            {ROLE_LABEL[r]}
+          </option>
+        ))}
+      </select>
+      <Button type="submit" variant="outline" disabled={!choice || saving}>
+        {saving ? "Adding…" : "Add"}
+      </Button>
+      {refused && (
+        <div className="basis-full">
+          <Said text={refused} onDismiss={() => setRefused(null)} />
+        </div>
+      )}
+    </form>
   )
 }

@@ -181,7 +181,7 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
 
       <Column>
         <div className="grid grid-cols-2 gap-4 max-[960px]:grid-cols-1">
-          <ScopeCard handle={scopeCard} scope={scope} project={p} me={me.data?.user.id} />
+          <ScopeCard handle={scopeCard} scope={scope} project={p} />
           <CriteriaCard
             handle={criteriaCard}
             scope={scope}
@@ -195,7 +195,6 @@ export function ProjectPage({ scope }: { scope: ProjectScope }) {
           scope={scope}
           criteria={p.scope.criteria}
           tasks={p.tasks}
-          me={me.data?.user.id}
         />
 
         <AccessCard card={accessCard} handle={accessHandle} scope={scope} project={p} />

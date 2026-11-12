@@ -58,7 +58,8 @@ utilities (`bg-card`, `text-soft`, `border-strong`, `bg-attention`) or `var(--to
 - The primary action is ink with paper text. One primary per view.
 - Shadows on overlays (`--shadow`), and one soft lift (`--lift`, `shadow-lift`) for the thing a
   screen is for: the conversation box, the card a question is answered in, the sign-in card.
-- People are initials in a neutral circle; a company is its first letter on a quiet tile.
+- People are initials in a neutral circle (someone with no name to show is the outline of a person);
+  a company is its first letter on a quiet tile.
 
 ### Type, radius, motion and icons
 
@@ -150,7 +151,8 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   access), **Due** (open tasks due today or overdue, oldest first) and **Waiting on the customer**
   (tasks waiting on the customer, open access requests, longest wait first). Each item appears
   once: blocked wins over waiting, waiting over due. A row says what it is, where it is (company
-  and project) and why it is there, and **acts in place**. The agent runs card follows.
+  and project, and who has it when that is someone else: "Assigned to Jonah Ade") and why it is
+  there, and **acts in place**. The agent runs card follows.
   - **One action per row, the rest in a menu.** The button is the move most likely wanted for
     why the row is there; the row's menu (the round dots button) holds the rest and **Open project**.
     Due: **Done**. Blocked task: **Unblock** (to In progress: the blocker is gone, so work resumes).
@@ -233,14 +235,39 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   - **Removing** a stakeholder or a system asks first, in the dialog. A stakeholder who has signed
     off a scope cannot be removed (the API answers 409) and the dialog says so. Access requests and
     tasks that named a removed person or system are left naming no one.
-  - **Team and Assigned.** The API names people by id only, so a row says **You** or **A teammate**
-    with the end of their id, like the board, until names arrive (#110). A lead or an admin changes
-    a member's role or removes them (the role is a select that shows the saved role until the API
+  - **Team and Assigned.** Each row is a person by name (see **People** below). A lead or an admin
+    **adds someone** to the company from the organisation's people (`GET /v1/people`, minus the team),
+    with a role (Engineer unless changed), and changes a member's role or removes them (the role is a select that shows the saved role until the API
     answers; removal asks in the row), and assigns or unassigns engineers on a project from the
     company's team. A refusal stays in the row. The only lead is never offered for removal or a
     change of role (the API would allow it): their row says "A company always has a lead. Make
-    someone else lead first." A lead who makes themselves an engineer is asked first, in the row. There is no way to add someone to a company yet: the
-    API only takes the id of a user, and has no list of the organisation's people to choose from.
+    someone else lead first." A lead who makes themselves an engineer is asked first, in the row. When
+    the organisation's people cannot be read (503, or 403), the card says so and offers no one to add,
+    never an empty list as if nobody existed; **Try again** reads them again after a 503.
+- **People.** Every screen names a person the same way, through `useNames` (`components/people.tsx`)
+  and `personOf` (`lib/people.ts`): a task's assignee on the board and on Today, the Team and Assigned
+  cards, who recorded a sign-off, who uploaded a document, who started an eval run, and who attended a
+  note. A decision's "who decided" is a name the FDE typed, not a user, so it is shown as written.
+  - **Where names come from.** `GET /v1/people` (the organisation's own admins and members, by name, no
+    emails), read once and kept five minutes as the API keeps it, never retried on a 403 or 503, and not
+    read again on focus; and the names on a company's members and a project's assignees, taken from the
+    cache without reading them again. Only `/v1/people` can say someone has no name: a member without one
+    may only mean WorkOS did not answer.
+  - **What a person reads as.** **You** for the signed-in person, always. Otherwise their name; **Unnamed
+    teammate** when WorkOS has neither a first nor a last name; **A teammate no longer listed** when the
+    list answered without them (they have left). When the list cannot be read, the screens fall back to
+    what they showed before names, **A teammate …abc123** (the end of the id), and the cards and forms
+    that offer people say plainly that names are unavailable. Nobody is ever an id alone. A nameless
+    person is drawn quieter, with the outline of a person for initials.
+  - **Names are untrusted text with no length cap.** They are rendered as text, never markup. In a row, a
+    pill or a card a long name is cut with an ellipsis (`truncate`), the whole of it on hover (`title`) and
+    to a screen reader (the text is all there); in a select's option, which cannot cut, it is clipped at
+    60 characters. A name is never logged, put in the address or kept in browser storage.
+  - **Picking teammates.** Who has a task (the task form) and who from the team attended a meeting (the
+    note form) are chosen from whoever works on the place as the page can read it: you, the company's
+    team and, on a project, its assignees, you first and the rest by name. The API also lets an
+    organisation admin who is not on the team work there; the page cannot list them, so they are not
+    offered. Someone already chosen stays a choice, even when they no longer work there.
 - **A stale save.** The API versions six records (a task, an access request, a stakeholder, a system, a scope
   item, a criterion; and the scope as a whole, for a sign-off), and a save that names a version the record has
   left is refused with a 409 `stale_version` and the record as it stands (`current`). Nothing was changed. The
@@ -432,7 +459,8 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   form. Anyone who can open the page may read, write, change and remove a note: the API guards all
   five routes with `work` alone.
   - **The list** is newest meeting first, as the API sends it: the title, the day it was held ("3 Nov
-    2026"), who was there ("Attended: You and 2 teammates", "With Mara Lindqvist, Ines Moreau") and, under
+    2026"), who was there ("Attended: You, Jonah Ade and Sam Okafor", past three "You, Jonah Ade and 2 others";
+    "With Mara Lindqvist, Ines Moreau") and, under
     it, the first two lines of the note. The title is a button that opens the whole note in place
     (`aria-expanded`); **Edit** is at the right. A note is **plain text**: the body is customer content, so it is
     rendered as text with its lines kept (`whitespace-pre-wrap`), never as HTML or Markdown, and a note
@@ -444,8 +472,9 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     of every other form. The words get the room: a field about 42% of the screen high that can be
     pulled taller, a counter ("1,204 of 20,000 characters", red over the limit), and the title and the day
     side by side above it, small. The cursor starts in the words. Who was there sits below: **who from
-    your team** (you, ticked for a new note, and any teammate the note already names) and **who from the
-    customer** (the company's stakeholders, each a pill with a checkbox).
+    your team** (everyone who works on the company or project, by name, you ticked for a new note, and
+    anyone the note already names) and **who from the customer** (the company's stakeholders), each a
+    pill with a checkbox.
   - **What the API holds.** `title` (a name: one line, 1 to 200), `held_on` (a day), `body` (1 to
     20,000 characters once trimmed, newline and tab allowed, no other control character), `stakeholders` (the
     company's, up to 50) and `attendees` (users of the workspace who work on the company or project, up to
@@ -454,10 +483,8 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     now, so a teammate's change to another field is not undone. A save that changes nothing sends nothing.
     A refusal names a field (`invalid_title`, `invalid_held_on`, `invalid_body`, `invalid_stakeholders`,
     `invalid_attendees`): that field is marked, takes focus and says so.
-  - **People.** Attendees are user ids and the API has no names yet (#110), so a teammate is "A teammate"
-    with the end of their id, as on the board and the Team card, and you are "You". A teammate who is on a
-    note can be unticked and ticked again, and is kept on a save; teammates cannot be added until there are
-    names to choose from.
+  - **People.** Attendees are user ids, named as everywhere (see **People** above). Someone on a note
+    who no longer works there can be unticked and ticked again, and is kept on a save.
   - **Words are never lost.** Nothing shows as saved until the API confirms. A refusal or a network failure keeps
     the dialog open with every word in it and says what happened. Cancel, Escape and a click outside ask
     first when there is something to lose ("Leave without saving this note? What you wrote is lost."): the
@@ -502,8 +529,7 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
   project scope for documents (a document belongs to the company, and the project search route searches the same
   company), so there is no per-project list; the card is the company's alone.
   - **The list** is newest first, as the API sends it: the name, the kind and size ("PDF · 1.2 MB"), how many
-    passages it was read into once it is ready, who added it and when ("Added 3 Nov 2026 by You"; the API names
-    people by id only, so anyone else is "A teammate" with the end of their id, as on the Team card), and its status
+    passages it was read into once it is ready, who added it and when ("Added 3 Nov 2026 by you", "by Jonah Ade"; see **People**), and its status
     at the right, a dot and words.
   - **Status says only what the API says.** `pending` is **Being read** (neutral dot, with "It can be searched once
     it has been read."), `ingested` is **Ready** (green), `failed` is **Could not be read** (amber, as a failing
@@ -732,15 +758,16 @@ The workspace's screens (the welcome screen, the conversation, sign-in) use only
     current version. The API returns no position, so the page cannot tell whether someone else already
     made the same move, and never says so.
   - **Create, edit, delete.** **New task** opens a form: title, status, the blocker or who it waits
-    on when the status needs one, due date, who has it (you, or unassigned), and **Works towards**,
+    on when the status needs one, due date, who has it (unassigned, or anyone who works on the project,
+    by name: see **People**), and **Works towards**,
     one of the project's success criteria or none (not shown while the project has none). Clicking a
     card opens the same form.
   - **Every save sends the criterion back.** The API replaces `criterion` on each save, as it does
     `assignee`, so a save that left it out would unlink the task. `toBody` returns `TaskSave`, whose
     replaced fields are all required, so no move, edit, prompt or Today action can drop one; unlinking
     is choosing "No success criterion" in the form. Removing a criterion unlinks its tasks (the API's
-    `on delete set null`). **Delete task** asks first. A teammate's name is not known yet, only their
-    id, so a task assigned to one says "Assigned to a teammate" and keeps them on save.
+    `on delete set null`). **Delete task** asks first. A card says who has it: "Assigned to you",
+    "Assigned to Jonah Ade" (one line, cut when long) or "Unassigned".
 - **Agent runs (project).** A card after Access: the project's runs, newest first, each with its
   state, and **Start a task**: what the agent should do and the GitHub repository and branch it
   starts from, prefilled from the latest run. The form checks the repository with the API's own
@@ -866,7 +893,7 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   `addStakeholder`, `updateStakeholder`, `removeStakeholder`, the same three for systems,
   `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
   remove), `accessRequests` and `threads` (read when a prompt or the decisions need them), `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
-  `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`, and `moveStage(scope, to, reason?)`
+  `people` (`GET /v1/people`, `queries.people`), `members`, `setMember`, `removeMember`, `assignees`, `assign`, `unassign`, and `moveStage(scope, to, reason?)`
   with `stageChecklist(scope)`. A forward move that the API refuses for open items throws a
   `ChecklistOpenError`, which carries the items the API found open. The API's refusals carry a
   code only; `SAFE_TEXT` in `client.ts` turns the ones a person can act on into a sentence.
@@ -919,6 +946,12 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   create a 400 `invalid_version`. `globalThis.__fdeMockSomeoneElse = true` makes someone else change the record the next
   versioned save is about, once, just before it is checked (an object is the change to make, such as `{ status: "done" }`),
   so a stale save can be seen and tested.
+  The mock answers `/v1/people` from its invented directory as the API does (the organisation's own people by
+  name, the unnamed last, no guest, no email), names members and assignees when it answers them, adds only
+  someone of the organisation to a company (404 otherwise), and takes a task's assignee or a note's attendee
+  only from those who work on the place. Its sample people include a long name and one with no name.
+  `globalThis.__fdeMockPeople = "unavailable"` makes WorkOS unreachable (`/v1/people` answers 503, and members
+  and assignees carry no names), and `"forbidden"` makes `/v1/people` answer 403.
   `resetMockApi({ engineer: true })` signs in as an engineer, `{ empty: true }` leaves no company,
   and `globalThis.__fdeMockNoCompanies = true` before the app loads does the same in the browser. It exists only in a dev build with `VITE_FDE_MOCK_API=1`;
   `mock-excluded.test.ts` and CI prove a production build leaves it out. Tests run against the
@@ -944,7 +977,7 @@ render, and leaves a `-FAILED.png` of it.
   once it has rendered, and an optional `act` for what to capture (open a dialog or a menu, hover, type).
   `failWrites: true` makes the mock refuse every write, to see the failed-save states;
   `emptyWorkspace: true` starts a workspace with no company; `workspace: true` turns the new workspace on for that screen (the mock's `__fdeMockWorkspace`); `pendingStep` starts a sign-in waiting at
-  that step, as Google's callback leaves it; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `staleChecklist: true` makes the project's
+  that step, as Google's callback leaves it; `evalsOff: true` makes the eval routes answer 404 (the mock's `__fdeMockEvalsOff`, set before the app loads); `people: "unavailable"` or `"forbidden"` makes `/v1/people` answer 503 or 403 (the mock's `__fdeMockPeople`); `staleChecklist: true` makes the project's
   checklist read as all met until the first refused move (the mock's `__fdeMockStaleChecklist`). A screen that shows a stale save sets the mock's `__fdeMockSomeoneElse` from its `act`, between opening a form and saving it (`someoneElse` in `screens.mjs`). `sizes` and
   `themes` narrow an entry. The file's header lists every option.
 - Look at the shots, in both themes and at 390 wide, before asking for review; say in the PR what you

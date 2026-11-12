@@ -125,6 +125,17 @@ describe("TodayView", () => {
     expect(within(waiting).getByText("Waiting 7 days")).toBeInTheDocument()
   })
 
+  it("names who has a task when it is someone else, and says nothing of your own", async () => {
+    await today()
+    const theirs = row("Buyer review of week 3 forecasts")
+    await waitFor(() =>
+      expect(theirs).toHaveTextContent(
+        "Lumen Grocers · Store demand forecasts · Assigned to Aurelia Montgomery-Featherstonehaugh de la Cruz Vandermeer-Okonkwo",
+      ),
+    )
+    expect(row("Publish eval results to the customer room")).not.toHaveTextContent("Assigned")
+  })
+
   it("opens the project an item belongs to", async () => {
     const { router } = renderWithRouter(<TodayView />)
 

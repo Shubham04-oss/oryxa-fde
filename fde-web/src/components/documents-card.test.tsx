@@ -66,9 +66,9 @@ describe("the documents list", () => {
     expect(rows[1]).toHaveTextContent("Could not be read")
     expect(rows[2]).toHaveTextContent("Ready")
     expect(rows[2]).toHaveTextContent("Word · 94 KB · 3 passages")
-    // The API names people by id only, so you are "You" and anyone else "A teammate" with the end of their id.
-    await waitFor(() => expect(rows[2]).toHaveTextContent("by You"))
-    expect(rows[0]).toHaveTextContent("by A teammate …_jonah")
+    // You are "you"; anyone else is named.
+    await waitFor(() => expect(rows[2]).toHaveTextContent("by you"))
+    await waitFor(() => expect(rows[0]).toHaveTextContent("by Jonah Ade"))
     // Nothing is called ready that the API has not ingested, and a pending one has no passage count.
     expect(rows[0]).not.toHaveTextContent("passage")
     expect(rows[0]).not.toHaveTextContent("Ready")

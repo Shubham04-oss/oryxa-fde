@@ -58,6 +58,7 @@ export function TodayRow({
   current,
   moving,
   refused,
+  assignee,
   onAct,
   onOpen,
   onDismiss,
@@ -71,6 +72,8 @@ export function TodayRow({
   moving: string | undefined
   /** Why the last action on this row did not happen: refused, or held back because the record had changed. */
   refused: Note | null
+  /** Who has the task when it is someone else: "Assigned to Jonah Ade". Yours and unassigned ones say nothing. */
+  assignee?: string
   onAct: (action: RowAction) => void
   onOpen: () => void
   onDismiss: () => void
@@ -113,8 +116,8 @@ export function TodayRow({
           >
             {title}
           </Link>
-          <span className="block text-[11px] text-muted-foreground">
-            {item.company.name} · {item.project.name}
+          <span className="block text-[11px] [overflow-wrap:anywhere] text-muted-foreground">
+            {[item.company.name, item.project.name, assignee].filter(Boolean).join(" · ")}
           </span>
           <span className="mt-0.5 flex items-start gap-1.5 text-[11px] leading-normal [overflow-wrap:anywhere] text-soft">
             <span

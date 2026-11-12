@@ -6,6 +6,8 @@ import { TaskDialog } from "./board"
 import { DecisionDialog } from "./decisions-card"
 import { FormDialog, TextArea, TextField, useFieldProblem } from "./form-dialog"
 import { Card, Quiet, Row, Rows } from "./page"
+import { NamesUnavailable, useNames, useWorkingOn } from "./people"
+import type { Names } from "./people"
 import { useTaskMover } from "./task-move"
 import { Button } from "./ui/button"
 import { Dialog } from "./ui/dialog"
@@ -35,6 +37,7 @@ import {
   stakeholdersLine,
 } from "@/lib/notes"
 import type { NoteFields } from "@/lib/notes"
+import { byName } from "@/lib/people"
 import { PART_LABEL, attempt, attemptAt } from "@/lib/records"
 import { localDay, shortDate } from "@/lib/time"
 import { cn } from "@/lib/utils"
@@ -75,6 +78,7 @@ export function NotesCard({
 }) {
   const notes = useQuery(queries.notes(place))
   const me = useQuery(queries.me())
+  const names = useNames(place)
   // A note to write or to change, as a copy taken when the form opened: "new" for a blank one.
   const [open, setOpen] = useState<MeetingNoteOut | "new" | null>(null)
   const [reading, setReading] = useState<ReadonlySet<string>>(new Set())
@@ -193,7 +197,7 @@ export function NotesCard({
               key={note.id}
               note={note}
               people={people}
-              me={me.data?.user.id}
+              names={names}
               reading={reading.has(note.id)}
               canMake={project !== undefined}
               onToggle={() => toggle(note.id)}
@@ -233,7 +237,7 @@ export function NotesCard({
 function NoteRow({
   note,
   people,
-  me,
+  names,
   reading,
   canMake,
   onToggle,
@@ -242,14 +246,14 @@ function NoteRow({
 }: {
   note: MeetingNoteOut
   people: ReadonlyArray<StakeholderOut>
-  me: string | undefined
+  names: Names
   reading: boolean
   canMake: boolean
   onToggle: () => void
   onEdit: (opener: HTMLElement) => void
   onMake: (kind: Making["kind"], opener: HTMLElement) => void
 }) {
-  const attended = attendeesLine(note, me)
+  const attended = attendeesLine(note, names.of)
   const customers = stakeholdersLine(note, people)
   const bodyId = `note-${note.id}`
   const hintId = useId()
@@ -373,7 +377,7 @@ function MakeFromNote({
           people={project.stakeholders}
           requests={project.access}
           criteria={project.scope.criteria}
-          me={me.data?.user.id}
+          scope={scope}
           send={async (_, fields) => {
             await mover.send(scope, null, fields)
             onMade("task", fields.title.trim())
@@ -484,12 +488,12 @@ function NoteWriter({
     setTimeout(() => (opener.current?.isConnected ? opener.current : text.current)?.focus(), 0)
   }
 
-  // Who was there: you, and any teammate the note already names. Others cannot be picked until the
-  // API gives their names, so a teammate is "A teammate" with the end of their id, as on the board.
-  const attendees = [...new Set([...(me ? [me] : []), ...opened.attendees])].map((id) => ({
-    id,
-    label: id === me ? "You" : `A teammate …${id.slice(-6)}`,
-  }))
+  // Who was there: anyone who works here, and anyone the note already names, kept even if they have left.
+  const names = useNames(place)
+  const working = useWorkingOn(place)
+  const attendees = byName([...new Set([...working, ...opened.attendees])].map(names.of)).map(
+    (p) => ({ id: p.id, label: p.label, quiet: p.nameless }),
+  )
 
   const save = () =>
     attemptAt(
@@ -650,12 +654,8 @@ function NoteWriter({
           options={attendees}
           picked={fields.attendees}
           onChange={(next) => set({ attendees: next })}
-          note={
-            attendees.length > 0
-              ? "Teammates can be added here once the workspace knows their names."
-              : undefined
-          }
         />
+        <NamesUnavailable names={names} />
         <Choose
           name="stakeholders"
           legend="Who from the customer was there"
@@ -696,15 +696,14 @@ function Choose({
   options,
   picked,
   onChange,
-  note,
   empty,
 }: {
   name: string
   legend: string
-  options: ReadonlyArray<{ id: string; label: string; detail?: string }>
+  /** `quiet`: a person with no name to show, drawn quieter. */
+  options: ReadonlyArray<{ id: string; label: string; detail?: string; quiet?: boolean }>
   picked: ReadonlyArray<string>
   onChange: (next: Array<string>) => void
-  note?: string
   empty?: string
 }) {
   const problem = useFieldProblem(name)
@@ -719,7 +718,7 @@ function Choose({
           {options.map((option, i) => (
             <label
               key={option.id}
-              className="inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs has-checked:border-strong has-checked:bg-raised has-focus-visible:ring-1 has-focus-visible:ring-ring max-[800px]:min-h-9"
+              className="inline-flex min-h-7 max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs has-checked:border-strong has-checked:bg-raised has-focus-visible:ring-1 has-focus-visible:ring-ring max-[800px]:min-h-9"
             >
               <input
                 type="checkbox"
@@ -735,13 +734,20 @@ function Choose({
                   )
                 }
               />
-              {option.label}
-              {option.detail && <span className="text-muted-foreground">{option.detail}</span>}
+              {/* A name has no length cap: cut to the pill, whole on hover and to a screen reader. */}
+              <span
+                title={option.label}
+                className={cn("min-w-0 truncate", option.quiet && "text-muted-foreground")}
+              >
+                {option.label}
+              </span>
+              {option.detail && (
+                <span className="shrink-0 text-muted-foreground">{option.detail}</span>
+              )}
             </label>
           ))}
         </div>
       )}
-      {note && <p className="text-[11px] text-muted-foreground">{note}</p>}
     </fieldset>
   )
 }

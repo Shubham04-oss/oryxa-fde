@@ -13,7 +13,6 @@ import {
   searchTerms,
   statusOf,
   uploadProblem,
-  uploader,
   whereIn,
 } from "./documents"
 
@@ -101,11 +100,6 @@ describe("names and sizes", () => {
     expect(formatBytes(12_300)).toBe("12 KB")
     expect(formatBytes(4.2 * 1024 * 1024)).toBe("4.2 MB")
     expect(formatBytes(MAX_DOCUMENT_BYTES)).toBe("20 MB")
-  })
-
-  it("names people by id only, as everywhere until the API gives names", () => {
-    expect(uploader("usr_riya", "usr_riya")).toBe("You")
-    expect(uploader("usr_jonah_abcdef", "usr_riya")).toBe("A teammate …abcdef")
   })
 })
 

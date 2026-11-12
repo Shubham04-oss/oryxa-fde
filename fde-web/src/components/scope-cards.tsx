@@ -3,6 +3,7 @@ import type { Ref, RefObject } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { FormDialog, TextArea, TextField, useFieldProblem } from "./form-dialog"
 import { Card, Quiet, Rows, Status, reveal } from "./page"
+import { useNames } from "./people"
 import { EditRow } from "./records-cards"
 import { FIELD, Labelled } from "./task-move"
 import { Button } from "./ui/button"
@@ -91,16 +92,15 @@ export type ScopeCardHandle = {
 export function ScopeCard({
   scope,
   project,
-  me,
   handle,
 }: {
   scope: ProjectScope
   project: Project
-  /** The signed-in user's id: a sign-off says whether they recorded it. */
-  me: string | undefined
   handle?: Ref<ScopeCardHandle>
 }) {
   const s = project.scope
+  // A sign-off says who recorded it.
+  const names = useNames(scope)
   const state = signOffState(s)
   const [open, setOpen] = useState<Open | null>(null)
   const addIn = useRef<HTMLButtonElement>(null)
@@ -200,8 +200,8 @@ export function ScopeCard({
             {state === "signed" && s.sign_off && (
               <p>
                 {by} agreed to this scope on {when}. Recorded by{" "}
-                {s.sign_off.recorded_by === me ? "you" : "a teammate"}. A change to the scope will
-                need signing off again.
+                {names.of(s.sign_off.recorded_by).phrase}. A change to the scope will need signing
+                off again.
               </p>
             )}
             {state === "changed" && s.sign_off && (
