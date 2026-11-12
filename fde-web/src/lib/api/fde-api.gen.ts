@@ -265,6 +265,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/companies/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set up a company in one call: the company (the caller becomes its lead), its first project,
+         *     its stakeholders and main contact, the project's scope items and success criteria, and the plan
+         *     as tasks in order. All of it or none of it. Send an `Idempotency-Key` header: a retry with the
+         *     same key and body answers the first setup with 200 and makes nothing new.
+         */
+        post: operations["set_up_company"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies/{company}": {
         parameters: {
             query?: never;
@@ -2533,6 +2555,44 @@ export interface components {
             question: string;
             updated_at: string;
         };
+        /** @description Everything the new-company conversation confirmed. */
+        SetupBody: {
+            company: components["schemas"]["CompanyBody"];
+            /**
+             * @description Up to 20 success criteria, each with its baseline and how it will be proven, without
+             *     `version`.
+             */
+            criteria?: components["schemas"]["CriterionBody"][];
+            /** @description The company's main contact, by place in `stakeholders` (from 0). */
+            main_contact?: number | null;
+            /** @description Up to 30 plan steps, as tasks in this order. */
+            plan?: components["schemas"]["SetupTaskBody"][];
+            /** @description The company's first project. */
+            project: components["schemas"]["ProjectBody"];
+            /** @description Up to 30 in-scope and out-of-scope items, without `version`. */
+            scope_items?: components["schemas"]["ScopeItemBody"][];
+            /** @description Up to 20 people at the customer, without `version`. */
+            stakeholders?: components["schemas"]["StakeholderBody"][];
+        };
+        /** @description What the setup made, read back from the store. */
+        SetupOut: {
+            company: components["schemas"]["CompanyOut"];
+            /** @description The plan, in order. */
+            plan: components["schemas"]["TaskOut"][];
+            /** @description With its `next_step`: the plan's first step. */
+            project: components["schemas"]["ProjectOut"];
+            scope: components["schemas"]["ScopeOut"];
+            stakeholders: components["schemas"]["StakeholderOut"][];
+        };
+        /** @description One step of the plan: a task, `todo`, in the order given. */
+        SetupTaskBody: {
+            /** @description The success criterion it works towards, by its place in `criteria` (from 0). */
+            criterion?: number | null;
+            /** @description Due date, `YYYY-MM-DD`. */
+            due_on?: string | null;
+            stage?: components["schemas"]["ProjectStage"] | null;
+            title: string;
+        };
         ShareLinkBody: {
             /**
              * Format: int32
@@ -3850,6 +3910,69 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_up_company: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 1 to 128 of `A-Za-z0-9-_`, the same for a retry */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupBody"];
+            };
+        };
+        responses: {
+            /** @description Set up earlier with this key and body: that setup, as it stands */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupOut"];
+                };
+            };
+            /** @description Set up */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupOut"];
+                };
+            };
+            /** @description `invalid_*` naming the part, e.g. `invalid_name`, `invalid_plan` (more than 30 steps), `invalid_criterion`, `invalid_idempotency_key`; nothing is made */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `rejected_idempotency_key_reused`: this key set up something else */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

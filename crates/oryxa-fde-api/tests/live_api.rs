@@ -820,6 +820,8 @@ fn spec_routes() -> BTreeSet<(String, String)> {
 const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/companies"),
     ("POST", "/v1/companies"),
+    // Creates a new company in the caller's own tenant, as `POST /v1/companies` does.
+    ("POST", "/v1/companies/setup"),
     ("GET", "/v1/security-answers"),
     ("POST", "/v1/security-answers"),
     ("GET", "/v1/me"),
@@ -5904,4 +5906,158 @@ async fn a_company_names_one_main_contact_among_its_own_stakeholders() {
         )
         .await;
     assert_eq!(cleared, json!({"stakeholder": null}));
+}
+
+/// `POST /v1/companies/setup` as `who`, with an `Idempotency-Key`.
+async fn set_up(w: &World, who: &User, key: &str, body: &Value) -> (StatusCode, Value) {
+    let req = Request::post("/v1/companies/setup")
+        .header("authorization", format!("Bearer {}", who.token))
+        .header("content-type", "application/json")
+        .header("idempotency-key", key)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let (status, _, body) = w.send(req).await;
+    (status, body)
+}
+
+fn setup_body() -> Value {
+    json!({
+        "company": { "name": "Acme", "industry": "Retail" },
+        "project": { "name": "Support triage" },
+        "stakeholders": [{ "name": "Sam Sponsor", "role": "sponsor" }, { "name": "Kim Champion", "role": "champion" }],
+        "main_contact": 0,
+        "scope_items": [{ "kind": "in", "description": "Label inbound tickets" },
+                        { "kind": "out", "description": "Answering tickets" }],
+        "criteria": [{ "description": "Labels are right", "metric": "label accuracy", "comparator": "at_least",
+                       "target": 90.0, "unit": "%", "baseline": 62.0, "proof": "The labelling eval suite" }],
+        "plan": [{ "title": "Call the sponsor", "stage": "discover" },
+                 { "title": "Get ticket export access", "stage": "access" },
+                 { "title": "Build the labeller", "stage": "build", "criterion": 0, "due_on": "2026-12-15" }],
+    })
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_company_is_set_up_in_one_call_all_or_nothing_and_once_per_key() {
+    let w = world().await;
+    let org = new_id("org");
+    let alice = user(&org, "alice", "member");
+
+    // Each validation failure makes nothing at all.
+    let key = new_id("key");
+    for (patch, code) in [
+        (json!({ "main_contact": 5 }), "invalid_main_contact"),
+        (
+            json!({ "plan": [{ "title": "x", "criterion": 3 }] }),
+            "invalid_criterion",
+        ),
+        (
+            json!({ "criteria": [{ "description": "d", "metric": "m", "comparator": "at_least", "target": 1.0, "proof": "" }] }),
+            "invalid_proof",
+        ),
+        (json!({ "stakeholders": [{ "name": "" }] }), "invalid_name"),
+        (json!({ "invite": ["someone@example.com"] }), "invalid_body"),
+    ] {
+        let mut body = setup_body();
+        body.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+        let (status, answer) = set_up(&w, &alice, &key, &body).await;
+        assert_eq!(
+            (status, answer["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some(code)),
+            "{patch}"
+        );
+    }
+    assert_eq!(count_companies(&w, &alice).await, 0, "nothing was made");
+    let req = Request::post("/v1/companies/setup")
+        .header("authorization", format!("Bearer {}", alice.token))
+        .header("content-type", "application/json")
+        .body(Body::from(setup_body().to_string()))
+        .unwrap();
+    let (status, _, answer) = w.send(req).await;
+    assert_eq!(
+        (status, answer["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_idempotency_key"))
+    );
+
+    // The happy path: everything, in one call.
+    let (status, made) = set_up(&w, &alice, &key, &setup_body()).await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let company = made["company"]["id"].as_str().unwrap().to_owned();
+    let project = made["project"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(made["project"]["next_step"]["title"], "Call the sponsor");
+    let stakeholders = made["stakeholders"].as_array().unwrap();
+    assert_eq!(stakeholders.len(), 2);
+    let main: Vec<&str> = stakeholders
+        .iter()
+        .filter(|s| s["main_contact"] == true)
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(main, ["Sam Sponsor"]);
+    assert_eq!(made["scope"]["items"].as_array().unwrap().len(), 2);
+    let criterion = &made["scope"]["criteria"][0];
+    assert_eq!(
+        (criterion["baseline"].clone(), criterion["proof"].clone()),
+        (json!(62.0), json!("The labelling eval suite"))
+    );
+    let plan = made["plan"].as_array().unwrap();
+    let titles: Vec<&str> = plan.iter().map(|t| t["title"].as_str().unwrap()).collect();
+    assert_eq!(
+        titles,
+        ["Call the sponsor", "Get ticket export access", "Build the labeller"]
+    );
+    assert_eq!(plan[2]["criterion"], criterion["id"]);
+    assert_eq!(plan[2]["stage"], "build");
+    assert!(plan.iter().all(|t| t["status"] == "todo"));
+    // The caller leads it, and it reads back through the ordinary routes.
+    let read = w
+        .ok(
+            &alice,
+            "GET",
+            &format!("/v1/companies/{company}/projects/{project}"),
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(read["name"], "Support triage");
+    let events = w.events(&org).await;
+    for e in ["fde.company.created.v1", "fde.project.created.v1"] {
+        assert_eq!(events.iter().filter(|x| *x == e).count(), 1, "{e} in {events:?}");
+    }
+
+    // A retry with the same key and body answers the first setup and makes nothing new.
+    let (status, again) = set_up(&w, &alice, &key, &setup_body()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (again["company"]["id"].as_str(), again["project"]["id"].as_str()),
+        (Some(company.as_str()), Some(project.as_str()))
+    );
+    assert_eq!(again["plan"].as_array().unwrap().len(), 3);
+    assert_eq!(count_companies(&w, &alice).await, 1);
+    assert_eq!(w.events(&org).await.len(), events.len(), "no new events");
+    // The same key for another setup is refused; another key makes another company.
+    let mut other = setup_body();
+    other["company"]["name"] = json!("Globex");
+    let (status, answer) = set_up(&w, &alice, &key, &other).await;
+    assert_eq!(
+        (status, answer["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_idempotency_key_reused"))
+    );
+    let (status, _) = set_up(&w, &alice, &new_id("key"), &other).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(count_companies(&w, &alice).await, 2);
+    // Keys are the caller's own: someone else's same key makes their own company.
+    let bob = user(&org, "bob", "member");
+    let (status, theirs) = set_up(&w, &bob, &key, &setup_body()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_ne!(theirs["company"]["id"].as_str(), Some(company.as_str()));
+
+    // Permission: what creating a company needs. A guest has no access to the workspace.
+    let guest = user(&org, "gina", "guest");
+    let (status, _) = set_up(&w, &guest, &new_id("key"), &setup_body()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+async fn count_companies(w: &World, who: &User) -> usize {
+    let (_, list) = w.call(Some(&who.token), "GET", "/v1/companies", None).await;
+    list.as_array().unwrap().len()
 }

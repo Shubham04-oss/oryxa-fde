@@ -114,7 +114,7 @@ pub struct CompanyBody {
 }
 
 impl CompanyBody {
-    fn parse(self) -> Result<CompanyIn, ApiError> {
+    pub(crate) fn parse(self) -> Result<CompanyIn, ApiError> {
         Ok(CompanyIn {
             name: name(self.name, "name")?,
             industry: self.industry.map(|v| name(v, "industry")).transpose()?,

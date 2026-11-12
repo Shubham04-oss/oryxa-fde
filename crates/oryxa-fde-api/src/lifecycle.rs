@@ -542,7 +542,7 @@ impl From<Decision> for DecisionOut {
 }
 
 impl ScopeItemBody {
-    fn parse(self) -> Result<ScopeItemIn, ApiError> {
+    pub(crate) fn parse(self) -> Result<ScopeItemIn, ApiError> {
         Ok(ScopeItemIn {
             kind: self.kind.into(),
             description: text(self.description, "description")?,
@@ -551,7 +551,7 @@ impl ScopeItemBody {
 }
 
 impl CriterionBody {
-    fn parse(self) -> Result<(CriterionIn, CriterionProof), ApiError> {
+    pub(crate) fn parse(self) -> Result<(CriterionIn, CriterionProof), ApiError> {
         if !self.target.is_finite() {
             return Err(ApiError::Invalid("target"));
         }
@@ -590,7 +590,7 @@ impl AccessRequestBody {
 }
 
 impl TaskBody {
-    fn parse(self) -> Result<TaskIn, ApiError> {
+    pub(crate) fn parse(self) -> Result<TaskIn, ApiError> {
         let place = match (self.before, self.after) {
             (Some(_), Some(_)) => return Err(ApiError::Invalid("place")),
             (Some(b), None) => Some(TaskPlace::Before(b)),

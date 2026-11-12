@@ -126,6 +126,15 @@ pub struct ProjectBody {
     pub summary: Option<String>,
 }
 
+impl ProjectBody {
+    pub(crate) fn parse(self) -> Result<ProjectIn, ApiError> {
+        Ok(ProjectIn {
+            name: name(self.name, "name")?,
+            summary: self.summary.map(|v| text(v, "summary")).transpose()?,
+        })
+    }
+}
+
 /// A change to some of a project's fields: a field left out stays as it is, `null` clears it.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -190,10 +199,7 @@ pub(crate) async fn create(
 ) -> Result<(StatusCode, Json<ProjectOut>), ApiError> {
     let cs = who.company(c);
     app.require(&who, company(&cs), "manage").await?;
-    let v = ProjectIn {
-        name: name(body.name, "name")?,
-        summary: body.summary.map(|v| text(v, "summary")).transpose()?,
-    };
+    let v = body.parse()?;
     let s = cs.project(ProjectId::new(new_id("prj")).map_err(|_| ApiError::Internal)?);
     let mut tx = app.store.project(&s).await?;
     let created = tx.create(&v, &who.actor()).await?.ok_or(ApiError::NotFound)?;
