@@ -159,7 +159,10 @@ pub enum Created {
 /// What setting a new password with a reset token came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reset {
-    Done,
+    /// Set, for this user.
+    Done {
+        user: String,
+    },
     WeakPassword,
     /// The token is wrong, spent or expired: why, for the log.
     Refused(String),
@@ -203,9 +206,11 @@ pub trait AuthKit: Send + Sync + 'static {
     /// Signs in with an address and the one-time code emailed to it.
     fn sign_in_with_code<'a>(&'a self, email: &'a str, code: &'a str, client: &'a Client) -> BoxFuture<'a, Attempt>;
     /// Emails the code of a pending email verification again.
-    fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent>;
+    fn resend_verification<'a>(&'a self, verification: &'a ProviderId) -> BoxFuture<'a, Sent>;
     /// The invitation a token names; `None` when there is no such invitation.
-    fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>>;
+    fn invitation<'a>(&'a self, token: &'a ProviderId) -> BoxFuture<'a, Result<Option<Invitation>, String>>;
+    /// The ids of the user's active WorkOS sessions, so they can be revoked.
+    fn sessions_of<'a>(&'a self, user: &'a ProviderId) -> BoxFuture<'a, Result<Vec<String>, String>>;
     /// Whether the address has an account.
     fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>>;
     /// Creates an account for an invited address with this password and name.
@@ -264,8 +269,14 @@ macro_rules! unused_invitation_and_reset {
     () => {
         fn invitation<'a>(
             &'a self,
-            _: &'a str,
+            _: &'a $crate::session::ProviderId,
         ) -> $crate::BoxFuture<'a, Result<Option<$crate::session::Invitation>, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn sessions_of<'a>(
+            &'a self,
+            _: &'a $crate::session::ProviderId,
+        ) -> $crate::BoxFuture<'a, Result<Vec<String>, String>> {
             Box::pin(async { Err("unused".into()) })
         }
         fn has_account<'a>(&'a self, _: &'a str) -> $crate::BoxFuture<'a, Result<bool, String>> {
@@ -300,10 +311,43 @@ macro_rules! unused_invitation_and_reset {
 #[cfg(test)]
 pub(crate) use unused_invitation_and_reset;
 
-/// An id WorkOS gave us, checked before it goes back into a WorkOS path.
-fn workos_id(v: &str) -> Option<String> {
-    let ok = (1..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    ok.then(|| v.to_owned())
+/// A value this crate puts into a WorkOS URL path or query: an id or a token from a link, 1 to 256
+/// letters, digits, `-` and `_`. So it can never be `.` or `..`, end a path segment (`/`), start a
+/// query or a fragment (`?`, `#`) or escape anything (`%`): the SDK passes `.` and `..` through its
+/// path encoding, and the URL parser would resolve them to another endpoint. Tokens are secrets, so
+/// `Debug` hides it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderId(String);
+
+impl ProviderId {
+    pub fn new(v: &str) -> Option<Self> {
+        let ok = (1..=256).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        ok.then(|| Self(v.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderId(<hidden>)")
+    }
+}
+
+/// `v` as a [`ProviderId`], or the error a lookup that cannot be made answers.
+fn provider_id(v: &str) -> Result<ProviderId, String> {
+    ProviderId::new(v).ok_or_else(|| "a value not safe for a WorkOS path".to_owned())
+}
+
+/// An address for a WorkOS query: nothing in it that could end the value or escape, should the
+/// SDK's encoding ever change.
+fn query_safe_email(email: &str) -> Result<&str, String> {
+    if email.contains(['/', '?', '#', '%', '&', '=', '+']) || email.bytes().any(|b| !b.is_ascii_graphic()) {
+        return Err("an address not safe for a WorkOS query".into());
+    }
+    Ok(email)
 }
 
 /// A failed send as [`Sent`]: an outage, or nothing sent for a reason the person must not learn.
@@ -356,7 +400,8 @@ fn attempt_of(status: u16, body: &[u8]) -> Attempt {
             let verification = v
                 .get("email_verification_id")
                 .and_then(|i| i.as_str())
-                .and_then(workos_id);
+                .and_then(ProviderId::new)
+                .map(|id| id.as_str().to_owned());
             return Attempt::VerifyEmail { pending, verification };
         }
         (Some("organization_selection_required"), Some(pending)) => {
@@ -416,6 +461,10 @@ fn attempt_from(r: Result<workos::models::AuthenticateResponse, workos::Error>) 
         },
     }
 }
+
+/// A page of a user's sessions, and how many pages a reset reads before it gives up.
+const SESSION_PAGE: i64 = 100;
+const MAX_SESSION_PAGES: usize = 10;
 
 /// WorkOS's largest page of memberships.
 const PEOPLE_PAGE: i64 = 100;
@@ -516,10 +565,11 @@ impl AuthKit for WorkOsAuthKit {
 
     fn user_name<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
+            let user = provider_id(user)?;
             let u = self
                 .0
                 .user_management()
-                .get_user(user)
+                .get_user(user.as_str())
                 .await
                 .map_err(|e| e.to_string())?;
             let name = [u.first_name.as_deref(), u.last_name.as_deref()]
@@ -533,10 +583,11 @@ impl AuthKit for WorkOsAuthKit {
 
     fn organisation_name<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
+            let organisation = provider_id(organisation)?;
             let o = self
                 .0
                 .organizations()
-                .get_organization(organisation)
+                .get_organization(organisation.as_str())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(o.name)
@@ -545,11 +596,12 @@ impl AuthKit for WorkOsAuthKit {
 
     fn people<'a>(&'a self, organisation: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
         Box::pin(async move {
+            let organisation = provider_id(organisation)?;
             let mut people = Vec::new();
             let mut after = None;
             for _ in 0..MAX_PEOPLE_PAGES {
                 let p = workos::organization_membership::ListOrganizationMembershipsParams {
-                    organization_id: Some(organisation.to_owned()),
+                    organization_id: Some(organisation.as_str().to_owned()),
                     statuses: Some(vec![workos::UserManagementOrganizationMembershipStatuses::Active]),
                     limit: Some(PEOPLE_PAGE),
                     after,
@@ -650,26 +702,31 @@ impl AuthKit for WorkOsAuthKit {
         })
     }
 
-    fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent> {
+    fn resend_verification<'a>(&'a self, verification: &'a ProviderId) -> BoxFuture<'a, Sent> {
         Box::pin(async move {
             // The verification names its user; its code is dropped unread.
-            let user = match self.0.user_management().get_email_verification(verification).await {
+            let user = match self
+                .0
+                .user_management()
+                .get_email_verification(verification.as_str())
+                .await
+            {
                 Ok(v) => v.user_id,
                 Err(e) => return sent_from(&e),
             };
-            let Some(user) = workos_id(&user) else {
+            let Some(user) = ProviderId::new(&user) else {
                 return Sent::NotSent("user id not valid".into());
             };
-            match self.0.user_management().send_verification_email(&user).await {
+            match self.0.user_management().send_verification_email(user.as_str()).await {
                 Ok(_) => Sent::Sent,
                 Err(e) => sent_from(&e),
             }
         })
     }
 
-    fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+    fn invitation<'a>(&'a self, token: &'a ProviderId) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
         Box::pin(async move {
-            match self.0.user_management().find_invitation_by_token(token).await {
+            match self.0.user_management().find_invitation_by_token(token.as_str()).await {
                 // The answer also holds the token and its link: only these fields are kept.
                 Ok(i) => Ok(Some(Invitation {
                     email: i.email,
@@ -691,7 +748,7 @@ impl AuthKit for WorkOsAuthKit {
     fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>> {
         Box::pin(async move {
             let p = workos::user_management::ListUsersParams {
-                email: Some(email.to_owned()),
+                email: Some(query_safe_email(email)?.to_owned()),
                 limit: Some(1),
                 ..Default::default()
             };
@@ -778,6 +835,35 @@ impl AuthKit for WorkOsAuthKit {
         })
     }
 
+    fn sessions_of<'a>(&'a self, user: &'a ProviderId) -> BoxFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            let mut ids = Vec::new();
+            let mut after = None;
+            for _ in 0..MAX_SESSION_PAGES {
+                let p = workos::user_management::ListSessionsParams {
+                    limit: Some(SESSION_PAGE),
+                    after,
+                    ..Default::default()
+                };
+                let page = self
+                    .0
+                    .user_management()
+                    .list_sessions(user.as_str(), p)
+                    .await
+                    .map_err(|e| {
+                        let (status, code) = status_and_code(&e);
+                        format!("status {status}, code {code}")
+                    })?;
+                ids.extend(page.data.into_iter().map(|s| s.id));
+                match page.list_metadata.after {
+                    Some(next) => after = Some(next),
+                    None => return Ok(ids),
+                }
+            }
+            Err("the user has too many sessions to list".into())
+        })
+    }
+
     fn reset_password<'a>(&'a self, token: &'a str, password: &'a str) -> BoxFuture<'a, Reset> {
         Box::pin(async move {
             let body = workos::models::CreatePasswordReset {
@@ -790,7 +876,7 @@ impl AuthKit for WorkOsAuthKit {
                 .confirm_password_reset(workos::user_management::ConfirmPasswordResetParams::new(body))
                 .await
             {
-                Ok(_) => Reset::Done,
+                Ok(r) => Reset::Done { user: r.user.id },
                 Err(e) => {
                     let (status, code) = status_and_code(&e);
                     if outage(status, &code) {
@@ -1478,7 +1564,7 @@ mod tests {
         fn sign_in_with_code<'a>(&'a self, _: &'a str, _: &'a str, _: &'a Client) -> BoxFuture<'a, Attempt> {
             Box::pin(async { Attempt::Unavailable("unused".into()) })
         }
-        fn resend_verification<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Sent> {
+        fn resend_verification<'a>(&'a self, _: &'a ProviderId) -> BoxFuture<'a, Sent> {
             Box::pin(async { Sent::Unavailable("unused".into()) })
         }
         crate::session::unused_invitation_and_reset!();
@@ -1540,6 +1626,56 @@ mod tests {
             panic!("a verification step")
         };
         assert_eq!(verification, None, "an id that could leave its WorkOS path is dropped");
+    }
+
+    #[test]
+    fn only_a_value_that_cannot_change_a_workos_url_is_a_provider_id() {
+        for ok in ["user_01ABC", "org_01A", "inv-token_123", "A", &"a".repeat(256)] {
+            assert_eq!(
+                ProviderId::new(ok).map(|i| i.as_str().to_owned()).as_deref(),
+                Some(ok),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a.b",
+            "%2e%2e",
+            "a/b",
+            "/",
+            "a?b",
+            "a#b",
+            "a%b",
+            "a b",
+            "a\\b",
+            "é",
+            &"a".repeat(257),
+        ] {
+            assert!(ProviderId::new(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(
+            format!("{:?}", ProviderId::new("secret-token").unwrap()),
+            "ProviderId(<hidden>)"
+        );
+        for bad in [
+            "a/b@example.com",
+            "a?b@example.com",
+            "a#b@example.com",
+            "a%2f@example.com",
+            "a&b=c@example.com",
+        ] {
+            assert!(query_safe_email(bad).is_err(), "{bad}");
+        }
+        assert!(
+            query_safe_email("ada.lovelace+fde@example.com").is_err(),
+            "a plus would read as a space"
+        );
+        assert_eq!(
+            query_safe_email("ada.lovelace@example.com"),
+            Ok("ada.lovelace@example.com")
+        );
 
         let body = r#"{"code":"organization_selection_required","pending_authentication_token":"pt_2",
             "organizations":[{"id":"org_01A","name":"Acme"},{"id":"bad id; drop","name":"x"},{"id":"org_01B","name":"Beta"}],

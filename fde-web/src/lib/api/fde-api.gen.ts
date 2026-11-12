@@ -125,8 +125,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Set a new password with the token from a reset link. It signs nobody in: the account's sessions
-         *     end, and the person signs in with the new password.
+         * Set a new password with the token from a reset link. It signs nobody in: the account's existing
+         *     sessions are revoked and end at their next refresh, and the person signs in with the new password.
          */
         post: operations["reset_password"];
         delete?: never;
@@ -2232,8 +2232,8 @@ export interface components {
             name: string;
         };
         /**
-         * @description The answer to a new password set: `{"next":"sign_in"}`. WorkOS ends the account's sessions; the
-         *     person signs in with the new password.
+         * @description The answer to a new password set: `{"next":"sign_in"}`. The account's existing sessions are
+         *     revoked and end at their next refresh; the person signs in with the new password.
          */
         PasswordChanged: {
             next: components["schemas"]["PasswordChangedNext"];

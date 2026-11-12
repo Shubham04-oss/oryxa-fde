@@ -2806,12 +2806,44 @@ async fn an_invitation_is_accepted_at_its_own_address_and_a_reset_signs_nobody_i
             .await;
         assert_eq!((status, body), (StatusCode::OK, json!({ "next": "check_email" })));
     }
+    // A session from before the reset, whose access token has expired: it refreshes, so it works.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let before = workos::helpers::session::seal(
+        &json!({
+            "purpose": "fde_session",
+            "access_token": support::token_for(Some(&org), &invited.id, "member", -60),
+            "refresh_token": format!("refresh|{org}|{}|member", invited.id),
+            "user": invited.id, "organisation": org, "signed_in": now - 120,
+        }),
+        &w.password,
+    )
+    .unwrap();
+    assert_eq!(
+        w.with_cookie(&before, "GET", "/v1/me", None, false).await.0,
+        StatusCode::OK
+    );
+
     let reset = |token: &str| json!({ "token": token, "password": "another long password" });
     let (status, headers, body) = w
         .send(sign_in_post("/auth/password/reset", reset("reset-ok"), &client, None))
         .await;
     assert_eq!((status, body), (StatusCode::OK, json!({ "next": "sign_in" })));
     assert!(set_cookie(&headers, "__Host-fde_session").is_none());
+    // The reset revoked the person's sessions: the one from before it no longer works.
+    assert!(
+        w.authkit
+            .revoked
+            .lock()
+            .unwrap()
+            .contains(&format!("session_of_{}", invited.id))
+    );
+    assert_eq!(
+        w.with_cookie(&before, "GET", "/v1/me", None, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     let (status, _, body) = w
         .send(sign_in_post(
             "/auth/password/reset",

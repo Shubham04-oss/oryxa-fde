@@ -34,8 +34,8 @@ use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::session::{
-    Attempt, Client, Created, Reset, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to, session_cookie,
-    set_cookie,
+    Attempt, Client, Created, ProviderId, Reset, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to,
+    session_cookie, set_cookie,
 };
 use crate::{ApiError, App, BoxFuture, ErrorBody, VerifyToken};
 
@@ -142,7 +142,9 @@ pub(crate) const RESET_CLIENT: Limit = Limit {
     window: MINUTES_15,
     limit: 10,
 };
-/// Every sign-in call to WorkOS, from everyone: a fifth of WorkOS's environment-wide write limit
+/// Every sign-in call to WorkOS, from everyone, counted once per attempt (an invitation lookup makes
+/// up to three WorkOS calls, an accept four and counts twice, a reset with its revocations a few
+/// more): a fifth of WorkOS's environment-wide write limit
 /// (500 per 10 seconds), so a flood never uses up what session refresh needs.
 pub(crate) const CEILING: Limit = Limit {
     kind: "all",
@@ -330,8 +332,8 @@ pub enum ResetRequestedNext {
     CheckEmail,
 }
 
-/// The answer to a new password set: `{"next":"sign_in"}`. WorkOS ends the account's sessions; the
-/// person signs in with the new password.
+/// The answer to a new password set: `{"next":"sign_in"}`. The account's existing sessions are
+/// revoked and end at their next refresh; the person signs in with the new password.
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 pub struct PasswordChanged {
     pub next: PasswordChangedNext,
@@ -445,13 +447,10 @@ async fn count(ctx: &Ctx<'_>, client: &Client, address: Option<[u8; 32]>, limits
     }
 }
 
-/// A token from a link (invitation, reset): opaque, so only its length and charset are checked.
-fn token_of(raw: &str) -> Option<&str> {
-    let ok = (1..=512).contains(&raw.len())
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
-    ok.then_some(raw)
+/// A token from a link (invitation, reset) as a [`ProviderId`]: letters, digits, `-` and `_` only,
+/// so `.`, `..`, a slash or an escape never reaches a WorkOS path.
+fn token_of(raw: &str) -> Option<ProviderId> {
+    ProviderId::new(raw)
 }
 
 /// A name as typed: trimmed, at most 100 characters, no control characters; empty is none.
@@ -788,15 +787,15 @@ pub(crate) async fn resend_verification(ctx: &Ctx<'_>, headers: &HeaderMap) -> R
     if let Err(e) = count(ctx, &client, Some(pending.address), &[SEND_ADDRESS, SEND_CLIENT]).await {
         return padded(start, e.into_response()).await;
     }
-    let sent = match pending.verification.as_deref() {
-        Some(v) => ctx.sign_in.authkit().resend_verification(v).await,
-        None => Sent::NotSent("the step names no verification".into()),
+    let sent = match pending.verification.as_deref().and_then(ProviderId::new) {
+        Some(v) => ctx.sign_in.authkit().resend_verification(&v).await,
+        None => Sent::NotSent("the step names no usable verification".into()),
     };
     padded(start, sent_answer(sent, SignInStep::VerifyEmail)).await
 }
 
 /// The open invitation `token` names, and its address; an unknown, spent or revoked one is refused.
-async fn open_invitation(ctx: &Ctx<'_>, token: &str) -> Result<(EmailAddress, Option<String>), ApiError> {
+async fn open_invitation(ctx: &Ctx<'_>, token: &ProviderId) -> Result<(EmailAddress, Option<String>), ApiError> {
     match ctx.sign_in.authkit().invitation(token).await {
         Ok(Some(i)) if i.pending => {
             let email = EmailAddress::new(&i.email).map_err(|_| ApiError::Invalid("invitation"))?;
@@ -830,7 +829,7 @@ pub(crate) async fn look_up_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: 
         return padded(start, e.into_response()).await;
     }
     let answer = async {
-        let (email, organisation) = open_invitation(ctx, token).await?;
+        let (email, organisation) = open_invitation(ctx, &token).await?;
         let has_account = ctx.sign_in.authkit().has_account(email.as_str()).await.map_err(|e| {
             tracing::warn!(error = %e, "workos could not look up an account");
             ApiError::Unavailable
@@ -882,7 +881,7 @@ pub(crate) async fn accept_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &
         return padded(start, e.into_response()).await;
     }
     // The address is the invitation's own, never one the request names.
-    let email = match open_invitation(ctx, token).await {
+    let email = match open_invitation(ctx, &token).await {
         Ok((email, _)) => email,
         Err(e) => return padded(start, e.into_response()).await,
     };
@@ -924,7 +923,7 @@ pub(crate) async fn accept_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &
         }
     }
     let attempt = kit
-        .accept_with_password(email.as_str(), &input.password.0, token, &client)
+        .accept_with_password(email.as_str(), &input.password.0, token.as_str(), &client)
         .await;
     let resp = conclude(ctx, attempt, address, return_to, ApiError::InvalidCredentials, false).await;
     padded(start, resp).await
@@ -954,6 +953,33 @@ pub(crate) async fn forgot_password(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u
     padded(start, sent_answer(sent, answer)).await
 }
 
+/// Revokes every WorkOS session of `user` after a reset, so a session from before it (a taken-over
+/// account's above all) ends at its next refresh. The new password is set either way, so a failure
+/// is logged, not answered.
+/// ponytail: a revoked session's access token still verifies until it expires (minutes); ending it
+/// at once needs the API to check revocation on every request.
+async fn end_sessions(kit: &dyn crate::session::AuthKit, user: &str) {
+    let Some(user) = ProviderId::new(user) else {
+        tracing::error!("password reset: the user id is not one a WorkOS path can take; sessions not revoked");
+        return;
+    };
+    let sessions = match kit.sessions_of(&user).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "password reset: sessions could not be listed, so none were revoked");
+            return;
+        }
+    };
+    let mut failed = 0usize;
+    for id in &sessions {
+        if let Err(e) = kit.revoke(id).await {
+            failed += 1;
+            tracing::error!(error = %e, "password reset: a session could not be revoked");
+        }
+    }
+    tracing::info!(sessions = sessions.len(), failed, "password reset; sessions revoked");
+}
+
 pub(crate) async fn reset_password(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8]) -> Response {
     let start = Instant::now();
     if !ctx.sign_in.same_site(headers) {
@@ -973,9 +999,10 @@ pub(crate) async fn reset_password(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8
     if let Err(e) = count(ctx, &client, None, &[RESET_CLIENT]).await {
         return padded(start, e.into_response()).await;
     }
-    let resp = match ctx.sign_in.authkit().reset_password(token, &input.password.0).await {
-        Reset::Done => {
-            tracing::info!("password reset");
+    let kit = ctx.sign_in.authkit();
+    let resp = match kit.reset_password(token.as_str(), &input.password.0).await {
+        Reset::Done { user } => {
+            end_sessions(kit, &user).await;
             Json(PasswordChanged {
                 next: PasswordChangedNext::SignIn,
             })
@@ -1138,8 +1165,8 @@ pub(crate) async fn forgot(State(app): State<Arc<App>>, headers: HeaderMap, raw:
     }
 }
 
-/// Set a new password with the token from a reset link. It signs nobody in: the account's sessions
-/// end, and the person signs in with the new password.
+/// Set a new password with the token from a reset link. It signs nobody in: the account's existing
+/// sessions are revoked and end at their next refresh, and the person signs in with the new password.
 #[utoipa::path(post, operation_id = "reset_password", path = "/auth/password/reset", tag = "auth",
     security(()), request_body = ResetPasswordIn,
     responses((status = 200, body = PasswordChanged, description = "`sign_in`"),
@@ -1212,6 +1239,7 @@ mod tests {
         /// What sending a code to `KNOWN` answers; any other address gets `NotSent`.
         on_send: Mutex<Sent>,
         calls: Mutex<Vec<(String, Client)>>,
+        revoked: Mutex<Vec<String>>,
     }
 
     impl Kit {
@@ -1221,6 +1249,7 @@ mod tests {
                 on_code: Mutex::new(signed_in("user_1", "org_01A")),
                 on_send: Mutex::new(Sent::Sent),
                 calls: Mutex::new(vec![]),
+                revoked: Mutex::new(vec![]),
             })
         }
         fn calls(&self) -> usize {
@@ -1238,8 +1267,11 @@ mod tests {
         fn refresh<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Tokens, RefreshError>> {
             Box::pin(async { Err(RefreshError::Refused("unused".into())) })
         }
-        fn revoke<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
-            Box::pin(async { Err("unused".into()) })
+        fn revoke<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.revoked.lock().unwrap().push(session.to_owned());
+                Ok(())
+            })
         }
         fn user_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async { Err("unused".into()) })
@@ -1318,17 +1350,30 @@ mod tests {
                 Attempt::Refused
             })
         }
-        fn resend_verification<'a>(&'a self, verification: &'a str) -> BoxFuture<'a, Sent> {
+        fn resend_verification<'a>(&'a self, verification: &'a ProviderId) -> BoxFuture<'a, Sent> {
             Box::pin(async move {
                 self.calls
                     .lock()
                     .unwrap()
-                    .push((format!("resend {verification}"), Client::default()));
+                    .push((format!("resend {}", verification.as_str()), Client::default()));
                 Sent::Sent
             })
         }
-        fn invitation<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+        fn sessions_of<'a>(&'a self, user: &'a ProviderId) -> BoxFuture<'a, Result<Vec<String>, String>> {
             Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((format!("sessions {}", user.as_str()), Client::default()));
+                Ok(vec![
+                    format!("session_a_{}", user.as_str()),
+                    format!("session_b_{}", user.as_str()),
+                ])
+            })
+        }
+        fn invitation<'a>(&'a self, token: &'a ProviderId) -> BoxFuture<'a, Result<Option<Invitation>, String>> {
+            Box::pin(async move {
+                let token = token.as_str();
                 self.calls
                     .lock()
                     .unwrap()
@@ -1406,7 +1451,7 @@ mod tests {
                 self.calls.lock().unwrap().push(("reset".into(), Client::default()));
                 match (token, password) {
                     (_, "weak") => Reset::WeakPassword,
-                    ("reset_ok", _) => Reset::Done,
+                    ("reset_ok", _) => Reset::Done { user: "user_1".into() },
                     ("reset_down", _) => Reset::Unavailable("status 503".into()),
                     _ => Reset::Refused("status 400, code invalid_token".into()),
                 }
@@ -1951,6 +1996,7 @@ mod tests {
             "pt_choose",
             "123456",
             "email_verification_1",
+            INVITED,
             "inv_new",
             "inv_known",
             "reset_ok",
@@ -2197,6 +2243,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_link_token_that_could_change_the_providers_path_never_reaches_it() {
+        let w = World::new(Attempt::Refused);
+        let long = "a".repeat(257);
+        for token in [
+            ".",
+            "..",
+            "%2e%2e",
+            "a/b",
+            "../invitations",
+            "a?b",
+            "a#b",
+            "a.b",
+            "",
+            long.as_str(),
+        ] {
+            let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body(token)).await).await;
+            assert_eq!(a.body, r#"{"error":"invalid_invitation"}"#, "lookup {token:?}");
+            let body = serde_json::json!({ "token": token, "password": PASSWORD });
+            let a = read(accept_invitation(&w.ctx(), &headers(&[]), body.to_string().as_bytes()).await).await;
+            assert_eq!(a.body, r#"{"error":"invalid_invitation"}"#, "accept {token:?}");
+            let a = read(reset_password(&w.ctx(), &headers(&[]), body.to_string().as_bytes()).await).await;
+            assert_eq!(a.body, r#"{"error":"invalid_reset_token"}"#, "reset {token:?}");
+        }
+        assert_eq!(w.kit.calls(), 0, "the provider was never asked");
+        assert!(
+            w.limits.seen.lock().unwrap().is_empty(),
+            "refused before anything is counted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_invitation_is_accepted_only_at_its_own_address() {
         let w = World::new(Attempt::Refused);
         let accept = |token: &str, password: &str| {
@@ -2318,6 +2395,10 @@ mod tests {
         let a = read(reset_password(&w.ctx(), &headers(&[]), &body("reset_ok", PASSWORD)).await).await;
         assert_eq!((a.status, a.body.as_str()), (StatusCode::OK, r#"{"next":"sign_in"}"#));
         assert!(a.cookies.is_empty(), "no session: {:?}", a.cookies);
+        // Every session of the person the reset named is revoked.
+        let calls: Vec<String> = w.kit.calls.lock().unwrap().iter().map(|(c, _)| c.clone()).collect();
+        assert!(calls.contains(&"sessions user_1".to_owned()), "{calls:?}");
+        assert_eq!(*w.kit.revoked.lock().unwrap(), ["session_a_user_1", "session_b_user_1"]);
         for (token, password, status, answer) in [
             (
                 "reset_ok",

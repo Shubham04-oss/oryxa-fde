@@ -152,6 +152,10 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
             let [_, org, user, role] = parts[..] else {
                 return Err(RefreshError::Refused("bad refresh token".into()));
             };
+            // A revoked session refreshes no more, as at WorkOS.
+            if self.revoked.lock().unwrap().contains(&format!("session_of_{user}")) {
+                return Err(RefreshError::Refused("invalid_grant".into()));
+            }
             assert_eq!(org, organisation, "refresh names the session's organisation");
             Ok(oryxa_fde_api::Tokens {
                 access_token: token(Some(org), user, role),
@@ -260,14 +264,22 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
         })
     }
 
-    fn resend_verification<'a>(&'a self, _: &'a str) -> Fut<'a, oryxa_fde_api::Sent> {
+    fn resend_verification<'a>(&'a self, _: &'a oryxa_fde_api::ProviderId) -> Fut<'a, oryxa_fde_api::Sent> {
         Box::pin(async { oryxa_fde_api::Sent::Sent })
     }
 
     /// `invite-ok` is an open invitation for `invited@example.com`; any other token names none.
-    fn invitation<'a>(&'a self, token: &'a str) -> Fut<'a, Result<Option<oryxa_fde_api::Invitation>, String>> {
+    /// Each user has one WorkOS session, named after them.
+    fn sessions_of<'a>(&'a self, user: &'a oryxa_fde_api::ProviderId) -> Fut<'a, Result<Vec<String>, String>> {
+        Box::pin(async move { Ok(vec![format!("session_of_{}", user.as_str())]) })
+    }
+
+    fn invitation<'a>(
+        &'a self,
+        token: &'a oryxa_fde_api::ProviderId,
+    ) -> Fut<'a, Result<Option<oryxa_fde_api::Invitation>, String>> {
         Box::pin(async move {
-            Ok((token == "invite-ok").then(|| oryxa_fde_api::Invitation {
+            Ok((token.as_str() == "invite-ok").then(|| oryxa_fde_api::Invitation {
                 email: "invited@example.com".into(),
                 organisation: None,
                 pending: true,
@@ -317,7 +329,8 @@ impl oryxa_fde_api::AuthKit for FakeAuthKit {
     fn reset_password<'a>(&'a self, token: &'a str, _: &'a str) -> Fut<'a, oryxa_fde_api::Reset> {
         Box::pin(async move {
             if token == "reset-ok" {
-                oryxa_fde_api::Reset::Done
+                let user = self.who.lock().unwrap().1.clone();
+                oryxa_fde_api::Reset::Done { user }
             } else {
                 oryxa_fde_api::Reset::Refused("invalid_token".into())
             }

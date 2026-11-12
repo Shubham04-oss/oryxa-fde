@@ -389,7 +389,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Set a new password with the token from a reset link. It signs nobody in: the account's sessions\nend, and the person signs in with the new password.",
+        "summary": "Set a new password with the token from a reset link. It signs nobody in: the account's existing\nsessions are revoked and end at their next refresh, and the person signs in with the new password.",
         "operationId": "reset_password",
         "requestBody": {
           "content": {
@@ -10603,7 +10603,7 @@
       },
       "PasswordChanged": {
         "type": "object",
-        "description": "The answer to a new password set: `{\"next\":\"sign_in\"}`. WorkOS ends the account's sessions; the\nperson signs in with the new password.",
+        "description": "The answer to a new password set: `{\"next\":\"sign_in\"}`. The account's existing sessions are\nrevoked and end at their next refresh; the person signs in with the new password.",
         "required": [
           "next"
         ],

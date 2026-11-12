@@ -54,8 +54,8 @@ pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
 pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
 pub use people::Person;
 pub use session::{
-    Attempt, AuthKit, Client, Created, Invitation, RefreshError, Reset, Sent, SignIn, Tokens, WorkOsAuthKit,
-    workos_issuer,
+    Attempt, AuthKit, Client, Created, Invitation, ProviderId, RefreshError, Reset, Sent, SignIn, Tokens,
+    WorkOsAuthKit, workos_issuer,
 };
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
