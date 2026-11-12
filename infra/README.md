@@ -110,7 +110,7 @@ them is a secret. The Cloudflare API token comes from `CLOUDFLARE_API_TOKEN` in 
 | `interface_endpoints` | `[]` | PrivateLink endpoints for AWS APIs (about $7.30/month each); empty means the NAT carries that traffic |
 | `log_retention_days` | `14` | CloudWatch retention for every task's logs |
 | `embedding_model` | `amazon.titan-embed-text-v2:0` | Bedrock foundation model that embeds text (`EMBEDDING_MODEL`); the API's and the ingest worker's roles may invoke this model only, in `aws_region`. A foundation model id: an inference-profile id (`us.`, `eu.`, `global.`...) is refused, since the permission names the model's ARN |
-| `workos_issuer` | `null` | `WORKOS_ISSUER` on the API, which pins every token's `iss` to it. Without a custom auth domain, WorkOS's issuer is `https://api.workos.com/user_management/<client id>`: set it to that until the API derives it (#199), or every sign-in is refused. With a custom auth domain, it is that domain. Null: the API's default, `https://api.workos.com/`, which no standard WorkOS environment issues. Validated: https, an optional path of letters, digits, `_`, `-` and `.`, no query, fragment, userinfo or wildcard (Verify before apply) |
+| `workos_issuer` | `null` | `WORKOS_ISSUER` on the API and the MCP server, which pin every token's `iss` to it. Needed only with a custom auth domain in WorkOS: set it to that domain, or every sign-in is refused. Null: the code derives WorkOS's own issuer from the client id, `https://api.workos.com/user_management/<client id>`, which is what a WorkOS environment without a custom auth domain issues; setting it to that value is harmless. Validated: https, an optional path of letters, digits, `_`, `-` and `.`, no query, fragment, userinfo or wildcard (Verify before apply) |
 | `ingest_cpu`, `ingest_memory` | `512`, `2048` | The ingest worker's task. It holds each document in memory and extracts its text in a child limited to 1 GiB of address space (`child.rs`), so memory is the figure to watch |
 | `lifecycle_cpu`, `lifecycle_memory` | `256`, `512` | The lifecycle worker's task |
 | `enable_mcp` | `false` | Deploy the MCP server for FDE agents: its task (the server and its own cloudflared), role and service, the `cloudflared/mcp-tunnel-token` secret, and on Cloudflare its tunnel, ingress rule and the proxied record for `mcp_hostname` (which it requires). **Off, because how an FDE's agent signs in is not decided** (What is missing before an agent can sign in): on, the name answers on the internet and refuses every request without a valid WorkOS token. Off, nothing of it exists, although the binary is in the image |
@@ -280,7 +280,7 @@ GitHub only when `GITHUB_APP_ID` is; Slack only when `SLACK_CLIENT_ID` is.
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` (`embed.rs:12`) | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
 | `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none: no company key named, every file under the environment key | `context/src/lib.rs:130` (name: `context/src/keys.rs:18`, parsed at `keys.rs:40`, Region compared at `keys.rs:93`) | output `company_key_alias_arn_prefix`, always (Company keys): `arn:<partition>:kms:<region>:<account>:alias/oryxa-fde-<env>/companies/`. A malformed prefix, or one in another Region than `AWS_REGION`, stops startup; `tests/code` reads the parser from the source and checks the value on the task against it |
-| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `main.rs:62` | `workos_issuer`; not set when null. Set it to `https://api.workos.com/user_management/<client id>` without a custom auth domain until the API derives it (#199) |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:496`; blank counts as unset) | `main.rs:57` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
 | `SESSION_PASSWORD_PREVIOUS` | optional | secret | none | `main.rs:75` | not set; add a secret when rotating |
 | `RUST_LOG` | optional | config | `info` | `main.rs:44` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
@@ -438,7 +438,7 @@ WorkOS bearer token as the API does (`Principal::from_bearer`). A variable that 
 | `EMBEDDING_MODEL` | optional | config | `amazon.titan-embed-text-v2:0` | `context/src/lib.rs:118` | `embedding_model` |
 | `EMBEDDING_REPLACES` | optional | config | none | `context/src/lib.rs:123` | not set |
 | `COMPANY_KEY_ALIAS_ARN_PREFIX` | optional | config | none | `context/src/lib.rs:130` | not set: no tool reads or writes a file, and the role has no KMS permission. The binary builds the same context as the API, so it would parse a value if given one, but it never names a key or asks KMS |
-| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/` | `mcp.rs:38` | `workos_issuer`; not set when null. Set it to `https://api.workos.com/user_management/<client id>` without a custom auth domain until the API derives it (#199) |
+| `WORKOS_ISSUER` | optional | config | `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>` (`session.rs:496`; blank counts as unset) | `mcp.rs:35` | `workos_issuer`; not set when null. Needed only with a custom auth domain in WorkOS: that domain |
 | `RUST_LOG` | optional | config | `info` | `mcp.rs:26` | not set |
 | `DATABASE_URL` | local only | secret | none | `store/src/lib.rs:307` | never set |
 
@@ -560,9 +560,9 @@ workflows (Deploys, below), not from the owner's machine.
    for each name in `tofu output secrets`. The SpiceDB key is random (`openssl rand -base64 32`), the
    WorkOS key comes from the WorkOS dashboard, and the event signing key is the private PEM of the pair
    made in step 4 (its public half is `event_public_key`, which the workers verify events with). In the WorkOS dashboard, register `https://<web_hostname>/auth/callback` as a redirect URI (the API sends the browser back to `<WEB_ORIGIN>/auth/callback`, `session.rs:362`); a mismatch fails the first sign-in. Copy the tunnel token from the Cloudflare dashboard
-   (Zero Trust, Networks, Tunnels, `oryxa-fde-dev-api`; output `tunnel_id`). Without a custom auth domain in WorkOS,
-   `workos_issuer` must be `https://api.workos.com/user_management/<client id>` in `terraform.tfvars` before step 10's
-   apply, or every sign-in is refused (Verify before apply: `WORKOS_ISSUER`, until #199). A person can sign in only as
+   (Zero Trust, Networks, Tunnels, `oryxa-fde-dev-api`; output `tunnel_id`). With a custom auth domain in WorkOS,
+   `workos_issuer` must be that domain in `terraform.tfvars` before step 10's apply, or every sign-in is refused
+   (Verify before apply: `WORKOS_ISSUER`); without one, leave it null. A person can sign in only as
    an active member of a WorkOS organisation with the role `admin` or `member`: add them there first.
 7. **SpiceDB datastore.** Run `infra/scripts/run-task.sh spicedb-migrate` (`datastore migrate head`,
    IAM auth).
@@ -1520,13 +1520,13 @@ These could not be checked without an account. Each one is flagged at the place 
   chosen decides where prompts are processed (Where prompts are processed).
 - **RDS in Mumbai.** AWS has no per-Region table for PostgreSQL 17 on `db.t4g.micro`; the
   `describe-orderable-db-instance-options` command in Mumbai (ap-south-1) answers it before the first apply.
-- **`WORKOS_ISSUER`.** The code's default is `https://api.workos.com/`, pinned against the token's `iss`
-  (`oryxa-authn/src/workos_jwt.rs:57`). A standard WorkOS environment (no custom auth domain) does not issue that:
-  its tokens carry `iss` = `https://api.workos.com/user_management/<client id>`, as
-  `https://api.workos.com/user_management/<client id>/.well-known/openid-configuration` shows. The first sign-ins in
-  dev answered `401 unauthorized` at `/auth/callback` for this reason. Set `workos_issuer` to that value until the API
-  derives it from the client id (#199). If the WorkOS environment uses a custom auth domain, the issuer is that
-  domain: set `workos_issuer` to it. Either way, a wrong issuer refuses every sign-in.
+- **`WORKOS_ISSUER`.** The token's `iss` is pinned exactly (`oryxa-authn/src/workos_jwt.rs:57`). Unset, the API and
+  the MCP server derive it from the client id (`session.rs:496`): `https://api.workos.com/user_management/<client id>`,
+  which a standard WorkOS environment (no custom auth domain) issues, as
+  `https://api.workos.com/user_management/<client id>/.well-known/openid-configuration` shows. Leave `workos_issuer`
+  null there; setting it to that value is harmless. If the WorkOS environment uses a custom auth domain, the issuer is
+  that domain: set `workos_issuer` to it. Either way, a wrong issuer refuses every sign-in with `401 unauthorized` at
+  `/auth/callback`.
 - **Who can sign in.** A person can sign in only as an active member of a WorkOS organisation with the role `admin`
   or `member`. Add each person to the organisation in the WorkOS dashboard, with one of those roles, before their
   first sign-in.
