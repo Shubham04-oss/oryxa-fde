@@ -113,6 +113,10 @@ P0 backend; nothing is deployed and the web app shows a small part of it. `docs/
 section 7 sets three milestones, and each stream now works toward them in order. New API surface
 waits until a screen uses it. The canvas, versioned config and billing move behind M2.
 
+From 12 November the M2 screens are reached through a conversation-first workspace
+(`docs/direction.md` section 9, ADR 0008): the web builds the block catalogue and the conversation
+surface on the dev mock first, then the API adds the assistant route and proposal types.
+
 | Stream | M1. It runs | M2. The FDE's day | M3. The customer side, and paying |
 | --- | --- | --- | --- |
 | API | The session reaches agent and eval routes | Next step and stage checklists; scope as an agreement with baselines; task order and links; the signal model, Slack inbound, GitHub widened, inbound webhook and results upload; Today over signals | Customer roles (ADR 0005), invites, billing, Jira and GitLab, calendar feed and forwarded email |

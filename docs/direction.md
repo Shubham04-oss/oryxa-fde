@@ -2,7 +2,8 @@
 
 What the product is for, who uses it, and how it should feel to work in. `docs/plan.md` says what to
 build and in what order; the ADRs record decisions; this page is the reason behind both. Set by the
-founder and the lead on 10 November 2026.
+founder and the lead on 10 November 2026. Section 9, how the workspace feels and adapts, was added
+on 12 November 2026 and takes precedence where it and section 3 differ on what a screen looks like.
 
 ## 1. The idea
 
@@ -142,3 +143,52 @@ Nothing solid was found on what sponsors want to see or on how long security rev
 
 Treat sections 3 to 5 as a well-founded starting point, and correct them from the first real
 engagement run in the product.
+
+## 9. How it feels: a conversation that builds the workspace
+
+Set by the founder on 12 November 2026. Sections 3 to 5 say what the FDE needs; this section says
+how they get it. The records, stages and permission rules above do not change.
+
+**One place to talk.** The FDE's main surface is a conversation with the workspace: what is wrong,
+what needs planning, what to do next. They say what they want and the workspace prepares it. The
+screens in section 3 remain as views the conversation opens and fills, not as the way in.
+
+**It speaks first.** When something happens (a company is created, a customer asks for a service to
+be connected, a check fails, an engagement has no next step) the workspace proposes what to do, and
+the FDE approves, changes or dismisses it.
+
+**Plan first, and adaptive.** A new company or project starts as a short brief built in
+conversation: what is being delivered, how the work will run, the rules for it, who to invite. From
+that the workspace proposes a plan as an ordered sequence of steps, and the FDE reorders and edits
+it. The sequence is theirs: the first step may be a call with the sponsor rather than build work. The eight
+stages stay as the backbone and the plan's steps hang off them, so the lifecycle is still managed
+(next step, stage checklists, handoff) however the FDE chose to begin.
+
+**Generated from our own blocks.** Each company and each person gets a workspace arranged for
+them. The workspace arranges and fills a fixed set of our building blocks (plan, rules, people,
+checklist, board, proof, suggestion and so on). It never writes markup or code for a screen. How it
+is allowed to act is in ADR 0008.
+
+**A person confirms.** Anything the workspace proposes that creates or changes a record, invites
+someone, grants access or sets a rule takes effect only when a person confirms it, and runs with
+that person's own permissions.
+
+**Evals are part of the plan, not a separate tool.** Every success criterion in a plan comes with
+how it will be proven: a baseline, a target and an eval suite or an uploaded result. Proof shows in
+the conversation and on the engagement, a criterion is never shown as met on a claim alone (an FDE
+may still move on with it open by giving a reason, as section 4 says), and the workspace's own
+proposals are measured too (ADR 0008).
+
+**Clear, decluttered, premium.** Usability comes first.
+
+- One primary action in a view. Few things on screen; the rest is a step away, not on the page.
+- Navigation is obvious and light: where am I, what needs me, how do I get back.
+- A considered colour theme in light and dark, a clear type scale, generous spacing, quiet motion
+  that respects the reduced-motion setting.
+- Every control has its hover, focus, pressed, disabled, empty and loading states.
+- Keyboard and screen-reader use work everywhere.
+- Built on TanStack Start, with well-kept open-source components (Base UI, the shadcn pieces,
+  Tailwind tokens) and Pikaicons' free, MIT-licensed set behind one icon entry point. Paid icon
+  files never enter this public repository.
+
+The same treatment reaches the customer portal later, in a simpler form.
