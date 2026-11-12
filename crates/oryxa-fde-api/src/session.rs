@@ -341,13 +341,15 @@ fn provider_id(v: &str) -> Result<ProviderId, String> {
     ProviderId::new(v).ok_or_else(|| "a value not safe for a WorkOS path".to_owned())
 }
 
-/// An address for a WorkOS query: nothing in it that could end the value or escape, should the
-/// SDK's encoding ever change.
-fn query_safe_email(email: &str) -> Result<&str, String> {
-    if email.contains(['/', '?', '#', '%', '&', '=', '+']) || email.bytes().any(|b| !b.is_ascii_graphic()) {
-        return Err("an address not safe for a WorkOS query".into());
+/// The query that finds the account at `email`, an [`oryxa_fde_store::EmailAddress`] already. The
+/// SDK percent-encodes every query byte outside `A-Za-z0-9-._~`, so a `+`, `&` or `#` in a real
+/// address travels intact and cannot change the URL.
+fn users_by_email(email: &str) -> workos::user_management::ListUsersParams {
+    workos::user_management::ListUsersParams {
+        email: Some(email.to_owned()),
+        limit: Some(1),
+        ..Default::default()
     }
-    Ok(email)
 }
 
 /// A failed send as [`Sent`]: an outage, or nothing sent for a reason the person must not learn.
@@ -747,11 +749,7 @@ impl AuthKit for WorkOsAuthKit {
 
     fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>> {
         Box::pin(async move {
-            let p = workos::user_management::ListUsersParams {
-                email: Some(query_safe_email(email)?.to_owned()),
-                limit: Some(1),
-                ..Default::default()
-            };
+            let p = users_by_email(email);
             match self.0.user_management().list_users(p).await {
                 Ok(list) => Ok(!list.data.is_empty()),
                 Err(e) => {
@@ -1629,6 +1627,27 @@ mod tests {
     }
 
     #[test]
+    fn an_address_goes_into_the_user_lookup_intact_and_encoded() {
+        for email in [
+            "ada+fde@example.com",
+            "o'neil@example.com",
+            "a&b=c@example.com",
+            "x%2f@example.com",
+        ] {
+            let p = users_by_email(email);
+            assert_eq!(p.email.as_deref(), Some(email), "intact");
+            // The SDK percent-encodes it, so nothing in it can change the URL.
+            let q = workos::query::encode_query(&p).unwrap();
+            assert!(!q.contains(email), "{q}");
+        }
+        let q = workos::query::encode_query(&users_by_email("ada+fde@example.com")).unwrap();
+        assert!(
+            q.contains("email=ada%2Bfde%40example.com"),
+            "a plus goes out as %2B, never a space: {q}"
+        );
+    }
+
+    #[test]
     fn only_a_value_that_cannot_change_a_workos_url_is_a_provider_id() {
         for ok in ["user_01ABC", "org_01A", "inv-token_123", "A", &"a".repeat(256)] {
             assert_eq!(
@@ -1658,23 +1677,6 @@ mod tests {
         assert_eq!(
             format!("{:?}", ProviderId::new("secret-token").unwrap()),
             "ProviderId(<hidden>)"
-        );
-        for bad in [
-            "a/b@example.com",
-            "a?b@example.com",
-            "a#b@example.com",
-            "a%2f@example.com",
-            "a&b=c@example.com",
-        ] {
-            assert!(query_safe_email(bad).is_err(), "{bad}");
-        }
-        assert!(
-            query_safe_email("ada.lovelace+fde@example.com").is_err(),
-            "a plus would read as a space"
-        );
-        assert_eq!(
-            query_safe_email("ada.lovelace@example.com"),
-            Ok("ada.lovelace@example.com")
         );
 
         let body = r#"{"code":"organization_selection_required","pending_authentication_token":"pt_2",

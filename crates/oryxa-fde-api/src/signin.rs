@@ -1200,6 +1200,8 @@ mod tests {
     const PASSWORD: &str = "correct horse battery staple";
     /// Invited, with no account yet.
     const INVITED: &str = "new.person@example.com";
+    /// Invited at a plus address, as many people use.
+    const PLUS: &str = "ada+fde@example.com";
 
     /// Tokens are `tok|user|organisation|session`; an empty organisation is none.
     struct Verifier;
@@ -1388,6 +1390,7 @@ mod tests {
                 Ok(match token {
                     "inv_new" => open(INVITED, true),
                     "inv_known" => open(KNOWN, true),
+                    "inv_plus" => open(PLUS, true),
                     "inv_spent" => open(INVITED, false),
                     "inv_down" => return Err("status 503".into()),
                     _ => None,
@@ -1395,7 +1398,13 @@ mod tests {
             })
         }
         fn has_account<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<bool, String>> {
-            Box::pin(async move { Ok(email == KNOWN) })
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((format!("has_account {email}"), Client::default()));
+                Ok(email == KNOWN)
+            })
         }
         fn create_account<'a>(
             &'a self,
@@ -1429,6 +1438,7 @@ mod tests {
                 match (email, password) {
                     (KNOWN, PASSWORD) => signed_in("user_1", "org_01A"),
                     (INVITED, _) => signed_in("user_new", "org_01A"),
+                    (PLUS, _) => signed_in("user_plus", "org_01A"),
                     _ => Attempt::Refused,
                 }
             })
@@ -2274,6 +2284,30 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_invitation_to_a_plus_address_is_looked_up_and_accepted_with_the_address_intact() {
+        let w = World::new(Attempt::Refused);
+        let a = read(look_up_invitation(&w.ctx(), &headers(&[]), &token_body("inv_plus")).await).await;
+        assert_eq!(a.status, StatusCode::OK, "{}", a.body);
+        assert!(a.body.contains(r#""email":"ada+fde@example.com""#), "{}", a.body);
+
+        let body = serde_json::json!({ "token": "inv_plus", "password": PASSWORD, "first_name": "Ada" });
+        let a = read(accept_invitation(&w.ctx(), &headers(&[]), body.to_string().as_bytes()).await).await;
+        assert_eq!(a.status, StatusCode::OK, "{}", a.body);
+        assert_eq!(
+            session_of(&w.sign_in, a.cookie(SESSION_COOKIE).unwrap()),
+            Some(("user_plus".into(), "org_01A".into()))
+        );
+        let calls: Vec<String> = w.kit.calls.lock().unwrap().iter().map(|(c, _)| c.clone()).collect();
+        for want in [
+            "has_account ada+fde@example.com",
+            "create ada+fde@example.com Some(\"Ada\") None",
+            "accept ada+fde@example.com inv_plus",
+        ] {
+            assert!(calls.iter().any(|c| c == want), "{want} not in {calls:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_invitation_is_accepted_only_at_its_own_address() {
         let w = World::new(Attempt::Refused);
         let accept = |token: &str, password: &str| {
@@ -2302,6 +2336,7 @@ mod tests {
             calls,
             [
                 "invitation inv_new",
+                "has_account new.person@example.com",
                 "create new.person@example.com Some(\"Ada\") Some(\"Lovelace\")",
                 "accept new.person@example.com inv_new"
             ]
