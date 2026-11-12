@@ -7,11 +7,13 @@ import {
   createRouter,
 } from "@tanstack/react-router"
 import { render, screen, waitFor } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Route, tokenOf } from "./sign-in"
 import { carried } from "@/components/auth/flow"
 import { resetMockApi } from "@/dev/mock-api"
 import { createQueryClient } from "@/lib/session"
+import { LATER } from "@/lib/api/sign-in-api"
+import type { Later } from "@/lib/api/sign-in-api"
 import type * as SignInModule from "@/lib/api/sign-in-api"
 
 // The flag is a build-time constant; here it is switched per test, read live by the route.
@@ -57,8 +59,17 @@ function open(at: string) {
   return router
 }
 
+/** Turns on the emailed-link steps, as when their API routes are served. */
+function withLinks() {
+  beforeEach(() => {
+    LATER.reset = true
+    LATER.invite = true
+  })
+}
+
 afterEach(() => {
   flag.on = false
+  for (const k of Object.keys(LATER) as Later[]) LATER[k] = false
   carried.token = ""
   carried.tokenFor = null
 })
@@ -87,7 +98,23 @@ describe("tokenOf", () => {
   })
 })
 
+describe("validateSearch, while the emailed-link routes are still to come", () => {
+  it.each(["code", "forgot", "reset", "invite"])("drops step=%s and any token", (step) => {
+    expect(validate({ step, token: "t-1", return_to: "/today" })).toEqual({ return_to: "/today" })
+  })
+
+  it("keeps the steps the API serves, never with a token", () => {
+    expect(validate({ step: "verify-email", token: "t-1" })).toEqual({
+      step: "verify-email",
+      return_to: "/",
+    })
+    expect(validate({ step: "organisation" })).toEqual({ step: "organisation", return_to: "/" })
+  })
+})
+
 describe("validateSearch", () => {
+  withLinks()
+
   it("keeps a known step, a known outcome, a good token and a local return_to", () => {
     expect(
       validate({ step: "reset", token: "t-1", error: "no_organisation", return_to: "/today?x=1" }),
@@ -140,8 +167,19 @@ describe("the /sign-in route", () => {
     expect(carried.token).toBe("")
   })
 
+  it("with the flag on, shows the first screen for a reset link until its route is served", async () => {
+    flag.on = true
+    const router = open("/sign-in?step=reset&token=reset-sample&return_to=%2Ftoday")
+
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+    await waitFor(() => expect(router.state.location.search).not.toHaveProperty("token"))
+    expect(router.state.location.href).not.toContain("reset-sample")
+    expect(carried.token).toBe("")
+  })
+
   it("with the flag on, reads a reset link's token and takes it out of the address", async () => {
     flag.on = true
+    LATER.reset = true
     const router = open("/sign-in?step=reset&token=reset-sample&return_to=%2Ftoday")
 
     expect(await screen.findByLabelText("New password")).toBeInTheDocument()
@@ -152,6 +190,7 @@ describe("the /sign-in route", () => {
 
   it("with the flag on, never offers one step's token to another", async () => {
     flag.on = true
+    LATER.invite = true
     carried.token = "reset-sample"
     carried.tokenFor = "reset"
     open("/sign-in?step=invite")

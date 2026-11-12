@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query"
 import { useEffect, useRef, useState } from "react"
 import {
   AuthForm,
@@ -12,34 +11,46 @@ import {
   Submit,
 } from "./fields"
 import { AuthFrame } from "./frame"
-import { carried, codeOf, emailProblem, useCall, useFlow, waitText } from "./flow"
-import { SignInError, signInApi } from "@/lib/api/sign-in-api"
+import { carried, codeOf, emailProblem, useCall, useFlow, useNote, waitText } from "./flow"
+import { LATER, SIGN_IN_TEXT, SignInError, signInApi } from "@/lib/api/sign-in-api"
 import { OUTCOMES } from "@/lib/sign-in-outcome"
 import type { Outcome } from "@/lib/sign-in-outcome"
 
 // The screens that sign a person in (ADR 0007). Each is plain: a title, its fields, its refusals in
-// our own words, and the ways on. The calls are the assumed contract in `sign-in-api.ts`.
+// our own words, and the ways on. The calls are in `sign-in-api.ts`; a way in whose API route is
+// still to come (`LATER`) is not shown.
 
 type Props = { returnTo: string }
 
 // What the dev mock accepts, written only into a dev build: `import.meta.env.DEV` is `false` in a
 // production build, so these strings are dropped from it.
 const SAMPLES = import.meta.env.DEV
-  ? "Sign in as riya@example.com with sample-password. Also try two-orgs@, unverified@, no-org@, mfa@, sso@ and locked@example.com."
+  ? "Sign in as riya@example.com with sample-password. Also try two-orgs@, unverified@, no-org@, mfa@ and locked@example.com."
   : undefined
-const SAMPLE_CODE = import.meta.env.DEV ? "The code is 123456; 000000 has expired." : undefined
+const SAMPLE_CODE = import.meta.env.DEV ? "The code is 123456." : undefined
 
-/** A refusal the person can act on, with the way on where there is one. */
-function Refusal({ error, returnTo }: { error: SignInError; returnTo: string }) {
+/**
+ * A refusal the person can act on, with the way on where there is one. `restart` offers to start
+ * again, on a later step that a refusal has ended.
+ */
+function Refusal({
+  error,
+  returnTo,
+  restart = false,
+}: {
+  error: SignInError
+  returnTo: string
+  restart?: boolean
+}) {
   return (
     <FormError>
       {waitText(error)}{" "}
-      {error.code === "step_expired" && (
+      {restart && error.code === "sign_in_unsupported" && (
         <StepLink step="password" returnTo={returnTo}>
           Start again
         </StepLink>
       )}
-      {error.code === "too_many_attempts" && (
+      {error.code === "too_many_attempts" && LATER.forgot && (
         <StepLink step="forgot" returnTo={returnTo}>
           Reset your password
         </StepLink>
@@ -50,8 +61,10 @@ function Refusal({ error, returnTo }: { error: SignInError; returnTo: string }) 
 
 /** Email and password, with a code or Google as the other ways in. */
 export function PasswordScreen({ returnTo }: Props) {
-  const { follow, go } = useFlow(returnTo)
-  const { working, error, setError, run } = useCall()
+  const { follow, go, ended } = useFlow(returnTo)
+  const { working, error, setError, run } = useCall(ended)
+  const note = useNote()
+  const [noted, setNoted] = useState(note !== null)
   const [email, setEmail] = useState(carried.email)
   const [password, setPassword] = useState("")
   const [problems, setProblems] = useState<{ email?: string; password?: string }>({})
@@ -65,10 +78,11 @@ export function PasswordScreen({ returnTo }: Props) {
     }
     setProblems(found)
     setError(null)
+    setNoted(false)
     if (found.email) return emailField.current?.focus()
     if (found.password) return passwordField.current?.focus()
     carried.email = email.trim()
-    const next = await run(() => signInApi.withPassword(email.trim(), password))
+    const next = await run(() => signInApi.withPassword(email.trim(), password, returnTo))
     // A refused password is never kept, even in this screen's state.
     setPassword("")
     if (next) follow(next)
@@ -101,42 +115,53 @@ export function PasswordScreen({ returnTo }: Props) {
             autoComplete="current-password"
             value={password}
             onChange={setPassword}
-            error={problems.password}
+            error={
+              problems.password ?? (error?.code === "invalid_password" ? error.message : undefined)
+            }
             aside={
-              <StepLink step="forgot" returnTo={returnTo}>
-                Forgotten password?
-              </StepLink>
+              LATER.forgot && (
+                <StepLink step="forgot" returnTo={returnTo}>
+                  Forgotten password?
+                </StepLink>
+              )
             }
           />
-          {error && error.code !== "invalid_email" && <Refusal error={error} returnTo={returnTo} />}
+          {noted && note && <Notice>{SIGN_IN_TEXT[note]}</Notice>}
+          {error && !["invalid_email", "invalid_password"].includes(error.code) && (
+            <Refusal error={error} returnTo={returnTo} />
+          )}
           <Submit working={working} busy="Signing in…">
             Sign in
           </Submit>
         </AuthForm>
-        <Or />
-        <Secondary
-          disabled={working}
-          onClick={() => {
-            carried.email = email.trim()
-            go("code")
-          }}
-        >
-          Email me a code instead
-        </Secondary>
-        <Secondary
-          disabled={working}
-          onClick={() =>
-            void run(async () => {
-              await signInApi.withGoogle(returnTo)
-              return true
-            }).then(
-              // Only the mock comes back here; the real one has left for Google.
-              (back) => back && follow({ next: "signed_in" }),
-            )
-          }
-        >
-          Continue with Google
-        </Secondary>
+        {(LATER.code || LATER.google) && <Or />}
+        {LATER.code && (
+          <Secondary
+            disabled={working}
+            onClick={() => {
+              carried.email = email.trim()
+              go("code")
+            }}
+          >
+            Email me a code instead
+          </Secondary>
+        )}
+        {LATER.google && (
+          <Secondary
+            disabled={working}
+            onClick={() =>
+              void run(async () => {
+                await signInApi.withGoogle(returnTo)
+                return true
+              }).then(
+                // Only the mock comes back here; the real one has left for Google.
+                (back) => back && follow({ next: "done", return_to: returnTo }),
+              )
+            }
+          >
+            Continue with Google
+          </Secondary>
+        )}
       </div>
     </AuthFrame>
   )
@@ -144,8 +169,8 @@ export function PasswordScreen({ returnTo }: Props) {
 
 /** An emailed one-time code: ask for it, then type it. */
 export function CodeScreen({ returnTo }: Props) {
-  const { follow } = useFlow(returnTo)
-  const { working, error, setError, run } = useCall()
+  const { follow, ended } = useFlow(returnTo)
+  const { working, error, setError, run } = useCall(ended)
   const [email, setEmail] = useState(carried.email)
   const [sentTo, setSentTo] = useState<string | null>(null)
   const [code, setCode] = useState("")
@@ -182,7 +207,7 @@ export function CodeScreen({ returnTo }: Props) {
     setProblem(digits ? undefined : "Enter the 6-digit code from the email.")
     setError(null)
     if (!digits || !sentTo) return field.current?.focus()
-    const next = await run(() => signInApi.withCode(sentTo, digits))
+    const next = await run(() => signInApi.withCode(sentTo, digits, returnTo))
     if (next) follow(next)
     else field.current?.focus()
   }
@@ -273,10 +298,10 @@ export function CodeScreen({ returnTo }: Props) {
   )
 }
 
-/** The code WorkOS emails to confirm an address, when sign-in says it is not confirmed yet. */
+/** The code emailed to confirm an address, when sign-in says it is not confirmed yet. */
 export function VerifyEmailScreen({ returnTo }: Props) {
-  const { follow } = useFlow(returnTo)
-  const { working, error, setError, run } = useCall()
+  const { follow, ended } = useFlow(returnTo)
+  const { working, error, setError, run } = useCall(ended)
   const [code, setCode] = useState("")
   const [problem, setProblem] = useState<string | undefined>()
   const [resent, setResent] = useState(false)
@@ -332,15 +357,17 @@ export function VerifyEmailScreen({ returnTo }: Props) {
             onChange={setCode}
             error={problem}
           />
-          {error && <Refusal error={error} returnTo={returnTo} />}
+          {error && <Refusal error={error} returnTo={returnTo} restart />}
           {resent && !error && <Notice>A new code is on its way. Use the newest one.</Notice>}
           <Submit working={working} busy="Checking…">
             Confirm and sign in
           </Submit>
         </AuthForm>
-        <Secondary disabled={working} onClick={() => void resend()}>
-          Send a new code
-        </Secondary>
+        {LATER.resend && (
+          <Secondary disabled={working} onClick={() => void resend()}>
+            Send a new code
+          </Secondary>
+        )}
         <StepLink step="password" returnTo={returnTo}>
           Start again
         </StepLink>
@@ -350,51 +377,24 @@ export function VerifyEmailScreen({ returnTo }: Props) {
 }
 
 /**
- * One person in several organisations chooses which to work in. The list is the API's, from the
- * pending step, so this opens the same after a password, a code or Google's callback.
+ * One person in several organisations chooses which to work in. The list is the one the last step's
+ * answer offered, kept in memory; after a reload it is gone and sign-in starts again.
  */
 export function OrganisationScreen({ returnTo }: Props) {
-  const { follow } = useFlow(returnTo)
-  const { working, error, run } = useCall()
+  const { follow, ended } = useFlow(returnTo)
+  const { working, error, run } = useCall(ended)
   const [chosen, setChosen] = useState<string | null>(null)
-  const pending = useQuery({
-    queryKey: ["sign-in", "pending"],
-    queryFn: () => signInApi.pending(),
-    retry: false,
-    gcTime: 0,
-  })
+  const [organisations] = useState(() => carried.organisations)
+
+  useEffect(() => {
+    if (organisations.length === 0) ended(new SignInError("invalid_sign_in"))
+  }, [organisations, ended])
 
   async function choose(id: string) {
     setChosen(id)
     const next = await run(() => signInApi.chooseOrganisation(id))
     if (next) follow(next)
     else setChosen(null)
-  }
-
-  if (pending.isPending)
-    return (
-      <AuthFrame title="Choose an organisation" focusTitle>
-        <p role="status" className="text-[13px] text-muted-foreground">
-          Finding your organisations…
-        </p>
-      </AuthFrame>
-    )
-  if (pending.isError || pending.data.step !== "choose_organisation") {
-    const failure = pending.error instanceof SignInError ? pending.error : null
-    return (
-      <AuthFrame title="Choose an organisation" focusTitle>
-        <div className="grid gap-4">
-          {failure && failure.code !== "step_expired" ? (
-            <Refusal error={failure} returnTo={returnTo} />
-          ) : (
-            <FormError>{new SignInError("step_expired").message}</FormError>
-          )}
-          <StepLink step="password" returnTo={returnTo}>
-            Back to sign in
-          </StepLink>
-        </div>
-      </AuthFrame>
-    )
   }
 
   return (
@@ -405,7 +405,7 @@ export function OrganisationScreen({ returnTo }: Props) {
     >
       <div className="grid gap-4">
         <ul aria-label="Your organisations" className="grid gap-2">
-          {pending.data.organisations.map((o) => (
+          {organisations.map((o) => (
             <li key={o.id}>
               <Secondary disabled={working} onClick={() => void choose(o.id)}>
                 {chosen === o.id ? `Opening ${o.name}…` : o.name}
@@ -413,7 +413,7 @@ export function OrganisationScreen({ returnTo }: Props) {
             </li>
           ))}
         </ul>
-        {error && <Refusal error={error} returnTo={returnTo} />}
+        {error && <Refusal error={error} returnTo={returnTo} restart />}
         <StepLink step="password" returnTo={returnTo}>
           Use a different account
         </StepLink>

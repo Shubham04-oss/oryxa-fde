@@ -2,8 +2,8 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useRouter } from "@tanstack/react-router"
 import { useCallback, useEffect, useState } from "react"
 import { safeReturnTo } from "@/lib/api/client"
-import { SignInError } from "@/lib/api/sign-in-api"
-import type { Next } from "@/lib/api/sign-in-api"
+import { LATER, SignInError } from "@/lib/api/sign-in-api"
+import type { Later, Next, Organisation, SignInCode } from "@/lib/api/sign-in-api"
 import type { Outcome } from "@/lib/sign-in-outcome"
 
 /** The sign-in steps, each at `/sign-in?step=…`. No step is the email and password screen. */
@@ -18,18 +18,39 @@ export const STEPS = [
 ] as const
 export type Step = (typeof STEPS)[number]
 
+/** The step in the address, or the first one for anything unknown or not served yet (`LATER`). */
 export function stepOf(value: unknown): Step {
-  return STEPS.includes(value as Step) ? (value as Step) : "password"
+  if (!STEPS.includes(value as Step)) return "password"
+  const step = value as Step
+  return Object.hasOwn(LATER, step) && !LATER[step as Later] ? "password" : step
 }
 
 /**
- * What one step hands the next, in memory only: the address typed, and an emailed link's token once
- * it is out of the address bar. A reload forgets them. Never the password.
+ * What one step hands the next, in memory only: the address typed, the organisations offered, a note
+ * for the first screen, and an emailed link's token once it is out of the address bar. A reload
+ * forgets them. Never the password.
  */
-export const carried: { email: string; token: string; tokenFor: Step | null } = {
+export const carried: {
+  email: string
+  organisations: Organisation[]
+  note: SignInCode | null
+  token: string
+  tokenFor: Step | null
+} = {
   email: "",
+  organisations: [],
+  note: null,
   token: "",
   tokenFor: null,
+}
+
+/** Forgets everything a sign-in carried between its steps. */
+function forget() {
+  carried.email = ""
+  carried.organisations = []
+  carried.note = null
+  carried.token = ""
+  carried.tokenFor = null
 }
 
 /** Moves between steps and finishes sign-in, keeping where the person was going. */
@@ -48,49 +69,87 @@ export function useFlow(returnTo: string) {
 
   /** An end with no session: the same page `/auth/callback` sends the browser to. */
   const end = useCallback(
-    (error: Outcome) =>
-      void router.navigate({ to: "/sign-in", search: { return_to: returnTo, error } }),
+    (error: Outcome) => {
+      forget()
+      void router.navigate({ to: "/sign-in", search: { return_to: returnTo, error } })
+    },
     [router, returnTo],
   )
 
   const follow = useCallback(
     (next: Next) => {
-      if (next.next === "signed_in") {
+      if (next.next === "done") {
         // Reads cached while signed out must not survive into the session.
         queryClient.clear()
-        carried.email = ""
-        carried.token = ""
-        carried.tokenFor = null
-        router.history.push(safeReturnTo(returnTo))
+        forget()
+        router.history.push(safeReturnTo(next.return_to))
       } else if (next.next === "verify_email") go("verify-email")
-      else if (next.next === "choose_organisation") go("organisation")
-      else if (next.next === "no_organisation") end("no_organisation")
-      else end(next.reason === "other" ? "cannot_finish" : next.reason)
+      else {
+        carried.organisations = next.organisations
+        go("organisation")
+      }
     },
-    [go, end, queryClient, router, returnTo],
+    [go, queryClient, router],
   )
 
-  return { go, follow }
+  /**
+   * A refusal that ends this step, acted on: a lapsed or missing step starts again with a note, and
+   * no organisation is the page for it. True when it was handled, so the screen shows nothing.
+   */
+  const ended = useCallback(
+    (error: SignInError) => {
+      if (error.code === "no_organisation") {
+        end("no_organisation")
+        return true
+      }
+      if (error.code === "invalid_sign_in") {
+        carried.organisations = []
+        carried.note = "invalid_sign_in"
+        go("password")
+        return true
+      }
+      return false
+    },
+    [end, go],
+  )
+
+  return { go, follow, ended }
 }
 
-/** One step's call: whether it is working and how it was refused. */
-export function useCall() {
+/**
+ * One step's call: whether it is working and how it was refused. `ended` acts on a refusal that
+ * ends the step (`useFlow`); any other refusal is shown.
+ */
+export function useCall(ended?: (error: SignInError) => boolean) {
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<SignInError | null>(null)
-  const run = useCallback(async <T>(call: () => Promise<T>): Promise<T | null> => {
-    setWorking(true)
-    setError(null)
-    try {
-      return await call()
-    } catch (failure) {
-      // Our own words only: nothing the browser or the answer said is shown or kept.
-      setError(failure instanceof SignInError ? failure : new SignInError("failed"))
-      return null
-    } finally {
-      setWorking(false)
-    }
-  }, [])
+  const run = useCallback(
+    async <T>(call: () => Promise<T>): Promise<T | null> => {
+      setWorking(true)
+      setError(null)
+      try {
+        return await call()
+      } catch (failure) {
+        // Our own words only: nothing the browser or the answer said is shown or kept.
+        const refused = failure instanceof SignInError ? failure : new SignInError("failed")
+        if (!ended?.(refused)) setError(refused)
+        return null
+      } finally {
+        setWorking(false)
+      }
+    },
+    [ended],
+  )
   return { working, error, setError, run }
+}
+
+/** The note `useFlow` left for the first screen, read once. */
+export function useNote(): SignInCode | null {
+  const [note] = useState(() => carried.note)
+  useEffect(() => {
+    carried.note = null
+  }, [])
+  return note
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -107,11 +166,14 @@ export function codeOf(typed: string): string | null {
   return /^\d{6}$/.test(digits) ? digits : null
 }
 
-/** "Wait 5 minutes" for a `Retry-After`, or the general advice. */
+/** "Wait 5 minutes" or "Wait 30 seconds" for a `Retry-After`, or the general advice. */
 export function waitText(error: SignInError): string {
   if (error.code !== "too_many_attempts" || !error.retryAfter) return error.message
-  const minutes = Math.max(1, Math.ceil(error.retryAfter / 60))
-  return `Too many attempts. Wait ${minutes} ${minutes === 1 ? "minute" : "minutes"}, then try again.`
+  const wait =
+    error.retryAfter < 60
+      ? `${error.retryAfter} ${error.retryAfter === 1 ? "second" : "seconds"}`
+      : `${Math.ceil(error.retryAfter / 60)} ${error.retryAfter <= 60 ? "minute" : "minutes"}`
+  return `Too many attempts. Wait ${wait}, then try again.`
 }
 
 /**
