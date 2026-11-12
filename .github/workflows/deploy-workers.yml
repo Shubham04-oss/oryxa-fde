@@ -122,12 +122,18 @@ jobs:
       - name: Build with the web's flags
         env:
           WEB_OWN_SIGN_IN: ${{ vars.WEB_OWN_SIGN_IN }}
+          WEB_WORKSPACE: ${{ vars.WEB_WORKSPACE }}
         run: |
-          unset VITE_FDE_OWN_SIGN_IN
+          unset VITE_FDE_OWN_SIGN_IN VITE_FDE_WORKSPACE
           own_sign_in=off
+          workspace=off
           if [ "${WEB_OWN_SIGN_IN-}" = "1" ]; then
             export VITE_FDE_OWN_SIGN_IN=1
             own_sign_in=on
+          fi
+          if [ "${WEB_WORKSPACE-}" = "1" ]; then
+            export VITE_FDE_WORKSPACE=1
+            workspace=on
           fi
           {
             echo "### Web build flags"
@@ -135,6 +141,7 @@ jobs:
             echo "| Flag | From | State |"
             echo "| --- | --- | --- |"
             echo "| \`VITE_FDE_OWN_SIGN_IN\` | \`WEB_OWN_SIGN_IN\` | $own_sign_in |"
+            echo "| \`VITE_FDE_WORKSPACE\` | \`WEB_WORKSPACE\` | $workspace |"
           } >> "$GITHUB_STEP_SUMMARY"
           pnpm build
       # fde-web's wrangler.jsonc is for local development. The build writes the config Wrangler
