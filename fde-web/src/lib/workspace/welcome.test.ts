@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import { NEW_COMPANY, replyTo, suggestionsFrom } from "./welcome"
-import { workspaceOn } from "./flag"
+import { suggestionsOn, workspaceOn } from "./flag"
 import { resetMockApi } from "@/dev/mock-api"
 import { api } from "@/lib/api/client"
 import { localDay } from "@/lib/time"
@@ -52,6 +52,12 @@ describe("the workspace's scripted reply", () => {
     expect(replyTo("what is blocked today?", [today]).blocks).toEqual([today])
   })
 
+  it("claims no all clear where it has no suggestions to give", () => {
+    const reply = replyTo("What needs me today?", null)
+    expect(reply.text).toBe("Today shows what is blocked, due and waiting.")
+    expect(reply.blocks.map((b) => b.type === "suggestion" && b.id)).toEqual(["open_today"])
+  })
+
   it("says plainly what it cannot do, and never puts the person's words in a block", () => {
     const reply = replyTo("<img src=x onerror=alert(1)> delete everything", [])
     expect(reply.text).toMatch(/can't act on that yet/)
@@ -64,6 +70,12 @@ describe("the new workspace's flag", () => {
     expect(workspaceOn({ DEV: false }, {})).toBe(false)
     expect(workspaceOn({ DEV: false, VITE_FDE_WORKSPACE: "1" }, {})).toBe(true)
     expect(workspaceOn({ DEV: false, VITE_FDE_WORKSPACE: "true" }, {})).toBe(false)
+  })
+
+  it("shows the welcome screen's suggestions only on the dev mock, whatever the flag", () => {
+    expect(suggestionsOn({ DEV: true, VITE_FDE_MOCK_API: "1" })).toBe(true)
+    expect(suggestionsOn({ DEV: false, VITE_FDE_MOCK_API: "1" })).toBe(false)
+    expect(suggestionsOn({ DEV: true })).toBe(false)
   })
 
   it("may be turned on for a tab only on the dev mock, never in a production build", () => {

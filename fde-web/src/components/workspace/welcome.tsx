@@ -12,6 +12,7 @@ import { queries } from "@/lib/api/client"
 import type { CompanySummary } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { localDay } from "@/lib/time"
+import { suggestionsOn } from "@/lib/workspace/flag"
 import type { SuggestionBlock } from "@/lib/workspace/blocks"
 import { NEW_COMPANY, replyTo, suggestionsFrom } from "@/lib/workspace/welcome"
 import { MAX_SAID } from "@/lib/workspace/wire"
@@ -20,6 +21,8 @@ import { cn } from "@/lib/utils"
 // The welcome screen (issue #209, DESIGN.md "The workspace"): a greeting, the conversation box as
 // the one main thing, what the workspace suggests next, and the companies, compact. The box talks
 // to the assistant where it is configured (issue #236), and answers from a script where it is not.
+// ponytail: suggested next is worked out here from fixed templates, so it shows only on the dev mock
+// (`suggestionsOn`) until the API serves suggestions; against a real API the section is left out.
 
 export function greeting(now: Date) {
   const hour = now.getHours()
@@ -35,10 +38,17 @@ export function greeting(now: Date) {
 const dateLine = (now: Date) =>
   new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long" }).format(now)
 
-export function Welcome({ now = new Date() }: { now?: Date }) {
+export function Welcome({
+  now = new Date(),
+  suggest = suggestionsOn(import.meta.env),
+}: {
+  now?: Date
+  /** Whether to show suggested next steps: only where they are not sample (`suggestionsOn`). */
+  suggest?: boolean
+}) {
   const me = useQuery(queries.me())
   const companies = useQuery(queries.companies())
-  const today = useQuery(queries.today())
+  const today = useQuery({ ...queries.today(), enabled: suggest })
   const [dismissed, setDismissed] = useState<Array<SuggestionBlock>>([])
   const first = me.data?.user.name.trim().split(/\s+/)[0]
 
@@ -50,7 +60,10 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         : []
   const shown = all.filter((s) => !dismissed.some((d) => d.id === s.id))
   const lastDismissed = dismissed.at(-1)
-  const { turns, thinking, say, settle } = useConversation((text) => replyTo(text, shown))
+  // Without suggestions the scripted reply knows nothing of the day, so it never claims an all clear.
+  const { turns, thinking, say, settle } = useConversation((text) =>
+    replyTo(text, suggest ? shown : null),
+  )
 
   return (
     // One rhythm: 24 inside the opening, 48 between sections (40 on a phone).
@@ -89,52 +102,54 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         </div>
       </section>
 
-      <section aria-labelledby="suggested-title" className="grid">
-        <SectionHead id="suggested-title" title="Suggested next" />
-        {companies.isPending || today.isPending ? (
-          <Skeleton rows={2} label="Reading your day…" />
-        ) : companies.isError || today.isError ? (
-          <Problem
-            text="We couldn't read your day, so there is nothing to suggest yet."
-            onRetry={() => {
-              void companies.refetch()
-              void today.refetch()
-            }}
-          />
-        ) : shown.length === 0 ? (
-          <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
-            Nothing needs you right now. I will suggest the next step when something changes.
-          </div>
-        ) : (
-          <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
-            {shown.map((block, i) => (
-              <li key={block.id} className="motion-safe:animate-rise">
-                <Suggestion
-                  block={block}
-                  // Once there is a reply, its own first action is the primary one instead.
-                  lead={i === 0 && turns.length === 0}
-                  onDismiss={() => setDismissed((d) => [...d, block])}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-        {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
-        <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
-          {lastDismissed && (
-            <>
-              Put away: {lastDismissed.title}.{" "}
-              <button
-                type="button"
-                onClick={() => setDismissed((d) => d.slice(0, -1))}
-                className="rounded-sm font-medium text-soft underline decoration-strong underline-offset-4 hover:text-foreground"
-              >
-                Undo
-              </button>
-            </>
+      {suggest && (
+        <section aria-labelledby="suggested-title" className="grid">
+          <SectionHead id="suggested-title" title="Suggested next" />
+          {companies.isPending || today.isPending ? (
+            <Skeleton rows={2} label="Reading your day…" />
+          ) : companies.isError || today.isError ? (
+            <Problem
+              text="We couldn't read your day, so there is nothing to suggest yet."
+              onRetry={() => {
+                void companies.refetch()
+                void today.refetch()
+              }}
+            />
+          ) : shown.length === 0 ? (
+            <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
+              Nothing needs you right now. I will suggest the next step when something changes.
+            </div>
+          ) : (
+            <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
+              {shown.map((block, i) => (
+                <li key={block.id} className="motion-safe:animate-rise">
+                  <Suggestion
+                    block={block}
+                    // Once there is a reply, its own first action is the primary one instead.
+                    lead={i === 0 && turns.length === 0}
+                    onDismiss={() => setDismissed((d) => [...d, block])}
+                  />
+                </li>
+              ))}
+            </ul>
           )}
-        </p>
-      </section>
+          {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
+          <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
+            {lastDismissed && (
+              <>
+                Put away: {lastDismissed.title}.{" "}
+                <button
+                  type="button"
+                  onClick={() => setDismissed((d) => d.slice(0, -1))}
+                  className="rounded-sm font-medium text-soft underline decoration-strong underline-offset-4 hover:text-foreground"
+                >
+                  Undo
+                </button>
+              </>
+            )}
+          </p>
+        </section>
+      )}
 
       <Companies />
     </div>

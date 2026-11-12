@@ -851,6 +851,11 @@ Off by default: the build flag `VITE_FDE_WORKSPACE=1` turns them on, and on the 
 `globalThis.__fdeMockWorkspace = true` (set before the app loads) does for one tab. With it on, the
 sidebar has **Home** first, `/` is the welcome screen, every company is at `/companies`, and New
 company opens `/new-company`. With it off, nothing changes and both new routes go back to `/`.
+With it on, the screens work against the real API as well as the mock (issue #249): a new company
+is saved in one setup call. What is still worked out in the browser stays on the dev mock only
+(`suggestionsOn` in `src/lib/workspace/flag.ts`): against a real API the welcome screen leaves
+**Suggested next** out and does not read Today for it, and the scripted reply to the day's work
+points to Today without claiming anything, until the API serves suggestions.
 
 - **Blocks.** The workspace shows only blocks from a fixed catalogue (`src/lib/workspace/blocks.ts`):
   suggestion, brief, plan, rules, people, checklist. Each has a zod schema; `parseBlocks` drops an
@@ -862,16 +867,18 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
 - **Welcome** (`/`): the date and a greeting (the screen's heading); the conversation box, the
   centrepiece (Enter sends, Shift and Enter is a new line); two quiet prompts in one row ("Set up a
   new company", "What needs me today?"; full width, one under the other, on a phone); **Suggested
-  next**, up to three, each approved by opening where it is done or put away (with Undo); and four
+  next** (on the dev mock only, above), up to three, each approved by opening where it is done or put away (with Undo); and four
   companies with **See all**. One rhythm: 24px inside the opening, 48px between sections (40px on a phone), the
   same heading for each section, and the companies' tiles on the same edge as the cards above. Each
   suggestion reads where it comes from, then what (semibold), then why; the first one's approve is
   the screen's one primary button (ink), the others are outlined. Suggestions are fixed
   templates over names, counts and days waiting; they never quote a record's own text. The
   scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
-- **New company** (`/new-company`): the workspace asks one step at a time (the company and what is
-  delivered; how to start; rules for agents and who approves; who to invite, optional; the plan;
-  the review). Each answer fills a section of the **Summary** beside it (a sheet from **Summary** on
+- **New company** (`/new-company`): the workspace asks one step at a time (the company, its first
+  project's name and what is delivered; how to start, the main contact and, optionally, one success
+  criterion with how it is measured: what, at least or at most, a target and unit, and optionally a
+  baseline and how it will be proven; rules for agents and who approves; who to invite, optional;
+  the plan; the review). Each answer fills a section of the **Summary** beside it (a sheet from **Summary** on
   a narrow screen). The plan is proposed from the answers (a call first, scope first, or a pilot)
   and can be reordered, renamed, added to and removed from, from one menu per step (the ⋯ button,
   so a phone's list stays a list of steps). Focus never falls to the page: after a move it stays on
@@ -882,9 +889,28 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   many steps prove a criterion and the first three, with **Show all**; the rules as a count per
   verdict and who approves, with **Show the rules**; and the people. A value is never dropped for
   its length: a block's limits are the forms' own, counted in characters as the forms count them.
-  Any answer can be changed. Nothing is saved until **Create company** on the review, which calls
-  `api.createCompany` and opens the company; in this preview the plan, rules and invitations are
-  not kept, and the review says so. Real customer data is always "Never".
+  Any answer can be changed. The rules and people steps say they are not saved yet, and so do their
+  sections of the summary. A plan step's criterion is the one given at the start (renamed or taken
+  away with it, even on a changed plan), and its "How we will prove it" is what was typed, or "Not
+  said yet"; nothing is made up for it. Real customer data is always "Never".
+- **The review** says exactly what will be saved, taken from the answers as they will be sent:
+  the company (and that the FDE becomes its lead), the first project and what is delivered, the
+  main contact, the success criterion as it will read ("Met when ... Baseline ..."), and the plan as
+  tasks in order with their stages. Under **Not saved yet** it lists the rules for agents, any
+  invitations (by address) and, where a step names someone, who a step is with, as plain text with no
+  control: each rule and invitation is confirmed on its own route (ADR 0008), not built yet.
+  Nothing is saved until **Create company**, which sends one `POST /v1/companies/setup`
+  (`setupBody` in `src/lib/workspace/setup.ts` maps the answers; an answer with no field is left
+  out) and lands on the new project, its first step the next step.
+  - **One key per setup.** The `Idempotency-Key` is made when the review first sends, and the same key
+    goes again, with the same bytes (kept, never serialized again), only while the body is identical:
+    a double click, Try again after a lost answer (it says it may or may not have been saved, and
+    that trying again will not make a second company), a 403 or a 5xx. A changed body takes a new
+    key, as does a body the API could not read, and a 409 `rejected_idempotency_key_reused` (it says
+    to check the companies first).
+  - **A refused part** (a 400 `invalid_*`) is shown under that part of the review, with a link to the
+    step that changes it; `invalid_name` is worked out from the names sent, in the API's order.
+    A 401 keeps every answer and says to sign in again in another tab.
 
 ## 4. Data
 
@@ -928,7 +954,8 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   every response; `schemas.ts` refuses one without it. `api.updateTask`, `updateAccess`, `updateStakeholder`,
   `updateSystem`, `updateScopeItem` and `updateCriterion` take the version of the copy the save is based on as their last
   argument, as does `signOffScope` (the scope's); a 409 `stale_version` throws a `StaleSaveError` carrying `current`.
-- Writes are `api.createCompany`, `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
+- Writes are `api.createCompany`, `setUpCompany` (`POST /v1/companies/setup`, with the
+  `Idempotency-Key` and the body's bytes as first sent, `SetupRequest`), `updateCompany` (a `PATCH`), `createProject`, `updateProject`,
   `addStakeholder`, `updateStakeholder`, `removeStakeholder`, `setMainContact`, the same three for systems,
   `addAccess` and `updateAccess` (the access request routes: there is no delete), `addDecision` (the log has no edit or
   remove), `accessRequests` and `threads` (read when a prompt or the decisions need them), `addScopeItem`, `updateScopeItem`, `removeScopeItem`, the same three for criteria, `signOffScope`, and
@@ -990,6 +1017,15 @@ company opens `/new-company`. With it off, nothing changes and both new routes g
   create a 400 `invalid_version`. `globalThis.__fdeMockSomeoneElse = true` makes someone else change the record the next
   versioned save is about, once, just before it is checked (an object is the change to make, such as `{ status: "done" }`),
   so a stale save can be seen and tested.
+  The mock answers `POST /v1/companies/setup` as the API does (`setUp` in `mock-api.ts`): the key
+  checked, a body serde would not read (an unknown field at any level, a wrong type or enum) a 400
+  `invalid_body`, the lists' limits and the places they name, then every part through its own route
+  here with that route's rules, all or nothing (a refused setup leaves nothing and claims no key);
+  the key claimed by caller and key, the same key and bytes answered with that setup as it stands
+  (200, or 403 if it can no longer be seen), and other bytes a 409 `rejected_idempotency_key_reused`.
+  With two parts wrong it may name another one first than the API, which checks all before writing.
+  `globalThis.__fdeMockRefuseSetup = "invalid_target"` (any code) refuses the next setup with that 400,
+  once, so a refused part can be seen.
   The mock answers `/v1/people` from its invented directory as the API does (the organisation's own people by
   name, the unnamed last, no guest, no email), names members and assignees when it answers them, adds only
   someone of the organisation to a company (404 otherwise), and takes a task's assignee or a note's attendee

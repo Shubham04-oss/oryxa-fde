@@ -2,6 +2,8 @@ import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 import { NewCompanyConversation } from "./new-company"
+import { api } from "@/lib/api/client"
+import { CompanyId, ProjectId } from "@/lib/api/schemas"
 import { renderWithRouter } from "@/test/render"
 import { installWire, resetWire, wire } from "@/test/wire"
 
@@ -20,6 +22,7 @@ const press = (name: string) =>
 /** Answers the conversation up to the plan step; `name` is typed as the company's name. */
 async function toPlan(name = "Orion Rail") {
   await userEvent.type(await screen.findByLabelText("Company name"), name)
+  await userEvent.type(screen.getByLabelText("First project"), "Claims intake")
   await userEvent.type(screen.getByLabelText("What are you delivering?"), "Claims intake.")
   await press("Continue")
   await question("How do you want to start?")
@@ -28,6 +31,11 @@ async function toPlan(name = "Orion Rail") {
     screen.getByLabelText("What would show it worked?"),
     "Claims triaged in two hours",
   )
+  await userEvent.type(screen.getByLabelText("What is measured"), "hours to triage")
+  await userEvent.selectOptions(screen.getByLabelText("It passes when it is"), "at_most")
+  await userEvent.type(screen.getByLabelText("Target"), "2")
+  await userEvent.type(screen.getByLabelText("Unit"), "h")
+  await userEvent.type(screen.getByLabelText("Baseline"), "9")
   await press("Continue")
   await question("What may agents do here, and who approves?")
   await press("Continue")
@@ -52,24 +60,165 @@ async function stepMenu(title: string, item: string) {
 
 const focused = () => document.activeElement
 
+/** Answers every step and opens the review. */
+async function toReview(name = "Orion Rail") {
+  await toPlan(name)
+  await press("Use this plan")
+  await question(`Ready to create ${name}?`)
+}
+
+const review = () =>
+  within(conversation()).getByRole("region", { name: "Saved when you create it" })
+const notSaved = () => within(conversation()).getByRole("region", { name: "Not saved yet" })
+
+/** Where the router went after a setup: the new project's page. */
+const PROJECT_PAGE = /^\/companies\/(cmp_new\d+)\/projects\/(prj_new\d+)$/
+
 describe("a new company as a conversation", () => {
-  it("saves nothing until the person confirms on the review, then creates it through the existing call", async () => {
+  it("saves nothing until the person confirms, then sets it all up in one call and opens the project", async () => {
     const { router } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
-    await toPlan()
-    await press("Use this plan")
-    await question("Ready to create Orion Rail?")
+    await toReview()
     // Five steps answered, rules and invites among them: not one write yet.
     expect(wire.sent).toEqual([])
 
     await press("Create company")
-    await waitFor(() => expect(router.state.location.pathname).toMatch(/^\/companies\/cmp_new/))
+    await waitFor(() => expect(router.state.location.pathname).toMatch(PROJECT_PAGE))
     expect(wire.sent).toEqual([
       {
         method: "POST",
-        path: "/companies",
-        body: { name: "Orion Rail", industry: null, region: null, summary: "Claims intake." },
+        path: "/companies/setup",
+        body: {
+          company: { name: "Orion Rail", industry: null, region: null, summary: null },
+          project: { name: "Claims intake", summary: "Claims intake." },
+          stakeholders: [{ name: "Dana Ortiz" }],
+          main_contact: 0,
+          scope_items: [],
+          criteria: [
+            {
+              description: "Claims triaged in two hours",
+              metric: "hours to triage",
+              comparator: "at_most",
+              target: 2,
+              unit: "h",
+              baseline: 9,
+              proof: null,
+            },
+          ],
+          plan: [
+            { title: "Discovery call", stage: "discover", criterion: null },
+            { title: "Agree scope and success criteria", stage: "scope", criterion: 0 },
+            { title: "Request access to the systems", stage: "access", criterion: null },
+            { title: "Build", stage: "build", criterion: null },
+            { title: "Evaluate", stage: "evaluate", criterion: 0 },
+            { title: "Hand off", stage: "handoff", criterion: null },
+          ],
+        },
       },
     ])
+    expect(wire.keys[0]?.key).toMatch(/^setup-[A-Za-z0-9-]+$/)
+    // The project it lands on has the plan, and its first step is the next step.
+    const [, company, project] = PROJECT_PAGE.exec(router.state.location.pathname)!
+    const scope = { company: CompanyId.parse(company), project: ProjectId.parse(project) }
+    expect((await api.project(scope)).next_step?.title).toBe("Discovery call")
+  })
+
+  it("says what will be saved, and what will not, with no control for rules or invitations", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    const saved = review()
+    for (const text of [
+      "Orion Rail",
+      "Claims intake",
+      "Dana Ortiz",
+      "Claims triaged in two hours",
+      "Met when hours to triage is at most 2 h. Baseline 9 h.",
+      "How it will be proven is not said yet.",
+    ])
+      expect(within(saved).getByText(text)).toBeInTheDocument()
+    expect(within(saved).getByText(/^6 tasks, in this order/)).toBeInTheDocument()
+    const later = notSaved()
+    expect(within(later).getByText("Rules for agents")).toBeInTheDocument()
+    expect(within(later).getByText("1 invitation")).toBeInTheDocument()
+    expect(within(later).getByText(/sam@example\.com/)).toBeInTheDocument()
+    expect(within(later).getByText("Who a step is with")).toBeInTheDocument()
+    expect(within(later).queryAllByRole("button")).toEqual([])
+    expect(within(later).queryAllByRole("checkbox")).toEqual([])
+    expect(within(later).queryAllByRole("radio")).toEqual([])
+  })
+
+  it("sends one request for a double click", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    let release = () => {}
+    wire.hold = new Promise<void>((resolve) => (release = resolve))
+    const create = within(conversation()).getByRole("button", { name: "Create company" })
+    await userEvent.dblClick(create)
+    expect(wire.sent).toHaveLength(1)
+    release()
+    await waitFor(() => expect(within(conversation()).getByRole("button", { name: /Creating/ })))
+  })
+
+  it("retries a lost answer with the same key and bytes, and makes one company", async () => {
+    const { router } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    // The API made it, and the answer never came back.
+    wire.lose = 1
+    await press("Create company")
+    expect(await within(conversation()).findByRole("alert")).toHaveTextContent(
+      "may or may not have been saved",
+    )
+    await press("Try again")
+    await waitFor(() => expect(router.state.location.pathname).toMatch(PROJECT_PAGE))
+    expect(wire.keys).toHaveLength(2)
+    expect(wire.keys[1]).toEqual(wire.keys[0])
+    const named = (await api.companies()).companies.filter((c) => c.name === "Orion Rail")
+    expect(named).toHaveLength(1)
+  })
+
+  it("shows a refused part beside it, and a changed answer goes with a new key", async () => {
+    const { router } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    wire.refuse = Response.json({ error: "invalid_target" }, { status: 400 })
+    await press("Create company")
+    const alert = await within(review()).findByRole("alert")
+    expect(alert).toHaveTextContent("The target must be a number.")
+    wire.refuse = null
+
+    await userEvent.click(within(alert).getByRole("button", { name: "Change success criterion" }))
+    const target = await screen.findByLabelText("Target")
+    await userEvent.clear(target)
+    await userEvent.type(target, "1.5")
+    await press("Continue")
+    await question("Ready to create Orion Rail?")
+    await press("Create company")
+    await waitFor(() => expect(router.state.location.pathname).toMatch(PROJECT_PAGE))
+    expect(wire.keys).toHaveLength(2)
+    expect(wire.keys[1]!.key).not.toBe(wire.keys[0]!.key)
+    expect(wire.sent[1]?.body).toMatchObject({ criteria: [{ target: 1.5 }] })
+  })
+
+  it("keeps the key for a refusal it may retry, and takes a new one after a 409", async () => {
+    renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
+    await toReview()
+    wire.refuse = Response.json({ error: "forbidden" }, { status: 403 })
+    await press("Create company")
+    expect(await within(conversation()).findByRole("alert")).toHaveTextContent(
+      "You are not allowed to set up a company here.",
+    )
+    await press("Try again")
+    await within(conversation()).findByRole("alert")
+    expect(wire.keys[1]).toEqual(wire.keys[0])
+
+    wire.refuse = Response.json({ error: "rejected_idempotency_key_reused" }, { status: 409 })
+    await press("Try again")
+    await waitFor(() =>
+      expect(within(conversation()).getByRole("alert")).toHaveTextContent("Check your companies"),
+    )
+    wire.refuse = Response.json({ error: "unavailable" }, { status: 503 })
+    await press("Create company")
+    await waitFor(() => expect(wire.keys).toHaveLength(4))
+    expect(wire.keys[3]!.key).not.toBe(wire.keys[2]!.key)
+    expect(wire.keys[3]!.text).toBe(wire.keys[2]!.text)
   })
 
   it("can be left from the review without saving anything", async () => {
@@ -83,23 +232,20 @@ describe("a new company as a conversation", () => {
 
   it("keeps every answer when the create is refused, and can try again", async () => {
     renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
-    await toPlan()
-    await press("Use this plan")
-    await question("Ready to create Orion Rail?")
+    await toReview()
     ;(globalThis as Record<string, unknown>).__fdeMockFailWrites = true
     await press("Create company")
     expect(await within(conversation()).findByRole("alert")).toBeInTheDocument()
     expect(within(summary()).getByText("Orion Rail")).toBeInTheDocument()
-    expect(within(conversation()).getByRole("button", { name: "Create company" })).toBeEnabled()
+    expect(within(conversation()).getByRole("button", { name: "Try again" })).toBeEnabled()
   })
 
   it("shows what was typed as text, never as markup", async () => {
     const hostile = '<img src=x onerror="window.__owned=1"><b>Bold</b>'
     const { container } = renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
-    await toPlan(hostile)
-    await press("Use this plan")
-    await question(`Ready to create ${hostile}?`)
+    await toReview(hostile)
     expect(within(summary()).getByText(hostile)).toBeInTheDocument()
+    expect(within(review()).getByText(hostile)).toBeInTheDocument()
     expect(container.querySelector("img, b")).toBeNull()
     expect((window as unknown as Record<string, unknown>).__owned).toBeUndefined()
   })
@@ -120,6 +266,9 @@ describe("a new company as a conversation", () => {
     expect(planTitles()[0]).toBe("Discovery call")
     // The criterion they gave says how it will be proven, beside the steps that name it.
     expect(within(conversation()).getAllByText(/How we will prove it/)).toHaveLength(2)
+    expect(within(conversation()).getAllByText("How we will prove it: Not said yet")).toHaveLength(
+      2,
+    )
 
     await stepMenu("Build", "Move up")
     expect(planTitles()[2]).toBe("Build")
@@ -183,6 +332,7 @@ describe("a new company as a conversation", () => {
     renderWithRouter(<NewCompanyConversation />, { at: "/new-company" })
     const long = "Automate claims intake for their freight team. ".repeat(20).trim()
     await userEvent.type(await screen.findByLabelText("Company name"), "Orion Rail")
+    await userEvent.type(screen.getByLabelText("First project"), "Claims intake")
     // Pasted, as a long brief would be; typing it would take the test's whole budget.
     await userEvent.click(screen.getByLabelText("What are you delivering?"))
     await userEvent.paste(long)

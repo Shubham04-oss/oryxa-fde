@@ -290,6 +290,16 @@ export const TaskOut = z.object({
 })
 export type TaskOut = z.infer<typeof TaskOut>
 
+/** What `POST /v1/companies/setup` made, read back: the plan is the project's tasks, in order. */
+export const SetupOut = z.object({
+  company: CompanyOut,
+  project: ProjectOut,
+  stakeholders: z.array(StakeholderOut),
+  scope: ScopeOut,
+  plan: z.array(TaskOut),
+})
+export type SetupOut = z.infer<typeof SetupOut>
+
 export const DecisionOut = z.object({
   id: DecisionId,
   title: z.string(),

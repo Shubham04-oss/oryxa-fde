@@ -8,6 +8,7 @@ import type {
   Me,
   ProjectOut,
   ProjectScope,
+  SetupOut,
   StakeholderOut,
   StakeholderPart,
   SystemOut,
@@ -285,6 +286,28 @@ export async function commitCompanyCreated(client: QueryClient, created: Company
     role: lead,
     projects: [],
     stakeholders: [],
+    systems: [],
+  })
+  refresh(client)
+}
+
+/**
+ * A company the API has set up in one call: in the list with its first project, and its page and the
+ * project's ready to open, with the people it was set up with. The rest is read when it is opened.
+ */
+export async function commitSetUp(client: QueryClient, out: SetupOut) {
+  await settle(client)
+  const lead: CompanyRole = "lead"
+  const { company, project } = out
+  const summary = { id: project.id, name: project.name, stage: project.stage }
+  client.setQueryData(queries.companies().queryKey, (old) =>
+    old ? { companies: [...old.companies, { ...company, role: lead, projects: [summary] }] } : old,
+  )
+  client.setQueryData(queries.company(company.id).queryKey, {
+    ...company,
+    role: lead,
+    projects: [project],
+    stakeholders: out.stakeholders,
     systems: [],
   })
   refresh(client)

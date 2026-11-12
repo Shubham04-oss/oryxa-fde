@@ -1,22 +1,37 @@
 import { describe, expect, it } from "vitest"
 import {
   NO_ANSWERS,
+  NO_CRITERION,
+  NO_PROOF,
   answerText,
   defaultRules,
   nextStep,
   proposePlan,
   readyToCreate,
-  reviewChecklist,
+  relinkPlan,
   summaryBlocks,
 } from "./new-company"
-import type { Answers } from "./new-company"
+import type { Answers, StartAnswer } from "./new-company"
 import { MAX_NAME, MAX_TEXT } from "@/lib/records"
 
-const company = { name: "Orion Rail", industry: "", region: "", summary: "Claims intake." }
-const start = (approach: "talk" | "scope" | "pilot", contact = "", criterion = "") => ({
+const company = {
+  name: "Orion Rail",
+  project: "Claims intake",
+  industry: "",
+  region: "",
+  summary: "Claims intake.",
+}
+const start = (
+  approach: "talk" | "scope" | "pilot",
+  contact = "",
+  criterion = "",
+  proof = "",
+): StartAnswer => ({
   approach,
   contact,
-  criterion,
+  criterion: criterion
+    ? { ...NO_CRITERION, description: criterion, metric: "hours to triage", target: "2", proof }
+    : NO_CRITERION,
 })
 const all: Answers = {
   company,
@@ -39,6 +54,7 @@ describe("the new-company conversation", () => {
     expect(readyToCreate({ ...all, rules: null })).toBe(false)
     expect(readyToCreate({ ...all, plan: [] })).toBe(false)
     expect(readyToCreate({ ...all, company: { ...company, name: "  " } })).toBe(false)
+    expect(readyToCreate({ ...all, company: { ...company, project: "" } })).toBe(false)
     expect(readyToCreate({ ...all, people: null })).toBe(true)
   })
 
@@ -69,18 +85,34 @@ describe("the new-company conversation", () => {
   it("ties the criterion the FDE gave to the steps that agree and prove it, with how", () => {
     const plan = proposePlan({
       ...NO_ANSWERS,
-      start: start("talk", "", "Claims triaged within two hours"),
+      start: start("talk", "", "Claims triaged within two hours", "An eval on sample claims"),
     })
     const proving = plan.filter((s) => s.criterion)
     expect(proving.map((s) => s.stage)).toEqual(["scope", "evaluate"])
     for (const step of proving)
       expect(step.criterion).toEqual({
         name: "Claims triaged within two hours",
-        proof: expect.stringMatching(/eval/),
+        proof: "An eval on sample claims",
       })
-    // With no criterion named, only the evaluation says how it will be proven.
+    // How it will be proven is never made up: unsaid, the step says so.
+    const unsaid = proposePlan({ ...NO_ANSWERS, start: start("pilot", "", "Claims triaged") })
+    expect(unsaid.find((s) => s.criterion)?.criterion?.proof).toBe(NO_PROOF)
+    // With no criterion named, no step claims one.
     const plain = proposePlan({ ...NO_ANSWERS, start: start("talk") })
-    expect(plain.filter((s) => s.criterion).map((s) => s.stage)).toEqual(["evaluate"])
+    expect(plain.filter((s) => s.criterion)).toEqual([])
+  })
+
+  it("keeps a changed plan's steps on the criterion as it now stands, or on none", () => {
+    const first = { ...NO_ANSWERS, start: start("talk", "", "Claims triaged") }
+    const plan = proposePlan(first).filter((s) => s.stage !== "build")
+    const renamed = relinkPlan(plan, { ...first, start: start("talk", "", "Claims routed") })
+    expect(renamed.map((s) => s.title)).toEqual(plan.map((s) => s.title))
+    expect(renamed.filter((s) => s.criterion).map((s) => s.criterion?.name)).toEqual([
+      "Claims routed",
+      "Claims routed",
+    ])
+    const none = relinkPlan(plan, { ...first, start: start("talk") })
+    expect(none.some((s) => s.criterion)).toBe(false)
   })
 
   it("fills the summary as blocks that pass their schemas, one per answered step", () => {
@@ -95,11 +127,12 @@ describe("the new-company conversation", () => {
     const answers: Answers = {
       company: {
         name: long(MAX_NAME, "é"),
+        project: long(MAX_NAME, "é"),
         industry: long(MAX_NAME),
         region: long(MAX_NAME),
         summary: long(MAX_TEXT - 1, "𝒶") + "\n",
       },
-      start: start("talk", long(120), long(200)),
+      start: start("talk", long(120), long(200), long(240)),
       rules: defaultRules(),
       people: [{ email: `${long(64)}@example.com`, role: "sponsor" }],
       plan: null,
@@ -126,21 +159,17 @@ describe("the new-company conversation", () => {
     )
   })
 
-  it("checks optional people apart from what is required", () => {
-    const list = reviewChecklist(all)
-    expect(list?.type === "checklist" && list.items.at(-1)).toEqual({
-      label: "People to invite",
-      done: false,
-      optional: true,
-    })
-  })
-
   it("says each answer back in plain words", () => {
     expect(answerText("rules", all)).toBe("Agents ask first for 2 things. You approve.")
     expect(answerText("rules", { ...all, rules: { ...defaultRules(), approver: "leads" } })).toBe(
       "Agents ask first for 2 things. Any lead on the company approves.",
     )
     expect(answerText("people", all)).toBe("No one for now.")
-    expect(answerText("start", all)).toBe("Talk to them first. Main contact: Dana Ortiz")
+    expect(answerText("start", all)).toBe(
+      "Talk to them first. Main contact: Dana Ortiz. It worked if: Claims triaged within two hours",
+    )
+    expect(answerText("company", all)).toBe(
+      "Orion Rail. First project: Claims intake. Claims intake.",
+    )
   })
 })

@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 import { useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate } from "@tanstack/react-router"
 import { Button } from "../ui/button"
-import { BlockView, Empty } from "./blocks"
+import { BlockView, Empty, LongText } from "./blocks"
 import { CompanyForm, PeopleForm, PlanForm, RulesForm, StartForm } from "./step-forms"
 import { Voice } from "./welcome"
 import { api } from "@/lib/api/client"
-import { attempt, commitCompanyCreated, companyBody } from "@/lib/records"
+import type { SetupRequest } from "@/lib/api/client"
+import { commitSetUp } from "@/lib/records"
+import { inUnit, measure, targetOf } from "@/lib/scope"
+import { STAGE_LABEL } from "@/lib/stage"
 import type { Block, PlanStep } from "@/lib/workspace/blocks"
 import {
   NO_ANSWERS,
@@ -17,15 +20,17 @@ import {
   nextStep,
   proposePlan,
   readyToCreate,
-  reviewChecklist,
+  relinkPlan,
   summaryBlocks,
 } from "@/lib/workspace/new-company"
 import type { Answers, StepId } from "@/lib/workspace/new-company"
+import { STEP_OF, prepare, setupBody, setupProblem } from "@/lib/workspace/setup"
+import type { Part, SetupProblem } from "@/lib/workspace/setup"
 import { cn } from "@/lib/utils"
 
-// A new company, made in a conversation (issue #209, DESIGN.md "The workspace"). The workspace asks
-// one step at a time; each answer fills a block on the summary beside it. Nothing is saved or sent
-// until the person confirms on the review step, and then only through the existing create call.
+// A new company, made in a conversation (issues #209 and #249, DESIGN.md "The workspace"). The
+// workspace asks one step at a time; each answer fills a block on the summary beside it. Nothing is
+// saved or sent until the person confirms on the review step, and then in one setup call.
 
 export function NewCompanyConversation() {
   const client = useQueryClient()
@@ -36,7 +41,11 @@ export function NewCompanyConversation() {
   const [draft, setDraft] = useState<Array<PlanStep> | null>(null)
   const [edited, setEdited] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [problem, setProblem] = useState("")
+  const [problem, setProblem] = useState<SetupProblem | null>(null)
+  // The setup as last sent: its key and bytes go again only with an identical body.
+  const sent = useRef<SetupRequest | null>(null)
+  // A second click before the first one's render cannot send a second request.
+  const sending = useRef(false)
   const question = useRef<HTMLHeadingElement>(null)
   const opened = useRef(false)
 
@@ -56,11 +65,13 @@ export function NewCompanyConversation() {
     value: NonNullable<Answers[TStep]>,
   ) {
     const next: Answers = { ...answers, [id]: value }
-    // The plan follows the first move until the person has changed it themselves.
-    if (id === "start" && !edited && next.plan) next.plan = proposePlan(next)
+    // The plan follows the first move until the person has changed it themselves; after that only
+    // the criterion its steps work towards follows.
+    if (id === "start" && next.plan)
+      next.plan = edited ? relinkPlan(next.plan, next) : proposePlan(next)
     if (id === "plan") setDraft(null)
     setAnswers(next)
-    setProblem("")
+    setProblem(null)
     setCurrent(nextStep(next))
   }
 
@@ -76,17 +87,27 @@ export function NewCompanyConversation() {
 
   async function create() {
     // The only write this screen makes, and only from the review, once every step is answered.
-    if (current !== "review" || !readyToCreate(answers) || !answers.company) return
+    const body = current === "review" ? setupBody(answers) : null
+    if (!body || sending.current) return
+    const request = prepare(body, sent.current)
+    sent.current = request
+    sending.current = true
     setCreating(true)
-    setProblem("")
-    const failed = await attempt(async () => {
-      const created = await api.createCompany(companyBody(answers.company!))
-      await commitCompanyCreated(client, created)
-      await navigate({ to: "/companies/$companyId", params: { companyId: created.id } })
-    }, "company")
-    if (failed) {
+    setProblem(null)
+    try {
+      const out = await api.setUpCompany(request)
+      await commitSetUp(client, out)
+      await navigate({
+        to: "/companies/$companyId/projects/$projectId",
+        params: { companyId: out.company.id, projectId: out.project.id },
+      })
+    } catch (error) {
+      const failed = setupProblem(error, body)
+      // A refused body, or a key that set up something else: the next attempt takes a new key.
+      if (failed.kind === "part" || failed.key === "fresh") sent.current = null
       setProblem(failed)
       setCreating(false)
+      sending.current = false
     }
   }
 
@@ -130,11 +151,12 @@ export function NewCompanyConversation() {
                       onAnswer={answer}
                       review={
                         <Review
-                          checklist={reviewChecklist(answers)}
+                          answers={answers}
                           ready={readyToCreate(answers)}
                           creating={creating}
                           problem={problem}
                           onCreate={() => void create()}
+                          onChange={open}
                         />
                       }
                     />
@@ -241,28 +263,75 @@ function StepAnswer({
 }
 
 function Review({
-  checklist,
+  answers,
   ready,
   creating,
   problem,
   onCreate,
+  onChange,
 }: {
-  checklist: Block | null
+  answers: Answers
   ready: boolean
   creating: boolean
-  problem: string
+  problem: SetupProblem | null
   onCreate: () => void
+  onChange: (step: StepId) => void
 }) {
+  const savedId = useId()
+  const laterId = useId()
+  const wrong = problem?.kind === "part" ? problem : null
+  const general = problem?.kind === "general" ? problem : null
   return (
     <div className="grid gap-6 rounded-card border bg-canvas p-6 shadow-lift motion-safe:animate-settle max-[560px]:p-4">
-      {checklist && <BlockView block={checklist} />}
-      <p className="rounded-field bg-card px-4 py-3 text-meta text-soft">
-        Creating saves the company now. In this preview the plan, rules and invitations are not kept
-        yet, and no one is invited.
-      </p>
-      {problem && (
+      <section aria-labelledby={savedId} className="grid gap-3">
+        <h3 id={savedId} className="text-meta font-semibold">
+          Saved when you create it
+        </h3>
+        <dl className="grid divide-y rounded-field border">
+          {savedRows(answers).map((row) => (
+            <div
+              key={row.part}
+              className="grid grid-cols-[112px_minmax(0,1fr)] gap-x-4 gap-y-1 px-4 py-3 max-[560px]:grid-cols-1"
+            >
+              <dt className="text-micro leading-[20px] text-muted-foreground">{row.label}</dt>
+              <dd className="grid min-w-0 gap-1 text-meta break-words">
+                {row.value}
+                {wrong?.part === row.part && (
+                  <p
+                    role="alert"
+                    className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-meta text-destructive"
+                  >
+                    <span>{wrong.message}</span>
+                    <button
+                      type="button"
+                      onClick={() => onChange(STEP_OF[row.part])}
+                      className="rounded-sm font-medium underline underline-offset-4 hover:no-underline"
+                    >
+                      Change {row.label.toLowerCase()}
+                    </button>
+                  </p>
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+      <section aria-labelledby={laterId} className="grid gap-3">
+        <h3 id={laterId} className="text-meta font-semibold">
+          Not saved yet
+        </h3>
+        <ul className="grid gap-2.5">
+          {notSaved(answers).map((item) => (
+            <li key={item.label} className="grid gap-0.5 text-meta">
+              <span className="font-medium text-soft">{item.label}</span>
+              <span className="text-muted-foreground">{item.detail}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      {general && (
         <p role="alert" className="text-meta text-destructive">
-          {problem}
+          {general.message}
         </p>
       )}
       <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-5">
@@ -273,11 +342,150 @@ function Review({
           Not now
         </Link>
         <Button size="lg" disabled={!ready || creating} onClick={onCreate}>
-          {creating ? "Creating…" : "Create company"}
+          {creating ? "Creating…" : general?.key === "retry" ? "Try again" : "Create company"}
         </Button>
       </div>
     </div>
   )
+}
+
+const bare = (s: string) => s.replace(/\s+/g, "").toLowerCase()
+
+const Quiet = ({ children }: { children: React.ReactNode }) => (
+  <span className="text-muted-foreground">{children}</span>
+)
+
+/** Each part the setup call saves, as the review shows it: taken from the answers, as sent. */
+function savedRows(answers: Answers): Array<{ part: Part; label: string; value: React.ReactNode }> {
+  const c = answers.company
+  const start = answers.start
+  const plan = answers.plan ?? []
+  if (!c || !start) return []
+  const where = [c.industry.trim(), c.region.trim()].filter(Boolean).join(" · ")
+  const criterion = start.criterion.description.trim() ? start.criterion : null
+  const target = criterion ? targetOf(criterion.target) : null
+  const baseline = criterion ? targetOf(criterion.baseline) : null
+  const proving = plan.filter((s) => s.criterion).length
+  return [
+    {
+      part: "company",
+      label: "Company",
+      value: (
+        <>
+          <span className="font-medium">{c.name.trim()}</span>
+          {where && <Quiet>{where}</Quiet>}
+          <Quiet>You become its lead.</Quiet>
+        </>
+      ),
+    },
+    {
+      part: "project",
+      label: "First project",
+      value: (
+        <>
+          <span className="font-medium">{c.project.trim()}</span>
+          {c.summary.trim() ? <LongText value={c.summary.trim()} /> : <Quiet>No summary.</Quiet>}
+        </>
+      ),
+    },
+    {
+      part: "contact",
+      label: "Main contact",
+      value: start.contact.trim() ? (
+        <>
+          <span className="font-medium">{start.contact.trim()}</span>
+          <Quiet>A stakeholder at the company, marked as its main contact.</Quiet>
+        </>
+      ) : (
+        <Quiet>No one named.</Quiet>
+      ),
+    },
+    {
+      part: "criterion",
+      label: "Success criterion",
+      value: criterion ? (
+        <>
+          <span className="font-medium">{criterion.description}</span>
+          {target !== null && (
+            <span>
+              Met when{" "}
+              {measure({
+                metric: criterion.metric,
+                comparator: criterion.comparator,
+                target,
+                unit: criterion.unit || null,
+              })}
+              .{baseline !== null && ` Baseline ${inUnit(baseline, criterion.unit)}.`}
+            </span>
+          )}
+          <Quiet>
+            {criterion.proof
+              ? `How we will prove it: ${criterion.proof}`
+              : "How it will be proven is not said yet."}
+          </Quiet>
+        </>
+      ) : (
+        <Quiet>None yet. Add one on the project.</Quiet>
+      ),
+    },
+    {
+      part: "plan",
+      label: "Plan",
+      value: (
+        <>
+          <span>
+            {plan.length} {plan.length === 1 ? "task" : "tasks"}, in this order, each on its stage
+            {proving > 0 ? `; ${proving} work towards the criterion` : ""}. No one is assigned.
+          </span>
+          <ol className="grid gap-1 pt-1">
+            {plan.map((step, i) => (
+              <li key={step.id} className="flex min-w-0 gap-2">
+                <span className="w-5 flex-none text-right text-muted-foreground tabular-nums">
+                  {i + 1}.
+                </span>
+                <span className="min-w-0">
+                  {step.title}
+                  {/* "Build" under "Build" says nothing twice, as the plan block does. */}
+                  {bare(step.title) !== bare(STAGE_LABEL[step.stage]) && (
+                    <Quiet> · {STAGE_LABEL[step.stage]}</Quiet>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </>
+      ),
+    },
+  ]
+}
+
+/** What the conversation asked that this call does not save, said plainly (ADR 0008). */
+function notSaved(answers: Answers): Array<{ label: string; detail: string }> {
+  const people = answers.people ?? []
+  const withSomeone = (answers.plan ?? []).some((s) => s.with)
+  return [
+    {
+      label: "Rules for agents",
+      detail:
+        "Each rule is confirmed on its own, once rules can be saved. Until then this setup sets none.",
+    },
+    ...(people.length > 0
+      ? [
+          {
+            label: people.length === 1 ? "1 invitation" : `${people.length} invitations`,
+            detail: `No one is invited. Each invitation is confirmed on its own, once invitations can be sent: ${people.map((p) => p.email).join(", ")}.`,
+          },
+        ]
+      : []),
+    ...(withSomeone
+      ? [
+          {
+            label: "Who a step is with",
+            detail: "The plan's tasks do not keep it. The main contact is saved on the company.",
+          },
+        ]
+      : []),
+  ]
 }
 
 function Progress({ index, onSummary }: { index: number; onSummary: React.ReactNode }) {
@@ -305,11 +513,16 @@ function Progress({ index, onSummary }: { index: number; onSummary: React.ReactN
   )
 }
 
-const SECTIONS: Array<{ type: Block["type"]; title: string; empty: string }> = [
+const SECTIONS: Array<{ type: Block["type"]; title: string; empty: string; later?: true }> = [
   { type: "brief", title: "Company", empty: "Its name and what you deliver." },
   { type: "plan", title: "Plan", empty: "Proposed once I know how you want to start." },
-  { type: "rules", title: "Rules for agents", empty: "What agents may do, and who approves." },
-  { type: "people", title: "People", empty: "Who to invite, if anyone." },
+  {
+    type: "rules",
+    title: "Rules for agents",
+    empty: "What agents may do, and who approves.",
+    later: true,
+  },
+  { type: "people", title: "People", empty: "Who to invite, if anyone.", later: true },
 ]
 
 /** The summary beside the conversation: one section per block, empty until its step is answered. */
@@ -332,7 +545,12 @@ function Summary({ blocks, titled = true }: { blocks: Array<Block>; titled?: boo
             aria-label={section.title}
             className="grid gap-2.5 border-t px-5 py-4"
           >
-            <h3 className="text-micro font-medium text-muted-foreground">{section.title}</h3>
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="text-micro font-medium text-muted-foreground">{section.title}</h3>
+              {section.later && (
+                <span className="text-micro text-muted-foreground">Not saved yet</span>
+              )}
+            </div>
             {block ? (
               <div key="filled" className="motion-safe:animate-settle">
                 <BlockView block={block} />

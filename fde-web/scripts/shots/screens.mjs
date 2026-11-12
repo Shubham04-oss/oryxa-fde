@@ -1337,6 +1337,7 @@ async function answer(page, n) {
   const c = conversation(page)
   if (n >= 1) {
     await c.getByLabel("Company name").fill("Orion Rail")
+    await c.getByLabel("First project").fill("Claims intake")
     await c
       .getByLabel("What are you delivering?")
       .fill("Automate claims intake for their freight team.")
@@ -1346,8 +1347,7 @@ async function answer(page, n) {
     await question("How do you want to start?")(page).waitFor()
   }
   if (n >= 2) {
-    await c.getByLabel("Main contact at the company").fill("Dana Ortiz")
-    await c.getByLabel("What would show it worked?").fill("Claims triaged within two hours")
+    await measured(page)
     await cont(page)
     await question("What may agents do here, and who approves?")(page).waitFor()
   }
@@ -1372,6 +1372,24 @@ async function answer(page, n) {
     () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
   )
   await page.waitForTimeout(400)
+}
+/** The start step's answers: a main contact, and a criterion with how it is measured. */
+async function measured(page) {
+  const c = conversation(page)
+  await c.getByLabel("Main contact at the company", { exact: true }).fill("Dana Ortiz")
+  await c
+    .getByLabel("What would show it worked?", { exact: true })
+    .fill("Claims triaged within two hours")
+  await c
+    .getByLabel("What is measured", { exact: true })
+    .fill("hours from a claim arriving to its triage")
+  await c.getByLabel("It passes when it is", { exact: true }).selectOption("at_most")
+  await c.getByLabel("Target", { exact: true }).fill("2")
+  await c.getByLabel("Unit", { exact: true }).fill("h")
+  await c.getByLabel("Baseline", { exact: true }).fill("9.5")
+  await c
+    .getByLabel("How we will prove it", { exact: true })
+    .fill("An eval on sample claims, against the baseline")
 }
 /** Opens a plan step's menu and picks one of its items. */
 async function stepMenu(page, title, item) {
@@ -1420,6 +1438,50 @@ function workspaceScreens() {
       ready: question("Which company is it, and what are you delivering for them?"),
       act: (page) => answer(page, i),
     })),
+    {
+      name: "new-company-2-start-measured",
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 1)
+        await measured(page)
+        await page.evaluate(
+          () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
+        )
+        await page.waitForTimeout(400)
+      },
+    },
+    {
+      // A part the API refused, shown beside it on the review (the mock's `__fdeMockRefuseSetup`).
+      name: "new-company-6-review-refused",
+      path: "/new-company",
+      ...WORKSPACE,
+      themes: ["light"],
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 5)
+        await page.evaluate(() => (globalThis.__fdeMockRefuseSetup = "invalid_target"))
+        await cont(page, "Create company")
+        await conversation(page).getByRole("alert").waitFor()
+        await page.mouse.move(0, 0)
+        await page.waitForTimeout(400)
+      },
+    },
+    {
+      // After Create company: the new project, its first plan step the next step.
+      name: "new-company-7-landing",
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: async (page) => {
+        await answer(page, 5)
+        await cont(page, "Create company")
+        await page.getByRole("region", { name: "Next step" }).waitFor()
+        await page.mouse.move(0, 0)
+        await page.waitForTimeout(500)
+      },
+    },
     {
       name: "new-company-plan-edited",
       path: "/new-company",

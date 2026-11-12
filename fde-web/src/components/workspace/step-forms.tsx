@@ -5,19 +5,22 @@ import { Icon } from "../ui/icon"
 import type { IconName } from "../ui/icon"
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu"
 import { Proof, StepMeta, StepNumber } from "./blocks"
-import { companyProblem } from "@/lib/records"
-import type { CompanyFields } from "@/lib/records"
+import { checkName, companyProblem } from "@/lib/records"
+import { COMPARATOR_LABEL, criterionProblem, inUnit, measure, targetOf } from "@/lib/scope"
+import type { Comparator, CriterionFields } from "@/lib/scope"
 import { Email, INVITE_ROLES, PlanStepItem } from "@/lib/workspace/blocks"
 import type { InviteRole, PlanStep, Verdict } from "@/lib/workspace/blocks"
 import {
   APPROACHES,
   APPROVERS,
+  MAX_STEP_PROOF,
+  NO_CRITERION,
   ROLE_LABEL,
   RULES,
   VERDICT_LABEL,
   defaultRules,
 } from "@/lib/workspace/new-company"
-import type { Answers, Invite } from "@/lib/workspace/new-company"
+import type { Answers, CompanyAnswer, Invite, StartAnswer } from "@/lib/workspace/new-company"
 import { cn } from "@/lib/utils"
 
 // The answer to each step of the new-company conversation (issue #209). Each form keeps what is
@@ -118,22 +121,27 @@ export function CompanyForm({
   onAnswer,
 }: {
   label: string
-  initial: CompanyFields | null
-  onAnswer: (fields: CompanyFields) => void
+  initial: CompanyAnswer | null
+  onAnswer: (fields: CompanyAnswer) => void
 }) {
-  const [f, setF] = useState<CompanyFields>(
-    initial ?? { name: "", industry: "", region: "", summary: "" },
+  const [f, setF] = useState<CompanyAnswer>(
+    initial ?? { name: "", project: "", industry: "", region: "", summary: "" },
   )
   const [problem, setProblem] = useState("")
-  const set = (patch: Partial<CompanyFields>) => setF({ ...f, ...patch })
+  const set = (patch: Partial<CompanyAnswer>) => setF({ ...f, ...patch })
   const nameMissing = problem !== "" && !f.name.trim()
+  const projectMissing = problem !== "" && !nameMissing && !f.project.trim()
 
   return (
     <AnswerCard
       label={label}
-      problem={nameMissing ? undefined : problem}
+      problem={nameMissing || projectMissing ? undefined : problem}
       onSubmit={() => {
-        const bad = companyProblem(f)
+        const bad =
+          companyProblem(f) ??
+          (f.project.trim()
+            ? checkName(f.project, "invalid_name", true)
+            : "Name the first project.")
         if (bad) return setProblem(bad)
         setProblem("")
         onAnswer(f)
@@ -146,6 +154,20 @@ export function CompanyForm({
             autoComplete="organization"
             value={f.name}
             onChange={(e) => set({ name: e.target.value })}
+            className={cn(INPUT, "h-11")}
+          />
+        )}
+      </Field>
+      <Field
+        label="First project"
+        hint="What the work is called, such as: Claims intake."
+        error={projectMissing ? problem : undefined}
+      >
+        {(props) => (
+          <input
+            {...props}
+            value={f.project}
+            onChange={(e) => set({ project: e.target.value })}
             className={cn(INPUT, "h-11")}
           />
         )}
@@ -241,6 +263,18 @@ function ChoiceCard({
   )
 }
 
+/** What a start answer may hold, checked as the API checks a criterion, before anything is sent. */
+export function startProblem(s: StartAnswer) {
+  if ([...s.contact.trim()].length > 120 || [...s.criterion.description.trim()].length > 200)
+    return "Keep the contact under 120 characters and the criterion under 200."
+  if (s.contact.trim() && checkName(s.contact, "invalid_name", true))
+    return "The main contact's name is one line of plain text."
+  if (!s.criterion.description.trim()) return null
+  if ([...s.criterion.proof.trim()].length > MAX_STEP_PROOF)
+    return `Say how it will be proven in up to ${MAX_STEP_PROOF} characters.`
+  return criterionProblem(s.criterion)
+}
+
 export function StartForm({
   label,
   initial,
@@ -248,22 +282,40 @@ export function StartForm({
 }: {
   label: string
   initial: Answers["start"]
-  onAnswer: (start: NonNullable<Answers["start"]>) => void
+  onAnswer: (start: StartAnswer) => void
 }) {
-  const [s, setS] = useState<NonNullable<Answers["start"]>>(
-    initial ?? { approach: "talk", contact: "", criterion: "" },
+  const [s, setS] = useState<StartAnswer>(
+    initial ?? { approach: "talk", contact: "", criterion: NO_CRITERION },
   )
   const [problem, setProblem] = useState("")
   const name = useId()
+  const c = s.criterion
+  const setCriterion = (patch: Partial<CriterionFields>) =>
+    setS({ ...s, criterion: { ...c, ...patch } })
+  const named = c.description.trim() !== ""
+  const target = targetOf(c.target)
+  const baseline = targetOf(c.baseline)
   return (
     <AnswerCard
       label={label}
       problem={problem}
       onSubmit={() => {
-        if (s.contact.trim().length > 120 || s.criterion.trim().length > 200)
-          return setProblem("Keep the contact under 120 characters and the criterion under 200.")
+        const bad = startProblem(s)
+        if (bad) return setProblem(bad)
         setProblem("")
-        onAnswer({ ...s, contact: s.contact.trim(), criterion: s.criterion.trim() })
+        // A criterion left blank is none: what was typed under it goes with it.
+        const criterion: CriterionFields = named
+          ? {
+              description: c.description.trim(),
+              metric: c.metric.trim(),
+              comparator: c.comparator,
+              target: c.target.trim(),
+              unit: c.unit.trim(),
+              baseline: c.baseline.trim(),
+              proof: c.proof.trim(),
+            }
+          : NO_CRITERION
+        onAnswer({ ...s, contact: s.contact.trim(), criterion })
       }}
     >
       <fieldset className="grid gap-2">
@@ -297,13 +349,101 @@ export function StartForm({
           {(props) => (
             <input
               {...props}
-              value={s.criterion}
-              onChange={(e) => setS({ ...s, criterion: e.target.value })}
+              value={c.description}
+              onChange={(e) => setCriterion({ description: e.target.value })}
               className={cn(INPUT, "h-11")}
             />
           )}
         </Field>
       </div>
+      {named && (
+        // A criterion is measured: the API keeps it only with what is measured and its target.
+        <fieldset className="grid gap-4 rounded-field border bg-card p-4 motion-safe:animate-settle max-[560px]:p-3">
+          <legend className="px-1 text-meta font-medium text-soft">How it is measured</legend>
+          <Field label="What is measured" hint="Such as hours from a claim arriving to its triage.">
+            {(props) => (
+              <input
+                {...props}
+                value={c.metric}
+                onChange={(e) => setCriterion({ metric: e.target.value })}
+                className={cn(INPUT, "h-11")}
+              />
+            )}
+          </Field>
+          <div className="grid grid-cols-3 gap-4 max-[560px]:grid-cols-1">
+            <Field label="It passes when it is">
+              {(props) => (
+                <select
+                  {...props}
+                  value={c.comparator}
+                  onChange={(e) => setCriterion({ comparator: e.target.value as Comparator })}
+                  className={cn(INPUT, "h-11 pr-8")}
+                >
+                  {(Object.keys(COMPARATOR_LABEL) as Array<Comparator>).map((k) => (
+                    <option key={k} value={k}>
+                      {COMPARATOR_LABEL[k]}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+            <Field label="Target">
+              {(props) => (
+                <input
+                  {...props}
+                  inputMode="decimal"
+                  value={c.target}
+                  onChange={(e) => setCriterion({ target: e.target.value })}
+                  className={cn(INPUT, "h-11")}
+                />
+              )}
+            </Field>
+            <Field label="Unit" hint="Optional. Such as % or h.">
+              {(props) => (
+                <input
+                  {...props}
+                  value={c.unit}
+                  onChange={(e) => setCriterion({ unit: e.target.value })}
+                  className={cn(INPUT, "h-11")}
+                />
+              )}
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-4 max-[560px]:grid-cols-1">
+            <Field label="Baseline" hint="Optional. Measured before the work, in the same unit.">
+              {(props) => (
+                <input
+                  {...props}
+                  inputMode="decimal"
+                  value={c.baseline}
+                  onChange={(e) => setCriterion({ baseline: e.target.value })}
+                  className={cn(INPUT, "h-11")}
+                />
+              )}
+            </Field>
+            <Field
+              label="How we will prove it"
+              hint="Optional. Such as: an eval on sample data, run against the baseline."
+            >
+              {(props) => (
+                <input
+                  {...props}
+                  value={c.proof}
+                  onChange={(e) => setCriterion({ proof: e.target.value })}
+                  className={cn(INPUT, "h-11")}
+                />
+              )}
+            </Field>
+          </div>
+          {c.metric.trim() && target !== null && (
+            <p className="text-meta text-soft">
+              Met when{" "}
+              {measure({ ...c, metric: c.metric.trim(), target, unit: c.unit.trim() || null })}.
+              {baseline !== null && ` Baseline ${inUnit(baseline, c.unit.trim())}.`}
+            </p>
+          )}
+        </fieldset>
+      )}
     </AnswerCard>
   )
 }
