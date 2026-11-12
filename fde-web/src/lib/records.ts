@@ -8,6 +8,7 @@ import type {
   Me,
   ProjectOut,
   ProjectScope,
+  SetupOut,
   StakeholderOut,
   StakeholderPart,
   SystemOut,
@@ -29,10 +30,11 @@ export type SystemBody = Omit<components["schemas"]["SystemBody"], "version">
 export const MAX_NAME = 200
 export const MAX_TEXT = 4000
 
+// The API's rule is Rust's `char::is_control`: C0, DEL and C1. Text keeps newlines and tabs.
 // eslint-disable-next-line no-control-regex
-const NAME_CONTROL = /[\u0000-\u001f\u007f]/
+const NAME_CONTROL = /[\u0000-\u001f\u007f-\u009f]/
 // eslint-disable-next-line no-control-regex
-const TEXT_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/
+const TEXT_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/
 
 const length = (value: string) => [...value].length
 export const say = (code: string) => SAFE_TEXT[code] ?? "Check what you typed."
@@ -285,6 +287,28 @@ export async function commitCompanyCreated(client: QueryClient, created: Company
     role: lead,
     projects: [],
     stakeholders: [],
+    systems: [],
+  })
+  refresh(client)
+}
+
+/**
+ * A company the API has set up in one call: in the list with its first project, and its page and the
+ * project's ready to open, with the people it was set up with. The rest is read when it is opened.
+ */
+export async function commitSetUp(client: QueryClient, out: SetupOut) {
+  await settle(client)
+  const lead: CompanyRole = "lead"
+  const { company, project } = out
+  const summary = { id: project.id, name: project.name, stage: project.stage }
+  client.setQueryData(queries.companies().queryKey, (old) =>
+    old ? { companies: [...old.companies, { ...company, role: lead, projects: [summary] }] } : old,
+  )
+  client.setQueryData(queries.company(company.id).queryKey, {
+    ...company,
+    role: lead,
+    projects: [project],
+    stakeholders: out.stakeholders,
     systems: [],
   })
   refresh(client)

@@ -122,11 +122,20 @@ function ShowMore({
 const LONG = 140
 
 function BriefValue({ value }: { value: string }) {
+  return (
+    <dd className="grid min-w-0 gap-1">
+      <LongText value={value} />
+    </dd>
+  )
+}
+
+/** Text that may be long: shortened to three lines, with Show more, and never dropped. */
+export function LongText({ value }: { value: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
   const long = [...value].length > LONG || value.split("\n").length > 3
   return (
-    <dd className="grid min-w-0 gap-1">
+    <>
       <span
         id={id}
         className={cn(
@@ -139,7 +148,7 @@ function BriefValue({ value }: { value: string }) {
       {long && (
         <ShowMore open={open} onToggle={() => setOpen(!open)} controls={id} more="Show more" />
       )}
-    </dd>
+    </>
   )
 }
 

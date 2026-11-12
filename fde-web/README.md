@@ -25,6 +25,8 @@ pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm
   a deployed build only once the API's sign-in routes are there.
 - The new workspace (issue #209: the welcome screen and a new company made in a conversation) is off
   by default. Turn it on at build time with `VITE_FDE_WORKSPACE=1` (`VITE_FDE_WORKSPACE=1 pnpm dev:mock`).
+  On, it works against the real API too: a new company is saved in one call to `POST /v1/companies/setup`
+  (issue #249). The welcome screen's suggestions stay on the dev mock only until the API serves them.
   Its conversation box talks to the assistant Worker (`assistant/`, issue #236) through `/assistant/*`
   (`src/assistant.ts`) once the Worker has the `ASSISTANT` service binding and the secrets
   `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY`; without them, and on the mock, it answers from

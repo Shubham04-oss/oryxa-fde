@@ -69,6 +69,14 @@ describe("company forms", () => {
     )
     // A summary may run to several lines.
     expect(companyProblem({ ...ok, summary: "one\ntwo" })).toBeNull()
+    // C1 controls too, as Rust's `char::is_control` refuses them: a next-line (U+0085) is not a name.
+    expect(companyProblem({ ...ok, name: "Orion\u0085Rail" })).toBe(
+      "A name is one line, 1 to 200 characters.",
+    )
+    expect(companyProblem({ ...ok, summary: "one\u009ftwo" })).toBe(
+      "The summary is plain text, up to 4000 characters.",
+    )
+    expect(companyProblem({ ...ok, name: "Zoë Ölçer" })).toBeNull()
   })
 
   it("counts characters, not code units", () => {

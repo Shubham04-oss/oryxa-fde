@@ -5,12 +5,22 @@ type Env = { DEV: boolean; VITE_FDE_MOCK_API?: string; VITE_FDE_WORKSPACE?: stri
 /**
  * Whether this build shows the new workspace (issue #209): the welcome screen at `/` and a new
  * company made in a conversation. Off unless the build sets `VITE_FDE_WORKSPACE=1`, like our own
- * sign-in screens. On the dev mock only, `globalThis.__fdeMockWorkspace = true` (set before the app
+ * sign-in screens; on, it works against the real API too (the new company is saved in one setup
+ * call, issue #249). On the dev mock only, `globalThis.__fdeMockWorkspace = true` (set before the app
  * loads) turns it on for one tab, so `pnpm shots` can photograph both; a production build drops it.
  */
 export function workspaceOn(env: Env, global: Record<string, unknown> = globalThis) {
   if (env.VITE_FDE_WORKSPACE === "1") return true
   return mockApiOn(env) && global.__fdeMockWorkspace === true
+}
+
+/**
+ * Whether the welcome screen shows its suggested next steps. Only on the dev mock: they are worked
+ * out here from fixed templates until the API serves suggestions (ADR 0008), so a build against a
+ * real API never shows them as if the workspace had made them. The flag does not change this.
+ */
+export function suggestionsOn(env: Pick<Env, "DEV" | "VITE_FDE_MOCK_API">) {
+  return mockApiOn(env)
 }
 
 /** This build's answer, read when a screen renders. */

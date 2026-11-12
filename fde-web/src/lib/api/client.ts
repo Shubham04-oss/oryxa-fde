@@ -3,7 +3,7 @@ import createClient from "openapi-fetch"
 import { z } from "zod"
 import type { paths as RunPaths } from "./agent-runs.gen"
 import type { paths as EvalPaths } from "./evals.gen"
-import type { paths } from "./fde-api.gen"
+import type { components, paths } from "./fde-api.gen"
 import { EvalRunOut, ProofRoom, SuiteOut } from "./evals"
 import type { EvalRunId, SuiteId } from "./evals"
 import { ApprovalOut, EventsOut, RunOut, isActive, parseEvents } from "./runs"
@@ -25,6 +25,7 @@ import {
   CriterionOut,
   ScopeOut,
   SearchHitOut,
+  SetupOut,
   SignOffOut,
   StageChecklistOut,
   StageConflictBody,
@@ -263,6 +264,15 @@ export function selected(): Promise<Transport> {
     : Promise.resolve(network)
 }
 
+/** Everything the new-company conversation confirmed (`POST /v1/companies/setup`). */
+export type SetupBody = components["schemas"]["SetupBody"]
+
+/**
+ * One setup on the wire: its `Idempotency-Key`, the body, and the body's bytes as first sent. The API
+ * hashes the bytes, so a retry sends `json` itself, never the body serialized again.
+ */
+export type SetupRequest = { key: string; body: SetupBody; json: string }
+
 /** CSRF: the API refuses a write without it, and the Worker refuses one from another origin. */
 export const HEADERS = { "X-Oryxa-Request": "1" }
 
@@ -484,6 +494,22 @@ function connect(transport: Transport) {
 
     /** Creates a company; the caller becomes its lead. */
     createCompany: (body: CompanyBody) => read(CompanyOut, client.POST("/v1/companies", { body })),
+
+    /**
+     * Sets up a company in one call: the company (the caller becomes its lead), its first project,
+     * people, scope, criteria and plan, all or nothing. A retry with the same key and bytes answers
+     * the first setup (200) and makes nothing new; 201 and 200 are the same result.
+     */
+    setUpCompany: (request: SetupRequest, signal?: AbortSignal) =>
+      read(
+        SetupOut,
+        client.POST("/v1/companies/setup", {
+          params: { header: { "Idempotency-Key": request.key } },
+          body: request.body,
+          bodySerializer: () => request.json,
+          signal,
+        }),
+      ),
 
     /** Changes the fields in `patch`; a field left out stays, `null` clears it. */
     updateCompany: (id: CompanyId, patch: CompanyPatch) =>
@@ -1074,6 +1100,7 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     scope: async (scope) => (await use()).scope(scope),
     today: async () => (await use()).today(),
     createCompany: async (body) => (await use()).createCompany(body),
+    setUpCompany: async (request, signal) => (await use()).setUpCompany(request, signal),
     updateCompany: async (id, patch) => (await use()).updateCompany(id, patch),
     createProject: async (id, body) => (await use()).createProject(id, body),
     updateProject: async (scope, patch) => (await use()).updateProject(scope, patch),

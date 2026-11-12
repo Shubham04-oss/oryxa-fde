@@ -141,6 +141,31 @@ describe("success criteria", () => {
     expect(targetOf("-3")).toBe(-3)
     expect(targetOf("")).toBeNull()
     expect(targetOf("1,5")).toBeNull()
+    expect(targetOf("+2.")).toBe(2)
+    expect(targetOf(".5")).toBe(0.5)
+    // Decimal only: what `Number()` would also read is refused, never misread.
+    for (const odd of ["0x10", "0b1", "0o7", "1e3", "Infinity", "1_000", "2 h", "."])
+      expect(targetOf(odd)).toBeNull()
+  })
+
+  it("show a stored number so the box reads it back the same", () => {
+    for (const n of [70, 0.1, 0.0000001, 1.5e-7, -2.5e-8, 1e21, 1.234e22, -3.25])
+      expect(targetOf(criterionFields({ ...criterion, target: n }).target)).toBe(n)
+    expect(criterionFields({ ...criterion, target: 1.5e-7 }).target).toBe("0.00000015")
+  })
+
+  it("say plainly why a number cannot be read, a comma above all", () => {
+    expect(criterionProblem({ ...ok, target: "1,5" })).toBe(
+      "Use a point for decimals, such as 1.5, and no commas.",
+    )
+    expect(criterionProblem({ ...ok, target: "0x10" })).toBe("The target must be a number.")
+    expect(criterionProblem({ ...ok, baseline: "0,42" })).toBe(
+      "Use a point for decimals, such as 1.5, and no commas.",
+    )
+    expect(criterionProblem({ ...ok, baseline: "1e3" })).toBe(
+      "The baseline must be a number, in the same unit as the target.",
+    )
+    expect(criterionProblem({ ...ok, baseline: " " })).toBeNull()
   })
 
   it("send every field, a blank unit, baseline or proof as none", () => {

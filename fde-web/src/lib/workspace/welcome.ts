@@ -112,18 +112,21 @@ const TODAY: SuggestionBlock = {
 /**
  * The workspace's answer to what the FDE typed. Scripted: it recognises a new company and the
  * day's work, and says plainly what it cannot do yet. The text it was given is never echoed into
- * a block, only shown back as the person's own words.
+ * a block, only shown back as the person's own words. `suggestions` is null where there are none
+ * to give (a real API, until it serves them): then it points to Today and claims nothing.
  */
-export function replyTo(said: string, suggestions: Array<SuggestionBlock>): Reply {
+export function replyTo(said: string, suggestions: Array<SuggestionBlock> | null): Reply {
   const words = said.toLowerCase()
   if (
     /\b(new|add|onboard|set up|setup|start)\b.*\b(company|customer|client|engagement)\b/.test(words)
   )
     return { text: "Let's set it up together.", blocks: [NEW_COMPANY] }
   if (/\b(today|blocked|stuck|due|waiting|next|priorit\w*|plan my)\b/.test(words))
-    return suggestions.length > 0
-      ? { text: "This is where I would start.", blocks: suggestions.slice(0, 2) }
-      : { text: "Nothing is blocked, due or waiting right now.", blocks: [TODAY] }
+    return suggestions === null
+      ? { text: "Today shows what is blocked, due and waiting.", blocks: [TODAY] }
+      : suggestions.length > 0
+        ? { text: "This is where I would start.", blocks: suggestions.slice(0, 2) }
+        : { text: "Nothing is blocked, due or waiting right now.", blocks: [TODAY] }
   return {
     text: "I can't act on that yet. For now I can set up a company or show you the day.",
     blocks: [NEW_COMPANY, TODAY],

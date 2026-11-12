@@ -15,6 +15,12 @@ export type Wire = {
   refuseReads: { ending: string; response: Response } | null
   /** Every write sent, in order. */
   sent: Array<{ method: string; path: string; body: unknown }>
+  /** Each write's `Idempotency-Key` and exact body text, in the order sent (null for none). */
+  keys: Array<{ key: string | null; text: string }>
+  /** Lets the API act on this many writes, then loses each answer as a dropped connection does. */
+  lose: number
+  /** Lets the API act on every write, then holds its answer until this resolves or the caller gives up. */
+  holdAnswers: Promise<void> | null
   /** The path of every read made, in order. */
   reads: Array<string>
 }
@@ -25,6 +31,9 @@ export const wire: Wire = {
   holdReads: null,
   refuseReads: null,
   sent: [],
+  keys: [],
+  lose: 0,
+  holdAnswers: null,
   reads: [],
 }
 
@@ -38,6 +47,9 @@ export function resetWire() {
   wire.holdReads = null
   wire.refuseReads = null
   wire.sent = []
+  wire.keys = []
+  wire.lose = 0
+  wire.holdAnswers = null
   wire.reads = []
 }
 
@@ -54,6 +66,7 @@ export function installWire() {
         path: new URL(request.url).pathname.replace("/api/v1", ""),
         body: text ? (JSON.parse(text) as unknown) : null,
       })
+      wire.keys.push({ key: request.headers.get("idempotency-key"), text })
     }
     if (!write) wire.reads.push(new URL(request.url).pathname.replace("/api/v1", ""))
     if (write && wire.hold) await wire.hold
@@ -65,6 +78,21 @@ export function installWire() {
     )
       return wire.refuseReads.response.clone()
     const response = await answer(request)
+    if (write && wire.lose > 0) {
+      wire.lose -= 1
+      throw new TypeError("Failed to fetch")
+    }
+    if (write && wire.holdAnswers) {
+      const signal = request.signal
+      await Promise.race([
+        wire.holdAnswers,
+        new Promise((_, reject) => {
+          const gaveUp = () => reject(new DOMException("The operation was aborted.", "AbortError"))
+          if (signal.aborted) gaveUp()
+          signal.addEventListener("abort", gaveUp, { once: true })
+        }),
+      ])
+    }
     if (!write && wire.holdReads) await wire.holdReads
     return response
   }

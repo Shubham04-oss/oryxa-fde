@@ -1019,7 +1019,17 @@ function seed() {
   // Eval suites and runs for the projects that have them; the rest have none.
   const evals = seedEvals()
   for (const p of projects) p.records.evals = evals[p.project.id] ?? p.records.evals
-  return { me, companies, projects, runs: seedRuns(), assignees, documents: seedDocuments() }
+  // Setups by caller and `Idempotency-Key`: the body's bytes and what they made.
+  const setups: Record<string, { json: string; company: string; project: string }> = {}
+  return {
+    me,
+    companies,
+    projects,
+    runs: seedRuns(),
+    assignees,
+    documents: seedDocuments(),
+    setups,
+  }
 }
 
 let state = seed()
@@ -1212,13 +1222,16 @@ const TASK_FIELDS = [
 const TASK_STATES = ["todo", "in_progress", "waiting_on_customer", "blocked", "done"] as const
 let taskCount = 0
 
-// A plain string of 1 to `max` characters, as the API's `Name` and `Text` types take it.
+// A plain string of 1 to `max` characters, as the API's `Name` and `Text` types take it (no control
+// character by Rust's `char::is_control`: C0, DEL and C1; text keeps newlines and tabs).
 const plain = (value: unknown, max: number, lines: boolean) =>
   typeof value === "string" &&
   [...value.trim()].length >= 1 &&
   [...value.trim()].length <= max &&
   // eslint-disable-next-line no-control-regex
-  !(lines ? /[\u0000-\u0008\u000b-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/).test(value.trim())
+  !(lines ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/ : /[\u0000-\u001f\u007f-\u009f]/).test(
+    value.trim(),
+  )
 
 /** `POST`, `PUT` and `DELETE` on a project's tasks, with the checks the API makes on a task. */
 async function taskRoutes(
@@ -1635,6 +1648,261 @@ async function createCompany(request: Request) {
   }
   state.companies.push(created)
   return json(created.company, 201)
+}
+
+// ── Setup in one call ──────────────────────────────────────────────────────
+// `POST /v1/companies/setup` (#246, `setup.rs`): every part checked by its own route's rules and
+// made by its own route here, all or nothing, with the `Idempotency-Key` claimed by caller and key.
+
+const MAX_SETUP = { stakeholders: 20, scope_items: 30, criteria: 20, plan: 30 } as const
+const SETUP_KEY = /^[A-Za-z0-9_-]{1,128}$/
+
+type Fields = Record<string, unknown>
+const isObject = (v: unknown): v is Fields =>
+  typeof v === "object" && v !== null && !Array.isArray(v)
+/** Only `allowed` keys: the API's bodies deny unknown fields at every level. */
+const only = (v: unknown, allowed: ReadonlyArray<string>): v is Fields =>
+  isObject(v) && Object.keys(v).every((k) => allowed.includes(k))
+const isText = (v: unknown) => typeof v === "string"
+const maybe = (v: unknown, ok: (v: unknown) => boolean) => v === undefined || v === null || ok(v)
+const isIndex = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0
+const isVersion = (v: unknown) => maybe(v, (x) => typeof x === "number" && Number.isInteger(x))
+const listOf = (v: unknown, each: (x: unknown) => boolean) =>
+  v === undefined || (Array.isArray(v) && v.every(each))
+
+/**
+ * Whether serde would read the body at all: the right keys and types at every level, and enums it
+ * knows. Anything else is the API's 400 `invalid_body`, before any part's own rules.
+ */
+type SetupShape = {
+  company: Fields
+  project: Fields
+  stakeholders?: Array<Fields>
+  main_contact?: number | null
+  scope_items?: Array<Fields>
+  criteria?: Array<Fields>
+  plan?: Array<Fields>
+}
+
+function setupShape(b: unknown): b is SetupShape {
+  const top = [
+    "company",
+    "project",
+    "stakeholders",
+    "main_contact",
+    "scope_items",
+    "criteria",
+    "plan",
+  ]
+  if (!only(b, top) || !isObject(b.company) || !isObject(b.project)) return false
+  const companyIn = b.company
+  const projectIn = b.project
+  return (
+    only(companyIn, ["name", "industry", "region", "summary"]) &&
+    isText(companyIn.name) &&
+    ["industry", "region", "summary"].every((k) => maybe(companyIn[k], isText)) &&
+    only(projectIn, ["name", "summary"]) &&
+    isText(projectIn.name) &&
+    maybe(projectIn.summary, isText) &&
+    listOf(
+      b.stakeholders,
+      (s) =>
+        only(s, ["name", "role", "title", "email", "version"]) &&
+        isText(s.name) &&
+        (s.role === undefined || PARTS.some((p) => p === s.role)) &&
+        maybe(s.title, isText) &&
+        maybe(s.email, isText) &&
+        isVersion(s.version),
+    ) &&
+    maybe(b.main_contact, isIndex) &&
+    listOf(
+      b.scope_items,
+      (i) =>
+        only(i, ["kind", "description", "version"]) &&
+        KINDS.some((k) => k === i.kind) &&
+        isText(i.description) &&
+        isVersion(i.version),
+    ) &&
+    listOf(
+      b.criteria,
+      (c) =>
+        only(c, [
+          "description",
+          "metric",
+          "comparator",
+          "target",
+          "unit",
+          "baseline",
+          "proof",
+          "version",
+        ]) &&
+        isText(c.description) &&
+        isText(c.metric) &&
+        COMPARATORS.some((x) => x === c.comparator) &&
+        typeof c.target === "number" &&
+        maybe(c.unit, isText) &&
+        maybe(c.baseline, (x) => typeof x === "number") &&
+        maybe(c.proof, isText) &&
+        isVersion(c.version),
+    ) &&
+    listOf(
+      b.plan,
+      (t) =>
+        only(t, ["title", "stage", "due_on", "criterion"]) &&
+        isText(t.title) &&
+        maybe(t.stage, (x) => STAGES.some((st) => st === x)) &&
+        maybe(t.due_on, isText) &&
+        maybe(t.criterion, isIndex),
+    )
+  )
+}
+
+/** A body for one of the mock's own routes, as that route would be sent it. */
+const asRequest = (body: unknown) =>
+  new Request("http://mock.invalid/", { method: "POST", body: JSON.stringify(body) })
+
+/** The setup as it stands: the company, its first project, its people, the scope and the plan. */
+function setupOut(companyId: string, projectId: string): S["SetupOut"] | null {
+  const found = state.companies.find((c) => c.company.id === companyId)
+  const p = state.projects.find((x) => x.project.id === projectId)
+  if (!found || !p) return null
+  return {
+    company: found.company,
+    project: projectOut(p),
+    stakeholders: found.stakeholders,
+    scope: p.records.scope,
+    plan: p.records.tasks,
+  }
+}
+
+/** Takes back a company the mock made, and its project: everything a setup makes is inside them. */
+function takeBack(companyId: string | null, projectId: string | null) {
+  const c = state.companies.findIndex((x) => x.company.id === companyId)
+  if (c >= 0) state.companies.splice(c, 1)
+  const p = state.projects.findIndex((x) => x.project.id === projectId)
+  if (p >= 0) state.projects.splice(p, 1)
+  if (projectId) delete state.assignees[projectId]
+}
+
+/**
+ * Makes what the setup describes through each part's own route, in order. Answers the first refusal,
+ * having taken back everything it made: nothing is left of a refused setup.
+ */
+async function makeSetup(b: SetupShape): Promise<Response | { company: string; project: string }> {
+  const made = { company: null as string | null, project: null as string | null }
+  const undo = () => takeBack(made.company, made.project)
+  // A route that does not answer a `POST` (null) never happens here; it would be the API's 404.
+  const step = async (answered: Response | null) => {
+    const reply = answered ?? refuse(404, "not_found")
+    if (reply.ok) return { id: (await reply.json<{ id: string }>()).id }
+    undo()
+    return reply
+  }
+  const madeCompany = await step(await createCompany(asRequest(b.company)))
+  if (madeCompany instanceof Response) return madeCompany
+  made.company = madeCompany.id
+  const found = state.companies.find((c) => c.company.id === madeCompany.id)!
+  const people: Array<string> = []
+  for (const s of b.stakeholders ?? []) {
+    const added = await step(await stakeholderRoutes("POST", undefined, found, asRequest(s)))
+    if (added instanceof Response) return added
+    people.push(added.id)
+  }
+  if (typeof b.main_contact === "number") {
+    const set = await mainContactRoute(found, asRequest({ stakeholder: people[b.main_contact] }))
+    if (!set.ok) {
+      undo()
+      return set
+    }
+  }
+  const madeProject = await step(
+    await projectWrites("POST", undefined, found, asRequest(b.project)),
+  )
+  if (madeProject instanceof Response) return madeProject
+  made.project = madeProject.id
+  const p = state.projects.find((x) => x.project.id === madeProject.id)!
+  const { scope: scopeOf, tasks } = p.records
+  for (const item of b.scope_items ?? []) {
+    const added = await step(
+      await scopeRoutes("POST", ["items"], found, scopeOf, tasks, asRequest(item)),
+    )
+    if (added instanceof Response) return added
+  }
+  const criteria: Array<string> = []
+  for (const c of b.criteria ?? []) {
+    const added = await step(
+      await scopeRoutes("POST", ["criteria"], found, scopeOf, tasks, asRequest(c)),
+    )
+    if (added instanceof Response) return added
+    criteria.push(added.id)
+  }
+  for (const t of b.plan ?? []) {
+    const planned = {
+      title: t.title,
+      status: "todo",
+      stage: t.stage ?? null,
+      due_on: t.due_on ?? null,
+      criterion: typeof t.criterion === "number" ? criteria[t.criterion] : null,
+    }
+    const added = await step(
+      await taskRoutes("POST", undefined, found, p.records, asRequest(planned)),
+    )
+    if (added instanceof Response) return added
+  }
+  return { company: madeCompany.id, project: madeProject.id }
+}
+
+/**
+ * `POST /v1/companies/setup`, in the API's order: the key, the body's shape, the lists' limits and the
+ * places they name, then each part by its own route. Then the claim: a key used before with the same
+ * bytes answers that setup with 200 and makes nothing new, and with other bytes is a 409.
+ */
+async function setUp(request: Request) {
+  // Dev and test only: `globalThis.__fdeMockRefuseSetup = "forbidden"` refuses the next setup once with
+  // that code: a 403 for `forbidden`, a 400 for any other (the forms catch those before they are sent).
+  const g = globalThis as Record<string, unknown>
+  const refused = g.__fdeMockRefuseSetup
+  if (typeof refused === "string") {
+    delete g.__fdeMockRefuseSetup
+    return refuse(refused === "forbidden" ? 403 : 400, refused)
+  }
+  const key = request.headers.get("idempotency-key")
+  if (key === null || !SETUP_KEY.test(key)) return refuse(400, "invalid_idempotency_key")
+  const raw = await request.text()
+  let b: unknown
+  try {
+    b = JSON.parse(raw)
+  } catch {
+    return refuse(400, "invalid_body")
+  }
+  if (!setupShape(b)) return refuse(400, "invalid_body")
+  for (const list of ["stakeholders", "scope_items", "criteria", "plan"] as const)
+    if ((b[list]?.length ?? 0) > MAX_SETUP[list]) return refuse(400, `invalid_${list}`)
+  if (typeof b.main_contact === "number" && b.main_contact >= (b.stakeholders?.length ?? 0))
+    return refuse(400, "invalid_main_contact")
+  if (
+    (b.plan ?? []).some(
+      (t) => typeof t.criterion === "number" && t.criterion >= (b.criteria?.length ?? 0),
+    )
+  )
+    return refuse(400, "invalid_criterion")
+  // ponytail: the API checks every part before it writes, the mock as it makes each one, so with two
+  // parts wrong the mock may name another one first. Each part's own rules are the same.
+  const claim = `${state.me.user.id}\u0000${key}`
+  const earlier = state.setups[claim]
+  const made = await makeSetup(b)
+  if (made instanceof Response) return made
+  if (earlier) {
+    // The claim is checked once the body is known good, as the API does; this one makes nothing.
+    takeBack(made.company, made.project)
+    if (earlier.json !== raw) return refuse(409, "rejected_idempotency_key_reused")
+    // What it made is shown only to someone who may still see it.
+    const found = state.companies.find((c) => c.company.id === earlier.company)
+    if (!found || !mayWork(found)) return refuse(403, "forbidden")
+    return json(setupOut(earlier.company, earlier.project))
+  }
+  state.setups[claim] = { json: raw, company: made.company, project: made.project }
+  return json(setupOut(made.company, made.project), 201)
 }
 
 /** `PATCH`: a field left out stays, `null` clears it (a name cannot be cleared). */
@@ -2196,6 +2464,7 @@ async function stageMove(
 /** Answers a request to `/api/v1/companies/...`, given the path's parts after `companies`. */
 async function companyRoutes(method: string, parts: Array<string>, request: Request) {
   const [companyId, collection, projectId, record, ...rest] = parts
+  if (companyId === "setup" && collection === undefined && method === "POST") return setUp(request)
   if (companyId === undefined) {
     if (method === "POST") return createCompany(request)
     return method === "GET" ? json(companyList()) : null

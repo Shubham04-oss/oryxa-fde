@@ -1,6 +1,8 @@
 import { parseBlocks } from "./blocks"
 import type { Block, InviteRole, PlanStep, Verdict } from "./blocks"
 import type { CompanyFields } from "@/lib/records"
+import { criterionFields } from "@/lib/scope"
+import type { CriterionFields } from "@/lib/scope"
 
 // The new-company conversation (issue #209), as data. The steps, their words, the rules agents
 // follow and the plan the workspace proposes are all here; the screen only draws them. Scripted for
@@ -22,7 +24,7 @@ export const STEPS: ReadonlyArray<Step> = [
   {
     id: "company",
     ask: "Which company is it, and what are you delivering for them?",
-    why: "A name is enough to start. The rest helps me propose a plan.",
+    why: "Its name and the first project's are enough to start. The rest helps me propose a plan.",
   },
   {
     id: "start",
@@ -32,18 +34,18 @@ export const STEPS: ReadonlyArray<Step> = [
   {
     id: "rules",
     ask: "What may agents do here, and who approves?",
-    why: "Agents follow these on every run for this company.",
+    why: "Not saved yet: each rule will be confirmed on its own, once rules can be set.",
   },
   {
     id: "people",
     ask: "Who should be invited?",
-    why: "Optional. Nothing is sent until you confirm.",
+    why: "Optional. Not sent yet: each invitation will be confirmed on its own.",
     optional: true,
   },
   {
     id: "plan",
     ask: "Here is a plan to start with. Change anything.",
-    why: "Reorder, rename, add or remove steps. It becomes the company's first plan.",
+    why: "Reorder, rename, add or remove steps. It becomes the first project's tasks, in order.",
   },
   {
     id: "review",
@@ -108,9 +110,23 @@ export const ROLE_LABEL: Record<InviteRole, string> = {
 
 export type Invite = { email: string; role: InviteRole }
 
+/**
+ * The first answer: the company, and the first project's name. `summary` is what is delivered, which
+ * is the first project's summary when the setup is saved.
+ */
+export type CompanyAnswer = CompanyFields & { project: string }
+
+/** How the work starts, and the one success criterion, if one was given (a blank description is none). */
+export type StartAnswer = { approach: Approach; contact: string; criterion: CriterionFields }
+
+export const NO_CRITERION: CriterionFields = criterionFields()
+
+/** The longest proof a plan step can show (`blocks.ts`), so the plan never drops a step for it. */
+export const MAX_STEP_PROOF = 240
+
 export type Answers = {
-  company: CompanyFields | null
-  start: { approach: Approach; contact: string; criterion: string } | null
+  company: CompanyAnswer | null
+  start: StartAnswer | null
   rules: { verdicts: Record<string, Verdict>; approver: Approver } | null
   /** An empty list once answered is "no one for now". */
   people: Array<Invite> | null
@@ -141,31 +157,40 @@ export function askOf(step: Step, answers: Answers) {
   return step.ask.replace("{name}", answers.company?.name.trim() || "the company")
 }
 
-const PROOF = "An eval on sample data, run against today's baseline."
+/** What a step shows when the person has not said how the criterion will be proven. */
+export const NO_PROOF = "Not said yet"
+
+/** The criterion as a plan step shows it, or null when none was given. */
+export function stepCriterion(answers: Answers): NonNullable<PlanStep["criterion"]> | null {
+  const c = answers.start?.criterion
+  const name = c?.description.trim()
+  if (!c || !name) return null
+  return { name, proof: c.proof.trim() || NO_PROOF }
+}
 
 /**
  * The plan the workspace proposes from the answers so far: it starts where the FDE said to start,
- * names the contact, and ties the criterion they gave to the steps that agree and prove it. Each
- * step is an ordinary task on one of the eight stages (ADR 0008), so the lifecycle still holds.
+ * names the contact, and ties the criterion they gave (if any) to the steps that agree and prove
+ * it. Each step is an ordinary task on one of the eight stages (ADR 0008), so the lifecycle holds.
  */
 export function proposePlan(answers: Answers): Array<PlanStep> {
   const start = answers.start
   const contact = start?.contact.trim() || ""
-  const named = start?.criterion.trim() || ""
-  const criterion = { name: named || "Each criterion agreed at scope", proof: PROOF }
+  const named = stepCriterion(answers)
+  const criterion = named ? { criterion: named } : {}
   const withContact = contact ? { with: contact } : {}
   const scope: Omit<PlanStep, "id"> = {
     title: "Agree scope and success criteria",
     stage: "scope",
     ...withContact,
-    ...(named ? { criterion: { name: named, proof: PROOF } } : {}),
+    ...criterion,
   }
   const steps: Array<Omit<PlanStep, "id">> =
     start?.approach === "pilot"
       ? [
           { title: "Request access and sample data", stage: "access" },
           { title: "Build a pilot on sample data", stage: "build" },
-          { title: "Evaluate the pilot", stage: "evaluate", criterion },
+          { title: "Evaluate the pilot", stage: "evaluate", ...criterion },
           { title: "Review the results", stage: "evaluate", ...withContact },
           { title: "Agree what comes next", stage: "handoff" },
         ]
@@ -174,7 +199,7 @@ export function proposePlan(answers: Answers): Array<PlanStep> {
             scope,
             { title: "Request access to the systems", stage: "access" },
             { title: "Build", stage: "build" },
-            { title: "Evaluate", stage: "evaluate", criterion },
+            { title: "Evaluate", stage: "evaluate", ...criterion },
             { title: "Hand off", stage: "handoff" },
           ]
         : [
@@ -186,10 +211,21 @@ export function proposePlan(answers: Answers): Array<PlanStep> {
             scope,
             { title: "Request access to the systems", stage: "access" },
             { title: "Build", stage: "build" },
-            { title: "Evaluate", stage: "evaluate", criterion },
+            { title: "Evaluate", stage: "evaluate", ...criterion },
             { title: "Hand off", stage: "handoff" },
           ]
   return steps.map((step, i) => ({ id: `step_${i + 1}`, ...step }))
+}
+
+/**
+ * A plan the person has changed, after the first move changed: the steps that worked towards the
+ * criterion now name it as it stands, or nothing when it was taken away. Nothing else moves.
+ */
+export function relinkPlan(plan: Array<PlanStep>, answers: Answers): Array<PlanStep> {
+  const named = stepCriterion(answers)
+  return plan.map(({ criterion, ...step }) =>
+    criterion && named ? { ...step, criterion: named } : step,
+  )
 }
 
 function brief(answers: Answers): Block | null {
@@ -200,6 +236,7 @@ function brief(answers: Answers): Block | null {
   const items = [
     { label: "Name", value: c.name },
     { label: "Sector", value: where },
+    { label: "Project", value: c.project },
     { label: "Delivering", value: c.summary },
     { label: "First move", value: approach?.label ?? "" },
     { label: "Main contact", value: answers.start?.contact ?? "" },
@@ -229,33 +266,11 @@ export function summaryBlocks(answers: Answers): Array<Block> {
   return parseBlocks(raw.filter(Boolean))
 }
 
-/** What the review checks before the company can be created. */
-export function reviewChecklist(answers: Answers): Block | null {
-  return (
-    parseBlocks([
-      {
-        type: "checklist",
-        items: [
-          { label: "Company named", done: Boolean(answers.company?.name.trim()) },
-          { label: "What you are delivering", done: Boolean(answers.company?.summary.trim()) },
-          { label: "How to start", done: answers.start !== null },
-          { label: "Rules for agents", done: answers.rules !== null },
-          { label: "A plan with at least one step", done: (answers.plan?.length ?? 0) > 0 },
-          {
-            label: "People to invite",
-            done: (answers.people?.length ?? 0) > 0,
-            optional: true,
-          },
-        ],
-      },
-    ])[0] ?? null
-  )
-}
-
 /** Whether the person may confirm: every step but the optional ones answered. */
 export function readyToCreate(answers: Answers) {
   return (
     Boolean(answers.company?.name.trim()) &&
+    Boolean(answers.company?.project.trim()) &&
     answers.start !== null &&
     answers.rules !== null &&
     (answers.plan?.length ?? 0) > 0
@@ -268,13 +283,23 @@ export function answerText(id: StepId, answers: Answers): string {
     case "company": {
       const c = answers.company
       if (!c) return ""
-      return c.summary.trim() ? `${c.name.trim()}. ${c.summary.trim()}` : c.name.trim()
+      return [
+        c.name.trim(),
+        c.project.trim() && `First project: ${c.project.trim()}`,
+        c.summary.trim(),
+      ]
+        .filter(Boolean)
+        .join(". ")
     }
     case "start": {
       const s = answers.start
       if (!s) return ""
       const label = APPROACHES.find((a) => a.id === s.approach)?.label ?? ""
-      return [label, s.contact.trim() && `Main contact: ${s.contact.trim()}`]
+      return [
+        label,
+        s.contact.trim() && `Main contact: ${s.contact.trim()}`,
+        s.criterion.description.trim() && `It worked if: ${s.criterion.description.trim()}`,
+      ]
         .filter(Boolean)
         .join(". ")
     }
