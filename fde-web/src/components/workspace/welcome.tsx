@@ -144,11 +144,14 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         )}
         {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
         <p role="status" className="mt-3 grid gap-1 text-meta text-muted-foreground empty:mt-0">
-          {dismiss.failed.map((f) => (
-            <span key={f.id}>
-              We couldn't put away {f.name}, so it is back. Try again in a moment.
-            </span>
-          ))}
+          {/* Only while the API still sends it: once it has gone, its refusal is moot. */}
+          {dismiss.failed
+            .filter((f) => shown.some((x) => x.id === f.id))
+            .map((f) => (
+              <span key={f.id}>
+                We couldn't put away {f.name}, so it is back. Try again in a moment.
+              </span>
+            ))}
           {dismiss.done && (
             <span>Put away: {dismiss.done.name}. It comes back if something changes.</span>
           )}
@@ -161,15 +164,18 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
 }
 
 const DISMISS = ["home", "dismiss"]
+type HomeData = Awaited<ReturnType<typeof api.home>>
 /** One suggestion being put away: the API's id, and how the screen names it. */
 type Dismissal = { id: string; name: string }
 
 /**
  * Puts a suggestion away for this person until its facts change. It leaves the list at once and comes
- * back if the API refuses; it changes nothing anyone else sees. The cached home is never edited: a
- * row is hidden while its dismissal is on its way, and after the API confirms it until a read of the
- * home made after that lands. The home is read again only when no other dismissal is pending, so a
- * read cannot bring back one still on its way, and a failure brings back only its own row.
+ * back if the API refuses; it changes nothing anyone else sees. Nothing is taken out of the cached
+ * home before the API confirms it: a row is hidden while its dismissal is on its way, and once
+ * confirmed it leaves the cache and stays hidden until a read of the home asked for after that lands.
+ * The home is read again once no other dismissal is pending (after a failure too), so a read cannot
+ * bring back one still on its way, a failure brings back only its own row, and one the API sends
+ * again (its facts changed) comes back.
  */
 function useDismiss() {
   const client = useQueryClient()
@@ -195,16 +201,26 @@ function useDismiss() {
     },
     onMutate: ({ id }) => setFailed((f) => f.filter((x) => x.id !== id)),
     onSuccess: (_data, put) => {
-      setGone((g) => new Map(g).set(put.id, Date.now()))
+      // Taken here, not in the updater: React runs that later, after the read below is asked for.
+      const at = Date.now()
+      setGone((g) => new Map(g).set(put.id, at))
       setDone(put)
+      // Confirmed, so safe to take out of the cached home: leaving and coming back does not show it.
+      client.setQueryData<HomeData>(
+        key,
+        (home) => home && { ...home, suggestions: home.suggestions.filter((x) => x.id !== put.id) },
+      )
     },
     onError: (_error, put) => setFailed((f) => [...f.filter((x) => x.id !== put.id), put]),
-    onSettled: async (_data, error) => {
-      // This one still counts as pending here, so 1 means no other is on its way.
-      if (error || client.isMutating({ mutationKey: DISMISS }) > 1) return
+    onSettled: () => {
+      // This one still counts as pending here, so 1 means no other is on its way. A failure reads too,
+      // so a success that skipped its read for this one is not hidden for good. Not awaited: awaiting
+      // would keep this one pending, and a success meanwhile would skip its own read.
+      if (client.isMutating({ mutationKey: DISMISS }) > 1) return
       const asked = Date.now()
-      await client.invalidateQueries({ queryKey: key })
-      setGone((g) => new Map([...g].filter(([, at]) => at > asked)))
+      void client
+        .invalidateQueries({ queryKey: key })
+        .then(() => setGone((g) => new Map([...g].filter(([, at]) => at > asked))))
     },
   })
   return {

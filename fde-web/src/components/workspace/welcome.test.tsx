@@ -37,6 +37,14 @@ const VALID = {
   project: { id: "prj_x", name: "Triage" },
   route: "/companies/cmp_x/projects/prj_x",
 }
+const OTHER = {
+  ...VALID,
+  id: "no_next_step.prj_y",
+  project: { id: "prj_y", name: "Search" },
+  route: "/companies/cmp_x/projects/prj_y",
+}
+const NOT_X = "Not now: No next step, Acme · Triage"
+const NOT_Y = "Not now: No next step, Acme · Search"
 /** Serves `/home` with exactly these suggestions. */
 const serveHome = (suggestions: Array<unknown>) =>
   (wire.refuseReads = {
@@ -153,10 +161,107 @@ describe("the welcome screen", () => {
     const before = await suggested()
     const name = before[0]!.getAttribute("aria-label")!
     wire.refuse = refused(404)
+    // The API's next read no longer has it either.
+    serveHome([])
     await userEvent.click(before[0]!)
     expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
     expect(screen.queryByText(/^We couldn't put away/)).toBeNull()
     expect(screen.queryByRole("button", { name })).toBeNull()
+  })
+
+  it("shows one put away again when a later read of the API still sends it (its facts changed)", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+  })
+
+  it("reads again after a refusal, so one confirmed before it is not hidden for good", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    const releaseX = holdWrites()
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await waitFor(() => expect(wire.sent).toHaveLength(1))
+    const releaseY = holdWrites()
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(wire.sent).toHaveLength(2))
+    releaseX()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    wire.refuse = refused(503)
+    releaseY()
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: NOT_Y })).toBeInTheDocument()
+  })
+
+  it("reads again for one confirmed while the last read is still on its way", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    await screen.findByRole("button", { name: NOT_X })
+    let answer = () => {}
+    wire.holdReads = new Promise<void>((r) => (answer = r))
+    await userEvent.click(screen.getByRole("button", { name: NOT_X }))
+    await waitFor(() => expect(homeReads()).toBe(2))
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(homeReads()).toBe(3))
+    wire.holdReads = null
+    answer()
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: NOT_Y })).toBeInTheDocument()
+  })
+
+  it("says each refusal when two are refused in a row", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away No next step, Acme · Triage/)
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await screen.findByText(/^We couldn't put away No next step, Acme · Search/)
+    expect(
+      screen.getByText(/^We couldn't put away No next step, Acme · Triage/),
+    ).toBeInTheDocument()
+  })
+
+  it("clears a refusal's line when it is tried again, even if the API sends it again", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away/)
+    wire.refuse = null
+    // The retry is confirmed, and the next read still has it (its facts changed): no old refusal.
+    await userEvent.click(screen.getByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBeGreaterThanOrEqual(3))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.queryByText(/^We couldn't put away/)).toBeNull()
+  })
+
+  it("drops a refusal's line once the API no longer sends that suggestion", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away/)
+    serveHome([OTHER])
+    wire.refuse = null
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(homeReads()).toBeGreaterThanOrEqual(3))
+    await waitFor(() => expect(screen.queryByText(/^We couldn't put away/)).toBeNull())
+  })
+
+  it("counts a 400 as a refusal, not as put away", async () => {
+    serveHome([VALID])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = new Response(JSON.stringify({ error: "invalid_suggestion" }), { status: 400 })
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.queryByText(/^Put away: /)).toBeNull()
   })
 
   it("names each row by where it is, so two of a kind are told apart", async () => {
