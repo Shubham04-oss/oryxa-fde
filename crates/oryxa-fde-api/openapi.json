@@ -922,6 +922,271 @@
         ]
       }
     },
+    "/v1/assistant/conversations": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "The caller's conversations, most recently active first: their home ones and those of companies\nthey may still work on. Ids and times only.",
+        "operationId": "list_conversations",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many, 1 to 50; 20 if left out.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationOut"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A customer role: no access to the workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Start a conversation, bound for good to the caller and to a company (or a project in it), or to\nthe caller's home. A company needs `work` on it; home needs `access` to the workspace, which a\ncustomer role does not have.",
+        "operationId": "create_conversation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assistant/conversations/{conversation}": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "One of the caller's conversations with its turns. Anyone else's is not found.",
+        "operationId": "get_conversation",
+        "parameters": [
+          {
+            "name": "conversation",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Delete one of the caller's conversations and its turns. Only its holder, who may delete it even\nafter losing access to its company. An audit row names it; no content is kept.",
+        "operationId": "delete_conversation",
+        "parameters": [
+          {
+            "name": "conversation",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assistant/conversations/{conversation}/check": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Whether the caller holds this conversation, bound to this company (or to home when `company` is\nleft out), and may still use it. fde-web's server asks before every turn and reconnect; anything\nbut 204 refuses.",
+        "operationId": "check_conversation",
+        "parameters": [
+          {
+            "name": "conversation",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "company",
+            "in": "query",
+            "description": "The company the caller believes it is bound to; left out for a home conversation.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The caller's, bound as asked, and still theirs to use"
+          },
+          "404": {
+            "description": "Any refusal: not the caller's, bound elsewhere, or no longer theirs to use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies": {
       "get": {
         "tags": [
@@ -10151,6 +10416,77 @@
         ],
         "description": "A company in the caller's list: the company, the caller's role and its projects."
       },
+      "ConversationBody": {
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The company it is bound to; left out, the person's home conversation."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A project of that company, to bind it more narrowly."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConversationDetailOut": {
+        "type": "object",
+        "required": [
+          "conversation",
+          "turns"
+        ],
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationOut"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnOut"
+            },
+            "description": "Its finished turns, in order."
+          }
+        }
+      },
+      "ConversationOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "created_at",
+          "last_active_at"
+        ],
+        "properties": {
+          "company": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The company it is bound to, for good; null for a home conversation."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CriterionBody": {
         "type": "object",
         "required": [
@@ -10492,6 +10828,13 @@
             "description": "The company's own threads, each with its comments, and meeting notes."
           }
         }
+      },
+      "FinishedState": {
+        "type": "string",
+        "enum": [
+          "done",
+          "failed"
+        ]
       },
       "ForgotPasswordIn": {
         "type": "object",
@@ -11337,6 +11680,31 @@
             "description": "What was decided."
           }
         }
+      },
+      "ProposalEntry": {
+        "type": "object",
+        "description": "A proposal as the Worker checked it, and what the person did with it.",
+        "required": [
+          "proposal",
+          "state"
+        ],
+        "properties": {
+          "proposal": {
+            "type": "object"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProposalState"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProposalState": {
+        "type": "string",
+        "enum": [
+          "waiting",
+          "confirmed",
+          "dismissed"
+        ]
       },
       "RedeemBody": {
         "type": "object",
@@ -13293,6 +13661,60 @@
           }
         }
       },
+      "TurnOut": {
+        "type": "object",
+        "required": [
+          "n",
+          "id",
+          "said",
+          "text",
+          "blocks",
+          "proposals",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its place, from 1.",
+            "minimum": 0
+          },
+          "notice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proposals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProposalEntry"
+            }
+          },
+          "said": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/FinishedState"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
       "UnsubscribeBody": {
         "type": "object",
         "required": [
@@ -13452,6 +13874,10 @@
     {
       "name": "room",
       "description": "Share links, and the customer room a project's guests see"
+    },
+    {
+      "name": "assistant",
+      "description": "The workspace assistant's conversations: the record behind the assistant Worker's working copy, bound to one person and one company or their home"
     },
     {
       "name": "integrations",

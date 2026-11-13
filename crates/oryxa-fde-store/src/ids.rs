@@ -57,6 +57,7 @@ id_type!(ShapeId, "canvas shape id");
 id_type!(ThreadId, "thread id");
 id_type!(CommentId, "comment id");
 id_type!(MeetingNoteId, "meeting note id");
+id_type!(ConversationId, "conversation id");
 
 #[cfg(test)]
 mod tests {
