@@ -21,6 +21,7 @@ import { emptyEvals, evalRoutes, seedEvals, settle, valueOf, measured } from "./
 import type { MockEvals } from "./mock-evals"
 import { runRoutes, seedRuns } from "./mock-runs"
 import { resetMockSignIn, signInRoutes } from "./mock-sign-in"
+import { assistantRoutes, resetMockAssistant } from "./mock-assistant"
 
 type S = components["schemas"]
 
@@ -1053,6 +1054,7 @@ export function resetMockApi({
   if (engineer) state.me = { ...state.me, role: "member" }
   setSession(signedIn)
   resetMockSignIn()
+  resetMockAssistant()
 }
 
 function setSession(on: boolean) {
@@ -2688,6 +2690,12 @@ async function answer(request: Request): Promise<Response> {
   }
   const signedIn = await signInRoutes(pathname, method, request, setSession)
   if (signedIn) return signedIn
+  // The conversation prototype's scripted assistant (issue #263); the welcome screen's conversation is not one of its.
+  if (pathname.startsWith("/assistant/")) {
+    if (!hasSession()) return refuse(401, "unauthorized")
+    const answered = await assistantRoutes(pathname, method, request)
+    if (answered) return answered
+  }
   if (!pathname.startsWith("/api/v1/")) return refuse(404, "not_found")
   if (!hasSession()) return refuse(401, "unauthorized")
   // Dev and test only, like everything here: `globalThis.__fdeMockFailWrites = true` makes every write

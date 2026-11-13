@@ -1558,6 +1558,173 @@ function workspaceScreens() {
   ]
 }
 
+// Round 2: the conversation prototype (issue #263), on the dev mock's scripted assistant. A chat is a
+// fixed-height screen whose thread scrolls inside it, so each shot is the viewport, as a person sees it.
+const CHAT = { workspace: true, sizes: ["1440", "390"], full: false }
+const DISPATCH_CHAT = "/conversations?new=cmp_kestrel/prj_kestrel_dispatch"
+const chatReady = (name) => (page) => page.getByRole("heading", { name, exact: true })
+const thread = (page) => page.getByRole("log", { name: "Conversation" })
+/** Lets the quiet motion settle, with nothing hovered or focused. */
+async function settleChat(page) {
+  await page.mouse.move(0, 0)
+  await page.evaluate(
+    () => document.activeElement instanceof HTMLElement && document.activeElement.blur(),
+  )
+  await page.waitForTimeout(450)
+}
+/** Sends a starter prompt and waits for the answer to end (its rating shows). */
+async function askAndWait(page, prompt) {
+  await page.getByRole("button", { name: prompt, exact: true }).click()
+  await thread(page)
+    .getByRole("button", { name: "Good answer" })
+    .last()
+    .waitFor({ timeout: 20_000 })
+}
+/** Scrolls the thread so `locator` sits near the top of it. */
+async function bringUp(locator) {
+  await locator.evaluate((el) => el.scrollIntoView({ block: "start" }))
+}
+
+function chatScreens() {
+  return [
+    {
+      name: "round2-chat-empty",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: settleChat,
+    },
+    {
+      // Mid-turn: one read done, text streaming, the next read in flight (the mock holds there).
+      name: "round2-chat-midstream",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: async (page) => {
+        await page.evaluate(() => (globalThis.__fdeMockAssistantHold = "r2"))
+        await page.getByRole("button", { name: "What is blocked right now?", exact: true }).click()
+        await page.getByText("Reading Dispatch copilot's tasks…").waitFor()
+        await settleChat(page)
+      },
+    },
+    {
+      name: "round2-chat-steps-collapsed",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: async (page) => {
+        await askAndWait(page, "What is blocked right now?")
+        await settleChat(page)
+      },
+    },
+    {
+      name: "round2-chat-steps-expanded",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: async (page) => {
+        await askAndWait(page, "What is blocked right now?")
+        await page.getByRole("button", { name: /^Read 3 things/ }).click()
+        await page.getByRole("button", { name: /^Read Dispatch copilot's tasks/ }).click()
+        await bringUp(page.getByRole("button", { name: /^Read 3 things/ }))
+        await settleChat(page)
+      },
+    },
+    {
+      // Two proposals from one answer: the first confirmed (with its record), the second still waiting.
+      name: "round2-chat-proposals",
+      path: "/conversations?new=home",
+      ...CHAT,
+      ready: chatReady("Ask across your companies"),
+      act: async (page) => {
+        await askAndWait(page, "Set up Orion Rail and Halden Water")
+        await page.getByRole("button", { name: "Create company" }).first().click()
+        await page.getByText("Created Orion Rail.").waitFor()
+        await bringUp(
+          page
+            .getByRole("region", { name: "Checklist" })
+            .or(page.getByRole("article", { name: "Checklist" })),
+        )
+        await settleChat(page)
+      },
+    },
+    {
+      // A change ADR 0008 confirms on its own: giving a person a role grants access.
+      name: "round2-chat-risky",
+      path: "/conversations?c=c_kestrel_pilot",
+      ...CHAT,
+      ready: (page) => page.getByRole("heading", { name: "Give a person a role" }),
+      act: async (page) => {
+        await bringUp(page.getByRole("article", { name: "Checklist" }))
+        await settleChat(page)
+      },
+    },
+    {
+      // Riya is an engineer at Brightwater, so the API refuses to change its team.
+      name: "round2-chat-refused",
+      path: "/conversations?c=c_bright_team",
+      ...CHAT,
+      ready: (page) => page.getByRole("heading", { name: "Give a person a role" }),
+      act: async (page) => {
+        await page.getByRole("button", { name: "Confirm", exact: true }).click()
+        await page.getByText("The workspace refused this.").waitFor()
+        await settleChat(page)
+      },
+    },
+    {
+      name: "round2-chat-failed",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: async (page) => {
+        await page.evaluate(() => (globalThis.__fdeMockAssistantFail = true))
+        await page.getByRole("button", { name: "Plan the pilot rollout", exact: true }).click()
+        await page.getByRole("button", { name: "Try again" }).waitFor({ timeout: 20_000 })
+        await settleChat(page)
+      },
+    },
+    {
+      // A message typed while an answer runs waits above the box; the send button is Stop meanwhile.
+      name: "round2-chat-queued",
+      path: DISPATCH_CHAT,
+      ...CHAT,
+      ready: chatReady("Ask about Dispatch copilot"),
+      act: async (page) => {
+        await page.evaluate(() => (globalThis.__fdeMockAssistantHold = "r2"))
+        await page.getByRole("button", { name: "What is blocked right now?", exact: true }).click()
+        await page.getByText("Reading Dispatch copilot's tasks…").waitFor()
+        await page.getByLabel("Ask about Dispatch copilot").fill("And who could chase the export?")
+        await page.keyboard.press("Enter")
+        await page.getByText("Queued. It sends when this answer ends.").waitFor()
+        await settleChat(page)
+      },
+    },
+    {
+      name: "round2-chat-panel",
+      path: "/conversations?c=c_kestrel_pilot",
+      ...CHAT,
+      ready: (page) => page.getByRole("heading", { name: "Give a person a role" }),
+      act: async (page) => {
+        await page.getByRole("button", { name: "Open the plan beside the conversation" }).click()
+        await page.getByRole("button", { name: "Close the panel" }).waitFor()
+        await settleChat(page)
+      },
+    },
+    {
+      name: "round2-chat-list",
+      path: "/conversations?c=c_kestrel_pilot",
+      ...CHAT,
+      sizes: ["390"],
+      ready: (page) => page.getByRole("heading", { name: "Give a person a role" }),
+      act: async (page) => {
+        await page.getByRole("button", { name: "Show conversations" }).click()
+        await page.getByRole("navigation", { name: "Your conversations" }).waitFor()
+        await page.waitForTimeout(450)
+      },
+    },
+  ]
+}
+
 export const screens = [
   {
     name: "sign-in",
@@ -1578,6 +1745,7 @@ export const screens = [
   },
   ...ownSignInScreens(),
   ...workspaceScreens(),
+  ...chatScreens(),
   { name: "companies", path: "/", ready: heading("Companies") },
   { name: "today", path: "/today", ready: heading("Today") },
   {
