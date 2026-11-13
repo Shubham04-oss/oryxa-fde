@@ -143,6 +143,12 @@ pub enum TurnState {
 }
 
 impl TurnState {
+    fn as_str(self) -> &'static str {
+        match self {
+            TurnState::Done => "done",
+            TurnState::Failed => "failed",
+        }
+    }
     fn parse(v: &str) -> Result<Self, StoreError> {
         match v {
             "done" => Ok(TurnState::Done),
@@ -151,6 +157,70 @@ impl TurnState {
         }
     }
 }
+
+/// A finished turn to append. The caller has checked `blocks` and `proposals` against the
+/// conversation's scope; the store checks what it can of the rest.
+#[derive(Clone, PartialEq)]
+pub struct TurnIn {
+    /// Its place, from 1: the next one, or one already stored (an idempotent retry).
+    pub n: u32,
+    pub id: TurnKey,
+    pub said: Said,
+    /// The assistant's text; [`reply_fits`] decides.
+    pub reply: String,
+    pub blocks: Value,
+    /// Each `{proposal, state}`, `state` being `waiting`, `confirmed` or `dismissed`.
+    pub proposals: Value,
+    /// Why it stopped short: one of the Worker's notices.
+    pub notice: Option<String>,
+    pub state: TurnState,
+}
+
+impl fmt::Debug for TurnIn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TurnIn(n={}, id={})", self.n, self.id.as_str())
+    }
+}
+
+/// What appending a turn came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Appended {
+    Stored(Turn),
+    /// That turn was stored before with exactly these contents: nothing changed.
+    Already(Turn),
+    /// Its place is taken by a different turn, or it is not the next one.
+    Conflict,
+    /// The conversation holds [`MAX_TURNS`] already.
+    Full,
+}
+
+/// A person's answer to a proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalAnswer {
+    Confirmed,
+    Dismissed,
+}
+
+impl ProposalAnswer {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProposalAnswer::Confirmed => "confirmed",
+            ProposalAnswer::Dismissed => "dismissed",
+        }
+    }
+}
+
+/// What settling a proposal came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Settled {
+    Set(Turn),
+    /// It already had this answer: nothing changed.
+    Already(Turn),
+    /// It was answered the other way before; an answer is not changed.
+    Answered,
+}
+
+const NOTICES: [&str; 4] = ["tool_limit", "reply_limit", "timed_out", "failed"];
 
 /// A stored turn.
 #[derive(Clone, PartialEq)]
@@ -164,6 +234,19 @@ pub struct Turn {
     pub notice: Option<String>,
     pub state: TurnState,
     pub created_at: OffsetDateTime,
+}
+
+impl Turn {
+    fn same(&self, v: &TurnIn) -> bool {
+        self.n == v.n
+            && self.id == v.id
+            && self.said == v.said
+            && self.reply == v.reply
+            && self.blocks == v.blocks
+            && self.proposals == v.proposals
+            && self.notice == v.notice
+            && self.state == v.state
+    }
 }
 
 impl fmt::Debug for Turn {
@@ -399,10 +482,160 @@ impl AssistantTx {
         rows.into_iter().map(turn).collect()
     }
 
-    // The append of a finished turn (#237's second part) goes here. It must: lock the conversation by its
-    // holder first (`find(.., true)`); check `Said` and `reply_fits`, which the table does not; and count
-    // the parts' bytes as the table does (`octet_length` of jsonb's text form, which writes ", " and ": "
-    // with spaces), or keep a margin under the caps, so a part near them is refused cleanly, never a 500.
+    /// Appends a finished turn to `user`'s conversation `id`: the next one, or the same turn again (an
+    /// idempotent retry). `None` unless `user` holds it in this scope. It locks the conversation by its
+    /// holder before anything else, since turns have no person column; checks what the table does not
+    /// (`Said`, [`reply_fits`]); and measures the parts' bytes in jsonb's text form, the form the table
+    /// checks, so a part over a cap is refused here, never by the insert.
+    pub async fn append(
+        &mut self,
+        id: &ConversationId,
+        user: &UserId,
+        v: &TurnIn,
+    ) -> Result<Option<Appended>, StoreError> {
+        if !reply_fits(&v.reply) {
+            return Err(StoreError::Rejected("text"));
+        }
+        if v.notice.as_deref().is_some_and(|n| !NOTICES.contains(&n)) {
+            return Err(StoreError::Rejected("notice"));
+        }
+        let (Some(blocks), Some(proposals)) = (v.blocks.as_array(), v.proposals.as_array()) else {
+            return Err(StoreError::Rejected("blocks"));
+        };
+        if blocks.len() > MAX_BLOCKS {
+            return Err(StoreError::Rejected("blocks"));
+        }
+        if proposals.len() > MAX_PROPOSALS {
+            return Err(StoreError::Rejected("proposals"));
+        }
+        // The conversation's row lock, by its holder, orders two appends of it: the second sees the first.
+        if self.find(id, user, true).await?.is_none() {
+            return Ok(None);
+        }
+        let (blocks_bytes, proposals_bytes): (i32, i32) =
+            sqlx::query_as("select octet_length($1::jsonb::text), octet_length($2::jsonb::text)")
+                .bind(&v.blocks)
+                .bind(&v.proposals)
+                .fetch_one(&mut *self.tx)
+                .await?;
+        if usize::try_from(blocks_bytes).unwrap_or(usize::MAX) > MAX_BLOCKS_BYTES {
+            return Err(StoreError::Rejected("blocks"));
+        }
+        if usize::try_from(proposals_bytes).unwrap_or(usize::MAX) > MAX_PROPOSALS_BYTES {
+            return Err(StoreError::Rejected("proposals"));
+        }
+        let turns = self.turns(id).await?;
+        if let Some(stored) = turns.iter().find(|t| t.n == v.n) {
+            return Ok(Some(if stored.same(v) {
+                Appended::Already(stored.clone())
+            } else {
+                Appended::Conflict
+            }));
+        }
+        let next = u32::try_from(turns.len()).unwrap_or(u32::MAX) + 1;
+        if next > MAX_TURNS {
+            return Ok(Some(Appended::Full));
+        }
+        if v.n != next || turns.iter().any(|t| t.id == v.id) {
+            return Ok(Some(Appended::Conflict));
+        }
+        let (t, c, _) = self.keys();
+        let row = sqlx::query(&format!(
+            "insert into assistant_turns (tenant_id, conversation_id, company_id, n, turn_id, said, reply, blocks,
+                 proposals, notice, state)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning {TURN}"
+        ))
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(&c)
+        .bind(i32::try_from(v.n).map_err(|_| StoreError::Rejected("n"))?)
+        .bind(v.id.as_str())
+        .bind(v.said.as_str())
+        .bind(&v.reply)
+        .bind(&v.blocks)
+        .bind(&v.proposals)
+        .bind(v.notice.as_deref())
+        .bind(v.state.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?;
+        self.touch(id).await?;
+        turn(row).map(|t| Some(Appended::Stored(t)))
+    }
+
+    /// Records the person's answer to proposal `proposal` of turn `n`: `confirmed` or `dismissed`, from
+    /// `waiting` only (the same answer again changes nothing). `None` unless `user` holds the
+    /// conversation in this scope and the turn and proposal exist.
+    pub async fn settle(
+        &mut self,
+        id: &ConversationId,
+        user: &UserId,
+        n: u32,
+        proposal: &str,
+        state: ProposalAnswer,
+    ) -> Result<Option<Settled>, StoreError> {
+        if self.find(id, user, true).await?.is_none() {
+            return Ok(None);
+        }
+        let Some(mut turn) = self.turns(id).await?.into_iter().find(|t| t.n == n) else {
+            return Ok(None);
+        };
+        let Some(entries) = turn.proposals.as_array_mut() else {
+            return Err(StoreError::Corrupt("proposals"));
+        };
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|e| e.get("proposal").and_then(|p| p.get("id")).and_then(Value::as_str) == Some(proposal))
+        else {
+            return Ok(None);
+        };
+        match entry.get("state").and_then(Value::as_str) {
+            Some(s) if s == state.as_str() => return Ok(Some(Settled::Already(turn))),
+            Some("waiting") => {}
+            _ => return Ok(Some(Settled::Answered)),
+        }
+        entry["state"] = Value::String(state.as_str().to_owned());
+        let (t, c, _) = self.keys();
+        let row = sqlx::query(&format!(
+            "update assistant_turns set proposals = $5
+             where tenant_id = $1 and conversation_id = $2 and company_id is not distinct from $3 and n = $4
+             returning {TURN}"
+        ))
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(&c)
+        .bind(i32::try_from(n).map_err(|_| StoreError::Rejected("n"))?)
+        .bind(&turn.proposals)
+        .fetch_one(&mut *self.tx)
+        .await?;
+        self.touch(id).await?;
+        Ok(Some(Settled::Set(self::turn(row)?)))
+    }
+
+    async fn touch(&mut self, id: &ConversationId) -> Result<(), StoreError> {
+        let (t, _, _) = self.keys();
+        sqlx::query(
+            "update assistant_conversations set last_active_at = now() where tenant_id = $1 and conversation_id = $2",
+        )
+        .bind(&t)
+        .bind(id.as_str())
+        .execute(&mut *self.tx)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether `project` is one of this scope's company's projects (row-level security hides any other).
+    pub async fn has_project(&mut self, project: &ProjectId) -> Result<bool, StoreError> {
+        let (t, c, _) = self.keys();
+        let Some(c) = c else { return Ok(false) };
+        Ok(sqlx::query_scalar(
+            "select exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)",
+        )
+        .bind(&t)
+        .bind(&c)
+        .bind(project.as_str())
+        .fetch_one(&mut *self.tx)
+        .await?)
+    }
 
     /// Deletes `by`'s conversation `id` in this scope and its turns, and leaves an audit row naming it
     /// (no content); `false` if there is none.
