@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
@@ -8,21 +8,18 @@ import { BlockView, Suggestion } from "./blocks"
 import { ProposalCard } from "./proposal"
 import { useConversation } from "./use-conversation"
 import type { ThreadTurn } from "./use-conversation"
-import { queries } from "@/lib/api/client"
+import { ApiError, api, queries } from "@/lib/api/client"
 import type { CompanySummary } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
-import { localDay } from "@/lib/time"
-import { suggestionsOn } from "@/lib/workspace/flag"
-import type { SuggestionBlock } from "@/lib/workspace/blocks"
-import { NEW_COMPANY, replyTo, suggestionsFrom } from "@/lib/workspace/welcome"
+import { NEW_COMPANY, replyTo, suggestionsFromHome } from "@/lib/workspace/welcome"
+import type { HomeSuggestion } from "@/lib/workspace/welcome"
 import { MAX_SAID } from "@/lib/workspace/wire"
 import { cn } from "@/lib/utils"
 
 // The welcome screen (issue #209, DESIGN.md "The workspace"): a greeting, the conversation box as
 // the one main thing, what the workspace suggests next, and the companies, compact. The box talks
 // to the assistant where it is configured (issue #236), and answers from a script where it is not.
-// ponytail: suggested next is worked out here from fixed templates, so it shows only on the dev mock
-// (`suggestionsOn`) until the API serves suggestions; against a real API the section is left out.
+// Suggested next is the API's home (`GET /v1/home`, issue #256), worded here from fixed templates.
 
 export function greeting(now: Date) {
   const hour = now.getHours()
@@ -38,31 +35,32 @@ export function greeting(now: Date) {
 const dateLine = (now: Date) =>
   new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long" }).format(now)
 
-export function Welcome({
-  now = new Date(),
-  suggest = suggestionsOn(import.meta.env),
-}: {
-  now?: Date
-  /** Whether to show suggested next steps: only where they are not sample (`suggestionsOn`). */
-  suggest?: boolean
-}) {
+export function Welcome({ now = new Date() }: { now?: Date }) {
   const me = useQuery(queries.me())
   const companies = useQuery(queries.companies())
-  const today = useQuery({ ...queries.today(), enabled: suggest })
-  const [dismissed, setDismissed] = useState<Array<SuggestionBlock>>([])
+  const home = useQuery(queries.home())
+  const dismiss = useDismiss()
   const first = me.data?.user.name.trim().split(/\s+/)[0]
 
-  const all =
-    companies.isSuccess && companies.data.companies.length === 0
-      ? [NEW_COMPANY]
-      : today.isSuccess && companies.isSuccess
-        ? suggestionsFrom(today.data.items, companies.data.companies, localDay(now))
-        : []
-  const shown = all.filter((s) => !dismissed.some((d) => d.id === s.id))
-  const lastDismissed = dismissed.at(-1)
-  // Without suggestions the scripted reply knows nothing of the day, so it never claims an all clear.
+  const noCompany = companies.isSuccess && companies.data.companies.length === 0
+  const shown: Array<HomeSuggestion> = home.isSuccess
+    ? suggestionsFromHome(home.data.suggestions).filter((s) => !dismiss.hidden.has(s.id))
+    : []
+  const list = useRef<HTMLUListElement>(null)
+  // Where focus goes once a dismissed row has left: the next row's Not now, or the section's heading.
+  const [focusTo, setFocusTo] = useState<{ id: string | null } | null>(null)
+  useEffect(() => {
+    if (!focusTo) return
+    const row = [
+      ...(list.current?.querySelectorAll<HTMLElement>("li[data-suggestion]") ?? []),
+    ].find((li) => li.dataset.suggestion === focusTo.id)
+    const target = row?.querySelector<HTMLElement>('button[aria-label^="Not now:"]')
+    ;(target ?? document.getElementById("suggested-title"))?.focus()
+    setFocusTo(null)
+  }, [focusTo])
+  // Until the API has answered, the scripted reply knows nothing of the day, so it never claims an all clear.
   const { turns, thinking, say, settle } = useConversation((text) =>
-    replyTo(text, suggest ? shown : null),
+    replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null),
   )
 
   return (
@@ -102,58 +100,135 @@ export function Welcome({
         </div>
       </section>
 
-      {suggest && (
-        <section aria-labelledby="suggested-title" className="grid">
-          <SectionHead id="suggested-title" title="Suggested next" />
-          {companies.isPending || today.isPending ? (
-            <Skeleton rows={2} label="Reading your day…" />
-          ) : companies.isError || today.isError ? (
-            <Problem
-              text="We couldn't read your day, so there is nothing to suggest yet."
-              onRetry={() => {
-                void companies.refetch()
-                void today.refetch()
-              }}
-            />
-          ) : shown.length === 0 ? (
-            <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
-              Nothing needs you right now. I will suggest the next step when something changes.
-            </div>
-          ) : (
-            <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
-              {shown.map((block, i) => (
-                <li key={block.id} className="motion-safe:animate-rise">
-                  <Suggestion
-                    block={block}
-                    // Once there is a reply, its own first action is the primary one instead.
-                    lead={i === 0 && turns.length === 0}
-                    onDismiss={() => setDismissed((d) => [...d, block])}
-                  />
-                </li>
-              ))}
-            </ul>
+      <section aria-labelledby="suggested-title" className="grid">
+        <SectionHead id="suggested-title" title="Suggested next" focusable />
+        {noCompany ? (
+          <ul className="overflow-hidden rounded-card border bg-canvas">
+            <li className="motion-safe:animate-rise">
+              <Suggestion block={NEW_COMPANY} lead={turns.length === 0} />
+            </li>
+          </ul>
+        ) : home.isPending ? (
+          <Skeleton rows={2} label="Reading your day…" />
+        ) : home.isError ? (
+          <Problem
+            text="We couldn't read your day, so there is nothing to suggest yet."
+            onRetry={() => void home.refetch()}
+          />
+        ) : shown.length === 0 ? (
+          <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
+            {/* An all clear only when the API itself had nothing: what was put away or skipped may still need the person. */}
+            {home.data.received === 0
+              ? "Nothing needs you right now. I will suggest the next step when something changes."
+              : "Nothing new to suggest right now."}
+          </div>
+        ) : (
+          <ul ref={list} className="divide-y overflow-hidden rounded-card border bg-canvas">
+            {shown.map(({ id, block }, i) => (
+              <li key={id} data-suggestion={id} className="motion-safe:animate-rise">
+                <Suggestion
+                  block={block}
+                  // Once there is a reply, its own first action is the primary one instead.
+                  lead={i === 0 && turns.length === 0}
+                  onDismiss={() => {
+                    setFocusTo({ id: (shown[i + 1] ?? shown[i - 1])?.id ?? null })
+                    dismiss.put({
+                      id,
+                      name: block.context ? `${block.title}, ${block.context}` : block.title,
+                    })
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
+        <p role="status" className="mt-3 grid gap-1 text-meta text-muted-foreground empty:mt-0">
+          {/* Only while the API still sends it: once it has gone, its refusal is moot. */}
+          {dismiss.failed
+            .filter((f) => shown.some((x) => x.id === f.id))
+            .map((f) => (
+              <span key={f.id}>
+                We couldn't put away {f.name}, so it is back. Try again in a moment.
+              </span>
+            ))}
+          {dismiss.done && (
+            <span>Put away: {dismiss.done.name}. It comes back if something changes.</span>
           )}
-          {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
-          <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
-            {lastDismissed && (
-              <>
-                Put away: {lastDismissed.title}.{" "}
-                <button
-                  type="button"
-                  onClick={() => setDismissed((d) => d.slice(0, -1))}
-                  className="rounded-sm font-medium text-soft underline decoration-strong underline-offset-4 hover:text-foreground"
-                >
-                  Undo
-                </button>
-              </>
-            )}
-          </p>
-        </section>
-      )}
+        </p>
+      </section>
 
       <Companies />
     </div>
   )
+}
+
+const DISMISS = ["home", "dismiss"]
+type HomeData = Awaited<ReturnType<typeof api.home>>
+/** One suggestion being put away: the API's id, and how the screen names it. */
+type Dismissal = { id: string; name: string }
+
+/**
+ * Puts a suggestion away for this person until its facts change. It leaves the list at once and comes
+ * back if the API refuses; it changes nothing anyone else sees. Nothing is taken out of the cached
+ * home before the API confirms it: a row is hidden while its dismissal is on its way, and once
+ * confirmed it leaves the cache and stays hidden until a read of the home asked for after that lands.
+ * The home is read again once no other dismissal is pending (after a failure too), so a read cannot
+ * bring back one still on its way, a failure brings back only its own row, and one the API sends
+ * again (its facts changed) comes back.
+ */
+function useDismiss() {
+  const client = useQueryClient()
+  const key = queries.home().queryKey
+  // Confirmed, with when, until a later read of the home shows the API's own answer.
+  const [gone, setGone] = useState<ReadonlyMap<string, number>>(new Map())
+  const [failed, setFailed] = useState<Array<Dismissal>>([])
+  const [done, setDone] = useState<Dismissal | null>(null)
+  const pending = useMutationState({
+    filters: { mutationKey: DISMISS, status: "pending" },
+    select: (m) => (m.state.variables as Dismissal).id,
+  })
+  const mutation = useMutation({
+    mutationKey: DISMISS,
+    mutationFn: async ({ id }: Dismissal) => {
+      try {
+        await api.dismissHome(id)
+      } catch (error) {
+        // The API no longer has it (its facts changed): it is gone, as asked.
+        if (error instanceof ApiError && error.status === 404) return
+        throw error
+      }
+    },
+    onMutate: ({ id }) => setFailed((f) => f.filter((x) => x.id !== id)),
+    onSuccess: (_data, put) => {
+      // Taken here, not in the updater: React runs that later, after the read below is asked for.
+      const at = Date.now()
+      setGone((g) => new Map(g).set(put.id, at))
+      setDone(put)
+      // Confirmed, so safe to take out of the cached home: leaving and coming back does not show it.
+      client.setQueryData<HomeData>(
+        key,
+        (home) => home && { ...home, suggestions: home.suggestions.filter((x) => x.id !== put.id) },
+      )
+    },
+    onError: (_error, put) => setFailed((f) => [...f.filter((x) => x.id !== put.id), put]),
+    onSettled: () => {
+      // This one still counts as pending here, so 1 means no other is on its way. A failure reads too,
+      // so a success that skipped its read for this one is not hidden for good. Not awaited: awaiting
+      // would keep this one pending, and a success meanwhile would skip its own read.
+      if (client.isMutating({ mutationKey: DISMISS }) > 1) return
+      const asked = Date.now()
+      void client
+        .invalidateQueries({ queryKey: key })
+        .then(() => setGone((g) => new Map([...g].filter(([, at]) => at > asked))))
+    },
+  })
+  return {
+    hidden: new Set([...pending, ...gone.keys()]),
+    failed,
+    done,
+    put: mutation.mutate,
+  }
 }
 
 const CHIP =
@@ -383,15 +458,22 @@ function Companies() {
 function SectionHead({
   id,
   title,
+  focusable,
   children,
 }: {
   id: string
   title: string
+  /** Takes focus from script, when what had it has gone. */
+  focusable?: boolean
   children?: React.ReactNode
 }) {
   return (
     <div className="mb-3 flex h-5 items-baseline justify-between gap-3">
-      <h2 id={id} className="text-meta font-medium text-soft">
+      <h2
+        id={id}
+        tabIndex={focusable ? -1 : undefined}
+        className="rounded-sm text-meta font-medium text-soft"
+      >
         {title}
       </h2>
       {children}

@@ -852,10 +852,7 @@ Off by default: the build flag `VITE_FDE_WORKSPACE=1` turns them on, and on the 
 sidebar has **Home** first, `/` is the welcome screen, every company is at `/companies`, and New
 company opens `/new-company`. With it off, nothing changes and both new routes go back to `/`.
 With it on, the screens work against the real API as well as the mock (issue #249): a new company
-is saved in one setup call. What is still worked out in the browser stays on the dev mock only
-(`suggestionsOn` in `src/lib/workspace/flag.ts`): against a real API the welcome screen leaves
-**Suggested next** out and does not read Today for it, and the scripted reply to the day's work
-points to Today without claiming anything, until the API serves suggestions.
+is saved in one setup call, and **Suggested next** is the API's home (`GET /v1/home`, issue #256).
 
 - **Blocks.** The workspace shows only blocks from a fixed catalogue (`src/lib/workspace/blocks.ts`):
   suggestion, brief, plan, rules, people, checklist. Each has a zod schema; `parseBlocks` drops an
@@ -867,12 +864,27 @@ points to Today without claiming anything, until the API serves suggestions.
 - **Welcome** (`/`): the date and a greeting (the screen's heading); the conversation box, the
   centrepiece (Enter sends, Shift and Enter is a new line); two quiet prompts in one row ("Set up a
   new company", "What needs me today?"; full width, one under the other, on a phone); **Suggested
-  next** (on the dev mock only, above), up to three, each approved by opening where it is done or put away (with Undo); and four
+  next**, the API's home suggestions (at most five), each approved by opening where it is done or put away; and four
   companies with **See all**. One rhythm: 24px inside the opening, 48px between sections (40px on a phone), the
   same heading for each section, and the companies' tiles on the same edge as the cards above. Each
   suggestion reads where it comes from, then what (semibold), then why; the first one's approve is
   the screen's one primary button (ink), the others are outlined. Suggestions are fixed
-  templates over names, counts and days waiting; they never quote a record's own text. The
+  templates over names, counts and days waiting; they never quote a record's own text. The API
+  sends a kind, counts, names and a route; the words for each kind are the web's own
+  (`suggestionsFromHome` in `src/lib/workspace/welcome.ts`), names are shown as text, a kind the web
+  does not know is skipped, and so is one whose route is not Today, a company or a project of ours.
+  Loading is two quiet bars; an error says the day could not be read, with **Try again**. "Nothing
+  needs you right now." only when the API sent none; when every one was put away or skipped it is
+  "Nothing new to suggest right now.", and so is the scripted reply, since what is put away may
+  still need the person. Each row's names carry where it is ("Not now: No next step, Acme ·
+  Triage"; "Open the project: Acme · Triage"), so two of a kind are told apart. Putting one away is
+  the one write applied before the API answers (it changes nothing anyone else sees, only this
+  person's home): it leaves at once, focus moves to the next row's Not now (or the section's
+  heading when none is left), and it comes back with a line naming it if the API refuses; a 404
+  (already gone) counts as done. Several can be on their way at once: each failure brings back only
+  its own row, and the home is read again only once none is pending. It stays away until the facts
+  behind it change, so there is no Undo. A workspace with no company is offered **Set up a new
+  company** instead. The
   scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
 - **New company** (`/new-company`): the workspace asks one step at a time (the company, its first
   project's name and what is delivered; how to start, the main contact and, optionally, one success
@@ -1078,5 +1090,7 @@ render, and leaves a `-FAILED.png` of it.
   all clear unless the API answered.
 - Never imply a connection or a finished action before the API confirms it. A write is never
   applied to the screen first and undone on failure: the screen shows it pending, then confirmed.
+  The one exception is putting away a home suggestion, which changes nothing anyone
+  else sees, only this person's home (see **Welcome**).
 - Plain, short sentences in sentence case. No em dashes anywhere: UI copy, docs and comments. No
   exclamation marks.
