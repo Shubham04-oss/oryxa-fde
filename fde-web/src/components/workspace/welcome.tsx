@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent } from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
@@ -8,8 +8,8 @@ import { BlockView, Suggestion } from "./blocks"
 import { ProposalCard } from "./proposal"
 import { useConversation } from "./use-conversation"
 import type { ThreadTurn } from "./use-conversation"
-import { api, queries } from "@/lib/api/client"
-import type { CompanySummary, HomeOut } from "@/lib/api/schemas"
+import { ApiError, api, queries } from "@/lib/api/client"
+import type { CompanySummary } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { NEW_COMPANY, replyTo, suggestionsFromHome } from "@/lib/workspace/welcome"
 import type { HomeSuggestion } from "@/lib/workspace/welcome"
@@ -44,8 +44,20 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
 
   const noCompany = companies.isSuccess && companies.data.companies.length === 0
   const shown: Array<HomeSuggestion> = home.isSuccess
-    ? suggestionsFromHome(home.data.suggestions)
+    ? suggestionsFromHome(home.data.suggestions).filter((s) => !dismiss.hidden.has(s.id))
     : []
+  const list = useRef<HTMLUListElement>(null)
+  // Where focus goes once a dismissed row has left: the next row's Not now, or the section's heading.
+  const [focusTo, setFocusTo] = useState<{ id: string | null } | null>(null)
+  useEffect(() => {
+    if (!focusTo) return
+    const row = [
+      ...(list.current?.querySelectorAll<HTMLElement>("li[data-suggestion]") ?? []),
+    ].find((li) => li.dataset.suggestion === focusTo.id)
+    const target = row?.querySelector<HTMLElement>('button[aria-label^="Not now:"]')
+    ;(target ?? document.getElementById("suggested-title"))?.focus()
+    setFocusTo(null)
+  }, [focusTo])
   // Until the API has answered, the scripted reply knows nothing of the day, so it never claims an all clear.
   const { turns, thinking, say, settle } = useConversation((text) =>
     replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null),
@@ -89,7 +101,7 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
       </section>
 
       <section aria-labelledby="suggested-title" className="grid">
-        <SectionHead id="suggested-title" title="Suggested next" />
+        <SectionHead id="suggested-title" title="Suggested next" focusable />
         {noCompany ? (
           <ul className="overflow-hidden rounded-card border bg-canvas">
             <li className="motion-safe:animate-rise">
@@ -105,29 +117,41 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
           />
         ) : shown.length === 0 ? (
           <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
-            Nothing needs you right now. I will suggest the next step when something changes.
+            {/* An all clear only when the API itself had nothing: what was put away or skipped may still need the person. */}
+            {home.data.received === 0
+              ? "Nothing needs you right now. I will suggest the next step when something changes."
+              : "Nothing new to suggest right now."}
           </div>
         ) : (
-          <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
+          <ul ref={list} className="divide-y overflow-hidden rounded-card border bg-canvas">
             {shown.map(({ id, block }, i) => (
-              <li key={id} className="motion-safe:animate-rise">
+              <li key={id} data-suggestion={id} className="motion-safe:animate-rise">
                 <Suggestion
                   block={block}
                   // Once there is a reply, its own first action is the primary one instead.
                   lead={i === 0 && turns.length === 0}
-                  onDismiss={() => dismiss.mutate({ id, title: block.title })}
+                  onDismiss={() => {
+                    setFocusTo({ id: (shown[i + 1] ?? shown[i - 1])?.id ?? null })
+                    dismiss.put({
+                      id,
+                      name: block.context ? `${block.title}, ${block.context}` : block.title,
+                    })
+                  }}
                 />
               </li>
             ))}
           </ul>
         )}
         {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
-        <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
-          {dismiss.isError
-            ? `We couldn't put away “${dismiss.variables.title}”, so it is back. Try again in a moment.`
-            : dismiss.isSuccess
-              ? `Put away: ${dismiss.variables.title}. It comes back if something changes.`
-              : ""}
+        <p role="status" className="mt-3 grid gap-1 text-meta text-muted-foreground empty:mt-0">
+          {dismiss.failed.map((f) => (
+            <span key={f.id}>
+              We couldn't put away {f.name}, so it is back. Try again in a moment.
+            </span>
+          ))}
+          {dismiss.done && (
+            <span>Put away: {dismiss.done.name}. It comes back if something changes.</span>
+          )}
         </p>
       </section>
 
@@ -136,27 +160,59 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
   )
 }
 
+const DISMISS = ["home", "dismiss"]
+/** One suggestion being put away: the API's id, and how the screen names it. */
+type Dismissal = { id: string; name: string }
+
 /**
  * Puts a suggestion away for this person until its facts change. It leaves the list at once and comes
- * back if the API refuses: a dismissal changes no record, only what this person's home shows.
+ * back if the API refuses; it changes nothing anyone else sees. The cached home is never edited: a
+ * row is hidden while its dismissal is on its way, and after the API confirms it until a read of the
+ * home made after that lands. The home is read again only when no other dismissal is pending, so a
+ * read cannot bring back one still on its way, and a failure brings back only its own row.
  */
 function useDismiss() {
   const client = useQueryClient()
   const key = queries.home().queryKey
-  return useMutation({
-    mutationFn: ({ id }: { id: string; title: string }) => api.dismissHome(id),
-    onMutate: async ({ id }) => {
-      await client.cancelQueries({ queryKey: key })
-      const before = client.getQueryData<HomeOut>(key)
-      client.setQueryData<HomeOut>(
-        key,
-        (home) => home && { suggestions: home.suggestions.filter((s) => s.id !== id) },
-      )
-      return { before }
-    },
-    onError: (_error, _vars, context) => client.setQueryData(key, context?.before),
-    onSettled: () => client.invalidateQueries({ queryKey: key }),
+  // Confirmed, with when, until a later read of the home shows the API's own answer.
+  const [gone, setGone] = useState<ReadonlyMap<string, number>>(new Map())
+  const [failed, setFailed] = useState<Array<Dismissal>>([])
+  const [done, setDone] = useState<Dismissal | null>(null)
+  const pending = useMutationState({
+    filters: { mutationKey: DISMISS, status: "pending" },
+    select: (m) => (m.state.variables as Dismissal).id,
   })
+  const mutation = useMutation({
+    mutationKey: DISMISS,
+    mutationFn: async ({ id }: Dismissal) => {
+      try {
+        await api.dismissHome(id)
+      } catch (error) {
+        // The API no longer has it (its facts changed): it is gone, as asked.
+        if (error instanceof ApiError && error.status === 404) return
+        throw error
+      }
+    },
+    onMutate: ({ id }) => setFailed((f) => f.filter((x) => x.id !== id)),
+    onSuccess: (_data, put) => {
+      setGone((g) => new Map(g).set(put.id, Date.now()))
+      setDone(put)
+    },
+    onError: (_error, put) => setFailed((f) => [...f.filter((x) => x.id !== put.id), put]),
+    onSettled: async (_data, error) => {
+      // This one still counts as pending here, so 1 means no other is on its way.
+      if (error || client.isMutating({ mutationKey: DISMISS }) > 1) return
+      const asked = Date.now()
+      await client.invalidateQueries({ queryKey: key })
+      setGone((g) => new Map([...g].filter(([, at]) => at > asked)))
+    },
+  })
+  return {
+    hidden: new Set([...pending, ...gone.keys()]),
+    failed,
+    done,
+    put: mutation.mutate,
+  }
 }
 
 const CHIP =
@@ -386,15 +442,22 @@ function Companies() {
 function SectionHead({
   id,
   title,
+  focusable,
   children,
 }: {
   id: string
   title: string
+  /** Takes focus from script, when what had it has gone. */
+  focusable?: boolean
   children?: React.ReactNode
 }) {
   return (
     <div className="mb-3 flex h-5 items-baseline justify-between gap-3">
-      <h2 id={id} className="text-meta font-medium text-soft">
+      <h2
+        id={id}
+        tabIndex={focusable ? -1 : undefined}
+        className="rounded-sm text-meta font-medium text-soft"
+      >
         {title}
       </h2>
       {children}

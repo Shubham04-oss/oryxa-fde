@@ -873,11 +873,18 @@ is saved in one setup call, and **Suggested next** is the API's home (`GET /v1/h
   sends a kind, counts, names and a route; the words for each kind are the web's own
   (`suggestionsFromHome` in `src/lib/workspace/welcome.ts`), names are shown as text, a kind the web
   does not know is skipped, and so is one whose route is not Today, a company or a project of ours.
-  Loading is two quiet bars; an error says the day could not be read, with **Try again**; none says
-  "Nothing needs you right now." Putting one away is the one write applied before the API answers
-  (it changes no record, only this person's home): it leaves at once, and comes back with a line
-  saying so if the API refuses. It stays away until the facts behind it change, so there is no
-  Undo. A workspace with no company is offered **Set up a new company** instead. The
+  Loading is two quiet bars; an error says the day could not be read, with **Try again**. "Nothing
+  needs you right now." only when the API sent none; when every one was put away or skipped it is
+  "Nothing new to suggest right now.", and so is the scripted reply, since what is put away may
+  still need the person. Each row's names carry where it is ("Not now: No next step, Acme ·
+  Triage"; "Open the project: Acme · Triage"), so two of a kind are told apart. Putting one away is
+  the one write applied before the API answers (it changes nothing anyone else sees, only this
+  person's home): it leaves at once, focus moves to the next row's Not now (or the section's
+  heading when none is left), and it comes back with a line naming it if the API refuses; a 404
+  (already gone) counts as done. Several can be on their way at once: each failure brings back only
+  its own row, and the home is read again only once none is pending. It stays away until the facts
+  behind it change, so there is no Undo. A workspace with no company is offered **Set up a new
+  company** instead. The
   scripted reply recognises a new company and the day's work, and says plainly what it cannot do.
 - **New company** (`/new-company`): the workspace asks one step at a time (the company, its first
   project's name and what is delivered; how to start, the main contact and, optionally, one success
@@ -1083,6 +1090,7 @@ render, and leaves a `-FAILED.png` of it.
   all clear unless the API answered.
 - Never imply a connection or a finished action before the API confirms it. A write is never
   applied to the screen first and undone on failure: the screen shows it pending, then confirmed.
-  The one exception is putting away a home suggestion, which changes no record (see **Welcome**).
+  The one exception is putting away a home suggestion, which changes nothing anyone
+  else sees, only this person's home (see **Welcome**).
 - Plain, short sentences in sentence case. No em dashes anywhere: UI copy, docs and comments. No
   exclamation marks.

@@ -11,6 +11,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 const SUGGESTION_ID = /^[a-z_]{1,32}(\.[A-Za-z0-9_-]{1,128})?$/
 /** The block's `context` limit; two long names are shortened rather than lose the suggestion. */
 const CONTEXT_MAX = 160
+/** The most suggestions the welcome screen shows (the API's `MAX_SUGGESTIONS`). */
+const MAX_SHOWN = 5
 
 /**
  * The route a suggestion opens, only if it is one of our own screens: Today, a company or one of
@@ -39,7 +41,7 @@ function wording(s: HomeSuggestionOut): Wording | null {
     case "due_today":
       return {
         context: "Across your projects",
-        title: `${plural(n, "task")} due today`,
+        title: `${plural(n, "task")} due or overdue`,
         detail: "Finish what you can, or move the date.",
         label: "Open Today",
       }
@@ -95,7 +97,8 @@ export type HomeSuggestion = { id: string; block: SuggestionBlock }
  * not one the API makes, its route is not one of our own screens, or the block does not validate.
  */
 export function suggestionsFromHome(suggestions: Array<HomeSuggestionOut>): Array<HomeSuggestion> {
-  return suggestions.flatMap((s, i) => {
+  // The API sends at most five; the screen keeps that promise whatever it is sent.
+  return suggestions.slice(0, MAX_SHOWN).flatMap((s, i) => {
     const to = destinationOf(s.route)
     const words = wording(s)
     if (!to || !words || !SUGGESTION_ID.test(s.id)) return []
@@ -145,7 +148,8 @@ export function replyTo(said: string, suggestions: Array<SuggestionBlock> | null
       ? { text: "Today shows what is blocked, due and waiting.", blocks: [TODAY] }
       : suggestions.length > 0
         ? { text: "This is where I would start.", blocks: suggestions.slice(0, 2) }
-        : { text: "Nothing is blocked, due or waiting right now.", blocks: [TODAY] }
+        : // What is put away or skipped may still need the person, so this never claims an all clear.
+          { text: "Nothing new to suggest right now.", blocks: [TODAY] }
   return {
     text: "I can't act on that yet. For now I can set up a company or show you the day.",
     blocks: [NEW_COMPANY, TODAY],

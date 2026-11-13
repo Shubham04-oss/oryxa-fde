@@ -1229,6 +1229,9 @@ function homeSuggestions(): Array<HomeSuggestion> {
       id: "due_today",
       kind: "due_today",
       count: due.length,
+      days: null,
+      company: null,
+      project: null,
       route: "/today",
       facts: facts("due_today", due),
       weight: [due.length, 0],
@@ -1310,7 +1313,15 @@ function home(): S["HomeOut"] {
 }
 
 /** `POST /v1/home/suggestions/{id}/dismiss`: only a suggestion the person has now. */
-function dismissHome(id: string) {
+function dismissHome(raw: string) {
+  let id: string
+  try {
+    id = decodeURIComponent(raw)
+  } catch {
+    return refuse(400, "invalid_suggestion")
+  }
+  // The API's `SuggestionKey` rule: `<kind>` or `<kind>.<project id>`.
+  if (!/^[a-z_]{1,32}(\.[A-Za-z0-9_-]{1,128})?$/.test(id)) return refuse(400, "invalid_suggestion")
   const found = homeSuggestions().find((s) => s.id === id)
   if (!found) return refuse(404, "not_found")
   homeDismissed.set(id, found.facts)
@@ -2689,9 +2700,7 @@ async function answer(request: Request): Promise<Response> {
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())
   if (method === "GET" && parts.length === 0 && root === "home") return json(home())
   if (method === "POST" && root === "home" && parts.length === 3 && parts[0] === "suggestions")
-    return parts[2] === "dismiss"
-      ? dismissHome(decodeURIComponent(parts[1]!))
-      : refuse(404, "not_found")
+    return parts[2] === "dismiss" ? dismissHome(parts[1]!) : refuse(404, "not_found")
   if (method === "GET" && root === "room" && parts[0] === "companies" && parts[2] === "projects")
     return roomRead(parts[1], parts[3])
   const answered = root === "companies" ? await companyRoutes(method, parts, request) : null

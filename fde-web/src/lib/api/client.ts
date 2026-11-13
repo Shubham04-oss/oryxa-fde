@@ -503,6 +503,8 @@ function connect(transport: Transport) {
         client.GET("/v1/home"),
       )
       return {
+        /** How many the API sent, before any was left out: none is the only all clear. */
+        received: suggestions.length,
         suggestions: suggestions.flatMap((s) => {
           const parsed = HomeSuggestionOut.safeParse(s)
           return parsed.success ? [parsed.data] : []

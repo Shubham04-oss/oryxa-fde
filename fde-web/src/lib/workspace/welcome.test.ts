@@ -32,7 +32,7 @@ describe("the welcome screen's suggestions", () => {
       [
         "due_today",
         "Across your projects",
-        "3 tasks due today",
+        "3 tasks due or overdue",
         { label: "Open Today", to: { screen: "today" } },
       ],
       ...[
@@ -49,6 +49,20 @@ describe("the welcome screen's suggestions", () => {
         },
       ]),
     ])
+  })
+
+  it("count what is due today and what is overdue together, one or many", () => {
+    const titles = suggestionsFromHome([at("due_today"), at("due_today", { count: 4 })]).map(
+      (s) => s.block.title,
+    )
+    expect(titles).toEqual(["1 task due or overdue", "4 tasks due or overdue"])
+  })
+
+  it("show at most five, whatever the API sends", () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      at("no_next_step", { id: `no_next_step.prj_${i}` }),
+    )
+    expect(suggestionsFromHome(many)).toHaveLength(5)
   })
 
   it("say how many wait and the longest wait, when several access requests do", () => {
@@ -120,6 +134,8 @@ describe("the welcome screen's suggestions", () => {
     const [first] = (await api.home()).suggestions
     await api.dismissHome(first!.id)
     expect((await api.home()).suggestions.map((s) => s.id)).not.toContain(first!.id)
+    await expect(api.dismissHome("not a/key")).rejects.toMatchObject({ status: 400 })
+    await expect(api.dismissHome("%E0")).rejects.toMatchObject({ status: 400 })
     await expect(api.dismissHome("blocked_tasks.prj_nowhere")).rejects.toMatchObject({
       status: 404,
     })
@@ -139,6 +155,12 @@ describe("the workspace's scripted reply", () => {
   it("claims no all clear where it has no suggestions to give", () => {
     const reply = replyTo("What needs me today?", null)
     expect(reply.text).toBe("Today shows what is blocked, due and waiting.")
+    expect(reply.blocks.map((b) => b.type === "suggestion" && b.id)).toEqual(["open_today"])
+  })
+
+  it("never claims an all clear when the day's suggestions are all put away", () => {
+    const reply = replyTo("What needs me today?", [])
+    expect(reply.text).toBe("Nothing new to suggest right now.")
     expect(reply.blocks.map((b) => b.type === "suggestion" && b.id)).toEqual(["open_today"])
   })
 
