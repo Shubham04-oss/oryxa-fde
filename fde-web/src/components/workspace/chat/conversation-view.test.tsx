@@ -119,12 +119,16 @@ describe("a turn", () => {
     )
     flags.__fdeMockAssistantHold = "r2"
     await userEvent.click(await screen.findByRole("button", { name: "What is blocked right now?" }))
-    expect(await screen.findByText(/One thing holds Dispatch copilot up/)).toBeVisible()
+    // The answer itself, not the live region, which may read the same sentence.
+    const answer = async () => (await screen.findAllByLabelText("The workspace's answer"))[0]!
+    expect(
+      await within(await answer()).findByText(/One thing holds Dispatch copilot up/),
+    ).toBeVisible()
     await userEvent.type(screen.getByRole("textbox"), "Who could chase it?{Enter}")
     expect(await screen.findByText("Queued. It sends when this answer ends.")).toBeVisible()
     await userEvent.click(screen.getByRole("button", { name: "Stop the answer" }))
     expect(await screen.findByText("You stopped this answer. What it said is kept.")).toBeVisible()
-    expect(screen.getByText(/One thing holds Dispatch copilot up/)).toBeVisible()
+    expect(within(await answer()).getByText(/One thing holds Dispatch copilot up/)).toBeVisible()
     // The queued message goes once the stopped turn has ended.
     await waitFor(() => expect(screen.getAllByLabelText("You said")).toHaveLength(2))
     expect(screen.queryByText("Queued. It sends when this answer ends.")).toBeNull()
