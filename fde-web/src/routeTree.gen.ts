@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppConversationsRouteImport } from './routes/_app/conversations'
 import { Route as AppNewCompanyRouteImport } from './routes/_app/new-company'
 import { Route as AppTodayRouteImport } from './routes/_app/today'
 import { Route as AppCompaniesIndexRouteImport } from './routes/_app/companies/index'
@@ -31,6 +32,11 @@ const SignInRoute = SignInRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppConversationsRoute = AppConversationsRouteImport.update({
+  id: '/conversations',
+  path: '/conversations',
   getParentRoute: () => AppRoute,
 } as any)
 const AppNewCompanyRoute = AppNewCompanyRouteImport.update({
@@ -70,6 +76,7 @@ const AppCompaniesCompanyIdProjectsProjectIdRunsRunIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/sign-in': typeof SignInRoute
+  '/conversations': typeof AppConversationsRoute
   '/new-company': typeof AppNewCompanyRoute
   '/today': typeof AppTodayRoute
   '/companies/': typeof AppCompaniesIndexRoute
@@ -79,6 +86,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
+  '/conversations': typeof AppConversationsRoute
   '/new-company': typeof AppNewCompanyRoute
   '/today': typeof AppTodayRoute
   '/': typeof AppIndexRoute
@@ -91,6 +99,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/_app/conversations': typeof AppConversationsRoute
   '/_app/new-company': typeof AppNewCompanyRoute
   '/_app/today': typeof AppTodayRoute
   '/_app/': typeof AppIndexRoute
@@ -104,6 +113,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/sign-in'
+    | '/conversations'
     | '/new-company'
     | '/today'
     | '/companies/'
@@ -113,6 +123,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/sign-in'
+    | '/conversations'
     | '/new-company'
     | '/today'
     | '/'
@@ -124,6 +135,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/sign-in'
+    | '/_app/conversations'
     | '/_app/new-company'
     | '/_app/today'
     | '/_app/'
@@ -159,6 +171,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/conversations': {
+      id: '/_app/conversations'
+      path: '/conversations'
+      fullPath: '/conversations'
+      preLoaderRoute: typeof AppConversationsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/new-company': {
@@ -207,6 +226,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppConversationsRoute: typeof AppConversationsRoute
   AppNewCompanyRoute: typeof AppNewCompanyRoute
   AppTodayRoute: typeof AppTodayRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -217,6 +237,7 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppConversationsRoute: AppConversationsRoute,
   AppNewCompanyRoute: AppNewCompanyRoute,
   AppTodayRoute: AppTodayRoute,
   AppIndexRoute: AppIndexRoute,

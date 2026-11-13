@@ -113,9 +113,15 @@ export const budget = (now = Date.now()): Budget => ({
   idleMs: READ_IDLE_MS,
 })
 
+/** An event of a turn's stream: the wire's, or one a prototype proposes for it (`chat.ts`). */
+type Streamed = { type: string }
+/** Reads one event, or null when it is unknown or malformed. */
+export type Parse<TEvent extends Streamed> = (input: unknown) => TEvent | null
+
 /** Counts `event` against the reply's caps; false once it would pass one (the Worker keeps to them). */
-function within(given: Budget, event: WireEvent): boolean {
-  if (event.type === "text") return (given.text += [...event.delta].length) <= MAX_REPLY
+function within(given: Budget, event: Streamed): boolean {
+  if (event.type === "text" && "delta" in event && typeof event.delta === "string")
+    return (given.text += [...event.delta].length) <= MAX_REPLY
   if (event.type === "block") return ++given.blocks <= MAX_BLOCKS
   if (event.type === "proposal") return ++given.proposals <= MAX_PROPOSALS
   return true
@@ -144,10 +150,11 @@ async function nextRead(
  * Reads one turn's stream, handing each checked event to `onEvent`. Answers how it ended: done,
  * failed, dropped part way (with the last event it had), cut off for passing a cap, or timed out.
  */
-export async function readStream(
+export async function readStream<TEvent extends Streamed = WireEvent>(
   body: ReadableStream<Uint8Array>,
-  onEvent: (event: WireEvent) => void,
+  onEvent: (event: TEvent) => void,
   given: Budget = budget(),
+  parse: Parse<TEvent> = parseEvent as unknown as Parse<TEvent>,
 ): Promise<{
   ended: "done" | "failed" | "dropped" | "cut" | "timed_out"
   last: number | null
@@ -183,11 +190,12 @@ export async function readStream(
         } catch {
           raw = null
         }
-        const event = parseEvent(raw)
+        const event = parse(raw)
         if (event !== null && !within(given, event)) return stop("cut")
         if (frame.id !== null && Number.isSafeInteger(frame.id)) last = frame.id
         if (event === null) continue
-        if (event.type === "turn") turn = event.turn
+        if (event.type === "turn" && "turn" in event && typeof event.turn === "string")
+          turn = event.turn
         onEvent(event)
       }
       // UTF-8 bytes, not UTF-16 units: text in another script takes up to three bytes a character.
@@ -201,12 +209,13 @@ export async function readStream(
 }
 
 /** Follows a turn's stream from after `last` (or from the start), reconnecting a few times if it drops. */
-export async function followTurn(
+export async function followTurn<TEvent extends Streamed = WireEvent>(
   conversation: string,
   turn: string,
   last: number | null,
-  onEvent: (event: WireEvent) => void,
+  onEvent: (event: TEvent) => void,
   given: Budget = budget(),
+  parse: Parse<TEvent> = parseEvent as unknown as Parse<TEvent>,
 ): Promise<"done" | "failed" | "timed_out"> {
   let from = last
   for (let attempt = 0; attempt < RECONNECTS; attempt++) {
@@ -220,7 +229,7 @@ export async function followTurn(
       continue
     }
     if (response.status !== 200 || !response.body) return "failed"
-    const read = await readStream(response.body, onEvent, given)
+    const read = await readStream(response.body, onEvent, given, parse)
     if (read.ended === "cut") return "failed"
     if (read.ended !== "dropped") return read.ended
     from = read.last ?? from
@@ -229,11 +238,12 @@ export async function followTurn(
 }
 
 /** Says `text`: the turn's events go to `onEvent` as they arrive, and a dropped connection resumes. */
-export async function sendTurn(
+export async function sendTurn<TEvent extends Streamed = WireEvent>(
   conversation: string,
   text: string,
-  onEvent: (event: WireEvent) => void,
+  onEvent: (event: TEvent) => void,
   given: Budget = budget(),
+  parse: Parse<TEvent> = parseEvent as unknown as Parse<TEvent>,
 ): Promise<Ended> {
   let response: Response
   try {
@@ -253,12 +263,12 @@ export async function sendTurn(
     if (code === "assistant_not_configured" || code === "not_found") return { kind: "off" }
     return { kind: "refused", refusal: "unknown" }
   }
-  const read = await readStream(response.body, onEvent, given)
+  const read = await readStream(response.body, onEvent, given, parse)
   // A stream that passed a cap is not followed again: it would only send the same again.
   if (read.ended === "cut") return { kind: "failed" }
   if (read.ended !== "dropped") return { kind: read.ended }
   if (read.turn === null) return { kind: "failed" }
-  return { kind: await followTurn(conversation, read.turn, read.last, onEvent, given) }
+  return { kind: await followTurn(conversation, read.turn, read.last, onEvent, given, parse) }
 }
 
 /** Tells the assistant the person has answered a proposal; the action itself was the API's. */

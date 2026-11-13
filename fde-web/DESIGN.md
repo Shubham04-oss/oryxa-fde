@@ -933,6 +933,66 @@ is saved in one setup call, and **Suggested next** is the API's home (`GET /v1/h
     "Use a point for decimals, such as 1.5, and no commas."; `0x10`, `1e3` and the like are refused,
     never read as something else.
 
+### Round 2: conversation (issue #263, a prototype; every pattern here is a proposal)
+
+A working prototype of the conversation surface at `/conversations`, shown only with the workspace
+flag on and on the dev mock, whose scripted assistant (`src/dev/mock-assistant.ts`) streams the
+wire format of issue #236. No model is called and no existing screen changes. Nothing below is agreed
+until the founder has looked at it and the lead has reviewed it.
+
+- **Layout.** The person's conversations on the left (248px), grouped as Home and then each company,
+  newest first, with **New conversation** as a menu of scopes; the thread in the middle at 720px; and,
+  when a block is opened, that block at full size on the right (400px, 360px below 1100px). When the
+  list and the panel would squeeze the thread, the list gives way. On a phone the thread is alone,
+  the list is a sheet from the left and the panel a sheet from the bottom. Escape closes the panel
+  first, then stops an answer from the composer.
+- **The thread.** What the person said is a quiet bubble on the right; the reply runs across the
+  column as plain text (`white-space: pre-wrap`, never markdown or HTML) with a calm tint caret
+  while it streams. A polite live region reads each read as it starts and the reply in whole
+  sentences. The thread follows new text only while the person is at the bottom; scrolled up, it
+  stays put and **Jump to latest** appears.
+- **The agent's work.** Each tool read is one line in fixed words from its tool (`stepLabel` in
+  `src/lib/workspace/chat.ts`): "Reading Dispatch copilot's tasks..." with a shimmer, then "Read ..."
+  with a tick and its duration, or "Could not read ..." in the attention colour. A line opens to what
+  was asked (a fixed sentence) and what came back (a count, never the records). When the turn ends
+  the lines fold to "Read 3 things · 2.4s". A turn that plans its work shows **Plan for this answer**,
+  a checklist whose items tick only when what each is tied to has finished: a read, the reply, or a
+  proposal the person confirmed ("Waits on you" until then).
+- **Blocks** are compact cards (kind, a one-line summary with numbers, a peek for a plan or a
+  checklist) with **Open**, which shows the block in the panel. A card's **From** chips link to the
+  records the turn read, by the names the API gives, and only to our own routes.
+- **Proposals** are confirm cards: the action in words, its exact arguments as a labelled list, where
+  it applies and as whom, all built from the typed arguments and names read back through the API.
+  The first one waiting has the view's one primary button; the rest are outlined. One is confirmed at
+  a time, and only while it is still waiting. Confirm is never focused for the person and never
+  bound to Enter. States: waiting, confirming, done (with a chip to the record), refused (the API's
+  own reason, then only **Not now**) and put away (one struck-through line). The kinds ADR 0008
+  confirms one at a time carry **Grants access** in the attention colour and say what they grant;
+  this extends `--attention` from "held up" to "needs care", which is the lead's call.
+- **Endings** are one Marker line with fixed words per code: the four notices, a refusal, "You
+  stopped this answer. What it said is kept.", and for a failed or timed-out turn **Try again** (once).
+- **Composer.** It grows to 216px, Enter sends, Shift+Enter breaks a line, and the count shows only
+  from 90% of the limit. During an answer the send button is **Stop**, and Enter queues one message,
+  shown above the box with **Remove**, sent when the answer ends. A new conversation says what it can
+  do in its scope and offers three prompts, which go once the thread has content. The header's scope
+  chip (a lock, or Home) names what the conversation is bound to and says it cannot change.
+- **Colour.** One accent, the tint, as in the new-company progress: the caret, a read in flight, a
+  step being worked and "Waits on you". As text it is 6.03:1 on `--card` and 6.41:1 on `--canvas` in
+  light, 7.19:1 and 6.92:1 in dark; **Grants access** in `--attention` is 4.98:1 light, 10.52:1 dark.
+- **Rating.** A quiet thumbs up or down under each answer, kept in this browser by turn id only;
+  it will go to the API for `oryxa-fde-evals`.
+- **Components.** `src/components/ai/` holds presentational pieces copied in, with their source,
+  commit and licence: shadcn's Message, Bubble and Marker (MIT), and AI Elements' Tool, Task, Plan,
+  Confirmation, Suggestion, PromptInput, Artifact and Shimmer (Apache-2.0), moved from Radix to Base
+  UI. The screen folds each turn into AI SDK shaped parts (`text`, `tool-*`, `data-*`) so their
+  props line up; the wire is unchanged. Not taken: MessageResponse, Streamdown, Reasoning and
+  InlineCitation (they render model output as markdown or show reasoning), the Tool's raw JSON, and
+  shadcn's MessageScroller (it needs the `@shadcn/react` runtime package).
+- **Proposed for the wire** (parsed in `chat.ts`, sent only by the dev mock; the Worker change is
+  tracked separately): a `step` event `{ id, tool, state, count? }` with `tool` from a fixed list and
+  no arguments or output; a `todo` event; a `set_member` action; the conversation list and a new
+  conversation bound to a scope; each finished turn's steps and todo in its record; and a stop route.
+
 ## 4. Data
 
 - `src/lib/api/client.ts` is the only way to the API. Screens use `api` and `queries` from it and

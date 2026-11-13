@@ -65,6 +65,7 @@ function useTitle(companies: Array<CompanySummary> | undefined) {
   if (params.companyId) return company?.name ?? "Company"
   if (pathname === "/today") return "Today"
   if (pathname === "/new-company") return "New company"
+  if (pathname === "/conversations") return "Conversations"
   return pathname === "/" && newWorkspace() ? "Home" : "Companies"
 }
 
