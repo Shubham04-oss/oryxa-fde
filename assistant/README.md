@@ -2,8 +2,11 @@
 
 The workspace assistant (ADR 0008, ADR 0009, issue #236): a Cloudflare Worker with one Durable Object per
 conversation, built on Cloudflare's Agents SDK (`agents`: its `Lifecycle`, the `Streams` capability for resumable
-streams, and the job queue for the idle alarm) with the Vercel AI SDK (`ai`) for the model loop. This slice enables
-only a scripted model (`src/model/fake.ts`): no model provider is reached and no model credential exists.
+streams, and the job queue for the idle alarm) with the Vercel AI SDK (`ai`) for the model loop. `ASSISTANT_MODEL`
+picks the model (`src/model/provider.ts`): `fake`, the scripted model (`src/model/fake.ts`) and the default, or
+`vertex:<model id>`, Gemini on Vertex AI through the AI SDK's Vertex provider in its edge form (issue #260). Vertex
+needs every setting below, well formed, or each turn is refused; it is never swapped for another model. Its requests
+go only to the one Vertex host for the configured location and Google's token endpoint, over https, enforced in code.
 
 ## Who reaches it
 
@@ -61,7 +64,10 @@ real model (ADR 0009 leaves budgets per organisation open).
 
 Not yet: the deploy workflow is a follow-up. It will need the Worker secrets `SERVICE_TOKEN` and `BINDING_KEY`
 (each at least 32 random characters), the API's `vpc_services` binding named `API`, and fde-web's service binding
-`ASSISTANT` with `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY` equal to them.
+`ASSISTANT` with `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY` equal to them. For Gemini on Vertex it also
+sets the var `ASSISTANT_MODEL` to `vertex:<model id>` (for example `vertex:gemini-2.5-flash`), the secrets
+`VERTEX_CLIENT_EMAIL` (a service account's email) and `VERTEX_PRIVATE_KEY` (its PKCS #8 PEM key, escaped newlines
+accepted), and the vars `VERTEX_PROJECT` and `VERTEX_LOCATION` (`global` or one region). Sample data only (ADR 0009).
 
 ## Develop
 

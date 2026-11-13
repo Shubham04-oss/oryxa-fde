@@ -7,7 +7,7 @@ import { Block, Destination } from "./catalogue/blocks.js";
 import type { Block as BlockValue, Destination as DestinationValue } from "./catalogue/blocks.js";
 import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, Proposal, WIRE_VERSION, parseEvent } from "./catalogue/wire.js";
 import type { Notice, Proposal as ProposalValue, WireEvent } from "./catalogue/wire.js";
-import { MAX_STEPS, MAX_TOOL_CALLS, TURN_TIMEOUT_MS } from "./limits.js";
+import { MAX_OUTPUT_TOKENS, MAX_STEPS, MAX_TOOL_CALLS, TURN_TIMEOUT_MS } from "./limits.js";
 import { readTools } from "./tools.js";
 import type { Reader } from "./tools.js";
 
@@ -143,6 +143,7 @@ async function stream(
       isStepCount(MAX_STEPS),
       ({ steps }) => steps.reduce((n, s) => n + s.toolCalls.length, 0) >= MAX_TOOL_CALLS,
     ],
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
     maxRetries: 0,
     abortSignal,
     // The default logs the whole error, which may carry the prompt. Ours logs nothing; the turn fails plainly.

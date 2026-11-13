@@ -13,8 +13,16 @@ export interface Env {
   SERVICE_TOKEN?: string;
   /** The key fde-web signs each conversation binding with (its `ASSISTANT_BINDING_KEY`). Unset or short: refused. */
   BINDING_KEY?: string;
-  /** Which model answers, by name (src/model/provider.ts). Only `fake` is enabled. */
+  /** Which model answers, by name (src/model/provider.ts): `fake`, or `vertex:<model id>` with the four below. */
   ASSISTANT_MODEL?: string;
+  /** Secret: the Vertex service account's client email. */
+  VERTEX_CLIENT_EMAIL?: string;
+  /** Secret: that account's PKCS #8 private key (PEM). Read for one turn's model call; never stored or logged. */
+  VERTEX_PRIVATE_KEY?: string;
+  /** The Google Cloud project Vertex is called in. */
+  VERTEX_PROJECT?: string;
+  /** The Vertex location: `global` or one region. */
+  VERTEX_LOCATION?: string;
 }
 
 type AssistantEnv = Env;
