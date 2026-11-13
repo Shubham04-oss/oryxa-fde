@@ -1063,7 +1063,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
 | `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`, `oryxa-fde-mcp`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, then rolls the API service and then each deployed worker onto it (the tunnel sidecar included in the API's new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
-| `deploy-workers` | `wrangler deploy` for `sandbox/gateway`, `realtime/` and `assistant/` (with dev's API binding), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN`, `WEB_WORKSPACE` |
+| `deploy-workers` | `wrangler deploy` for `sandbox/gateway`, `realtime/` and `assistant/` (with dev's API binding), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN`, `WEB_WORKSPACE`, `ASSISTANT_MODEL` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
 apply (Apply order, step 3):
@@ -1080,6 +1080,7 @@ apply (Apply order, step 3):
   | `API_VPC_SERVICE_ID` | `tofu output -raw api_vpc_service_id` |
   | `WEB_OWN_SIGN_IN` | Optional. `1` builds fde-web with `VITE_FDE_OWN_SIGN_IN=1` (our own sign-in screens, ADR 0007); unset or any other value leaves them off |
   | `WEB_WORKSPACE` | Optional. `1` builds fde-web with `VITE_FDE_WORKSPACE=1` (the conversation-first workspace screens, ADR 0008); unset or any other value leaves them off |
+  | `ASSISTANT_MODEL` | Optional. Which model the assistant Worker uses (ADR 0009): unset or `fake` keeps the scripted model; `vertex:<model id>` selects Gemini on Vertex AI and also needs the Worker secrets `VERTEX_CLIENT_EMAIL`, `VERTEX_PRIVATE_KEY`, `VERTEX_PROJECT` and `VERTEX_LOCATION`, set with `wrangler secret put` and never in this repository. With any of them missing the Worker refuses every turn |
 - **Environment secret** `CLOUDFLARE_API_TOKEN`, on `dev` only, never a repository secret: a token
   for this account and zone only, with Account: Workers Scripts Edit and Containers Edit (the
   gateway's sandbox image), and Zone: Workers Routes Edit. Not the OpenTofu token. Only the

@@ -75,8 +75,17 @@ jobs:
       - name: Add the API binding
         env:
           API_VPC_SERVICE_ID: ${{ vars.API_VPC_SERVICE_ID }}
+          # Which model answers: unset keeps wrangler.jsonc's scripted model. `vertex:<model id>` also needs the
+          # Worker secrets VERTEX_CLIENT_EMAIL, VERTEX_PRIVATE_KEY, VERTEX_PROJECT and VERTEX_LOCATION, set with
+          # `wrangler secret put`; with any of them missing the Worker refuses every turn (it never falls back).
+          ASSISTANT_MODEL: ${{ vars.ASSISTANT_MODEL }}
         run: |
           : "${API_VPC_SERVICE_ID:?set API_VPC_SERVICE_ID on the dev environment}"
+          case "${ASSISTANT_MODEL-}" in
+            "" | fake) ;;
+            vertex:*) [[ "$ASSISTANT_MODEL" =~ ^vertex:[a-z0-9][a-z0-9.-]{0,62}$ ]] || { echo "ASSISTANT_MODEL is not a model name" >&2; exit 1; } ;;
+            *) echo "ASSISTANT_MODEL must be unset, fake or vertex:<model id>" >&2; exit 1 ;;
+          esac
           node --input-type=module -e '
             import { readFileSync, writeFileSync } from "node:fs";
             import ts from "typescript";
@@ -87,6 +96,7 @@ jobs:
             config.workers_dev = false;
             config.preview_urls = false;
             config.vpc_services = [{ binding: "API", service_id: process.env.API_VPC_SERVICE_ID }];
+            if (process.env.ASSISTANT_MODEL) config.vars = { ...config.vars, ASSISTANT_MODEL: process.env.ASSISTANT_MODEL };
             writeFileSync("wrangler.deploy.json", JSON.stringify(config, null, 2) + "\n");
           '
       # Only this step sees the token. On the first deploy Cloudflare creates the Conversation and PersonTurns
