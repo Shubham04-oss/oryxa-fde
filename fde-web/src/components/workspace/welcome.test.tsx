@@ -31,16 +31,67 @@ describe("the welcome screen", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   })
 
-  it("suggests next steps; one can be put away and brought back", async () => {
+  it("suggests the API's next steps, worded from the web's templates", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    expect(wire.reads).toContain("/home")
+    expect(wire.reads).not.toContain("/today")
+  })
+
+  it("puts one away at once, and tells the API", async () => {
     renderWithRouter(<Welcome now={MORNING} />)
     const before = await suggested()
     const name = before[0]!.getAttribute("aria-label")!
+    let release = () => {}
+    wire.hold = new Promise((r) => (release = r))
     await userEvent.click(before[0]!)
+    // Gone before the API answers.
     expect(screen.queryByRole("button", { name })).toBeNull()
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(/Put away/)
-    await userEvent.click(screen.getByRole("button", { name: "Undo" }))
-    expect(screen.getByRole("button", { name })).toBeInTheDocument()
-    expect(wire.sent).toEqual([])
+    expect(wire.sent).toEqual([
+      {
+        method: "POST",
+        path: expect.stringMatching(/^\/home\/suggestions\/[^/]+\/dismiss$/),
+        body: null,
+      },
+    ])
+    release()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name })).toBeNull()
+  })
+
+  it("brings a suggestion back when the API refuses to put it away", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    const before = await suggested()
+    const name = before[0]!.getAttribute("aria-label")!
+    wire.refuse = new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })
+    await userEvent.click(before[0]!)
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name })).toBeInTheDocument()
+  })
+
+  it("says so calmly, with Try again, when the day cannot be read", async () => {
+    wire.refuseReads = {
+      ending: "/home",
+      // A refusal is not retried, so the error shows at once.
+      response: new Response(JSON.stringify({ error: "forbidden" }), { status: 403 }),
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(
+      await screen.findByText("We couldn't read your day, so there is nothing to suggest yet."),
+    ).toBeInTheDocument()
+    wire.refuseReads = null
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }))
+    expect(await suggested()).not.toHaveLength(0)
+  })
+
+  it("says nothing needs the FDE when the API suggests nothing, and claims no more", async () => {
+    wire.refuseReads = {
+      ending: "/home",
+      response: new Response(JSON.stringify({ suggestions: [] }), { status: 200 }),
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(await screen.findByText(/^Nothing needs you right now\./)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^Not now:/ })).toBeNull()
   })
 
   it("approves a suggestion by opening where it is done, and writes nothing", async () => {
@@ -72,23 +123,6 @@ describe("the welcome screen", () => {
     await userEvent.type(box, "one{Shift>}{Enter}{/Shift}two")
     expect(box).toHaveValue("one\ntwo")
     expect(screen.queryByRole("log")).toBeNull()
-  })
-
-  it("leaves suggestions out against a real API, and keeps the box and the companies", async () => {
-    renderWithRouter(<Welcome now={MORNING} suggest={false} />)
-    expect(await screen.findByRole("link", { name: /^See all/ })).toBeInTheDocument()
-    expect(
-      screen.getByRole("textbox", { name: "What do you want to work on?" }),
-    ).toBeInTheDocument()
-    expect(screen.queryByRole("heading", { name: "Suggested next" })).toBeNull()
-    expect(screen.queryByRole("button", { name: /^Not now:/ })).toBeNull()
-    // The day is not read for suggestions it will not show.
-    expect(wire.reads).not.toContain("/today")
-    await userEvent.click(screen.getByRole("button", { name: "What needs me today?" }))
-    const log = screen.getByRole("log", { name: "Conversation" })
-    expect(
-      await within(log).findByText("Today shows what is blocked, due and waiting."),
-    ).toBeInTheDocument()
   })
 
   it("offers the first company to a workspace with none", async () => {

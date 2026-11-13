@@ -1,95 +1,114 @@
-import { parseBlocks } from "./blocks"
+import { Destination, parseBlock } from "./blocks"
 import type { Block, SuggestionBlock } from "./blocks"
-import type { CompanySummary, TodayItem } from "@/lib/api/schemas"
-import { groupToday } from "@/lib/today"
+import type { HomeSuggestionOut } from "@/lib/api/schemas"
 
-// What the welcome screen says first (issue #209): a few next steps, as suggestion blocks. Like the
-// home conversation in ADR 0008, they are fixed templates over what the companies list shows (names,
-// counts, days waiting) and never quote a record's own text. A model fills the same blocks later.
+// What the welcome screen says first: the API's home suggestions (`GET /v1/home`, issue #256), as
+// suggestion blocks. The API sends a kind, counts, names and a route; the words for each kind are
+// fixed here (ADR 0008), so nothing from the answer is ever shown but a name, as text.
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
-const where = (item: TodayItem) => `${item.company.name} · ${item.project.name}`
-const project = (item: TodayItem) => ({
-  screen: "project" as const,
-  company: item.company.id,
-  project: item.project.id,
-})
-
-/** The project with the most blocked items, and how many. */
-function mostBlocked(items: Array<TodayItem>): unknown {
-  const counts = new Map<string, { item: TodayItem; n: number }>()
-  for (const item of items) {
-    const seen = counts.get(item.project.id)
-    counts.set(item.project.id, { item: seen?.item ?? item, n: (seen?.n ?? 0) + 1 })
-  }
-  const top = [...counts.values()].sort((x, y) => y.n - x.n)[0]!
-  return {
-    type: "suggestion",
-    id: `blocked_${top.item.project.id}`,
-    context: where(top.item),
-    title: `${plural(top.n, "thing")} blocked`,
-    detail: "Unblock it, or record what it waits on.",
-    approve: { label: "Open the project", to: project(top.item) },
-  }
-}
-
-/** The longest wait on the customer. */
-function longestWait(item: TodayItem): unknown {
-  const days = item.kind === "access_request" ? item.access.days_waiting : null
-  return {
-    type: "suggestion",
-    id: `waiting_${item.kind === "task" ? item.task.id : item.access.id}`,
-    context: where(item),
-    title:
-      item.kind === "access_request"
-        ? days && days > 0
-          ? `Access has waited ${plural(days, "day")}`
-          : "Access is waiting on the customer"
-        : "Work is waiting on the customer",
-    detail: "A nudge to the person who can answer may move it.",
-    approve: { label: "Open the project", to: project(item) },
-  }
-}
-
-function due(items: Array<TodayItem>): unknown {
-  const companies = new Set(items.map((i) => i.company.id)).size
-  return {
-    type: "suggestion",
-    id: "due_today",
-    context:
-      companies === 1
-        ? items[0]!.company.name
-        : `Across ${plural(companies, "company", "companies")}`,
-    title: `${plural(items.length, "thing")} due today`,
-    approve: { label: "Open Today", to: { screen: "today" } },
-  }
-}
+/** A suggestion's id as the API makes it (`<kind>` or `<kind>.<project id>`), safe to send back. */
+const SUGGESTION_ID = /^[a-z_]{1,32}(\.[A-Za-z0-9_-]{1,128})?$/
+/** The block's `context` limit; two long names are shortened rather than lose the suggestion. */
+const CONTEXT_MAX = 160
 
 /**
- * Up to three next steps: where most is blocked, the longest wait on the customer, and what is
- * due, in that order. With fewer than three, companies with no project yet.
+ * The route a suggestion opens, only if it is one of our own screens: Today, a company or one of
+ * its projects. Anything else (another host, a query, an id that breaks the rule) is null.
  */
-export function suggestionsFrom(
-  items: Array<TodayItem>,
-  companies: Array<CompanySummary>,
-  day: string,
-): Array<SuggestionBlock> {
-  const groups = groupToday(items, day)
-  const raw: Array<unknown> = []
-  if (groups.blocked.length > 0) raw.push(mostBlocked(groups.blocked))
-  if (groups.waiting[0]) raw.push(longestWait(groups.waiting[0]))
-  if (groups.due.length > 0) raw.push(due(groups.due))
-  if (raw.length < 3)
-    for (const company of companies.filter((c) => c.projects.length === 0).slice(0, 3 - raw.length))
-      raw.push({
-        type: "suggestion",
-        id: `first_project_${company.id}`,
-        context: company.name,
-        title: "Start the first project",
-        detail: "Every engagement needs one before work can be planned.",
-        approve: { label: "Open the company", to: { screen: "company", company: company.id } },
-      })
-  return parseBlocks(raw).filter((b): b is SuggestionBlock => b.type === "suggestion")
+export function destinationOf(route: string): Destination | null {
+  const m = /^\/(?:(today)|companies\/([^/]+)(?:\/projects\/([^/]+))?)$/.exec(route)
+  if (!m) return null
+  const [, today, company, project] = m
+  const to = today
+    ? { screen: "today" }
+    : project
+      ? { screen: "project", company, project }
+      : { screen: "company", company }
+  const parsed = Destination.safeParse(to)
+  return parsed.success ? parsed.data : null
+}
+
+type Wording = Pick<SuggestionBlock, "context" | "title" | "detail"> & { label: string }
+
+/** The fixed words for each kind; null where the answer lacks what the kind needs. */
+function wording(s: HomeSuggestionOut): Wording | null {
+  const where = s.company && s.project ? `${s.company.name} · ${s.project.name}` : null
+  const n = s.count
+  switch (s.kind) {
+    case "due_today":
+      return {
+        context: "Across your projects",
+        title: `${plural(n, "task")} due today`,
+        detail: "Finish what you can, or move the date.",
+        label: "Open Today",
+      }
+    case "access_waiting": {
+      if (!where) return null
+      const days = s.days ?? 0
+      return {
+        context: where,
+        title:
+          n > 1
+            ? `${n} access requests waiting on the customer`
+            : days > 0
+              ? `Access has waited ${plural(days, "day")}`
+              : "Access is waiting on the customer",
+        detail:
+          n > 1 && days > 0
+            ? `The longest has waited ${plural(days, "day")}. A nudge may move it.`
+            : "A nudge to the person who can answer may move it.",
+        label: "Open the project",
+      }
+    }
+    case "blocked_tasks":
+      if (!where) return null
+      return {
+        context: where,
+        title: `${plural(n, "task")} blocked`,
+        detail: `Unblock ${n === 1 ? "it" : "them"}, or record what ${n === 1 ? "it waits" : "they wait"} on.`,
+        label: "Open the project",
+      }
+    case "no_next_step":
+      if (!where) return null
+      return {
+        context: where,
+        title: "No next step",
+        detail: "Add the next task, or close the engagement.",
+        label: "Open the project",
+      }
+    default:
+      return null
+  }
+}
+
+const shorten = (v: string, max: number) => {
+  const chars = [...v]
+  return chars.length <= max ? v : `${chars.slice(0, max - 1).join("")}…`
+}
+
+/** A home suggestion as the welcome screen shows it: the API's id (to dismiss it) and its block. */
+export type HomeSuggestion = { id: string; block: SuggestionBlock }
+
+/**
+ * The API's suggestions as blocks, in its order. One is skipped when its kind is unknown, its id is
+ * not one the API makes, its route is not one of our own screens, or the block does not validate.
+ */
+export function suggestionsFromHome(suggestions: Array<HomeSuggestionOut>): Array<HomeSuggestion> {
+  return suggestions.flatMap((s, i) => {
+    const to = destinationOf(s.route)
+    const words = wording(s)
+    if (!to || !words || !SUGGESTION_ID.test(s.id)) return []
+    const { label, ...rest } = words
+    const block = parseBlock({
+      type: "suggestion",
+      id: `home_${i}`,
+      ...rest,
+      context: rest.context && shorten(rest.context, CONTEXT_MAX),
+      approve: { label, to },
+    })
+    return block?.type === "suggestion" ? [{ id: s.id, block }] : []
+  })
 }
 
 export type Reply = { text: string; blocks: Array<Block> }

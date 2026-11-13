@@ -14,15 +14,6 @@ export function workspaceOn(env: Env, global: Record<string, unknown> = globalTh
   return mockApiOn(env) && global.__fdeMockWorkspace === true
 }
 
-/**
- * Whether the welcome screen shows its suggested next steps. Only on the dev mock: they are worked
- * out here from fixed templates until the API serves suggestions (ADR 0008), so a build against a
- * real API never shows them as if the workspace had made them. The flag does not change this.
- */
-export function suggestionsOn(env: Pick<Env, "DEV" | "VITE_FDE_MOCK_API">) {
-  return mockApiOn(env)
-}
-
 /** This build's answer, read when a screen renders. */
 export function newWorkspace() {
   // `import.meta.env.DEV` is the literal `false` in a production build, so only the build flag is left.

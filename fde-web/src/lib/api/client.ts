@@ -15,6 +15,7 @@ import {
   CompanySummaryOut,
   DecisionOut,
   DocumentOut,
+  HomeSuggestionOut,
   Me,
   MainContactOut,
   MeetingNoteOut,
@@ -491,6 +492,31 @@ function connect(transport: Transport) {
     scope: (scope: ProjectScope) => get.scope(scope),
 
     today: () => read(TodayOut, client.GET("/v1/today")),
+
+    /**
+     * The person's home suggestions. Each is checked on its own, so one of a kind this web does not
+     * know (or malformed) is left out and the rest still show.
+     */
+    home: async () => {
+      const { suggestions } = await read(
+        z.object({ suggestions: z.array(z.unknown()) }),
+        client.GET("/v1/home"),
+      )
+      return {
+        suggestions: suggestions.flatMap((s) => {
+          const parsed = HomeSuggestionOut.safeParse(s)
+          return parsed.success ? [parsed.data] : []
+        }),
+      }
+    },
+
+    /** Hides a home suggestion from this person until the facts behind it change. */
+    async dismissHome(suggestion: string) {
+      const { error, response } = await client.POST("/v1/home/suggestions/{suggestion}/dismiss", {
+        params: { path: { suggestion } },
+      })
+      if (!response.ok) throw refusal(response.status, error)
+    },
 
     /** Creates a company; the caller becomes its lead. */
     createCompany: (body: CompanyBody) => read(CompanyOut, client.POST("/v1/companies", { body })),
@@ -1099,6 +1125,8 @@ export function apiOver(transport: () => Promise<Transport>): Api {
     project: async (scope) => (await use()).project(scope),
     scope: async (scope) => (await use()).scope(scope),
     today: async () => (await use()).today(),
+    home: async () => (await use()).home(),
+    dismissHome: async (suggestion) => (await use()).dismissHome(suggestion),
     createCompany: async (body) => (await use()).createCompany(body),
     setUpCompany: async (request, signal) => (await use()).setUpCompany(request, signal),
     updateCompany: async (id, patch) => (await use()).updateCompany(id, patch),
@@ -1230,6 +1258,7 @@ export const queries = {
       ...read,
     }),
   today: () => queryOptions({ queryKey: ["today"], queryFn: api.today, ...read }),
+  home: () => queryOptions({ queryKey: ["home"], queryFn: api.home, ...read }),
   /** The people at a project's company, read when a prompt needs them. */
   projectStakeholders: (scope: ProjectScope) =>
     queryOptions({

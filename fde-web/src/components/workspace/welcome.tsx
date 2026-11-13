@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { Button } from "../ui/button"
 import { Icon } from "../ui/icon"
@@ -8,21 +8,18 @@ import { BlockView, Suggestion } from "./blocks"
 import { ProposalCard } from "./proposal"
 import { useConversation } from "./use-conversation"
 import type { ThreadTurn } from "./use-conversation"
-import { queries } from "@/lib/api/client"
-import type { CompanySummary } from "@/lib/api/schemas"
+import { api, queries } from "@/lib/api/client"
+import type { CompanySummary, HomeOut } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
-import { localDay } from "@/lib/time"
-import { suggestionsOn } from "@/lib/workspace/flag"
-import type { SuggestionBlock } from "@/lib/workspace/blocks"
-import { NEW_COMPANY, replyTo, suggestionsFrom } from "@/lib/workspace/welcome"
+import { NEW_COMPANY, replyTo, suggestionsFromHome } from "@/lib/workspace/welcome"
+import type { HomeSuggestion } from "@/lib/workspace/welcome"
 import { MAX_SAID } from "@/lib/workspace/wire"
 import { cn } from "@/lib/utils"
 
 // The welcome screen (issue #209, DESIGN.md "The workspace"): a greeting, the conversation box as
 // the one main thing, what the workspace suggests next, and the companies, compact. The box talks
 // to the assistant where it is configured (issue #236), and answers from a script where it is not.
-// ponytail: suggested next is worked out here from fixed templates, so it shows only on the dev mock
-// (`suggestionsOn`) until the API serves suggestions; against a real API the section is left out.
+// Suggested next is the API's home (`GET /v1/home`, issue #256), worded here from fixed templates.
 
 export function greeting(now: Date) {
   const hour = now.getHours()
@@ -38,31 +35,20 @@ export function greeting(now: Date) {
 const dateLine = (now: Date) =>
   new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long" }).format(now)
 
-export function Welcome({
-  now = new Date(),
-  suggest = suggestionsOn(import.meta.env),
-}: {
-  now?: Date
-  /** Whether to show suggested next steps: only where they are not sample (`suggestionsOn`). */
-  suggest?: boolean
-}) {
+export function Welcome({ now = new Date() }: { now?: Date }) {
   const me = useQuery(queries.me())
   const companies = useQuery(queries.companies())
-  const today = useQuery({ ...queries.today(), enabled: suggest })
-  const [dismissed, setDismissed] = useState<Array<SuggestionBlock>>([])
+  const home = useQuery(queries.home())
+  const dismiss = useDismiss()
   const first = me.data?.user.name.trim().split(/\s+/)[0]
 
-  const all =
-    companies.isSuccess && companies.data.companies.length === 0
-      ? [NEW_COMPANY]
-      : today.isSuccess && companies.isSuccess
-        ? suggestionsFrom(today.data.items, companies.data.companies, localDay(now))
-        : []
-  const shown = all.filter((s) => !dismissed.some((d) => d.id === s.id))
-  const lastDismissed = dismissed.at(-1)
-  // Without suggestions the scripted reply knows nothing of the day, so it never claims an all clear.
+  const noCompany = companies.isSuccess && companies.data.companies.length === 0
+  const shown: Array<HomeSuggestion> = home.isSuccess
+    ? suggestionsFromHome(home.data.suggestions)
+    : []
+  // Until the API has answered, the scripted reply knows nothing of the day, so it never claims an all clear.
   const { turns, thinking, say, settle } = useConversation((text) =>
-    replyTo(text, suggest ? shown : null),
+    replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null),
   )
 
   return (
@@ -102,58 +88,75 @@ export function Welcome({
         </div>
       </section>
 
-      {suggest && (
-        <section aria-labelledby="suggested-title" className="grid">
-          <SectionHead id="suggested-title" title="Suggested next" />
-          {companies.isPending || today.isPending ? (
-            <Skeleton rows={2} label="Reading your day…" />
-          ) : companies.isError || today.isError ? (
-            <Problem
-              text="We couldn't read your day, so there is nothing to suggest yet."
-              onRetry={() => {
-                void companies.refetch()
-                void today.refetch()
-              }}
-            />
-          ) : shown.length === 0 ? (
-            <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
-              Nothing needs you right now. I will suggest the next step when something changes.
-            </div>
-          ) : (
-            <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
-              {shown.map((block, i) => (
-                <li key={block.id} className="motion-safe:animate-rise">
-                  <Suggestion
-                    block={block}
-                    // Once there is a reply, its own first action is the primary one instead.
-                    lead={i === 0 && turns.length === 0}
-                    onDismiss={() => setDismissed((d) => [...d, block])}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
-          {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
-          <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
-            {lastDismissed && (
-              <>
-                Put away: {lastDismissed.title}.{" "}
-                <button
-                  type="button"
-                  onClick={() => setDismissed((d) => d.slice(0, -1))}
-                  className="rounded-sm font-medium text-soft underline decoration-strong underline-offset-4 hover:text-foreground"
-                >
-                  Undo
-                </button>
-              </>
-            )}
-          </p>
-        </section>
-      )}
+      <section aria-labelledby="suggested-title" className="grid">
+        <SectionHead id="suggested-title" title="Suggested next" />
+        {noCompany ? (
+          <ul className="overflow-hidden rounded-card border bg-canvas">
+            <li className="motion-safe:animate-rise">
+              <Suggestion block={NEW_COMPANY} lead={turns.length === 0} />
+            </li>
+          </ul>
+        ) : home.isPending ? (
+          <Skeleton rows={2} label="Reading your day…" />
+        ) : home.isError ? (
+          <Problem
+            text="We couldn't read your day, so there is nothing to suggest yet."
+            onRetry={() => void home.refetch()}
+          />
+        ) : shown.length === 0 ? (
+          <div className="rounded-card border border-dashed px-5 py-6 text-meta text-muted-foreground">
+            Nothing needs you right now. I will suggest the next step when something changes.
+          </div>
+        ) : (
+          <ul className="divide-y overflow-hidden rounded-card border bg-canvas">
+            {shown.map(({ id, block }, i) => (
+              <li key={id} className="motion-safe:animate-rise">
+                <Suggestion
+                  block={block}
+                  // Once there is a reply, its own first action is the primary one instead.
+                  lead={i === 0 && turns.length === 0}
+                  onDismiss={() => dismiss.mutate({ id, title: block.title })}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Takes no room until something is put away, so the gap to Companies stays the rhythm's. */}
+        <p role="status" className="mt-3 text-meta text-muted-foreground empty:mt-0">
+          {dismiss.isError
+            ? `We couldn't put away “${dismiss.variables.title}”, so it is back. Try again in a moment.`
+            : dismiss.isSuccess
+              ? `Put away: ${dismiss.variables.title}. It comes back if something changes.`
+              : ""}
+        </p>
+      </section>
 
       <Companies />
     </div>
   )
+}
+
+/**
+ * Puts a suggestion away for this person until its facts change. It leaves the list at once and comes
+ * back if the API refuses: a dismissal changes no record, only what this person's home shows.
+ */
+function useDismiss() {
+  const client = useQueryClient()
+  const key = queries.home().queryKey
+  return useMutation({
+    mutationFn: ({ id }: { id: string; title: string }) => api.dismissHome(id),
+    onMutate: async ({ id }) => {
+      await client.cancelQueries({ queryKey: key })
+      const before = client.getQueryData<HomeOut>(key)
+      client.setQueryData<HomeOut>(
+        key,
+        (home) => home && { suggestions: home.suggestions.filter((s) => s.id !== id) },
+      )
+      return { before }
+    },
+    onError: (_error, _vars, context) => client.setQueryData(key, context?.before),
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
+  })
 }
 
 const CHIP =

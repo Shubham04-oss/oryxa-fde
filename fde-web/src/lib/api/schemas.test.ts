@@ -43,6 +43,7 @@ describe("schemas", () => {
       Flat<Spec["CompanySummaryOut"]>
     >()
     expectTypeOf<z.input<typeof S.TodayOut>>().toEqualTypeOf<Spec["TodayOut"]>()
+    expectTypeOf<z.input<typeof S.HomeOut>>().toEqualTypeOf<Spec["HomeOut"]>()
   })
 
   it("refuse ids that break the platform's id rule", () => {
