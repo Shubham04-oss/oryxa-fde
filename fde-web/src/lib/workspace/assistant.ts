@@ -17,8 +17,10 @@ const RECONNECTS = 3
 export const TURN_DEADLINE_MS = 120_000
 /** How long one read may hear nothing at all. The Worker sends a heartbeat every 15 seconds. */
 export const READ_IDLE_MS = 45_000
-/** The most of a frame held while it waits for its end: well over the Worker's largest event (64 KiB). */
+/** The most bytes of a frame held while it waits for its end: well over the Worker's largest event (64 KiB). */
 export const MAX_PENDING = 256 * 1024
+
+const encoder = new TextEncoder()
 
 const path = (conversation: string, rest = "") => `/assistant/conversations/${conversation}${rest}`
 
@@ -188,7 +190,8 @@ export async function readStream(
         if (event.type === "turn") turn = event.turn
         onEvent(event)
       }
-      if (buffer.length > MAX_PENDING) return stop("cut")
+      // UTF-8 bytes, not UTF-16 units: text in another script takes up to three bytes a character.
+      if (encoder.encode(buffer).byteLength > MAX_PENDING) return stop("cut")
     }
   } catch {
     return { ended: "dropped", last, turn }

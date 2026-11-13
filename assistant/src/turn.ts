@@ -121,6 +121,8 @@ export async function runTurn(input: TurnInput): Promise<void> {
     await stream(input, deadline.signal, emit, notice);
   } finally {
     clearTimeout(timer);
+    // However the turn ended, a read still in flight stops here and lets the person's session go.
+    deadline.abort();
   }
 }
 

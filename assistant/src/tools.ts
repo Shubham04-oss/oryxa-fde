@@ -22,22 +22,25 @@ const MAX_ENTRIES = 50;
 const API_ORIGIN = "http://api.internal";
 const API_TIMEOUT_MS = 10_000;
 
-/** Reads one allowed route as the person; null when it cannot be read, for whatever reason. */
-export type Reader = (path: ReadPath) => Promise<unknown>;
+/** Reads one allowed route as the person until `stop` fires; null when it cannot be read, for whatever reason. */
+export type Reader = (path: ReadPath, stop?: AbortSignal) => Promise<unknown>;
 
 /**
  * A reader that calls the API with the person's session. The session lives in this closure for the turn and is
  * sent nowhere else: not to the model, not to storage, not to a log.
  */
 export function apiReader(api: Fetcher | undefined, session: string): Reader {
-  return async (path) => {
+  return async (path, stop) => {
     if (api === undefined || !(READS as ReadonlyArray<string>).includes(path)) return null;
     try {
       const response = await api.fetch(
         new Request(`${API_ORIGIN}${path}`, {
           headers: { accept: "application/json", cookie: session },
           redirect: "manual",
-          signal: AbortSignal.timeout(API_TIMEOUT_MS),
+          // Ends with the turn too, so a read in flight does not hold the session past it.
+          signal: stop
+            ? AbortSignal.any([stop, AbortSignal.timeout(API_TIMEOUT_MS)])
+            : AbortSignal.timeout(API_TIMEOUT_MS),
         }),
       );
       if (response.status !== 200) {
@@ -191,13 +194,14 @@ export function readTools(binding: Binding, read: Reader, onLimit: () => void) {
     list_companies: tool({
       description: "List the companies this person works with, with their projects' names and stages.",
       inputSchema: z.strictObject({}),
-      execute: () => within(async () => companiesAnswer(binding, await read("/v1/companies"))),
+      execute: (_, { abortSignal }) =>
+        within(async () => companiesAnswer(binding, await read("/v1/companies", abortSignal))),
       toModelOutput: ({ output }) => asData("the companies list", output),
     }),
     read_today: tool({
       description: "Read what needs this person today: open work by kind, state, company and project.",
       inputSchema: z.strictObject({}),
-      execute: () => within(async () => todayAnswer(binding, await read("/v1/today"))),
+      execute: (_, { abortSignal }) => within(async () => todayAnswer(binding, await read("/v1/today", abortSignal))),
       toModelOutput: ({ output }) => asData("today's work", output),
     }),
   };
