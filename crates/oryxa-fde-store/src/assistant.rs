@@ -1,0 +1,417 @@
+//! Assistant conversations (#237, ADR 0008 and 0009): the record behind the Durable Object's working
+//! copy. A conversation belongs to one person and one scope, fixed when it is made: one company (and
+//! maybe one project in it) or that person's home. Its turns are read and written only in a
+//! transaction limited to that scope, and only for the person who holds it. Their content stays in
+//! Postgres: it never reaches a log, an event or SpiceDB, and `Debug` shows none of it.
+
+use std::fmt;
+
+use oryxa_core::{TenantId, UserId};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
+use serde_json::Value;
+use sqlx::postgres::PgRow;
+use sqlx::{Postgres, Row, Transaction};
+use time::OffsetDateTime;
+
+use crate::{ConversationId, Store, StoreError, id};
+
+/// The most turns one conversation holds (the Worker's `MAX_TURNS`).
+pub const MAX_TURNS: u32 = 50;
+/// The longest message a person may send (`MAX_SAID`).
+pub const MAX_SAID_CHARS: usize = 2000;
+/// The most text one reply holds (`MAX_REPLY`).
+pub const MAX_REPLY_CHARS: usize = 8000;
+
+/// Where a conversation is bound, for good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationScope {
+    /// The person's home: list-level facts only (ADR 0008).
+    Home(TenantId),
+    Company(CompanyScope),
+    Project(ProjectScope),
+}
+
+impl ConversationScope {
+    pub fn tenant(&self) -> &TenantId {
+        match self {
+            ConversationScope::Home(t) => t,
+            ConversationScope::Company(c) => &c.tenant,
+            ConversationScope::Project(p) => &p.company.tenant,
+        }
+    }
+
+    pub fn company(&self) -> Option<&CompanyScope> {
+        match self {
+            ConversationScope::Home(_) => None,
+            ConversationScope::Company(c) => Some(c),
+            ConversationScope::Project(p) => Some(&p.company),
+        }
+    }
+
+    pub fn project(&self) -> Option<&ProjectId> {
+        match self {
+            ConversationScope::Project(p) => Some(&p.project),
+            _ => None,
+        }
+    }
+}
+
+/// A conversation, without its turns' content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    pub id: ConversationId,
+    pub user: UserId,
+    pub scope: ConversationScope,
+    pub created_at: OffsetDateTime,
+    pub last_active_at: OffsetDateTime,
+}
+
+/// A turn's id as the Worker names it: `t_` and 1 to 64 of `[A-Za-z0-9_-]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnKey(String);
+
+impl TurnKey {
+    pub fn new(v: &str) -> Option<Self> {
+        let rest = v.strip_prefix("t_")?;
+        let ok = (1..=64).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        ok.then(|| Self(v.to_owned()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What a person said in a turn: 1 to [`MAX_SAID_CHARS`] characters, trimmed, no control characters
+/// but tab and newline. Customer text, so `Debug` shows its length only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Said(String);
+
+impl Said {
+    pub fn new(v: &str) -> Option<Self> {
+        let v = v.trim();
+        let ok = (1..=MAX_SAID_CHARS).contains(&v.chars().count()) && plain(v);
+        ok.then(|| Self(v.to_owned()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Said {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Said({} chars)", self.0.chars().count())
+    }
+}
+
+/// No control characters but tab and newline.
+pub(crate) fn plain(v: &str) -> bool {
+    !v.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    Done,
+    Failed,
+}
+
+impl TurnState {
+    fn parse(v: &str) -> Result<Self, StoreError> {
+        match v {
+            "done" => Ok(TurnState::Done),
+            "failed" => Ok(TurnState::Failed),
+            _ => Err(StoreError::Corrupt("turn state")),
+        }
+    }
+}
+
+/// A stored turn.
+#[derive(Clone, PartialEq)]
+pub struct Turn {
+    pub n: u32,
+    pub id: TurnKey,
+    pub said: Said,
+    pub reply: String,
+    pub blocks: Value,
+    pub proposals: Value,
+    pub notice: Option<String>,
+    pub state: TurnState,
+    pub created_at: OffsetDateTime,
+}
+
+impl fmt::Debug for Turn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Turn(n={}, id={})", self.n, self.id.as_str())
+    }
+}
+
+const CONVERSATION: &str = "conversation_id, user_id, company_id, project_id, created_at, last_active_at";
+const TURN: &str = "n, turn_id, said, reply, blocks, proposals, notice, state, created_at";
+
+fn conversation(tenant: &TenantId, r: PgRow) -> Result<Conversation, StoreError> {
+    let company: Option<String> = r.try_get("company_id")?;
+    let project: Option<String> = r.try_get("project_id")?;
+    let scope = match (company, project) {
+        (None, None) => ConversationScope::Home(tenant.clone()),
+        (Some(c), None) => {
+            ConversationScope::Company(CompanyScope::new(tenant.clone(), id("company id", CompanyId::new, c)?))
+        }
+        (Some(c), Some(p)) => ConversationScope::Project(
+            CompanyScope::new(tenant.clone(), id("company id", CompanyId::new, c)?).project(id(
+                "project id",
+                ProjectId::new,
+                p,
+            )?),
+        ),
+        (None, Some(_)) => return Err(StoreError::Corrupt("conversation scope")),
+    };
+    Ok(Conversation {
+        id: id("conversation id", ConversationId::new, r.try_get("conversation_id")?)?,
+        user: id("user id", UserId::new, r.try_get("user_id")?)?,
+        scope,
+        created_at: r.try_get("created_at")?,
+        last_active_at: r.try_get("last_active_at")?,
+    })
+}
+
+fn turn(r: PgRow) -> Result<Turn, StoreError> {
+    let n: i32 = r.try_get("n")?;
+    let id_raw: String = r.try_get("turn_id")?;
+    let said: String = r.try_get("said")?;
+    Ok(Turn {
+        n: u32::try_from(n).map_err(|_| StoreError::Corrupt("turn"))?,
+        id: TurnKey::new(&id_raw).ok_or(StoreError::Corrupt("turn id"))?,
+        said: Said::new(&said).ok_or(StoreError::Corrupt("said"))?,
+        reply: r.try_get("reply")?,
+        blocks: r.try_get("blocks")?,
+        proposals: r.try_get("proposals")?,
+        notice: r.try_get("notice")?,
+        state: TurnState::parse(&r.try_get::<String, _>("state")?)?,
+        created_at: r.try_get("created_at")?,
+    })
+}
+
+/// A transaction for one conversation scope: row-level security limits it to that company (or to the
+/// tenant's home rows), and every query filters by tenant, company and the person.
+pub struct AssistantTx {
+    tx: Transaction<'static, Postgres>,
+    scope: ConversationScope,
+}
+
+impl Store {
+    /// The scope `user`'s conversation `id` is bound to, read from its content-free record; `None`
+    /// when there is no such conversation or it is someone else's.
+    pub async fn conversation_scope(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        id: &ConversationId,
+    ) -> Result<Option<ConversationScope>, StoreError> {
+        let mut tx = self.scoped(tenant, &[]).await?;
+        let row = sqlx::query(&format!(
+            "select {CONVERSATION} from assistant_conversations
+             where tenant_id = $1 and conversation_id = $2 and user_id = $3"
+        ))
+        .bind(tenant.as_str())
+        .bind(id.as_str())
+        .bind(user.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.map(|r| conversation(tenant, r).map(|c| c.scope)).transpose()
+    }
+
+    /// `user`'s conversations, most recently active first: their home ones and those of `companies`
+    /// (the companies they may still work on), at most `limit`.
+    pub async fn conversations(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        companies: &[CompanyScope],
+        limit: u32,
+    ) -> Result<Vec<Conversation>, StoreError> {
+        if companies.iter().any(|c| &c.tenant != tenant) {
+            return Err(StoreError::MixedTenants);
+        }
+        let ids: Vec<&CompanyId> = companies.iter().map(|c| &c.company).collect();
+        let raw: Vec<&str> = ids.iter().map(|c| c.as_str()).collect();
+        let mut tx = self.scoped(tenant, &ids).await?;
+        let rows = sqlx::query(&format!(
+            "select {CONVERSATION} from assistant_conversations
+             where tenant_id = $1 and user_id = $2 and (company_id is null or company_id = any($3))
+             order by last_active_at desc, conversation_id limit $4"
+        ))
+        .bind(tenant.as_str())
+        .bind(user.as_str())
+        .bind(&raw)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter().map(|r| conversation(tenant, r)).collect()
+    }
+
+    /// A transaction for conversations bound to `scope`.
+    pub async fn assistant(&self, scope: &ConversationScope) -> Result<AssistantTx, StoreError> {
+        let tx = match scope.company() {
+            Some(c) => self.scoped(&c.tenant, &[&c.company]).await?,
+            None => self.scoped(scope.tenant(), &[]).await?,
+        };
+        Ok(AssistantTx {
+            tx,
+            scope: scope.clone(),
+        })
+    }
+}
+
+impl AssistantTx {
+    pub async fn commit(self) -> Result<(), StoreError> {
+        self.tx.commit().await.map_err(Into::into)
+    }
+
+    /// Tenant, company and project, owned so a query can borrow the transaction mutably.
+    fn keys(&self) -> (String, Option<String>, Option<String>) {
+        (
+            self.scope.tenant().as_str().to_owned(),
+            self.scope.company().map(|c| c.company.as_str().to_owned()),
+            self.scope.project().map(|p| p.as_str().to_owned()),
+        )
+    }
+
+    /// Makes conversation `id` for `user` in this scope. A project named by the scope must be one of
+    /// its company's, or `StoreError::Missing("project")`; a company must exist, or `Missing("company")`.
+    pub async fn create(&mut self, id: &ConversationId, user: &UserId) -> Result<Conversation, StoreError> {
+        let (t, c, p) = self.keys();
+        if let Some(c) = &c {
+            let found: bool =
+                sqlx::query_scalar("select exists (select 1 from companies where tenant_id = $1 and company_id = $2)")
+                    .bind(&t)
+                    .bind(c)
+                    .fetch_one(&mut *self.tx)
+                    .await?;
+            if !found {
+                return Err(StoreError::Missing("company"));
+            }
+        }
+        if let (Some(c), Some(p)) = (&c, &p) {
+            let found: bool = sqlx::query_scalar(
+                "select exists (select 1 from projects where tenant_id = $1 and company_id = $2 and project_id = $3)",
+            )
+            .bind(&t)
+            .bind(c)
+            .bind(p)
+            .fetch_one(&mut *self.tx)
+            .await?;
+            if !found {
+                return Err(StoreError::Missing("project"));
+            }
+        }
+        let row = sqlx::query(&format!(
+            "insert into assistant_conversations (tenant_id, conversation_id, user_id, company_id, project_id)
+             values ($1, $2, $3, $4, $5) returning {CONVERSATION}"
+        ))
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(user.as_str())
+        .bind(&c)
+        .bind(&p)
+        .fetch_one(&mut *self.tx)
+        .await?;
+        conversation(self.scope.tenant(), row)
+    }
+
+    /// `user`'s conversation `id` in this scope, locked for this transaction when `lock`.
+    async fn find(
+        &mut self,
+        id: &ConversationId,
+        user: &UserId,
+        lock: bool,
+    ) -> Result<Option<Conversation>, StoreError> {
+        let (t, c, p) = self.keys();
+        let row = sqlx::query(&format!(
+            "select {CONVERSATION} from assistant_conversations
+             where tenant_id = $1 and conversation_id = $2 and user_id = $3
+               and company_id is not distinct from $4 and project_id is not distinct from $5 {}",
+            if lock { "for update" } else { "" }
+        ))
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(user.as_str())
+        .bind(&c)
+        .bind(&p)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+        row.map(|r| conversation(self.scope.tenant(), r)).transpose()
+    }
+
+    /// The conversation and its turns in order; `None` unless `user` holds it in this scope.
+    pub async fn get(
+        &mut self,
+        id: &ConversationId,
+        user: &UserId,
+    ) -> Result<Option<(Conversation, Vec<Turn>)>, StoreError> {
+        let Some(found) = self.find(id, user, false).await? else {
+            return Ok(None);
+        };
+        let turns = self.turns(id).await?;
+        Ok(Some((found, turns)))
+    }
+
+    async fn turns(&mut self, id: &ConversationId) -> Result<Vec<Turn>, StoreError> {
+        let (t, c, _) = self.keys();
+        let rows = sqlx::query(&format!(
+            "select {TURN} from assistant_turns
+             where tenant_id = $1 and conversation_id = $2 and company_id is not distinct from $3 order by n"
+        ))
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(&c)
+        .fetch_all(&mut *self.tx)
+        .await?;
+        rows.into_iter().map(turn).collect()
+    }
+
+    /// Deletes `user`'s conversation `id` in this scope and its turns; `false` if there is none.
+    pub async fn delete(&mut self, id: &ConversationId, user: &UserId) -> Result<bool, StoreError> {
+        let (t, c, p) = self.keys();
+        let n = sqlx::query(
+            "delete from assistant_conversations
+             where tenant_id = $1 and conversation_id = $2 and user_id = $3
+               and company_id is not distinct from $4 and project_id is not distinct from $5",
+        )
+        .bind(&t)
+        .bind(id.as_str())
+        .bind(user.as_str())
+        .bind(&c)
+        .bind(&p)
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        Ok(n == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_keys_and_said_follow_the_workers_rules() {
+        assert!(TurnKey::new("t_01J-x_y").is_some());
+        for bad in ["", "t_", "x_1", "t_a/b", "t_a b", &format!("t_{}", "a".repeat(65))] {
+            assert!(TurnKey::new(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(
+            Said::new("  plan the pilot\nplease ").unwrap().as_str(),
+            "plan the pilot\nplease"
+        );
+        assert!(Said::new(&"x".repeat(MAX_SAID_CHARS)).is_some());
+        for bad in ["", "   ", "a\u{7}b"] {
+            assert!(Said::new(bad).is_none(), "{bad:?}");
+        }
+        assert!(Said::new(&"x".repeat(MAX_SAID_CHARS + 1)).is_none());
+        assert_eq!(format!("{:?}", Said::new("secret plan").unwrap()), "Said(11 chars)");
+    }
+}

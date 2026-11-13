@@ -247,6 +247,69 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assistant/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The caller's conversations, most recently active first: their home ones and those of companies
+         *     they may still work on. Ids and times only.
+         */
+        get: operations["list_conversations"];
+        put?: never;
+        /**
+         * Start a conversation, bound for good to the caller and to a company (or a project in it), or to
+         *     the caller's home. A company needs `work` on it; home needs only a session.
+         */
+        post: operations["create_conversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assistant/conversations/{conversation}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One of the caller's conversations with its turns. Anyone else's is not found. */
+        get: operations["get_conversation"];
+        put?: never;
+        post?: never;
+        /** Delete one of the caller's conversations and its turns. */
+        delete: operations["delete_conversation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assistant/conversations/{conversation}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether the caller holds this conversation, bound to this company (or to home when `company` is
+         *     left out), and may still use it. fde-web's server asks before every turn and reconnect; anything
+         *     but 204 refuses.
+         */
+        get: operations["check_conversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies": {
         parameters: {
             query?: never;
@@ -2094,6 +2157,25 @@ export interface components {
             projects: components["schemas"]["ProjectSummaryOut"][];
             role?: components["schemas"]["CallerRole"] | null;
         };
+        ConversationBody: {
+            /** @description The company it is bound to; left out, the person's home conversation. */
+            company?: string | null;
+            /** @description A project of that company, to bind it more narrowly. */
+            project?: string | null;
+        };
+        ConversationDetailOut: {
+            conversation: components["schemas"]["ConversationOut"];
+            /** @description Its finished turns, in order. */
+            turns: components["schemas"]["TurnOut"][];
+        };
+        ConversationOut: {
+            /** @description The company it is bound to, for good; null for a home conversation. */
+            company?: string | null;
+            created_at: string;
+            id: string;
+            last_active_at: string;
+            project?: string | null;
+        };
         CriterionBody: {
             /**
              * Format: double
@@ -2207,6 +2289,8 @@ export interface components {
             /** @description The company's own threads, each with its comments, and meeting notes. */
             threads: components["schemas"]["ThreadWithComments"][];
         };
+        /** @enum {string} */
+        FinishedState: "done" | "failed";
         ForgotPasswordIn: {
             email: string;
         };
@@ -2457,6 +2541,13 @@ export interface components {
             /** @description What was decided. */
             title: string;
         };
+        /** @description A proposal as the Worker checked it, and what the person did with it. */
+        ProposalEntry: {
+            proposal: Record<string, never>;
+            state: components["schemas"]["ProposalState"];
+        };
+        /** @enum {string} */
+        ProposalState: "waiting" | "confirmed" | "dismissed";
         RedeemBody: {
             token: string;
         };
@@ -3130,6 +3221,21 @@ export interface components {
              *     with no next step needs one, or is over (direction section 4).
              */
             projects_without_next_step?: components["schemas"]["ProjectRefOut"][];
+        };
+        TurnOut: {
+            blocks: Record<string, never>[];
+            created_at: string;
+            id: string;
+            /**
+             * Format: int32
+             * @description Its place, from 1.
+             */
+            n: number;
+            notice?: string | null;
+            proposals: components["schemas"]["ProposalEntry"][];
+            said: string;
+            state: components["schemas"]["FinishedState"];
+            text: string;
         };
         UnsubscribeBody: {
             /** @description From the fragment of the link in a weekly digest. */
@@ -3905,6 +4011,202 @@ export interface operations {
             };
             /** @description Service Unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_conversations: {
+        parameters: {
+            query?: {
+                /** @description At most this many, 1 to 50; 20 if left out. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationOut"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversationBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation id */
+                conversation: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetailOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation id */
+                conversation: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    check_conversation: {
+        parameters: {
+            query?: {
+                /** @description The company the caller believes it is bound to; left out for a home conversation. */
+                company?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Conversation id */
+                conversation: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's, bound as asked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the caller's, or bound elsewhere */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

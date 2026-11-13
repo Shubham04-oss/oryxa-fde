@@ -18,6 +18,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Postgres, Transaction};
 
 mod access;
+mod assistant;
 mod canvas;
 mod checklist;
 mod companies;
@@ -49,6 +50,10 @@ mod views;
 mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
+pub use assistant::{
+    AssistantTx, Conversation, ConversationScope, MAX_REPLY_CHARS, MAX_SAID_CHARS, MAX_TURNS, Said, Turn, TurnKey,
+    TurnState,
+};
 pub use canvas::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,
 };
@@ -59,7 +64,7 @@ pub use documents::{ChunkHit, ChunkIn, ContentType, Document, DocumentIn, Docume
 pub use engine::{Activity, ActivityIn, CriterionResult, Suggestion, SuggestionKind, engine_actor};
 pub use evals::{EvalCaseResultRow, EvalCaseRow, EvalCriterionRow, EvalResults, EvalRunRow, EvalSuiteRow};
 pub use grants::{Grant, GrantRow, PendingGrant, PendingGrants};
-pub use ids::{CommentId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
+pub use ids::{CommentId, ConversationId, MeetingNoteId, ShapeId, SnapshotId, ThreadId};
 pub use integrations::{
     Claimed, GitHubInstallation, GitHubRepository, RepositoryName, SlackChannel, SlackChannelId, SlackInstallation,
     SlackPost, SlackTeamId,

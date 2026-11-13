@@ -834,6 +834,12 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/today"),
     // The caller's own suggestions, from the projects SpiceDB says they work on; a dismissal is theirs only.
     ("GET", "/v1/home"),
+    // The caller's own conversations: each is found by its holder only, then checked against its scope.
+    ("POST", "/v1/assistant/conversations"),
+    ("GET", "/v1/assistant/conversations"),
+    ("GET", "/v1/assistant/conversations/{conversation}"),
+    ("DELETE", "/v1/assistant/conversations/{conversation}"),
+    ("GET", "/v1/assistant/conversations/{conversation}/check"),
     ("POST", "/v1/home/suggestions/{suggestion}/dismiss"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
@@ -6179,4 +6185,155 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
 
 async fn home_of(w: &World, who: &User) -> (StatusCode, Value) {
     w.call(Some(&who.token), "GET", "/v1/home", None).await
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_conversation_is_bound_for_good_and_its_holders_alone() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let other = company(&w, &org, "globex").await;
+    let conversations = "/v1/assistant/conversations";
+
+    // Bound to a company the caller works on, or one of its projects; refused for one they do not.
+    let made = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(
+        (made["company"].clone(), made["project"].clone()),
+        (json!(t.company), Value::Null)
+    );
+    let narrow = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company, "project": t.project})),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(narrow["project"], t.project.as_str());
+    for body in [
+        json!({"company": other.company}),
+        json!({"company": t.company, "project": other.project}),
+    ] {
+        assert_eq!(
+            w.status(&t.lead, "POST", conversations, Some(body.clone())).await,
+            StatusCode::FORBIDDEN,
+            "{body}"
+        );
+    }
+    assert_eq!(
+        w.status(&t.lead, "POST", conversations, Some(json!({"project": t.project})))
+            .await,
+        StatusCode::BAD_REQUEST,
+        "a project only within its company"
+    );
+    let id = made["id"].as_str().unwrap().to_owned();
+    let path = format!("{conversations}/{id}");
+
+    // The check fde-web makes before every turn: this person, this company. Anything else refuses.
+    let check = |company: Option<&str>| match company {
+        Some(c) => format!("{path}/check?company={c}"),
+        None => format!("{path}/check"),
+    };
+    assert_eq!(
+        w.status(&t.lead, "GET", &check(Some(&t.company)), None).await,
+        StatusCode::NO_CONTENT
+    );
+    for (who, company) in [
+        (&t.lead, Some(other.company.as_str())),
+        (&t.lead, None),
+        (&t.engineer, Some(t.company.as_str())),
+        (&other.lead, Some(t.company.as_str())),
+    ] {
+        assert_eq!(
+            w.status(who, "GET", &check(company), None).await,
+            StatusCode::NOT_FOUND,
+            "{company:?}"
+        );
+    }
+    assert_eq!(
+        w.status(&t.lead, "GET", &format!("{conversations}/not%20an%20id/check"), None)
+            .await,
+        StatusCode::NOT_FOUND
+    );
+
+    // Its holder reads it (no turns yet); to anyone else it does not exist.
+    let read = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
+    assert_eq!(read["conversation"]["id"], id.as_str());
+    assert_eq!(read["turns"], json!([]));
+    for who in [&t.engineer, &other.lead] {
+        assert_eq!(w.status(who, "GET", &path, None).await, StatusCode::NOT_FOUND);
+        assert_eq!(w.status(who, "DELETE", &path, None).await, StatusCode::NOT_FOUND);
+    }
+
+    // A home conversation needs only a session, and checks as home.
+    let home = w
+        .ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    assert_eq!(home["company"], Value::Null);
+    let home_path = format!("{conversations}/{}", home["id"].as_str().unwrap());
+    assert_eq!(
+        w.status(&t.lead, "GET", &format!("{home_path}/check"), None).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        w.status(
+            &t.lead,
+            "GET",
+            &format!("{home_path}/check?company={}", t.company),
+            None
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+
+    // The caller's list: theirs, most recently active first; nobody else's.
+    let list = w.ok(&t.lead, "GET", conversations, None, StatusCode::OK).await;
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{list}");
+    assert_eq!(ids[0], home["id"].as_str().unwrap());
+    assert!(
+        w.ok(&t.engineer, "GET", conversations, None, StatusCode::OK)
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        w.status(&t.lead, "GET", &format!("{conversations}?limit=0"), None)
+            .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Deleted: gone.
+    assert_eq!(w.status(&t.lead, "DELETE", &path, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(w.status(&t.lead, "GET", &path, None).await, StatusCode::NOT_FOUND);
+
+    // The scope never changes, whoever writes: not even the database owner.
+    let owner = testing::admin().await;
+    let moved = sqlx::query("update assistant_conversations set company_id = $1 where conversation_id = $2")
+        .bind(&t.company)
+        .bind(home["id"].as_str().unwrap())
+        .execute(&owner)
+        .await;
+    assert!(moved.is_err(), "a conversation's scope cannot change");
+    let touched = sqlx::query("update assistant_conversations set last_active_at = now() where conversation_id = $1")
+        .bind(home["id"].as_str().unwrap())
+        .execute(&owner)
+        .await;
+    assert!(touched.is_ok(), "its last-active time can");
 }
