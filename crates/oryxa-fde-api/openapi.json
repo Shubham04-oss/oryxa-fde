@@ -8621,6 +8621,112 @@
         }
       }
     },
+    "/v1/home": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "What needs the caller next, across the projects they work on, as a few suggestions built from\nfixed templates: no free text from any record.",
+        "operationId": "get_home",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HomeOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/home/suggestions/{suggestion}/dismiss": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Hide a suggestion from the caller's home until its facts change: a new blocked task, another\naccess request, a project gaining or losing its next step. Only a suggestion the caller has now.",
+        "operationId": "dismiss_home_suggestion",
+        "parameters": [
+          {
+            "name": "suggestion",
+            "in": "path",
+            "description": "A suggestion's `id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Dismissed"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not one the caller has now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -10462,6 +10568,89 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "HomeKind": {
+        "type": "string",
+        "description": "What a suggestion is about, in rank order: the first kinds come first.",
+        "enum": [
+          "due_today",
+          "access_waiting",
+          "blocked_tasks",
+          "no_next_step"
+        ]
+      },
+      "HomeOut": {
+        "type": "object",
+        "required": [
+          "suggestions"
+        ],
+        "properties": {
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HomeSuggestionOut"
+            },
+            "description": "At most five, most pressing first."
+          }
+        }
+      },
+      "HomeSuggestionOut": {
+        "type": "object",
+        "description": "One suggested next step, built from ids and a fixed template.",
+        "required": [
+          "id",
+          "kind",
+          "count",
+          "route"
+        ],
+        "properties": {
+          "company": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NamedOut",
+                "description": "The company and project it is about; none for `due_today`, which spans them."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The longest wait in whole days, for `access_waiting`.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable while its kind and project are: `<kind>` or `<kind>.<project id>`. Send it to dismiss."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HomeKind"
+          },
+          "project": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NamedOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route": {
+            "type": "string",
+            "description": "The web app's path it opens, e.g. `/companies/{company}/projects/{project}` or `/today`."
           }
         }
       },

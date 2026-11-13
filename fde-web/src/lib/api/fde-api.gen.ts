@@ -1610,6 +1610,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/home": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What needs the caller next, across the projects they work on, as a few suggestions built from
+         *     fixed templates: no free text from any record.
+         */
+        get: operations["get_home"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/home/suggestions/{suggestion}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Hide a suggestion from the caller's home until its facts change: a new blocked task, another
+         *     access request, a project gaining or losing its next step. Only a suggestion the caller has now.
+         */
+        post: operations["dismiss_home_suggestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/me": {
         parameters: {
             query?: never;
@@ -2192,6 +2232,32 @@ export interface components {
             linked_by: string;
             /** Format: int64 */
             repository_id: number;
+        };
+        /**
+         * @description What a suggestion is about, in rank order: the first kinds come first.
+         * @enum {string}
+         */
+        HomeKind: "due_today" | "access_waiting" | "blocked_tasks" | "no_next_step";
+        HomeOut: {
+            /** @description At most five, most pressing first. */
+            suggestions: components["schemas"]["HomeSuggestionOut"][];
+        };
+        /** @description One suggested next step, built from ids and a fixed template. */
+        HomeSuggestionOut: {
+            company?: components["schemas"]["NamedOut"] | null;
+            /** Format: int32 */
+            count: number;
+            /**
+             * Format: int32
+             * @description The longest wait in whole days, for `access_waiting`.
+             */
+            days?: number | null;
+            /** @description Stable while its kind and project are: `<kind>` or `<kind>.<project id>`. Send it to dismiss. */
+            id: string;
+            kind: components["schemas"]["HomeKind"];
+            project?: components["schemas"]["NamedOut"] | null;
+            /** @description The web app's path it opens, e.g. `/companies/{company}/projects/{project}` or `/today`. */
+            route: string;
         };
         /** @enum {string} */
         IngestState: "pending" | "ingested" | "failed";
@@ -9312,6 +9378,101 @@ export interface operations {
             };
             /** @description Service Unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_home: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HomeOut"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    dismiss_home_suggestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A suggestion's `id` */
+                suggestion: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not one the caller has now */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

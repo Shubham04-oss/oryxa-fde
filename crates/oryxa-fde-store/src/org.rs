@@ -1,7 +1,7 @@
 //! Records that belong to the organisation rather than a company: the reusable library of answers
 //! to customers' security questionnaires.
 
-use oryxa_core::TenantId;
+use oryxa_core::{TenantId, UserId};
 use oryxa_fde_core::SecurityAnswerId;
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
@@ -135,4 +135,49 @@ fn answer(r: PgRow) -> Result<SecurityAnswer, StoreError> {
         answer: text(r.try_get("answer")?, "answer")?,
         updated_at: r.try_get("updated_at")?,
     })
+}
+
+/// A home suggestion a person dismissed: its id and the hash of its facts then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dismissal {
+    pub suggestion: String,
+    pub facts: String,
+}
+
+impl OrgTx {
+    /// The home suggestions `user` dismissed in this organisation.
+    pub async fn home_dismissals(&mut self, user: &UserId) -> Result<Vec<Dismissal>, StoreError> {
+        let rows = sqlx::query(
+            "select suggestion_id, facts_sha256 from home_dismissals where tenant_id = $1 and user_id = $2",
+        )
+        .bind(self.tenant.as_str())
+        .bind(user.as_str())
+        .fetch_all(&mut *self.tx)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(Dismissal {
+                    suggestion: r.try_get("suggestion_id")?,
+                    facts: r.try_get("facts_sha256")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Records that `user` dismissed `suggestion` while its facts hashed to `facts` (hex SHA-256);
+    /// a later dismissal of the same suggestion replaces it. The database checks both formats.
+    pub async fn dismiss_home(&mut self, user: &UserId, suggestion: &str, facts: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into home_dismissals (tenant_id, user_id, suggestion_id, facts_sha256) values ($1, $2, $3, $4)
+             on conflict (tenant_id, user_id, suggestion_id)
+             do update set facts_sha256 = excluded.facts_sha256, dismissed_at = now()",
+        )
+        .bind(self.tenant.as_str())
+        .bind(user.as_str())
+        .bind(suggestion)
+        .bind(facts)
+        .execute(&mut *self.tx)
+        .await?;
+        Ok(())
+    }
 }
