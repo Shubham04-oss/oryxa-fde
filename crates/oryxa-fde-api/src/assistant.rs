@@ -194,7 +194,9 @@ pub(crate) async fn create(
 /// they may still work on. Ids and times only.
 #[utoipa::path(get, operation_id = "list_conversations", path = "/v1/assistant/conversations", tag = "assistant",
     params(ListParams),
-    responses((status = 200, body = Vec<ConversationOut>), (status = 400, body = ErrorBody)))]
+    responses((status = 200, body = Vec<ConversationOut>), (status = 400, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "A customer role: no access to the workspace"),
+        (status = 503, body = ErrorBody)))]
 pub(crate) async fn list(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -265,7 +267,7 @@ pub(crate) async fn check(
 /// after losing access to its company. An audit row names it; no content is kept.
 #[utoipa::path(delete, operation_id = "delete_conversation", path = "/v1/assistant/conversations/{conversation}",
     tag = "assistant", params(("conversation" = String, Path, description = "Conversation id")),
-    responses((status = 204, description = "Deleted"), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+    responses((status = 204, description = "Deleted"), (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)))]
 pub(crate) async fn delete(
     State(app): State<Arc<App>>,
     who: Principal,

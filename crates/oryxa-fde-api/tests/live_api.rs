@@ -6327,21 +6327,26 @@ async fn a_conversation_is_bound_for_good_and_its_holders_alone() {
     let owner_db = testing::admin().await;
     let narrow_id = narrow["id"].as_str().unwrap();
     let home_id = home["id"].as_str().unwrap();
-    let insert = |conversation: &str, company: Option<&str>, blocks: Value| {
+    let insert_at = |n: i32, conversation: &str, company: Option<&str>, blocks: Value, proposals: Value| {
         let (conversation, company) = (conversation.to_owned(), company.map(str::to_owned));
         let (owner_db, org) = (owner_db.clone(), org.clone());
         async move {
             sqlx::query(
                 "insert into assistant_turns (tenant_id, conversation_id, company_id, n, turn_id, said, reply, blocks,
-                     proposals, state) values ($1, $2, $3, 1, 't_1', 'hi', '', $4, '[]', 'done')",
+                     proposals, state) values ($1, $2, $3, $4, 't_' || $4, 'hi', '', $5, $6, 'done')",
             )
             .bind(&org)
             .bind(&conversation)
             .bind(company)
+            .bind(n)
             .bind(blocks)
+            .bind(proposals)
             .execute(&owner_db)
             .await
         }
+    };
+    let insert = |conversation: &str, company: Option<&str>, blocks: Value| {
+        insert_at(1, conversation, company, blocks, json!([]))
     };
     for (conversation, company) in [
         (narrow_id, Some(other.company.as_str())),
@@ -6358,10 +6363,29 @@ async fn a_conversation_is_bound_for_good_and_its_holders_alone() {
         insert(narrow_id, Some(t.company.as_str()), seven).await.is_err(),
         "at most six blocks"
     );
-    let huge = json!([{ "type": "brief", "items": [{ "label": "x", "value": "v".repeat(70_000) }] }]);
+    let huge = json!([{ "type": "brief", "items": [{ "label": "x", "value": "v".repeat(1_100_000) }] }]);
     assert!(
         insert(narrow_id, Some(t.company.as_str()), huge).await.is_err(),
         "a byte cap on the blocks"
+    );
+    let four = Value::Array(vec![
+        json!({"proposal": {"action": "open_route"}, "state": "waiting"});
+        4
+    ]);
+    assert!(
+        insert_at(1, narrow_id, Some(t.company.as_str()), json!([]), four)
+            .await
+            .is_err(),
+        "at most three proposals"
+    );
+    // What the wire allows fits: six brief blocks of eight 4000-character values, in 3-byte characters.
+    let brief = json!({ "type": "brief", "items": vec![json!({ "label": "x", "value": "क".repeat(4000) }); 8] });
+    let widest = Value::Array(vec![brief; 6]);
+    assert!(
+        insert_at(2, narrow_id, Some(t.company.as_str()), widest, json!([]))
+            .await
+            .is_ok(),
+        "the widest turn the wire allows fits the cap"
     );
     assert!(
         insert(narrow_id, Some(t.company.as_str()), json!([])).await.is_ok(),
@@ -6456,6 +6480,26 @@ async fn a_conversation_is_bound_for_good_and_its_holders_alone() {
     )
     .bind(&org)
     .bind(eng["id"].as_str().unwrap())
+    .fetch_one(&owner_db)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+    // A home conversation's delete leaves its own tenant-level row.
+    let home_of_eng = format!("{conversations}/{}", eng_home["id"].as_str().unwrap());
+    assert_eq!(
+        w.status(&t.engineer, "DELETE", &home_of_eng, None).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        w.status(&t.engineer, "GET", &home_of_eng, None).await,
+        StatusCode::NOT_FOUND
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "select count(*) from audit_log where tenant_id = $1 and company_id is null
+           and action = 'assistant_conversation.deleted' and target = $2",
+    )
+    .bind(&org)
+    .bind(eng_home["id"].as_str().unwrap())
     .fetch_one(&owner_db)
     .await
     .unwrap();

@@ -26,8 +26,11 @@ pub const MAX_REPLY_CHARS: usize = 8000;
 /// them too.
 pub const MAX_BLOCKS: usize = 6;
 pub const MAX_PROPOSALS: usize = 3;
-/// The most bytes each of a turn's blocks and proposals may take as JSON text, as the table checks.
-pub const MAX_PARTS_BYTES: usize = 65_536;
+/// The most bytes a turn's blocks may take as JSON text, as the table checks: room for the wire's
+/// widest (six brief blocks of eight 4000-character values in 4-byte characters) with escapes.
+pub const MAX_BLOCKS_BYTES: usize = 1_048_576;
+/// The most bytes a turn's proposals may take as JSON text; three small actions need far less.
+pub const MAX_PROPOSALS_BYTES: usize = 65_536;
 
 /// Where a conversation is bound, for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +126,8 @@ pub(crate) fn plain(v: &str) -> bool {
 
 /// `String.prototype.trim`: Unicode white space and U+FEFF off both ends.
 fn js_trim(v: &str) -> &str {
-    v.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+    // U+0085 is white space to Rust but not to JavaScript, whose trim keeps it.
+    v.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
 }
 
 /// Whether a reply fits the wire: plain text of at most [`MAX_REPLY_CHARS`] UTF-16 code units, the
@@ -395,6 +399,11 @@ impl AssistantTx {
         rows.into_iter().map(turn).collect()
     }
 
+    // The append of a finished turn (#237's second part) goes here. It must: lock the conversation by its
+    // holder first (`find(.., true)`); check `Said` and `reply_fits`, which the table does not; and count
+    // the parts' bytes as the table does (`octet_length` of jsonb's text form, which writes ", " and ": "
+    // with spaces), or keep a margin under the caps, so a part near them is refused cleanly, never a 500.
+
     /// Deletes `by`'s conversation `id` in this scope and its turns, and leaves an audit row naming it
     /// (no content); `false` if there is none.
     pub async fn delete(&mut self, id: &ConversationId, by: &Actor) -> Result<bool, StoreError> {
@@ -467,6 +476,15 @@ mod tests {
         assert!(
             Said::new("a\u{85}b").is_some(),
             "a C1 control passes, as the wire's regex lets it"
+        );
+        assert_eq!(
+            Said::new("\u{85}").map(|s| s.as_str().to_owned()),
+            Some("\u{85}".into()),
+            "NEL is not trimmed"
+        );
+        assert_eq!(
+            Said::new("ok\u{85}").map(|s| s.as_str().to_owned()),
+            Some("ok\u{85}".into())
         );
         for bad in ["a\u{0}b", "a\u{b}b", "a\u{1b}b", "a\u{7f}b"] {
             assert!(Said::new(bad).is_none(), "{bad:?}");

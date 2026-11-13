@@ -50,7 +50,7 @@ create table assistant_turns (
     said            text not null check (char_length(said) between 1 and 2000),
     reply           text not null check (char_length(reply) <= 8000),
     blocks          jsonb not null check (jsonb_typeof(blocks) = 'array' and jsonb_array_length(blocks) <= 6
-                        and octet_length(blocks::text) <= 65536),
+                        and octet_length(blocks::text) <= 1048576),
     proposals       jsonb not null check (jsonb_typeof(proposals) = 'array' and jsonb_array_length(proposals) <= 3
                         and octet_length(proposals::text) <= 65536),
     notice          text check (notice is null or notice in ('tool_limit', 'reply_limit', 'timed_out', 'failed')),
