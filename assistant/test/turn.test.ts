@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseView } from "../src/catalogue/wire.js";
 import type { Conversation } from "../src/conversation.js";
-import { MAX_TURNS } from "../src/catalogue/wire.js";
+import { MAX_REPLY, MAX_TURNS } from "../src/catalogue/wire.js";
 import { PersonTurns, TURNS_PER_WINDOW, TURN_TIMEOUT_MS } from "../src/limits.js";
 import { apiReader } from "../src/tools.js";
 import { runTurn } from "../src/turn.js";
@@ -226,8 +226,8 @@ function stuckModel(): LanguageModelV4 {
   };
 }
 
-/** A model that asks for the companies list once, then waits on its answer. */
-function readingModel(): LanguageModelV4 {
+/** A model that asks for the companies list once, says `then` if given, and waits on the list's answer. */
+function readingModel(then = ""): LanguageModelV4 {
   const usage = {
     inputTokens: { total: 0, noCache: 0, cacheRead: undefined, cacheWrite: undefined },
     outputTokens: { total: 0, text: 0, reasoning: undefined },
@@ -244,6 +244,11 @@ function readingModel(): LanguageModelV4 {
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
             controller.enqueue({ type: "tool-call", toolCallId: "call-0", toolName: "list_companies", input: "{}" });
+            if (then !== "") {
+              controller.enqueue({ type: "text-start", id: "t" });
+              controller.enqueue({ type: "text-delta", id: "t", delta: then });
+              controller.enqueue({ type: "text-end", id: "t" });
+            }
             controller.enqueue({ type: "finish", usage, finishReason: { unified: "tool-calls", raw: undefined } });
             controller.close();
           },
@@ -287,12 +292,14 @@ describe("a turn's time limit", () => {
     } as unknown as Fetcher;
     const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
     const started = Date.now();
+    const reader = apiReader(api, SESSION);
+    let settled = false;
     await runTurn({
       model: readingModel(),
       binding: { conversation: "c_reading", tenant: TENANT, person: PERSON, company: null },
       said: "hello",
       history: [],
-      read: apiReader(api, SESSION),
+      read: (path, signal) => reader(path, signal).finally(() => (settled = true)),
       emit: () => {},
       out,
       timeoutMs: 50,
@@ -301,6 +308,38 @@ describe("a turn's time limit", () => {
     // Ended with the turn, not by the read's own ten second limit.
     expect(aborted).not.toBeNull();
     expect(aborted! - started).toBeLessThan(2_000);
+    // The read itself is over, so nothing still holds the session.
+    await new Promise((done) => setTimeout(done, 20));
+    expect(settled).toBe(true);
+  });
+
+  it("stops a read in flight when the turn ends another way, here at the reply limit", async () => {
+    let aborted = false;
+    const api = {
+      fetch: (request: Request) =>
+        new Promise<Response>((_, reject) => {
+          request.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(request.signal.reason as Error);
+          });
+        }),
+    } as unknown as Fetcher;
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    const reader = apiReader(api, SESSION);
+    let settled = false;
+    await runTurn({
+      model: readingModel("x".repeat(MAX_REPLY + 1)),
+      binding: { conversation: "c_reading_long", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: (path, signal) => reader(path, signal).finally(() => (settled = true)),
+      emit: () => {},
+      out,
+    });
+    expect(out.notice).toBe("reply_limit");
+    await new Promise((done) => setTimeout(done, 20));
+    expect(aborted).toBe(true);
+    expect(settled).toBe(true);
   });
 
   it("is a few minutes at most, and longer than any one read", () => {

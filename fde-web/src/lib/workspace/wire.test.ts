@@ -227,6 +227,20 @@ describe("a turn's stream, held to the reply's own limits", () => {
     const read = await readStream(open(`${turnFrame}id: 1\ndata: "${wide}`), () => {})
     expect(read).toEqual({ ended: "cut", last: 0, turn: "t_1" })
   })
+
+  it("holds a frame of exactly the limit, and cuts at one byte more", async () => {
+    // Alone in the stream and never ended, so the bytes held are exactly the bytes sent.
+    const at = await readStream(stream("x".repeat(MAX_PENDING)), () => {})
+    expect(at.ended).toBe("dropped")
+    const over = await readStream(stream("x".repeat(MAX_PENDING + 1)), () => {})
+    expect(over.ended).toBe("cut")
+  })
+
+  it("counts a character split between two pieces once", async () => {
+    // The stream splits at byte 40, inside a three-byte character: exactly the limit, so still held.
+    const read = await readStream(stream("界".repeat(Math.floor(MAX_PENDING / 3))), () => {})
+    expect(read.ended).toBe("dropped")
+  })
 })
 
 describe("a turn's stream, in time", () => {
