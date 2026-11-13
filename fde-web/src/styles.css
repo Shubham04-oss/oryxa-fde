@@ -114,6 +114,134 @@
   }
 }
 
+/* Round 2 (DESIGN.md "Round 2", issue #262): the project page prototype's two looks, chosen by
+   `data-look` on <html> while the prototype is open. "a", Quiet ledger, keeps the tokens above and
+   adds only the prototype's own; "b", Crisp console, redefines the neutrals and the tint as well, so
+   the shell around the prototype shows the same look. Nothing sets `data-look` outside the prototype. */
+:root {
+  --r2-accent: var(
+    --tint
+  ); /* the one accent: the primary action, the current stage, the selected tab */
+  --r2-accent-ink: #ffffff; /* text on the accent */
+  --r2-card-bg: var(--card);
+  --r2-card-shadow: 0 1px 2px #1b1a170a;
+  --r2-radius: 16px; /* a block */
+  --r2-radius-control: 999px; /* a button: a pill */
+  --r2-radius-node: 999px; /* a stage on the stepper */
+  --r2-pad: 24px; /* inside a block */
+  --r2-gap: 24px; /* between blocks */
+  --r2-row: 52px; /* one row of a list */
+  --r2-fs-page: 28px;
+  --r2-lh-page: 36px;
+  --r2-fs-section: 15px;
+  --r2-lh-section: 22px;
+  --r2-section-case: none;
+  --r2-section-tracking: -0.005em;
+  --r2-fs-body: 15px;
+  --r2-lh-body: 22px;
+  --r2-fs-meta: 13px;
+  --r2-lh-meta: 18px;
+  --r2-colhead: none; /* column headings over a list: table-like looks show them */
+}
+:root[data-theme="dark"] {
+  --r2-accent-ink: #161514;
+  --r2-card-shadow: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --r2-accent-ink: #161514;
+    --r2-card-shadow: none;
+  }
+}
+
+/* "b", Crisp console: cooler near-white, hairlines instead of filled blocks, tighter radius, denser
+   type, a stronger blue. After the dark blocks above and as specific, so it wins in light. */
+:root[data-look="b"] {
+  --base: #f6f7f9;
+  --canvas: #ffffff;
+  --card: #fbfcfd;
+  --raised: #f9fafb;
+  --hover: #eef0f3;
+  --selected: #e8ebf0;
+  --border-quiet: #e4e7ec;
+  --border-strong: #9aa1ad;
+  --focus: #1f5af0;
+  --text: #0d1117;
+  --text-soft: #3b4250;
+  --text-muted: #5f6775;
+  --text-inverse: #ffffff;
+  --tint: #1f5af0;
+  --tint-soft: #eaf0fe;
+  --scrim: #0d111740;
+  --shadow: 0 12px 32px -8px #0d111729, 0 1px 3px #0d11170f;
+  --lift: 0 1px 2px #0d11170a;
+  --r2-accent-ink: #ffffff;
+  --r2-card-bg: transparent;
+  --r2-card-shadow: none;
+  --r2-radius: 6px;
+  --r2-radius-control: 6px;
+  --r2-radius-node: 4px;
+  --r2-pad: 16px;
+  --r2-gap: 16px;
+  --r2-row: 40px;
+  --r2-fs-page: 22px;
+  --r2-lh-page: 28px;
+  --r2-fs-section: 12px;
+  --r2-lh-section: 16px;
+  --r2-section-case: uppercase;
+  --r2-section-tracking: 0.07em;
+  --r2-fs-body: 14px;
+  --r2-lh-body: 20px;
+  --r2-fs-meta: 12px;
+  --r2-lh-meta: 16px;
+  --r2-colhead: grid;
+}
+/* "b" at night: true dark. */
+:root[data-look="b"][data-theme="dark"] {
+  --base: #08090a;
+  --canvas: #0e0f11;
+  --card: #121316;
+  --raised: #16181b;
+  --hover: #181a1e;
+  --selected: #1f2227;
+  --border-quiet: #24272d;
+  --border-strong: #4a505a;
+  --focus: #6e8bff;
+  --text: #eceef1;
+  --text-soft: #b4bac4;
+  --text-muted: #8a919c;
+  --text-inverse: #0a0a0b;
+  --tint: #6e8bff;
+  --tint-soft: #161d33;
+  --scrim: #000000b3;
+  --shadow: 0 12px 32px -8px #000000cc, 0 0 0 1px #ffffff0d;
+  --lift: none;
+  --r2-accent-ink: #0a0a0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-look="b"]:not([data-theme="light"]) {
+    --base: #08090a;
+    --canvas: #0e0f11;
+    --card: #121316;
+    --raised: #16181b;
+    --hover: #181a1e;
+    --selected: #1f2227;
+    --border-quiet: #24272d;
+    --border-strong: #4a505a;
+    --focus: #6e8bff;
+    --text: #eceef1;
+    --text-soft: #b4bac4;
+    --text-muted: #8a919c;
+    --text-inverse: #0a0a0b;
+    --tint: #6e8bff;
+    --tint-soft: #161d33;
+    --scrim: #000000b3;
+    --shadow: 0 12px 32px -8px #000000cc, 0 0 0 1px #ffffff0d;
+    --lift: none;
+    --r2-accent-ink: #0a0a0b;
+  }
+}
+
 @theme inline {
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-heading: var(--font-sans);
@@ -165,6 +293,28 @@
   --text-display: 30px;
   --text-display--line-height: 38px;
   --text-display--letter-spacing: -0.028em;
+  /* Round 2's tokens as utilities (bg-brand, text-r2-body, rounded-r2…), each set per look above. */
+  --color-brand: var(--r2-accent);
+  --color-brand-ink: var(--r2-accent-ink);
+  --color-r2-card: var(--r2-card-bg);
+  --radius-r2: var(--r2-radius);
+  --radius-r2-control: var(--r2-radius-control);
+  --radius-r2-node: var(--r2-radius-node);
+  --shadow-r2: var(--r2-card-shadow);
+  --text-r2-page: var(--r2-fs-page);
+  --text-r2-page--line-height: var(--r2-lh-page);
+  --text-r2-page--letter-spacing: -0.02em;
+  --text-r2-body: var(--r2-fs-body);
+  --text-r2-body--line-height: var(--r2-lh-body);
+  --text-r2-meta: var(--r2-fs-meta);
+  --text-r2-meta--line-height: var(--r2-lh-meta);
+  --animate-panel: panel 220ms var(--ease-calm) both;
+  @keyframes panel {
+    from {
+      opacity: 0;
+      transform: translateX(12px);
+    }
+  }
   /* Radius: a field, a card, and the pill every button is. */
   --radius-field: 12px;
   --radius-card: 18px;
@@ -205,4 +355,17 @@
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
+}
+
+/* Round 2: a section's heading, sentence case in "a" and a small uppercase label in "b". */
+@utility r2-section {
+  font-size: var(--r2-fs-section);
+  line-height: var(--r2-lh-section);
+  font-weight: 600;
+  text-transform: var(--r2-section-case);
+  letter-spacing: var(--r2-section-tracking);
+}
+/* Round 2: column headings over a list, shown only where the look is table-like. */
+@utility r2-colhead {
+  display: var(--r2-colhead);
 }

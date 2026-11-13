@@ -2138,3 +2138,69 @@ export const screens = [
     },
   },
 ]
+
+// Round 2 (issue #262): the project page prototype in its two looks, for the founder. A busy project
+// (Kestrel's dispatch copilot) and a brand-new one, made by the new-company conversation and then opened
+// in the prototype without a reload (the mock keeps what was made only as long as the page).
+const ROUND2 = `${DISPATCH}/round2`
+const round2Ready = (page) => page.getByRole("tablist", { name: "Project" })
+/** Opens a path inside the app without reloading it, as a link would. */
+async function within(page, to) {
+  await page.evaluate((url) => {
+    window.history.pushState(window.history.state, "", url)
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }))
+  }, to)
+}
+const newProject = (query) => async (page) => {
+  await answer(page, 5)
+  await cont(page, "Create company")
+  await page.getByRole("region", { name: "Next step" }).waitFor()
+  await within(page, `${new URL(page.url()).pathname}/round2${query}`)
+  await round2Ready(page).waitFor()
+  await page.mouse.move(0, 0)
+  await page.waitForTimeout(600)
+}
+for (const look of ["a", "b"]) {
+  const q = (tab) => `?${tab ? `tab=${tab}&` : ""}look=${look}`
+  screens.push(
+    {
+      name: `round2-busy-overview-${look}`,
+      path: `${ROUND2}${q()}`,
+      ...WORKSPACE,
+      ready: round2Ready,
+    },
+    {
+      name: `round2-busy-proof-${look}`,
+      path: `${ROUND2}${q("proof")}`,
+      ...WORKSPACE,
+      ready: round2Ready,
+    },
+    {
+      name: `round2-new-overview-${look}`,
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: newProject(q()),
+    },
+    {
+      name: `round2-new-proof-${look}`,
+      path: "/new-company",
+      ...WORKSPACE,
+      ready: question("Which company is it, and what are you delivering for them?"),
+      act: newProject(q("proof")),
+    },
+    {
+      name: `round2-busy-ask-${look}`,
+      path: `${ROUND2}${q()}`,
+      ...WORKSPACE,
+      themes: ["light"],
+      full: false,
+      ready: round2Ready,
+      act: async (page) => {
+        await page.getByRole("button", { name: "Ask", exact: true }).click()
+        await page.getByRole("dialog").waitFor()
+        await page.waitForTimeout(300)
+      },
+    },
+  )
+}
