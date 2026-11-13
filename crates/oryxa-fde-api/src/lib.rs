@@ -31,6 +31,7 @@ mod engine;
 mod error;
 mod export;
 pub mod health;
+mod home;
 pub mod integrations;
 mod lifecycle;
 mod meetings;
@@ -182,6 +183,8 @@ fn routes() -> OpenApiRouter<Arc<App>> {
             records::remove_security_answer
         ))
         .routes(routes!(today::today))
+        .routes(routes!(home::home))
+        .routes(routes!(home::dismiss))
         .routes(routes!(share::create, share::list))
         .routes(routes!(share::revoke))
         .routes(routes!(share::redeem))

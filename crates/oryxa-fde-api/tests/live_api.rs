@@ -832,6 +832,9 @@ const UNTARGETED: &[(&str, &str)] = &[
     // No sign-in: the token in a digest's link names its one delivery, in its own tenant.
     ("POST", "/v1/digest/unsubscribe"),
     ("GET", "/v1/today"),
+    // The caller's own suggestions, from the projects SpiceDB says they work on; a dismissal is theirs only.
+    ("GET", "/v1/home"),
+    ("POST", "/v1/home/suggestions/{suggestion}/dismiss"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
     ("POST", "/auth/logout"),
@@ -6060,4 +6063,120 @@ async fn a_company_is_set_up_in_one_call_all_or_nothing_and_once_per_key() {
 async fn count_companies(w: &World, who: &User) -> usize {
     let (_, list) = w.call(Some(&who.token), "GET", "/v1/companies", None).await;
     list.as_array().unwrap().len()
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until_the_facts_change() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let other = company(&w, &org, "globex").await;
+    let tasks = |c: &Tenant| format!("/v1/companies/{}/projects/{}/tasks", c.company, c.project);
+    let blocked = |title: &str| Some(json!({"title": title, "status": "blocked", "blocker": "their IT"}));
+    let mine = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks(&t),
+            blocked("Mine, blocked"),
+            StatusCode::CREATED,
+        )
+        .await;
+    for title in ["Theirs, blocked", "Theirs, blocked too"] {
+        w.ok(&other.lead, "POST", &tasks(&other), blocked(title), StatusCode::CREATED)
+            .await;
+    }
+    // `Date` displays as `YYYY-MM-DD`.
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    let due = Some(json!({"title": "Send the summary", "status": "todo", "due_on": today}));
+    w.ok(&t.lead, "POST", &tasks(&t), due.clone(), StatusCode::CREATED)
+        .await;
+    // Another company's due task: `due_today` names no project, so only its count could leak it.
+    w.ok(&other.lead, "POST", &tasks(&other), due, StatusCode::CREATED)
+        .await;
+
+    let (status, body) = w.call(Some(&t.lead.token), "GET", "/v1/home", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = body["suggestions"].as_array().unwrap().clone();
+    let id_of = |kind: &str| format!("{kind}.{}", t.project);
+    let find = |list: &[Value], id: &str| list.iter().find(|s| s["id"] == id).cloned();
+    let due_today = find(&list, "due_today").expect("due today");
+    assert_eq!(due_today["count"], 1, "only the caller's own project: {body}");
+    // Nothing from a project the caller does not work on, and no record's own text.
+    let text = body.to_string();
+    assert!(!text.contains(&other.project) && !text.contains("globex"), "{text}");
+    for secret in ["Mine, blocked", "their IT", "Send the summary"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+    let suggestion = find(&list, &id_of("blocked_tasks")).expect("blocked tasks");
+    assert_eq!(suggestion["count"], 1);
+    assert_eq!(
+        suggestion["route"],
+        format!("/companies/{}/projects/{}", t.company, t.project)
+    );
+
+    let has = |body: &Value, id: &str| body.to_string().contains(id);
+
+    // Dismissed: gone for this person.
+    let dismiss = format!("/v1/home/suggestions/{}/dismiss", id_of("blocked_tasks"));
+    let (status, _) = w.call(Some(&t.lead.token), "POST", &dismiss, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")));
+    // Not someone else's: the project's engineer still sees it.
+    assert!(has(&home_of(&w, &t.engineer).await.1, &id_of("blocked_tasks")));
+
+    // Unblocked, it goes away and the dismissal is forgotten; blocked again with the very same task,
+    // the same ids as when it was dismissed, it shows again.
+    let task = format!("{}/{}", tasks(&t), mine["id"].as_str().unwrap());
+    let todo = Some(json!({"title": "Mine, blocked", "status": "todo"}));
+    w.ok(&t.lead, "PUT", &task, todo, StatusCode::OK).await;
+    assert!(!has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")));
+    w.ok(&t.lead, "PUT", &task, blocked("Mine, blocked"), StatusCode::OK)
+        .await;
+    assert!(
+        has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")),
+        "back with the same ids"
+    );
+
+    // Dismissed again, a new blocked task changes the facts and brings it back.
+    let (status, _) = w.call(Some(&t.lead.token), "POST", &dismiss, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    w.ok(
+        &t.lead,
+        "POST",
+        &tasks(&t),
+        blocked("Mine, blocked again"),
+        StatusCode::CREATED,
+    )
+    .await;
+    let (_, body) = home_of(&w, &t.lead).await;
+    let back = find(body["suggestions"].as_array().unwrap(), &id_of("blocked_tasks"));
+    assert_eq!(back.map(|s| s["count"].clone()), Some(json!(2)), "{body}");
+
+    // Only a suggestion the caller has now can be dismissed; another company's is not found.
+    let foreign = format!("/v1/home/suggestions/blocked_tasks.{}/dismiss", other.project);
+    assert_eq!(
+        w.call(Some(&t.lead.token), "POST", &foreign, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    // Not a suggestion id at all: refused before anything is read.
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "POST",
+            "/v1/home/suggestions/Bad.prj%2F1/dismiss",
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_suggestion"))
+    );
+    // Never to a customer role.
+    assert_eq!(home_of(&w, &t.guest).await.0, StatusCode::FORBIDDEN);
+}
+
+async fn home_of(w: &World, who: &User) -> (StatusCode, Value) {
+    w.call(Some(&who.token), "GET", "/v1/home", None).await
 }

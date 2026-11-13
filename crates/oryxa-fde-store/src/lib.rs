@@ -65,7 +65,7 @@ pub use integrations::{
     SlackPost, SlackTeamId,
 };
 pub use meetings::{MAX_NOTE_CHARS, MeetingNote, MeetingNoteIn, NoteText, NoteTextError};
-pub use org::{OrgTx, SecurityAnswer, SecurityAnswerIn};
+pub use org::{Dismissal, OrgTx, SecurityAnswer, SecurityAnswerIn, SuggestionKey};
 pub use plan::PlanTx;
 pub use projects::{Assignee, NextStep, Project, ProjectIn, ProjectTx};
 pub use records::{Stakeholder, StakeholderIn, StakeholderRole, System, SystemIn};
