@@ -1094,3 +1094,63 @@ render, and leaves a `-FAILED.png` of it.
   else sees, only this person's home (see **Welcome**).
 - Plain, short sentences in sentence case. No em dashes anywhere: UI copy, docs and comments. No
   exclamation marks.
+
+## 7. Round 2: proposals (issue #262)
+
+A prototype of the project page, for the founder to choose a look before anything is rolled out. Nothing
+here applies to another screen yet. It lives at `/companies/<id>/projects/<id>/round2` and only on the
+dev mock with the workspace on; a production build drops its code and nothing links to it. `?tab=` is the
+tab, `?look=a` or `?look=b` the look. Code in `src/components/round2/` and `src/lib/round2.ts`.
+
+**Two looks, one set of components.** The look is `data-look` on `<html>` while the prototype is open,
+so the shell takes it too. Every difference is a token in `src/styles.css` (`--r2-*`, and for "b" the
+neutrals and the tint as well); no component branches on the look.
+
+|          | a. Quiet ledger                              | b. Crisp console                                |
+| -------- | -------------------------------------------- | ----------------------------------------------- |
+| Neutrals | Today's warm paper and ink                   | Cooler near-white; true dark (`#0e0f11` canvas) |
+| Accent   | Lapis `#3b54c4` / `#8d9df5`                  | A stronger blue `#1f5af0` / `#6e8bff`           |
+| Blocks   | Soft filled cards, 16px radius, a faint lift | Hairline boxes, no fill, 6px radius             |
+| Buttons  | Pills                                        | 6px radius                                      |
+| Type     | Page 28, section 15, body 15, meta 13        | Page 22, section 12 uppercase, body 14, meta 12 |
+| Rhythm   | 24px inside and between blocks, 52px rows    | 16px, 40px rows, column headings over lists     |
+
+Contrast, measured (WCAG 2.2): text on the accent, a 6.46 and dark 7.19, b 5.56 and dark 6.41; the accent
+as text on the canvas, a 6.41 and 6.92, b 5.18 (on `--base`) and 6.21; b's `--text-muted` 5.32 on
+`--base`, 4.77 on `--selected`, and dark 6.04 and 5.02.
+
+**Proposals, for both looks.**
+
+- **One accent, three jobs**: the primary action, the current stage and the selected tab. Never a
+  status, never decoration. The primary button is filled with it; there is exactly one per view.
+- **Three button levels**: primary (filled accent), secondary (outlined, for an action that belongs to
+  a block), quiet (ink text, for an action inside a row).
+- **Type**: four steps, page title, section, body (14 or 15) and meta; no block uses more than two
+  (a section heading is body size in "a" and meta size in "b").
+- **Columns** that would say the same empty thing on every row ("Unassigned", no date) are left out.
+- **Status** is an icon and words (met, not met, blocked, overdue, waiting), never colour alone.
+- **Numbers** are tabular and right-aligned, in a column of their own.
+- **Spacing** on the 8px rhythm; one content width, 1120px, for every tab.
+- **Controls**: Base UI's tabs and menus; no native select on the page's own blocks.
+- **Icons** for tabs and rows through `Icon` only (Pikaicons' free set).
+- **Motion**: a tab's content rises in (240ms), the docked panel slides in (220ms); both `motion-safe:`.
+
+**The page.**
+
+- **Header**: the company (a link back), the project as the page title, its summary in one line, the
+  stages as a labelled stepper (behind ticked, current filled with the accent; "Stage 4 of 8, Build" on
+  a phone), and the **Next step** bar: the task, who has it, when it is due, and **Open the task**, the
+  page's one primary action. With no next step it is **Add a task**.
+- **Tabs**: Overview, Plan (the board, scope and criteria), Proof, Access, Notes and decisions, Agent.
+  Plan, Access, Notes and Agent hold today's cards for now, so every action still works.
+- **Overview** answers "what do I do now". Main column: the stage's checklist (each open item with its
+  one fix), **Needs attention** (blocked, overdue, waiting, as rows), **Coming up** (the plan's next open
+  tasks) and **Set up next** (at most three missing things, this stage's first, each with one action;
+  what the checklist already asks for is left to it). Rail: proof at a glance (a small track per
+  criterion), access waiting (days as bars against the week after which a wait is long) and people. A
+  section with nothing in it is not drawn.
+- **Proof**: per criterion, a track from baseline to target with the current value as a dot in its
+  status colour and the met zone shaded; the recent pass rates as a small line with the target as a
+  dashed rule; the value; the API's verdict in words. Each row has a sentence for a screen reader.
+- **Ask** opens an empty docked panel (a sheet on a phone). The conversation is a separate prototype;
+  the panel holds no composer, so nothing looks like it works when it does not.
