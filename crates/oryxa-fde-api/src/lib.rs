@@ -189,6 +189,8 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(assistant::create, assistant::list))
         .routes(routes!(assistant::get, assistant::delete))
         .routes(routes!(assistant::check))
+        .routes(routes!(assistant::put_turn))
+        .routes(routes!(assistant::answer))
         .routes(routes!(share::create, share::list))
         .routes(routes!(share::revoke))
         .routes(routes!(share::redeem))

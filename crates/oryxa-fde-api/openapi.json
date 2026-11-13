@@ -1187,6 +1187,211 @@
         }
       }
     },
+    "/v1/assistant/conversations/{conversation}/turns/{n}": {
+      "put": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes\nnothing (200). Only the conversation's holder; blocks and proposals as the scope allows.",
+        "operationId": "put_turn",
+        "parameters": [
+          {
+            "name": "conversation",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Turn number, from 1",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TurnBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored before with the same contents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), or a block or proposal the scope does not allow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: the conversation holds 50 turns",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assistant/conversations/{conversation}/turns/{n}/proposals/{proposal}": {
+      "put": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting\nproposal takes it; the same answer again changes nothing; an answered one is not changed. Only\nthe conversation's holder.",
+        "operationId": "answer_proposal",
+        "parameters": [
+          {
+            "name": "conversation",
+            "in": "path",
+            "description": "Conversation id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Turn number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "proposal",
+            "in": "path",
+            "description": "The proposal's id in its turn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The turn, with the answer recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`rejected_answered`: it was answered the other way",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companies": {
       "get": {
         "tags": [
@@ -10003,6 +10208,26 @@
           }
         }
       },
+      "AnswerBody": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AnswerState"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnswerState": {
+        "type": "string",
+        "description": "What the person did with a proposal.",
+        "enum": [
+          "confirmed",
+          "dismissed"
+        ]
+      },
       "AssigneeOut": {
         "type": "object",
         "required": [
@@ -13660,6 +13885,66 @@
             "description": "The caller's projects with no next step: every task is done, or there are none. An engagement\nwith no next step needs one, or is over (direction section 4)."
           }
         }
+      },
+      "TurnBody": {
+        "type": "object",
+        "description": "A finished turn, as the Worker folded it.",
+        "required": [
+          "id",
+          "said",
+          "state"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Up to 6 blocks of the catalogue."
+          },
+          "id": {
+            "type": "string",
+            "description": "The Worker's turn id, `t_` and 1 to 64 of `A-Za-z0-9_-`."
+          },
+          "notice": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TurnNotice"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proposals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProposalEntry"
+            },
+            "description": "Up to 3 proposals, each with its state."
+          },
+          "said": {
+            "type": "string",
+            "description": "What the person said: up to 2000 characters."
+          },
+          "state": {
+            "$ref": "#/components/schemas/FinishedState"
+          },
+          "text": {
+            "type": "string",
+            "description": "The assistant's text: up to 8000 characters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TurnNotice": {
+        "type": "string",
+        "enum": [
+          "tool_limit",
+          "reply_limit",
+          "timed_out",
+          "failed"
+        ]
       },
       "TurnOut": {
         "type": "object",

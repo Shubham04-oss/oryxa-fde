@@ -314,6 +314,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assistant/conversations/{conversation}/turns/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes
+         *     nothing (200). Only the conversation's holder; blocks and proposals as the scope allows.
+         */
+        put: operations["put_turn"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assistant/conversations/{conversation}/turns/{n}/proposals/{proposal}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting
+         *     proposal takes it; the same answer again changes nothing; an answered one is not changed. Only
+         *     the conversation's holder.
+         */
+        put: operations["answer_proposal"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/companies": {
         parameters: {
             query?: never;
@@ -2023,6 +2064,14 @@ export interface components {
             /** @description The run's id, or the pull request's number. */
             subject: string;
         };
+        AnswerBody: {
+            state: components["schemas"]["AnswerState"];
+        };
+        /**
+         * @description What the person did with a proposal.
+         * @enum {string}
+         */
+        AnswerState: "confirmed" | "dismissed";
         AssigneeOut: {
             added_at: string;
             /**
@@ -3226,6 +3275,23 @@ export interface components {
              */
             projects_without_next_step?: components["schemas"]["ProjectRefOut"][];
         };
+        /** @description A finished turn, as the Worker folded it. */
+        TurnBody: {
+            /** @description Up to 6 blocks of the catalogue. */
+            blocks?: Record<string, never>[];
+            /** @description The Worker's turn id, `t_` and 1 to 64 of `A-Za-z0-9_-`. */
+            id: string;
+            notice?: components["schemas"]["TurnNotice"] | null;
+            /** @description Up to 3 proposals, each with its state. */
+            proposals?: components["schemas"]["ProposalEntry"][];
+            /** @description What the person said: up to 2000 characters. */
+            said: string;
+            state: components["schemas"]["FinishedState"];
+            /** @description The assistant's text: up to 8000 characters. */
+            text?: string;
+        };
+        /** @enum {string} */
+        TurnNotice: "tool_limit" | "reply_limit" | "timed_out" | "failed";
         TurnOut: {
             blocks: Record<string, never>[];
             created_at: string;
@@ -4220,6 +4286,147 @@ export interface operations {
             };
             /** @description Any refusal: not the caller's, bound elsewhere, or no longer theirs to use */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    put_turn: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation id */
+                conversation: string;
+                /** @description Turn number, from 1 */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TurnBody"];
+            };
+        };
+        responses: {
+            /** @description Stored before with the same contents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnOut"];
+                };
+            };
+            /** @description Stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnOut"];
+                };
+            };
+            /** @description `invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), or a block or proposal the scope does not allow */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: the conversation holds 50 turns */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    answer_proposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation id */
+                conversation: string;
+                /** @description Turn number */
+                n: number;
+                /** @description The proposal's id in its turn */
+                proposal: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerBody"];
+            };
+        };
+        responses: {
+            /** @description The turn, with the answer recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnOut"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `rejected_answered`: it was answered the other way */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
