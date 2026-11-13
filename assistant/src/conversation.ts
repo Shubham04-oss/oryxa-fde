@@ -93,7 +93,7 @@ export class Conversation extends DurableObject<Env> {
     if ([...said.trim()].length > MAX_SAID) return refuse(413, "too_long");
     const words = Said.safeParse(said);
     if (!words.success) return Response.json({ error: "invalid_message" }, { status: 400 });
-    const model = modelFor(this.env.ASSISTANT_MODEL);
+    const model = modelFor(this.env);
     if (model === null) return refuse(503, "model_unavailable");
     if (this.#running !== null) return refuse(409, "busy");
     const { n } = this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM assistant_turns").one();

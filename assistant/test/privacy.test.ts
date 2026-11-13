@@ -70,7 +70,10 @@ describe("outbound requests", () => {
   it("are watched by this test wherever they start, the conversation's object included", async () => {
     const spy = vi.spyOn(globalThis, "fetch");
     await runInDurableObject(env.CONVERSATIONS.getByName(freshConversation()), () =>
-      fetch("https://outbound.example/").then((r) => r.body?.cancel()),
+      fetch("https://outbound.example/").then(
+        (r) => r.body?.cancel(),
+        () => {},
+      ),
     );
     expect(spy).toHaveBeenCalledTimes(1);
   });

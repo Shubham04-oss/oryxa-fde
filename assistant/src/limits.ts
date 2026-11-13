@@ -12,6 +12,8 @@ export const RATE_WINDOW_MS = 60_000;
 export const MAX_TOOL_CALLS = 4;
 /** Model steps one turn may take: each tool call needs one, and the answer one more. */
 export const MAX_STEPS = MAX_TOOL_CALLS + 1;
+/** The most tokens one model step may write, thinking included where the model counts it. */
+export const MAX_OUTPUT_TOKENS = 4096;
 /**
  * How long one turn may run, model and reads together. Past it the turn stops with a plain notice: the stream's
  * heartbeats would otherwise keep a stuck turn open, and the person's composer busy, for as long as it hangs.

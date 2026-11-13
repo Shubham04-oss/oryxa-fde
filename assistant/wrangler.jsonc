@@ -17,8 +17,10 @@
     "Conversation": { "type": "durable-object", "storage": "sqlite" },
     "PersonTurns": { "type": "durable-object", "storage": "sqlite" },
   },
-  // The scripted model is the only one enabled (src/model/provider.ts). SERVICE_TOKEN and BINDING_KEY are Worker
-  // secrets, and the API binding (`vpc_services`) comes with the deploy (infra); none of them is set here.
+  // The scripted model answers unless the deploy chooses `vertex:<model id>` (src/model/provider.ts). Gemini on Vertex
+  // then needs the secrets VERTEX_CLIENT_EMAIL and VERTEX_PRIVATE_KEY and the vars VERTEX_PROJECT and VERTEX_LOCATION;
+  // missing or malformed, every turn is refused. SERVICE_TOKEN and BINDING_KEY are Worker secrets, and the API
+  // binding (`vpc_services`) comes with the deploy (infra); none of them is set here.
   "vars": { "ASSISTANT_MODEL": "fake" },
   // Logs carry ids only, and invocation logs and traces are off: prompts and answers are never logged (ADR 0009).
   "observability": {
