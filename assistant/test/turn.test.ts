@@ -6,6 +6,7 @@ import { parseView } from "../src/catalogue/wire.js";
 import type { Conversation } from "../src/conversation.js";
 import { MAX_TURNS } from "../src/catalogue/wire.js";
 import { PersonTurns, TURNS_PER_WINDOW, TURN_TIMEOUT_MS } from "../src/limits.js";
+import { apiReader } from "../src/tools.js";
 import { runTurn } from "../src/turn.js";
 import type { Folded } from "../src/turn.js";
 import type { WireEvent } from "../src/catalogue/wire.js";
@@ -225,6 +226,32 @@ function stuckModel(): LanguageModelV4 {
   };
 }
 
+/** A model that asks for the companies list once, then waits on its answer. */
+function readingModel(): LanguageModelV4 {
+  const usage = {
+    inputTokens: { total: 0, noCache: 0, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 0, text: 0, reasoning: undefined },
+  };
+  return {
+    specificationVersion: "v4",
+    provider: "oryxa.test",
+    modelId: "reading",
+    supportedUrls: {},
+    doGenerate: () => Promise.reject(new Error("streams only")),
+    doStream: () =>
+      Promise.resolve({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "tool-call", toolCallId: "call-0", toolName: "list_companies", input: "{}" });
+            controller.enqueue({ type: "finish", usage, finishReason: { unified: "tool-calls", raw: undefined } });
+            controller.close();
+          },
+        }),
+      }),
+  };
+}
+
 describe("a turn's time limit", () => {
   it("ends a stuck turn with a plain notice, keeping what it had said", async () => {
     const emitted: Array<WireEvent> = [];
@@ -244,6 +271,36 @@ describe("a turn's time limit", () => {
     expect(out).toMatchObject({ text: "Looking ", notice: "timed_out" });
     expect(emitted.map((e) => e.type)).toEqual(["text", "notice"]);
     expect(emitted.at(-1)).toEqual({ v: 1, type: "notice", notice: "timed_out" });
+  });
+
+  it("stops a read in flight with the turn, so the person's session is not held past it", async () => {
+    // An API that never answers until its request is aborted, then says when that was.
+    let aborted: number | null = null;
+    const api = {
+      fetch: (request: Request) =>
+        new Promise<Response>((_, reject) => {
+          request.signal.addEventListener("abort", () => {
+            aborted = Date.now();
+            reject(request.signal.reason as Error);
+          });
+        }),
+    } as unknown as Fetcher;
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    const started = Date.now();
+    await runTurn({
+      model: readingModel(),
+      binding: { conversation: "c_reading", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: apiReader(api, SESSION),
+      emit: () => {},
+      out,
+      timeoutMs: 50,
+    });
+    expect(out.notice).toBe("timed_out");
+    // Ended with the turn, not by the read's own ten second limit.
+    expect(aborted).not.toBeNull();
+    expect(aborted! - started).toBeLessThan(2_000);
   });
 
   it("is a few minutes at most, and longer than any one read", () => {

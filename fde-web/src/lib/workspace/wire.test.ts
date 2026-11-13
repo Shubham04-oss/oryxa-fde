@@ -220,6 +220,13 @@ describe("a turn's stream, held to the reply's own limits", () => {
     expect(read).toEqual({ ended: "cut", last: 0, turn: "t_1" })
     expect(got.map((e) => e.type)).toEqual(["turn"])
   })
+
+  it("counts the frame it holds in bytes, so text in another script is cut at the same size", async () => {
+    // Three bytes a character: under the limit in characters, over it in bytes.
+    const wide = "界".repeat(MAX_PENDING / 2)
+    const read = await readStream(open(`${turnFrame}id: 1\ndata: "${wide}`), () => {})
+    expect(read).toEqual({ ended: "cut", last: 0, turn: "t_1" })
+  })
 })
 
 describe("a turn's stream, in time", () => {
