@@ -2,14 +2,23 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { WireEvent } from "../src/catalogue/wire.js";
 import { MAX_OUTPUT_TOKENS } from "../src/limits.js";
-import { OutboundRefused, TOKEN_URL, allowOnly, modelFor, vertexHost, vertexSettings } from "../src/model/provider.js";
+import {
+  OutboundRefused,
+  TOKEN_TIMEOUT_MS,
+  TOKEN_URL,
+  allowOnly,
+  modelFor,
+  runtime,
+  vertexHost,
+  vertexSettings,
+} from "../src/model/provider.js";
 import type { ModelSettings } from "../src/model/provider.js";
 import { TurnFailed, runTurn } from "../src/turn.js";
 import type { Folded } from "../src/turn.js";
 import { PERSON, TENANT } from "./helpers.js";
 
-// Gemini on Vertex AI (issue #260), with a fake `fetch` for Vertex and a stubbed global `fetch` for Google's token
-// endpoint: no test here reaches the network. The key is a throwaway pair made in this file; the email, project
+// Gemini on Vertex AI (issue #260), with a fake `fetch` for Vertex and a stubbed `runtime.fetch` (behind the global
+// `fetch` guard) for Google's token endpoint: no test here reaches the network. The key is a throwaway pair made in this file; the email, project
 // and token are obviously fake.
 
 const MODEL = "gemini-2.5-flash";
@@ -37,6 +46,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  runtime.tokenTimeoutMs = TOKEN_TIMEOUT_MS;
 });
 
 const settings = (overrides: Partial<Record<keyof ModelSettings, string | undefined>> = {}): ModelSettings => ({
@@ -51,13 +61,18 @@ const settings = (overrides: Partial<Record<keyof ModelSettings, string | undefi
 const fromBase64url = (s: string) =>
   Uint8Array.from(atob(s.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
 
-/** Google's token endpoint, faked on the global `fetch`: it checks the signed assertion and answers a fake token. */
+/**
+ * Google's token endpoint, faked behind the global `fetch` guard: it checks the signed assertion and answers a fake
+ * token. It sees only what the guard let through.
+ */
 function fakeTokenEndpoint() {
   const urls: Array<string> = [];
+  const inits: Array<RequestInit | undefined> = [];
   const claims: Array<Record<string, unknown>> = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  vi.spyOn(runtime, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     urls.push(url);
+    inits.push(init);
     const form = new URLSearchParams(String(init?.body));
     const [header, payload, signature] = (form.get("assertion") ?? "").split(".");
     const valid = await crypto.subtle.verify(
@@ -72,7 +87,7 @@ function fakeTokenEndpoint() {
     claims.push(JSON.parse(new TextDecoder().decode(fromBase64url(payload!))) as Record<string, unknown>);
     return Response.json({ access_token: FAKE_TOKEN, expires_in: 3599, token_type: "Bearer" });
   });
-  return { urls, claims };
+  return { urls, inits, claims };
 }
 
 /** One Vertex `streamGenerateContent?alt=sse` answer, in the shape Vertex sends it. */
@@ -194,6 +209,32 @@ describe("choosing a model", () => {
     expect(vertexSettings(settings({ VERTEX_PRIVATE_KEY: pem.replaceAll("\n", "\\n") }))).not.toBeNull();
   });
 
+  it("ignores whitespace pasted around a setting, and keeps every other rule", () => {
+    const padded = settings({
+      VERTEX_CLIENT_EMAIL: ` ${EMAIL}\n`,
+      VERTEX_PRIVATE_KEY: `\n  ${pem}\r\n`,
+      VERTEX_PROJECT: `${PROJECT}\n`,
+      VERTEX_LOCATION: "\tasia-south1 \r\n",
+    });
+    expect(vertexSettings(padded)).toEqual({
+      modelId: MODEL,
+      project: PROJECT,
+      location: "asia-south1",
+      clientEmail: EMAIL,
+      privateKey: pem.trim(),
+    });
+    // Whitespace inside a value is still refused, and so is a value that is only whitespace.
+    for (const overrides of [
+      { VERTEX_PROJECT: "sample project-0" },
+      { VERTEX_LOCATION: "asia- south1" },
+      { VERTEX_CLIENT_EMAIL: `assistant test@${EMAIL.split("@")[1]}` },
+      { VERTEX_PROJECT: " \n" },
+      { VERTEX_LOCATION: "  " },
+    ]) {
+      expect(modelFor(settings(overrides))).toBeNull();
+    }
+  });
+
   it("names the one host for the location, global or regional", () => {
     expect(vertexHost("global")).toBe("aiplatform.googleapis.com");
     expect(vertexHost("asia-south1")).toBe("asia-south1-aiplatform.googleapis.com");
@@ -232,6 +273,23 @@ describe("the outbound list", () => {
     for (const url of refused) await expect(guarded(url)).rejects.toBeInstanceOf(OutboundRefused);
     await expect(guarded(new Request("https://outbound.example/"))).rejects.toBeInstanceOf(OutboundRefused);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("takes only a plain method name after the model's `:`", async () => {
+    const send = vi.fn<typeof fetch>(() => Promise.resolve(new Response("ok")));
+    const guarded = allowOnly([MODELS, TOKEN_URL], send);
+    for (const url of [
+      `${MODELS}streamGenerateContent%2F..%2F..%2Fother`,
+      MODELS,
+      `${MODELS}?alt=sse`,
+      `${MODELS}stream-generate`,
+      `${MODELS}streamGenerateContent/x`,
+    ]) {
+      await expect(guarded(url)).rejects.toBeInstanceOf(OutboundRefused);
+    }
+    expect(send).not.toHaveBeenCalled();
+    await guarded(`${MODELS}generateContent`);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("is what the Vertex model sends through, to the exact path for a regional location", async () => {
@@ -320,7 +378,7 @@ describe("a turn on Gemini through Vertex", () => {
   });
 
   it("fails plainly when no token can be had, and never calls Vertex", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 401, statusText: "Unauthorized" }));
+    vi.spyOn(runtime, "fetch").mockResolvedValue(new Response("{}", { status: 401, statusText: "Unauthorized" }));
     const vertex = fakeVertex([]);
     const { failure } = await turnWith(vertex.send);
     expect(failure).toBeInstanceOf(TurnFailed);
@@ -345,5 +403,95 @@ describe("a turn on Gemini through Vertex", () => {
     expect(aborted).toBe(true);
     expect(failure).toBeNull();
     expect(out.notice).toBe("timed_out");
+  });
+});
+
+describe("the global fetch guard", () => {
+  it("refuses any URL but the token endpoint before it reaches the runtime", async () => {
+    const reached = vi.spyOn(runtime, "fetch").mockResolvedValue(new Response("{}"));
+    for (const url of [
+      "https://outbound.example/",
+      `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT}/locations/global/publishers/google/models/${MODEL}:streamGenerateContent`,
+      "http://oauth2.googleapis.com/token",
+      "https://oauth2.googleapis.com/token/x",
+      "https://oauth2.googleapis.com.example/token",
+    ]) {
+      await expect(fetch(url)).rejects.toBeInstanceOf(OutboundRefused);
+    }
+    await expect(fetch(new Request("https://outbound.example/"))).rejects.toBeInstanceOf(OutboundRefused);
+    expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("sends the token request with a time limit and without following redirects", async () => {
+    const token = fakeTokenEndpoint();
+    const vertex = fakeVertex([() => sse([chunk([{ text: "Hello." }], "STOP")])]);
+    const { failure } = await turnWith(vertex.send);
+    expect(failure).toBeNull();
+    expect(token.urls).toEqual([TOKEN_URL]);
+    expect(token.inits[0]?.redirect).toBe("manual");
+    expect(token.inits[0]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("ends a hung token request by its own time limit, and never calls Vertex", async () => {
+    runtime.tokenTimeoutMs = 50;
+    vi.spyOn(runtime, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error));
+        }),
+    );
+    const vertex = fakeVertex([]);
+    const started = Date.now();
+    // The turn's own limit is far off, so only the token's can have ended it.
+    const { failure } = await turnWith(vertex.send, settings(), 30_000);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(failure).toBeInstanceOf(TurnFailed);
+    expect(vertex.send).not.toHaveBeenCalled();
+  });
+
+  it("does not follow a redirect from the token endpoint", async () => {
+    const reached = vi
+      .spyOn(runtime, "fetch")
+      .mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://outbound.example/token" } }));
+    const vertex = fakeVertex([]);
+    const { failure } = await turnWith(vertex.send);
+    expect(failure).toBeInstanceOf(TurnFailed);
+    expect(reached.mock.calls.map(([input]) => String(input))).toEqual([TOKEN_URL]);
+    expect(vertex.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("Google's ambient settings", () => {
+  const AMBIENT = {
+    GOOGLE_VERTEX_API_KEY: "fake-ambient-api-key",
+    GOOGLE_VERTEX_PROJECT: "ambient-project-9",
+    GOOGLE_VERTEX_LOCATION: "us",
+    GOOGLE_CLIENT_EMAIL: "ambient@ambient-project-9.iam.gserviceaccount.com",
+    GOOGLE_PRIVATE_KEY: "not-a-key",
+  };
+
+  it("cannot switch the model to an API key or to another project, location or account", async () => {
+    // The provider reads these from the global `process.env`, which nodejs_compat fills from the Worker's env.
+    const { process } = globalThis as unknown as { process: { env: Record<string, string | undefined> } };
+    const before = Object.fromEntries(Object.keys(AMBIENT).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, AMBIENT);
+    try {
+      const token = fakeTokenEndpoint();
+      const vertex = fakeVertex([() => sse([chunk([{ text: "Hello." }], "STOP")])]);
+      const { failure } = await turnWith(vertex.send);
+      expect(failure).toBeNull();
+      expect(vertex.sent).toHaveLength(1);
+      expect(vertex.sent[0]!.url).toBe(
+        `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT}/locations/global/publishers/google/models/${MODEL}:streamGenerateContent?alt=sse`,
+      );
+      expect(vertex.sent[0]!.headers.get("authorization")).toBe(`Bearer ${FAKE_TOKEN}`);
+      expect(vertex.sent[0]!.headers.has("x-goog-api-key")).toBe(false);
+      expect(token.claims[0]).toMatchObject({ iss: EMAIL });
+    } finally {
+      for (const [k, v] of Object.entries(before)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });
