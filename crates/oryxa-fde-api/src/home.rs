@@ -11,7 +11,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use oryxa_fde_events::AccessStatus;
-use oryxa_fde_store::{Named, TaskStatus, TodayItem};
+use oryxa_fde_store::{Named, SuggestionKey, TaskStatus, TodayItem};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::Date;
@@ -35,7 +35,7 @@ pub enum HomeKind {
     AccessWaiting,
     /// Blocked tasks of one project: `count`.
     BlockedTasks,
-    /// A project with no next step: every task is done, or there are none.
+    /// A project with no next step: every task is done, or there are none. `count` is 1, the project.
     NoNextStep,
 }
 
@@ -76,7 +76,7 @@ pub struct HomeOut {
 #[derive(Debug)]
 struct Suggestion {
     out: HomeSuggestionOut,
-    facts: String,
+    facts: [u8; 32],
     /// Within a kind, the more pressing first.
     weight: (u32, u32),
 }
@@ -98,7 +98,7 @@ fn named<T: std::fmt::Display>(n: &Named<T>) -> NamedOut {
 }
 
 /// The hash of a suggestion's facts: its kind and the sorted ids behind it.
-fn facts(kind: HomeKind, mut ids: Vec<String>) -> String {
+fn facts(kind: HomeKind, mut ids: Vec<String>) -> [u8; 32] {
     ids.sort();
     let mut h = Sha256::new();
     h.update(kind.as_str().as_bytes());
@@ -106,7 +106,7 @@ fn facts(kind: HomeKind, mut ids: Vec<String>) -> String {
         h.update(b"\n");
         h.update(id.as_bytes());
     }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    h.finalize().into()
 }
 
 fn count(n: usize) -> u32 {
@@ -200,7 +200,7 @@ fn build(items: Vec<TodayItem>, today: Date) -> Vec<Suggestion> {
             all.push(one(HomeKind::BlockedTasks, n, None, f.blocked, (n, 0)));
         }
         if f.no_next_step {
-            all.push(one(HomeKind::NoNextStep, 0, None, vec![project.id.to_string()], (0, 0)));
+            all.push(one(HomeKind::NoNextStep, 1, None, vec![project.id.to_string()], (0, 0)));
         }
     }
     all.sort_by(|a, b| {
@@ -226,6 +226,7 @@ async fn current(app: &App, who: &Principal) -> Result<Vec<Suggestion>, ApiError
     let projects = app.projects_for(who).await?;
     let scopes = app.store.project_scopes(&who.tenant, &projects).await?;
     let items = app.store.today(&scopes).await?;
+    // ponytail: "today" is the server's UTC date; there is no per-person time zone yet.
     Ok(build(items, time::OffsetDateTime::now_utc().date()))
 }
 
@@ -237,20 +238,38 @@ async fn current(app: &App, who: &Principal) -> Result<Vec<Suggestion>, ApiError
 pub(crate) async fn home(State(app): State<Arc<App>>, who: Principal) -> Result<Json<HomeOut>, ApiError> {
     let all = current(&app, &who).await?;
     let mut tx = app.store.organisation(&who.tenant).await?;
-    let dismissed: HashMap<String, String> = tx
+    let mut dismissed: HashMap<String, [u8; 32]> = tx
         .home_dismissals(&who.user)
         .await?
         .into_iter()
-        .map(|d| (d.suggestion, d.facts))
+        .map(|d| (d.suggestion.as_str().to_owned(), d.facts))
         .collect();
+    let forget: Vec<SuggestionKey> = gone(&dismissed, &all)
+        .iter()
+        .filter_map(|id| SuggestionKey::new(id))
+        .collect();
+    tx.forget_home_dismissals(&who.user, &forget).await?;
     tx.commit().await?;
+    for key in &forget {
+        dismissed.remove(key.as_str());
+    }
     Ok(Json(HomeOut {
         suggestions: visible(all, &dismissed),
     }))
 }
 
+/// The dismissals whose suggestion is not in `all` any more: forgotten, so a suggestion that goes
+/// away and comes back with the same ids shows again.
+fn gone(dismissed: &HashMap<String, [u8; 32]>, all: &[Suggestion]) -> Vec<String> {
+    dismissed
+        .keys()
+        .filter(|id| !all.iter().any(|s| &s.out.id == *id))
+        .cloned()
+        .collect()
+}
+
 /// The suggestions not dismissed with the facts they have now, at most [`MAX_SUGGESTIONS`].
-fn visible(all: Vec<Suggestion>, dismissed: &HashMap<String, String>) -> Vec<HomeSuggestionOut> {
+fn visible(all: Vec<Suggestion>, dismissed: &HashMap<String, [u8; 32]>) -> Vec<HomeSuggestionOut> {
     all.into_iter()
         .filter(|s| dismissed.get(&s.out.id) != Some(&s.facts))
         .take(MAX_SUGGESTIONS)
@@ -263,19 +282,21 @@ fn visible(all: Vec<Suggestion>, dismissed: &HashMap<String, String>) -> Vec<Hom
 #[utoipa::path(post, operation_id = "dismiss_home_suggestion", path = "/v1/home/suggestions/{suggestion}/dismiss",
     tag = "projects", params(("suggestion" = String, Path, description = "A suggestion's `id`")),
     responses((status = 204, description = "Dismissed"), (status = 401, body = ErrorBody),
+        (status = 400, body = ErrorBody, description = "`invalid_suggestion`: not a suggestion id"),
         (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "Not one the caller has now")))]
 pub(crate) async fn dismiss(
     State(app): State<Arc<App>>,
     who: Principal,
     Path(suggestion): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let key = SuggestionKey::new(&suggestion).ok_or(ApiError::Invalid("suggestion"))?;
     let found = current(&app, &who)
         .await?
         .into_iter()
-        .find(|s| s.out.id == suggestion)
+        .find(|s| s.out.id == key.as_str())
         .ok_or(ApiError::NotFound)?;
     let mut tx = app.store.organisation(&who.tenant).await?;
-    tx.dismiss_home(&who.user, &found.out.id, &found.facts).await?;
+    tx.dismiss_home(&who.user, &key, &found.facts).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -408,6 +429,7 @@ mod tests {
         assert_eq!(longest.company.as_ref().map(|c| c.name.as_str()), Some("Globex"));
         assert_eq!((all[3].out.count, all[4].out.count), (2, 1));
         assert_eq!(all[5].out.project.as_ref().map(|p| p.name.as_str()), Some("Pilot"));
+        assert_eq!(all[5].out.count, 1, "the one project");
 
         // No record's own text reaches a suggestion: only kinds, counts, ids and names.
         let text = format!("{:?}", all.iter().map(|s| &s.out).collect::<Vec<_>>());
@@ -423,15 +445,65 @@ mod tests {
     }
 
     #[test]
+    fn a_suggestion_that_goes_away_and_comes_back_with_the_same_ids_shows_again() {
+        let all = build(world(), day(13));
+        let mut dismissed: HashMap<String, [u8; 32]> = all
+            .iter()
+            .filter(|s| s.out.id == "no_next_step.prj_Pilot" || s.out.id == "blocked_tasks.prj_Triage")
+            .map(|s| (s.out.id.clone(), s.facts))
+            .collect();
+        // Pilot gets a next step and Triage's task is unblocked: both suggestions go away.
+        let without: Vec<TodayItem> = world()
+            .into_iter()
+            .filter(|i| !matches!(i, TodayItem::NoNextStep { .. }))
+            .map(|i| match i {
+                TodayItem::Task { task, company, project } if task.id.as_str() == "tsk_1" => task_item(
+                    company,
+                    project,
+                    Task {
+                        status: TaskStatus::Todo,
+                        blocker: None,
+                        ..task
+                    },
+                ),
+                other => other,
+            })
+            .collect();
+        let mut forget = gone(&dismissed, &build(without, day(13)));
+        forget.sort();
+        assert_eq!(forget, ["blocked_tasks.prj_Triage", "no_next_step.prj_Pilot"]);
+        for id in forget {
+            dismissed.remove(&id);
+        }
+        // They come back with exactly the same ids: shown again.
+        let shown: Vec<String> = visible(build(world(), day(13)), &dismissed)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(shown.contains(&"blocked_tasks.prj_Triage".to_owned()), "{shown:?}");
+        // A suggestion still there keeps its dismissal.
+        let kept: HashMap<String, [u8; 32]> = all
+            .iter()
+            .filter(|s| s.out.id == "due_today")
+            .map(|s| (s.out.id.clone(), s.facts))
+            .collect();
+        assert!(gone(&kept, &all).is_empty());
+    }
+
+    fn task_item(company: Named<CompanyId>, project: Named<ProjectId>, task: Task) -> TodayItem {
+        TodayItem::Task { task, company, project }
+    }
+
+    #[test]
     fn at_most_five_are_shown_and_a_dismissal_lasts_until_its_facts_change() {
         let all = build(world(), day(13));
         assert_eq!(visible(build(world(), day(13)), &HashMap::new()).len(), MAX_SUGGESTIONS);
 
         // Dismissed with today's facts: hidden, and the next one moves up.
-        let dismissed: HashMap<String, String> = all
+        let dismissed: HashMap<String, [u8; 32]> = all
             .iter()
             .filter(|s| s.out.id == "access_waiting.prj_Search")
-            .map(|s| (s.out.id.clone(), s.facts.clone()))
+            .map(|s| (s.out.id.clone(), s.facts))
             .collect();
         let shown = visible(build(world(), day(13)), &dismissed);
         assert!(!shown.iter().any(|s| s.id == "access_waiting.prj_Search"));

@@ -9453,6 +9453,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `invalid_suggestion`: not a suggestion id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Unauthorized */
             401: {
                 headers: {

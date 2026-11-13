@@ -8694,6 +8694,16 @@
           "204": {
             "description": "Dismissed"
           },
+          "400": {
+            "description": "`invalid_suggestion`: not a suggestion id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Unauthorized",
             "content": {

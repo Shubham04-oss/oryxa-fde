@@ -14,4 +14,5 @@ alter table home_dismissals enable row level security;
 alter table home_dismissals force row level security;
 create policy in_tenant on home_dismissals to oryxa_fde_app
     using (fde_in_tenant(tenant_id)) with check (fde_in_tenant(tenant_id));
-grant select, insert, update on home_dismissals to oryxa_fde_app;
+-- Delete: a dismissal whose suggestion has gone away is forgotten, so it shows again if it comes back.
+grant select, insert, update, delete on home_dismissals to oryxa_fde_app;

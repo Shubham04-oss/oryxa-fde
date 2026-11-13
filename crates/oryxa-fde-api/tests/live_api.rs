@@ -6074,67 +6074,74 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
     let other = company(&w, &org, "globex").await;
     let tasks = |c: &Tenant| format!("/v1/companies/{}/projects/{}/tasks", c.company, c.project);
     let blocked = |title: &str| Some(json!({"title": title, "status": "blocked", "blocker": "their IT"}));
-    w.ok(
-        &t.lead,
-        "POST",
-        &tasks(&t),
-        blocked("Mine, blocked"),
-        StatusCode::CREATED,
-    )
-    .await;
-    w.ok(
-        &other.lead,
-        "POST",
-        &tasks(&other),
-        blocked("Theirs, blocked"),
-        StatusCode::CREATED,
-    )
-    .await;
-    w.ok(
-        &other.lead,
-        "POST",
-        &tasks(&other),
-        blocked("Theirs, blocked too"),
-        StatusCode::CREATED,
-    )
-    .await;
+    let mine = w
+        .ok(
+            &t.lead,
+            "POST",
+            &tasks(&t),
+            blocked("Mine, blocked"),
+            StatusCode::CREATED,
+        )
+        .await;
+    for title in ["Theirs, blocked", "Theirs, blocked too"] {
+        w.ok(&other.lead, "POST", &tasks(&other), blocked(title), StatusCode::CREATED)
+            .await;
+    }
     // `Date` displays as `YYYY-MM-DD`.
     let today = time::OffsetDateTime::now_utc().date().to_string();
     let due = Some(json!({"title": "Send the summary", "status": "todo", "due_on": today}));
-    w.ok(&t.lead, "POST", &tasks(&t), due, StatusCode::CREATED).await;
+    w.ok(&t.lead, "POST", &tasks(&t), due.clone(), StatusCode::CREATED)
+        .await;
+    // Another company's due task: `due_today` names no project, so only its count could leak it.
+    w.ok(&other.lead, "POST", &tasks(&other), due, StatusCode::CREATED)
+        .await;
 
     let (status, body) = w.call(Some(&t.lead.token), "GET", "/v1/home", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let list = body["suggestions"].as_array().unwrap().clone();
     let id_of = |kind: &str| format!("{kind}.{}", t.project);
-    let shown: Vec<&str> = list.iter().map(|s| s["id"].as_str().unwrap()).collect();
-    assert!(shown.contains(&"due_today"), "{body}");
-    assert!(shown.contains(&id_of("blocked_tasks").as_str()), "{body}");
+    let find = |list: &[Value], id: &str| list.iter().find(|s| s["id"] == id).cloned();
+    let due_today = find(&list, "due_today").expect("due today");
+    assert_eq!(due_today["count"], 1, "only the caller's own project: {body}");
     // Nothing from a project the caller does not work on, and no record's own text.
     let text = body.to_string();
     assert!(!text.contains(&other.project) && !text.contains("globex"), "{text}");
     for secret in ["Mine, blocked", "their IT", "Send the summary"] {
         assert!(!text.contains(secret), "{secret}: {text}");
     }
-    let mine = list
-        .iter()
-        .find(|s| s["id"] == id_of("blocked_tasks").as_str())
-        .unwrap();
-    assert_eq!(mine["count"], 1);
+    let suggestion = find(&list, &id_of("blocked_tasks")).expect("blocked tasks");
+    assert_eq!(suggestion["count"], 1);
     assert_eq!(
-        mine["route"],
+        suggestion["route"],
         format!("/companies/{}/projects/{}", t.company, t.project)
     );
 
-    // Dismissed: gone for this person, until another blocked task changes the facts.
+    let has = |body: &Value, id: &str| body.to_string().contains(id);
+
+    // Dismissed: gone for this person.
     let dismiss = format!("/v1/home/suggestions/{}/dismiss", id_of("blocked_tasks"));
     let (status, _) = w.call(Some(&t.lead.token), "POST", &dismiss, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (_, body) = w.call(Some(&t.lead.token), "GET", "/v1/home", None).await;
-    assert!(!body.to_string().contains(&id_of("blocked_tasks")), "{body}");
+    assert!(!has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")));
     // Not someone else's: the project's engineer still sees it.
-    let (_, theirs) = w.call(Some(&t.engineer.token), "GET", "/v1/home", None).await;
-    assert!(theirs.to_string().contains(&id_of("blocked_tasks")), "{theirs}");
+    assert!(has(&home_of(&w, &t.engineer).await.1, &id_of("blocked_tasks")));
+
+    // Unblocked, it goes away and the dismissal is forgotten; blocked again with the very same task,
+    // the same ids as when it was dismissed, it shows again.
+    let task = format!("{}/{}", tasks(&t), mine["id"].as_str().unwrap());
+    let todo = Some(json!({"title": "Mine, blocked", "status": "todo"}));
+    w.ok(&t.lead, "PUT", &task, todo, StatusCode::OK).await;
+    assert!(!has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")));
+    w.ok(&t.lead, "PUT", &task, blocked("Mine, blocked"), StatusCode::OK)
+        .await;
+    assert!(
+        has(&home_of(&w, &t.lead).await.1, &id_of("blocked_tasks")),
+        "back with the same ids"
+    );
+
+    // Dismissed again, a new blocked task changes the facts and brings it back.
+    let (status, _) = w.call(Some(&t.lead.token), "POST", &dismiss, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     w.ok(
         &t.lead,
         "POST",
@@ -6143,13 +6150,8 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
         StatusCode::CREATED,
     )
     .await;
-    let (_, body) = w.call(Some(&t.lead.token), "GET", "/v1/home", None).await;
-    let back = body["suggestions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == id_of("blocked_tasks").as_str())
-        .cloned();
+    let (_, body) = home_of(&w, &t.lead).await;
+    let back = find(body["suggestions"].as_array().unwrap(), &id_of("blocked_tasks"));
     assert_eq!(back.map(|s| s["count"].clone()), Some(json!(2)), "{body}");
 
     // Only a suggestion the caller has now can be dismissed; another company's is not found.
@@ -6158,9 +6160,23 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
         w.call(Some(&t.lead.token), "POST", &foreign, None).await.0,
         StatusCode::NOT_FOUND
     );
-    // Never to a customer role.
+    // Not a suggestion id at all: refused before anything is read.
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "POST",
+            "/v1/home/suggestions/Bad.prj%2F1/dismiss",
+            None,
+        )
+        .await;
     assert_eq!(
-        w.call(Some(&t.guest.token), "GET", "/v1/home", None).await.0,
-        StatusCode::FORBIDDEN
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_suggestion"))
     );
+    // Never to a customer role.
+    assert_eq!(home_of(&w, &t.guest).await.0, StatusCode::FORBIDDEN);
+}
+
+async fn home_of(w: &World, who: &User) -> (StatusCode, Value) {
+    w.call(Some(&who.token), "GET", "/v1/home", None).await
 }
