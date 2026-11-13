@@ -20,6 +20,37 @@ afterEach(() => {
 
 const MORNING = new Date(2026, 10, 12, 9, 0)
 const suggested = () => screen.findAllByRole("button", { name: /^Not now:/ })
+const homeReads = () => wire.reads.filter((r) => r === "/home").length
+/** Holds the writes sent from now on until the returned function is called. */
+function holdWrites() {
+  let release = () => {}
+  wire.hold = new Promise<void>((r) => (release = r))
+  return () => release()
+}
+const refused = (status: number) =>
+  new Response(JSON.stringify({ error: status === 404 ? "not_found" : "unavailable" }), { status })
+const VALID = {
+  id: "no_next_step.prj_x",
+  kind: "no_next_step",
+  count: 1,
+  company: { id: "cmp_x", name: "Acme" },
+  project: { id: "prj_x", name: "Triage" },
+  route: "/companies/cmp_x/projects/prj_x",
+}
+const OTHER = {
+  ...VALID,
+  id: "no_next_step.prj_y",
+  project: { id: "prj_y", name: "Search" },
+  route: "/companies/cmp_x/projects/prj_y",
+}
+const NOT_X = "Not now: No next step, Acme · Triage"
+const NOT_Y = "Not now: No next step, Acme · Search"
+/** Serves `/home` with exactly these suggestions. */
+const serveHome = (suggestions: Array<unknown>) =>
+  (wire.refuseReads = {
+    ending: "/home",
+    response: new Response(JSON.stringify({ suggestions }), { status: 200 }),
+  })
 
 describe("the welcome screen", () => {
   it("greets the FDE and puts the conversation box first", async () => {
@@ -31,22 +62,301 @@ describe("the welcome screen", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   })
 
-  it("suggests next steps; one can be put away and brought back", async () => {
+  it("suggests the API's next steps, worded from the web's templates", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    expect(wire.reads).toContain("/home")
+    expect(wire.reads).not.toContain("/today")
+  })
+
+  it("puts one away at once, and tells the API", async () => {
     renderWithRouter(<Welcome now={MORNING} />)
     const before = await suggested()
     const name = before[0]!.getAttribute("aria-label")!
+    let release = () => {}
+    wire.hold = new Promise((r) => (release = r))
     await userEvent.click(before[0]!)
+    // Gone before the API answers.
     expect(screen.queryByRole("button", { name })).toBeNull()
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(/Put away/)
-    await userEvent.click(screen.getByRole("button", { name: "Undo" }))
+    expect(wire.sent).toEqual([
+      {
+        method: "POST",
+        path: expect.stringMatching(/^\/home\/suggestions\/[^/]+\/dismiss$/),
+        body: null,
+      },
+    ])
+    release()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name })).toBeNull()
+  })
+
+  it("brings a suggestion back when the API refuses to put it away, without reading again", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    const before = await suggested()
+    const name = before[0]!.getAttribute("aria-label")!
+    // A read from here on never answers: the row must come back on its own.
+    wire.holdReads = new Promise(() => {})
+    wire.refuse = refused(503)
+    await userEvent.click(before[0]!)
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
     expect(screen.getByRole("button", { name })).toBeInTheDocument()
-    expect(wire.sent).toEqual([])
+  })
+
+  it("brings back only the one refused when two are put away at once, and says which", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    const [a, b] = await suggested()
+    const nameA = a!.getAttribute("aria-label")!
+    const nameB = b!.getAttribute("aria-label")!
+    const releaseA = holdWrites()
+    await userEvent.click(a!)
+    await waitFor(() => expect(wire.sent).toHaveLength(1))
+    const releaseB = holdWrites()
+    await userEvent.click(screen.getByRole("button", { name: nameB }))
+    await waitFor(() => expect(wire.sent).toHaveLength(2))
+    wire.refuse = refused(503)
+    releaseA()
+    expect(await screen.findByRole("button", { name: nameA })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: nameB })).toBeNull()
+    const what = nameA.replace(/^Not now: /, "")
+    expect(
+      screen.getByText(`We couldn't put away ${what}, so it is back. Try again in a moment.`),
+    ).toBeInTheDocument()
+    wire.refuse = null
+    releaseB()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    // The failure is still said after the later success.
+    expect(screen.getByText(/^We couldn't put away/)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    expect(screen.queryByRole("button", { name: nameB })).toBeNull()
+    expect(screen.getByRole("button", { name: nameA })).toBeInTheDocument()
+  })
+
+  it("keeps the second away while it is pending, though the first is done", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    const [a, b] = await suggested()
+    const nameA = a!.getAttribute("aria-label")!
+    const nameB = b!.getAttribute("aria-label")!
+    const releaseA = holdWrites()
+    await userEvent.click(a!)
+    await waitFor(() => expect(wire.sent).toHaveLength(1))
+    const releaseB = holdWrites()
+    await userEvent.click(screen.getByRole("button", { name: nameB }))
+    await waitFor(() => expect(wire.sent).toHaveLength(2))
+    releaseA()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    // No read while another is still on its way, so nothing comes back early.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(homeReads()).toBe(1)
+    expect(screen.queryByRole("button", { name: nameA })).toBeNull()
+    expect(screen.queryByRole("button", { name: nameB })).toBeNull()
+    releaseB()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByRole("button", { name: nameA })).toBeNull()
+    expect(screen.queryByRole("button", { name: nameB })).toBeNull()
+  })
+
+  it("counts a suggestion the API no longer has (404) as put away", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    const before = await suggested()
+    const name = before[0]!.getAttribute("aria-label")!
+    wire.refuse = refused(404)
+    // The API's next read no longer has it either.
+    serveHome([])
+    await userEvent.click(before[0]!)
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    expect(screen.queryByText(/^We couldn't put away/)).toBeNull()
+    expect(screen.queryByRole("button", { name })).toBeNull()
+  })
+
+  it("shows one put away again when a later read of the API still sends it (its facts changed)", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+  })
+
+  it("reads again after a refusal, so one confirmed before it is not hidden for good", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    const releaseX = holdWrites()
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await waitFor(() => expect(wire.sent).toHaveLength(1))
+    const releaseY = holdWrites()
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(wire.sent).toHaveLength(2))
+    releaseX()
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    wire.refuse = refused(503)
+    releaseY()
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBe(2))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: NOT_Y })).toBeInTheDocument()
+  })
+
+  it("reads again for one confirmed while the last read is still on its way", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    await screen.findByRole("button", { name: NOT_X })
+    let answer = () => {}
+    wire.holdReads = new Promise<void>((r) => (answer = r))
+    await userEvent.click(screen.getByRole("button", { name: NOT_X }))
+    await waitFor(() => expect(homeReads()).toBe(2))
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(homeReads()).toBe(3))
+    wire.holdReads = null
+    answer()
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(await screen.findByRole("button", { name: NOT_Y })).toBeInTheDocument()
+  })
+
+  it("says each refusal when two are refused in a row", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away No next step, Acme · Triage/)
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await screen.findByText(/^We couldn't put away No next step, Acme · Search/)
+    expect(
+      screen.getByText(/^We couldn't put away No next step, Acme · Triage/),
+    ).toBeInTheDocument()
+  })
+
+  it("clears a refusal's line when it is tried again, even if the API sends it again", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away/)
+    wire.refuse = null
+    // The retry is confirmed, and the next read still has it (its facts changed): no old refusal.
+    await userEvent.click(screen.getByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^Put away: /)).toBeInTheDocument()
+    await waitFor(() => expect(homeReads()).toBeGreaterThanOrEqual(3))
+    expect(await screen.findByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.queryByText(/^We couldn't put away/)).toBeNull()
+  })
+
+  it("drops a refusal's line once the API no longer sends that suggestion", async () => {
+    serveHome([VALID, OTHER])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = refused(503)
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    await screen.findByText(/^We couldn't put away/)
+    serveHome([OTHER])
+    wire.refuse = null
+    await userEvent.click(screen.getByRole("button", { name: NOT_Y }))
+    await waitFor(() => expect(homeReads()).toBeGreaterThanOrEqual(3))
+    await waitFor(() => expect(screen.queryByText(/^We couldn't put away/)).toBeNull())
+  })
+
+  it("counts a 400 as a refusal, not as put away", async () => {
+    serveHome([VALID])
+    renderWithRouter(<Welcome now={MORNING} />)
+    wire.refuse = new Response(JSON.stringify({ error: "invalid_suggestion" }), { status: 400 })
+    await userEvent.click(await screen.findByRole("button", { name: NOT_X }))
+    expect(await screen.findByText(/^We couldn't put away/)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: NOT_X })).toBeInTheDocument()
+    expect(screen.queryByText(/^Put away: /)).toBeNull()
+  })
+
+  it("names each row by where it is, so two of a kind are told apart", async () => {
+    serveHome([
+      VALID,
+      {
+        ...VALID,
+        id: "no_next_step.prj_y",
+        project: { id: "prj_y", name: "Search" },
+        route: "/companies/cmp_x/projects/prj_y",
+      },
+    ])
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(
+      await screen.findByRole("article", { name: "No next step, Acme · Triage" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Not now: No next step, Acme · Search" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Open the project: Acme · Search" }),
+    ).toBeInTheDocument()
+  })
+
+  it("moves focus to the next row after a dismiss, and to the heading after the last", async () => {
+    serveHome([
+      VALID,
+      {
+        ...VALID,
+        id: "no_next_step.prj_y",
+        project: { id: "prj_y", name: "Search" },
+        route: "/companies/cmp_x/projects/prj_y",
+      },
+    ])
+    renderWithRouter(<Welcome now={MORNING} />)
+    const first = await screen.findByRole("button", {
+      name: "Not now: No next step, Acme · Triage",
+    })
+    holdWrites()
+    first.focus()
+    await userEvent.keyboard("{Enter}")
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Not now: No next step, Acme · Search" }),
+      ),
+    )
+    await userEvent.keyboard("{Enter}")
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Suggested next" })),
+    )
+  })
+
+  it("skips a kind it does not know in the API's answer and shows the rest", async () => {
+    serveHome([{ ...VALID, id: "wire_money", kind: "wire_money" }, VALID])
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    expect(await suggested()).toHaveLength(1)
+  })
+
+  it("claims no all clear when what is left was put away or skipped", async () => {
+    serveHome([{ ...VALID, kind: "wire_money" }])
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(await screen.findByText("Nothing new to suggest right now.")).toBeInTheDocument()
+    expect(screen.queryByText(/^Nothing needs you right now/)).toBeNull()
+    await userEvent.click(screen.getByRole("button", { name: "What needs me today?" }))
+    const log = screen.getByRole("log", { name: "Conversation" })
+    expect(await within(log).findByText("Nothing new to suggest right now.")).toBeInTheDocument()
+  })
+
+  it("says so calmly, with Try again, when the day cannot be read", async () => {
+    wire.refuseReads = {
+      ending: "/home",
+      // A refusal is not retried, so the error shows at once.
+      response: new Response(JSON.stringify({ error: "forbidden" }), { status: 403 }),
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(
+      await screen.findByText("We couldn't read your day, so there is nothing to suggest yet."),
+    ).toBeInTheDocument()
+    wire.refuseReads = null
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }))
+    expect(await suggested()).not.toHaveLength(0)
+  })
+
+  it("says nothing needs the FDE when the API suggests nothing, and claims no more", async () => {
+    serveHome([])
+    renderWithRouter(<Welcome now={MORNING} />)
+    expect(await screen.findByText(/^Nothing needs you right now\./)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^Not now:/ })).toBeNull()
   })
 
   it("approves a suggestion by opening where it is done, and writes nothing", async () => {
     const { router } = renderWithRouter(<Welcome now={MORNING} />)
     await suggested()
-    await userEvent.click(screen.getAllByRole("button", { name: "Open the project" })[0]!)
+    await userEvent.click(screen.getAllByRole("button", { name: /^Open the project: / })[0]!)
     await waitFor(() =>
       expect(router.state.location.pathname).toMatch(/^\/companies\/cmp_\w+\/projects\//),
     )
@@ -72,23 +382,6 @@ describe("the welcome screen", () => {
     await userEvent.type(box, "one{Shift>}{Enter}{/Shift}two")
     expect(box).toHaveValue("one\ntwo")
     expect(screen.queryByRole("log")).toBeNull()
-  })
-
-  it("leaves suggestions out against a real API, and keeps the box and the companies", async () => {
-    renderWithRouter(<Welcome now={MORNING} suggest={false} />)
-    expect(await screen.findByRole("link", { name: /^See all/ })).toBeInTheDocument()
-    expect(
-      screen.getByRole("textbox", { name: "What do you want to work on?" }),
-    ).toBeInTheDocument()
-    expect(screen.queryByRole("heading", { name: "Suggested next" })).toBeNull()
-    expect(screen.queryByRole("button", { name: /^Not now:/ })).toBeNull()
-    // The day is not read for suggestions it will not show.
-    expect(wire.reads).not.toContain("/today")
-    await userEvent.click(screen.getByRole("button", { name: "What needs me today?" }))
-    const log = screen.getByRole("log", { name: "Conversation" })
-    expect(
-      await within(log).findByText("Today shows what is blocked, due and waiting."),
-    ).toBeInTheDocument()
   })
 
   it("offers the first company to a workspace with none", async () => {

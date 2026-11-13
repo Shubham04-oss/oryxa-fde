@@ -11,7 +11,7 @@ export type Wire = {
   refuse: Response | null
   /** Holds every read's answer, already taken, so it arrives late with what was true when it was asked. */
   holdReads: Promise<void> | null
-  /** Answers every read whose path ends with `ending` with `response`, as the API would. */
+  /** Answers every read whose path ends with `ending` with `response`, as the API would (held like any read). */
   refuseReads: { ending: string; response: Response } | null
   /** Every write sent, in order. */
   sent: Array<{ method: string; path: string; body: unknown }>
@@ -75,8 +75,11 @@ export function installWire() {
       !write &&
       wire.refuseReads &&
       new URL(request.url).pathname.endsWith(wire.refuseReads.ending)
-    )
+    ) {
+      // A served answer arrives late too, when reads are held.
+      if (wire.holdReads) await wire.holdReads
       return wire.refuseReads.response.clone()
+    }
     const response = await answer(request)
     if (write && wire.lose > 0) {
       wire.lose -= 1

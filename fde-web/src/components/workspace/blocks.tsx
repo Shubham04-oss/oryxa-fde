@@ -56,9 +56,11 @@ export function Suggestion({
   lead?: boolean
 }) {
   const go = useGo()
+  // Where it is, in each name, so two rows of one kind (two idle projects) are told apart.
+  const named = block.context ? `${block.title}, ${block.context}` : block.title
   return (
     <article
-      aria-label={block.title}
+      aria-label={named}
       className="flex items-center gap-6 px-5 py-4 max-[560px]:flex-col max-[560px]:items-stretch max-[560px]:gap-3 max-[560px]:px-4"
     >
       <div className="grid min-w-0 flex-1 gap-1">
@@ -71,7 +73,13 @@ export function Suggestion({
         )}
       </div>
       <div className="flex flex-none items-center gap-1">
-        <Button variant={lead ? "default" : "outline"} onClick={() => void go(block.approve.to)}>
+        <Button
+          variant={lead ? "default" : "outline"}
+          aria-label={
+            block.context ? `${block.approve.label}: ${block.context}` : block.approve.label
+          }
+          onClick={() => void go(block.approve.to)}
+        >
           {block.approve.label}
           <Icon name="arrow-right" size={14} strokeWidth={2} />
         </Button>
@@ -79,7 +87,7 @@ export function Suggestion({
           <button
             type="button"
             onClick={onDismiss}
-            aria-label={`Not now: ${block.title}`}
+            aria-label={`Not now: ${named}`}
             title="Not now"
             className="grid size-8 place-items-center rounded-full text-muted-foreground transition-[background-color,color,transform] duration-150 hover:bg-selected hover:text-foreground motion-safe:active:scale-[0.92]"
           >

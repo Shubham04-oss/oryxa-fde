@@ -424,6 +424,23 @@ export const TodayOut = z.object({
     .optional(),
 })
 
+/** What a home suggestion is about (`GET /v1/home`). The web words each kind from its own templates. */
+export const HomeKind = z.enum(["due_today", "access_waiting", "blocked_tasks", "no_next_step"])
+export type HomeKind = z.infer<typeof HomeKind>
+/** One suggested next step: a kind, counts, names and a route; never a record's own text. */
+export const HomeSuggestionOut = z.object({
+  id: z.string(),
+  kind: HomeKind,
+  count: z.int().min(0),
+  days: z.int().min(0).nullish(),
+  company: Named(CompanyId).nullish(),
+  project: Named(ProjectId).nullish(),
+  route: z.string(),
+})
+export type HomeSuggestionOut = z.infer<typeof HomeSuggestionOut>
+export const HomeOut = z.object({ suggestions: z.array(HomeSuggestionOut) })
+export type HomeOut = z.infer<typeof HomeOut>
+
 // What the company and project screens read, gathered by `api` (client.ts) from the answers above.
 
 export type Company = CompanyOut & {

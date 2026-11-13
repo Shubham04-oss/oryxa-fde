@@ -1045,6 +1045,7 @@ export function resetMockApi({
   empty = false,
 }: { signedIn?: boolean; engineer?: boolean; empty?: boolean } = {}) {
   state = seed()
+  homeDismissed = new Map()
   if (empty) {
     state.companies.length = 0
     state.projects.length = 0
@@ -1206,6 +1207,125 @@ function today(): S["TodayOut"] {
       }),
     )
   return { items, projects_without_next_step }
+}
+
+type HomeSuggestion = S["HomeSuggestionOut"] & { facts: string }
+
+/**
+ * `GET /v1/home`'s suggestions before dismissals, built from Today's facts as the API builds them
+ * (`home.rs`): what is due across every project, then per project access waiting, blocked tasks and
+ * no next step, in that order, the more pressing first. `facts` is the kind and its sorted ids.
+ */
+function homeSuggestions(): Array<HomeSuggestion> {
+  const { items, projects_without_next_step = [] } = today()
+  const now = day(0)
+  const due = items.flatMap((i) =>
+    i.kind === "task" && i.task.due_on && i.task.due_on <= now ? [i.task.id] : [],
+  )
+  const facts = (kind: string, ids: Array<string>) => [kind, ...[...ids].sort()].join("\n")
+  const all: Array<HomeSuggestion & { weight: [number, number] }> = []
+  if (due.length > 0)
+    all.push({
+      id: "due_today",
+      kind: "due_today",
+      count: due.length,
+      days: null,
+      company: null,
+      project: null,
+      route: "/today",
+      facts: facts("due_today", due),
+      weight: [due.length, 0],
+    })
+  type Place = { company: S["NamedOut"]; project: S["NamedOut"] }
+  const places = new Map<string, Place>()
+  for (const p of [...items, ...projects_without_next_step]) places.set(p.project.id, p)
+  for (const where of places.values()) {
+    const here = items.filter((i) => i.project.id === where.project.id)
+    const one = (
+      kind: S["HomeKind"],
+      ids: Array<string>,
+      weight: [number, number],
+      days?: number,
+    ) =>
+      all.push({
+        id: `${kind}.${where.project.id}`,
+        kind,
+        count: ids.length,
+        days: days ?? null,
+        company: where.company,
+        project: where.project,
+        route: `/companies/${where.company.id}/projects/${where.project.id}`,
+        facts: facts(kind, ids),
+        weight,
+      })
+    const waiting = here.flatMap((i) =>
+      i.kind === "access_request" && ["requested", "in_progress"].includes(i.access.status)
+        ? [i.access]
+        : [],
+    )
+    if (waiting.length > 0) {
+      const longest = Math.max(...waiting.map((a) => a.days_waiting))
+      one(
+        "access_waiting",
+        waiting.map((a) => a.id),
+        [longest, waiting.length],
+        longest,
+      )
+    }
+    const blocked = here.flatMap((i) =>
+      i.kind === "task" && i.task.status === "blocked" ? [i.task.id] : [],
+    )
+    if (blocked.length > 0) one("blocked_tasks", blocked, [blocked.length, 0])
+    if (projects_without_next_step.some((p) => p.project.id === where.project.id))
+      one("no_next_step", [where.project.id], [0, 0])
+  }
+  const rank: Array<S["HomeKind"]> = [
+    "due_today",
+    "access_waiting",
+    "blocked_tasks",
+    "no_next_step",
+  ]
+  const name = (s: HomeSuggestion) => `${s.company?.name ?? ""}\n${s.project?.name ?? ""}`
+  return all
+    .sort(
+      (a, b) =>
+        rank.indexOf(a.kind) - rank.indexOf(b.kind) ||
+        b.weight[0] - a.weight[0] ||
+        b.weight[1] - a.weight[1] ||
+        name(a).localeCompare(name(b)),
+    )
+    .map(({ weight: _, ...s }) => s)
+}
+
+/** This person's dismissed home suggestions: id to the facts it was dismissed with. */
+let homeDismissed = new Map<string, string>()
+
+/** `GET /v1/home`: at most five, a dismissed one hidden until its facts change. */
+function home(): S["HomeOut"] {
+  const all = homeSuggestions()
+  // A dismissal whose suggestion has gone is forgotten, so it shows again if it comes back.
+  for (const id of homeDismissed.keys()) if (!all.some((s) => s.id === id)) homeDismissed.delete(id)
+  const suggestions = all
+    .filter((s) => homeDismissed.get(s.id) !== s.facts)
+    .slice(0, 5)
+    .map(({ facts: _, ...s }) => s)
+  return { suggestions }
+}
+
+/** `POST /v1/home/suggestions/{id}/dismiss`: only a suggestion the person has now. */
+function dismissHome(raw: string) {
+  let id: string
+  try {
+    id = decodeURIComponent(raw)
+  } catch {
+    return refuse(400, "invalid_suggestion")
+  }
+  // The API's `SuggestionKey` rule: `<kind>` or `<kind>.<project id>`.
+  if (!/^[a-z_]{1,32}(\.[A-Za-z0-9_-]{1,128})?$/.test(id)) return refuse(400, "invalid_suggestion")
+  const found = homeSuggestions().find((s) => s.id === id)
+  if (!found) return refuse(404, "not_found")
+  homeDismissed.set(id, found.facts)
+  return new Response(null, { status: 204 })
 }
 
 const TASK_FIELDS = [
@@ -2578,6 +2698,9 @@ async function answer(request: Request): Promise<Response> {
   if (method === "GET" && parts.length === 0 && root === "me") return json(state.me)
   if (method === "GET" && parts.length === 0 && root === "people") return peopleList()
   if (method === "GET" && parts.length === 0 && root === "today") return json(today())
+  if (method === "GET" && parts.length === 0 && root === "home") return json(home())
+  if (method === "POST" && root === "home" && parts.length === 3 && parts[0] === "suggestions")
+    return parts[2] === "dismiss" ? dismissHome(parts[1]!) : refuse(404, "not_found")
   if (method === "GET" && root === "room" && parts[0] === "companies" && parts[2] === "projects")
     return roomRead(parts[1], parts[3])
   const answered = root === "companies" ? await companyRoutes(method, parts, request) : null
