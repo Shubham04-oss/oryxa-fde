@@ -13,14 +13,21 @@ use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
-use crate::{ConversationId, Store, StoreError, id};
+use crate::{Actor, ConversationId, Store, StoreError, audit, id};
 
 /// The most turns one conversation holds (the Worker's `MAX_TURNS`).
 pub const MAX_TURNS: u32 = 50;
 /// The longest message a person may send (`MAX_SAID`).
 pub const MAX_SAID_CHARS: usize = 2000;
-/// The most text one reply holds (`MAX_REPLY`).
+/// The most text one reply holds (`MAX_REPLY`), in UTF-16 code units as the web's `z.string().max`
+/// counts it.
 pub const MAX_REPLY_CHARS: usize = 8000;
+/// The most blocks, and proposals, one turn holds (`MAX_BLOCKS`, `MAX_PROPOSALS`); the table checks
+/// them too.
+pub const MAX_BLOCKS: usize = 6;
+pub const MAX_PROPOSALS: usize = 3;
+/// The most bytes each of a turn's blocks and proposals may take as JSON text, as the table checks.
+pub const MAX_PARTS_BYTES: usize = 65_536;
 
 /// Where a conversation is bound, for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,14 +91,15 @@ impl TurnKey {
     }
 }
 
-/// What a person said in a turn: 1 to [`MAX_SAID_CHARS`] characters, trimmed, no control characters
-/// but tab and newline. Customer text, so `Debug` shows its length only.
+/// What a person said in a turn, by the wire's `text(MAX_SAID)` rule: trimmed as JavaScript trims,
+/// 1 to [`MAX_SAID_CHARS`] code points, and no control characters but tab, newline and carriage
+/// return. Customer text, so `Debug` shows its length only.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Said(String);
 
 impl Said {
     pub fn new(v: &str) -> Option<Self> {
-        let v = v.trim();
+        let v = js_trim(v);
         let ok = (1..=MAX_SAID_CHARS).contains(&v.chars().count()) && plain(v);
         ok.then(|| Self(v.to_owned()))
     }
@@ -106,9 +114,22 @@ impl fmt::Debug for Said {
     }
 }
 
-/// No control characters but tab and newline.
+/// The wire's plain-text rule: none of U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F or
+/// U+007F (so tab, newline and carriage return pass, as do the C1 controls JavaScript's regex leaves).
 pub(crate) fn plain(v: &str) -> bool {
-    !v.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+    !v.chars()
+        .any(|c| matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{7f}'))
+}
+
+/// `String.prototype.trim`: Unicode white space and U+FEFF off both ends.
+fn js_trim(v: &str) -> &str {
+    v.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// Whether a reply fits the wire: plain text of at most [`MAX_REPLY_CHARS`] UTF-16 code units, the
+/// unit the web's view counts, so a stored reply never makes the web drop the conversation.
+pub fn reply_fits(v: &str) -> bool {
+    v.encode_utf16().count() <= MAX_REPLY_CHARS && plain(v)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +215,8 @@ fn turn(r: PgRow) -> Result<Turn, StoreError> {
 }
 
 /// A transaction for one conversation scope: row-level security limits it to that company (or to the
-/// tenant's home rows), and every query filters by tenant, company and the person.
+/// tenant's home rows), and every query filters by tenant, company and the person. Turns have no person
+/// column, so whatever writes one must first lock its conversation by its holder (`find(.., true)`).
 pub struct AssistantTx {
     tx: Transaction<'static, Postgres>,
     scope: ConversationScope,
@@ -373,8 +395,10 @@ impl AssistantTx {
         rows.into_iter().map(turn).collect()
     }
 
-    /// Deletes `user`'s conversation `id` in this scope and its turns; `false` if there is none.
-    pub async fn delete(&mut self, id: &ConversationId, user: &UserId) -> Result<bool, StoreError> {
+    /// Deletes `by`'s conversation `id` in this scope and its turns, and leaves an audit row naming it
+    /// (no content); `false` if there is none.
+    pub async fn delete(&mut self, id: &ConversationId, by: &Actor) -> Result<bool, StoreError> {
+        let user = &by.user;
         let (t, c, p) = self.keys();
         let n = sqlx::query(
             "delete from assistant_conversations
@@ -389,13 +413,74 @@ impl AssistantTx {
         .execute(&mut *self.tx)
         .await?
         .rows_affected();
-        Ok(n == 1)
+        if n != 1 {
+            return Ok(false);
+        }
+        match self.scope.clone() {
+            ConversationScope::Home(tenant) => {
+                sqlx::query("insert into audit_log (tenant_id, actor, action, target) values ($1, $2, $3, $4)")
+                    .bind(tenant.as_str())
+                    .bind(by.user.as_str())
+                    .bind("assistant_conversation.deleted")
+                    .bind(id.as_str())
+                    .execute(&mut *self.tx)
+                    .await?;
+            }
+            ConversationScope::Company(c) => {
+                audit(
+                    &mut self.tx,
+                    &c,
+                    None,
+                    by,
+                    "assistant_conversation.deleted",
+                    Some(id.as_str()),
+                )
+                .await?;
+            }
+            ConversationScope::Project(p) => {
+                audit(
+                    &mut self.tx,
+                    &p.company,
+                    Some(&p.project),
+                    by,
+                    "assistant_conversation.deleted",
+                    Some(id.as_str()),
+                )
+                .await?;
+            }
+        }
+        Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_rules_are_the_wires() {
+        // Pasted text keeps its carriage returns; JavaScript's trim takes U+FEFF too.
+        assert_eq!(
+            Said::new("\u{feff} line one\r\nline two \n").unwrap().as_str(),
+            "line one\r\nline two"
+        );
+        assert!(
+            Said::new("a\u{85}b").is_some(),
+            "a C1 control passes, as the wire's regex lets it"
+        );
+        for bad in ["a\u{0}b", "a\u{b}b", "a\u{1b}b", "a\u{7f}b"] {
+            assert!(Said::new(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(
+            Said::new(&"é".repeat(MAX_SAID_CHARS)).map(|s| s.as_str().chars().count()),
+            Some(MAX_SAID_CHARS)
+        );
+        // A reply counts UTF-16 units: an emoji is two.
+        assert!(reply_fits(&"x".repeat(MAX_REPLY_CHARS)));
+        assert!(reply_fits(&"😀".repeat(MAX_REPLY_CHARS / 2)));
+        assert!(!reply_fits(&"😀".repeat(MAX_REPLY_CHARS / 2 + 1)));
+        assert!(reply_fits("line\r\nline\ttab") && !reply_fits("a\u{1b}b"));
+    }
 
     #[test]
     fn turn_keys_and_said_follow_the_workers_rules() {

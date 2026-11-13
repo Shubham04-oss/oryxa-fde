@@ -51,8 +51,8 @@ mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use assistant::{
-    AssistantTx, Conversation, ConversationScope, MAX_REPLY_CHARS, MAX_SAID_CHARS, MAX_TURNS, Said, Turn, TurnKey,
-    TurnState,
+    AssistantTx, Conversation, ConversationScope, MAX_BLOCKS, MAX_PARTS_BYTES, MAX_PROPOSALS, MAX_REPLY_CHARS,
+    MAX_SAID_CHARS, MAX_TURNS, Said, Turn, TurnKey, TurnState, reply_fits,
 };
 pub use canvas::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,

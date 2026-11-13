@@ -972,7 +972,7 @@
         "tags": [
           "assistant"
         ],
-        "summary": "Start a conversation, bound for good to the caller and to a company (or a project in it), or to\nthe caller's home. A company needs `work` on it; home needs only a session.",
+        "summary": "Start a conversation, bound for good to the caller and to a company (or a project in it), or to\nthe caller's home. A company needs `work` on it; home needs `access` to the workspace, which a\ncustomer role does not have.",
         "operationId": "create_conversation",
         "requestBody": {
           "content": {
@@ -1073,7 +1073,7 @@
         "tags": [
           "assistant"
         ],
-        "summary": "Delete one of the caller's conversations and its turns.",
+        "summary": "Delete one of the caller's conversations and its turns. Only its holder, who may delete it even\nafter losing access to its company. An audit row names it; no content is kept.",
         "operationId": "delete_conversation",
         "parameters": [
           {
@@ -1142,10 +1142,10 @@
         ],
         "responses": {
           "204": {
-            "description": "The caller's, bound as asked"
+            "description": "The caller's, bound as asked, and still theirs to use"
           },
-          "403": {
-            "description": "Forbidden",
+          "404": {
+            "description": "Any refusal: not the caller's, bound elsewhere, or no longer theirs to use",
             "content": {
               "application/json": {
                 "schema": {
@@ -1154,8 +1154,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not the caller's, or bound elsewhere",
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {

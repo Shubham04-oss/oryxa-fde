@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::authz::{company, project};
+use crate::authz::{company, project, workspace};
 use crate::records::new;
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
@@ -151,10 +151,11 @@ async fn scope_of(app: &App, who: &Principal, id: &ConversationId) -> Result<Con
     Ok(scope)
 }
 
-/// What using a conversation in `scope` needs: `work` on its company, or its project.
+/// What using a conversation in `scope` needs: `access` to the workspace for home, so never a
+/// customer role (ADR 0005, 0008, as `/v1/home`); `work` on its company, or its project.
 async fn require(app: &App, who: &Principal, scope: &ConversationScope) -> Result<(), ApiError> {
     match scope {
-        ConversationScope::Home(_) => Ok(()),
+        ConversationScope::Home(t) => app.require(who, workspace(t), "access").await,
         ConversationScope::Company(c) => app.require(who, company(c), "work").await,
         ConversationScope::Project(p) => app.require(who, project(p), "work").await,
     }
@@ -165,7 +166,8 @@ fn conversation_id(raw: String) -> Result<ConversationId, ApiError> {
 }
 
 /// Start a conversation, bound for good to the caller and to a company (or a project in it), or to
-/// the caller's home. A company needs `work` on it; home needs only a session.
+/// the caller's home. A company needs `work` on it; home needs `access` to the workspace, which a
+/// customer role does not have.
 #[utoipa::path(post, operation_id = "create_conversation", path = "/v1/assistant/conversations", tag = "assistant",
     request_body = ConversationBody,
     responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
@@ -198,6 +200,7 @@ pub(crate) async fn list(
     who: Principal,
     Query(p): Query<ListParams>,
 ) -> Result<Json<Vec<ConversationOut>>, ApiError> {
+    app.require(&who, workspace(&who.tenant), "access").await?;
     let limit = p.limit.unwrap_or(DEFAULT_LIST);
     if !(1..=MAX_LIST).contains(&limit) {
         return Err(ApiError::Invalid("limit"));
@@ -236,8 +239,9 @@ pub(crate) async fn get(
 /// but 204 refuses.
 #[utoipa::path(get, operation_id = "check_conversation", path = "/v1/assistant/conversations/{conversation}/check",
     tag = "assistant", params(("conversation" = String, Path, description = "Conversation id"), CheckParams),
-    responses((status = 204, description = "The caller's, bound as asked"), (status = 403, body = ErrorBody),
-        (status = 404, body = ErrorBody, description = "Not the caller's, or bound elsewhere")))]
+    responses((status = 204, description = "The caller's, bound as asked, and still theirs to use"),
+        (status = 404, body = ErrorBody, description = "Any refusal: not the caller's, bound elsewhere, or no longer \
+            theirs to use"), (status = 503, body = ErrorBody)))]
 pub(crate) async fn check(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -245,7 +249,11 @@ pub(crate) async fn check(
     Query(p): Query<CheckParams>,
 ) -> Result<StatusCode, ApiError> {
     let id = conversation_id(raw)?;
-    let scope = scope_of(&app, &who, &id).await?;
+    // One answer for every refusal but an outage: the route says no more than it must.
+    let scope = scope_of(&app, &who, &id).await.map_err(|e| match e {
+        ApiError::Forbidden => ApiError::NotFound,
+        e => e,
+    })?;
     let bound = scope.company().map(|c| &c.company);
     if bound != p.company.as_ref() {
         return Err(ApiError::NotFound);
@@ -253,7 +261,8 @@ pub(crate) async fn check(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Delete one of the caller's conversations and its turns.
+/// Delete one of the caller's conversations and its turns. Only its holder, who may delete it even
+/// after losing access to its company. An audit row names it; no content is kept.
 #[utoipa::path(delete, operation_id = "delete_conversation", path = "/v1/assistant/conversations/{conversation}",
     tag = "assistant", params(("conversation" = String, Path, description = "Conversation id")),
     responses((status = 204, description = "Deleted"), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
@@ -263,9 +272,14 @@ pub(crate) async fn delete(
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = conversation_id(raw)?;
-    let scope = scope_of(&app, &who, &id).await?;
+    // The holder match alone: no permission is needed to delete one's own.
+    let scope = app
+        .store
+        .conversation_scope(&who.tenant, &who.user, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let mut tx = app.store.assistant(&scope).await?;
-    if !tx.delete(&id, &who.user).await? {
+    if !tx.delete(&id, &who.actor()).await? {
         return Err(ApiError::NotFound);
     }
     tx.commit().await?;

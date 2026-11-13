@@ -37,7 +37,10 @@ create trigger assistant_conversations_scope before update on assistant_conversa
 
 -- Its finished turns, in order: what the person said, the assistant's text, its blocks and proposals
 -- (with each proposal's state) as the Worker checked them. A company's conversation's turns are that
--- company's data, under its row policy; a home conversation's hold list-level facts only.
+-- company's data, under its row policy; a home conversation's hold list-level facts only. The limits are
+-- the Worker's wire limits (assistant/src/catalogue/wire.ts). There is no person column, so separating
+-- people rests on the store: an append must first lock the conversation by its holder (the store's
+-- `find(.., lock = true)` under the same user filter) before it writes a turn.
 create table assistant_turns (
     tenant_id       text not null,
     conversation_id text not null,
@@ -46,8 +49,10 @@ create table assistant_turns (
     turn_id         text not null check (turn_id ~ '^t_[A-Za-z0-9_-]{1,64}$'),
     said            text not null check (char_length(said) between 1 and 2000),
     reply           text not null check (char_length(reply) <= 8000),
-    blocks          jsonb not null check (jsonb_typeof(blocks) = 'array'),
-    proposals       jsonb not null check (jsonb_typeof(proposals) = 'array'),
+    blocks          jsonb not null check (jsonb_typeof(blocks) = 'array' and jsonb_array_length(blocks) <= 6
+                        and octet_length(blocks::text) <= 65536),
+    proposals       jsonb not null check (jsonb_typeof(proposals) = 'array' and jsonb_array_length(proposals) <= 3
+                        and octet_length(proposals::text) <= 65536),
     notice          text check (notice is null or notice in ('tool_limit', 'reply_limit', 'timed_out', 'failed')),
     state           text not null check (state in ('done', 'failed')),
     created_at      timestamptz not null default now(),
@@ -56,6 +61,26 @@ create table assistant_turns (
     foreign key (tenant_id, conversation_id)
         references assistant_conversations (tenant_id, conversation_id) on delete cascade
 );
+
+-- A turn is filed under its conversation's own company (both null for home), whatever writes it, so a
+-- company's turn can never sit under the tenant-level policy or another company's.
+create function fde_turn_in_its_company() returns trigger
+    language plpgsql
+    set search_path = pg_catalog
+as $$
+begin
+    if not exists (
+        select 1 from public.assistant_conversations c
+        where c.tenant_id = new.tenant_id and c.conversation_id = new.conversation_id
+          and c.company_id is not distinct from new.company_id
+    ) then
+        raise exception 'a turn belongs to its conversation''s company';
+    end if;
+    return new;
+end
+$$;
+create trigger assistant_turns_company before insert or update on assistant_turns
+    for each row execute function fde_turn_in_its_company();
 
 alter table assistant_conversations enable row level security;
 alter table assistant_conversations force row level security;

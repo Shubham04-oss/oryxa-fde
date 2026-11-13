@@ -262,7 +262,8 @@ export interface paths {
         put?: never;
         /**
          * Start a conversation, bound for good to the caller and to a company (or a project in it), or to
-         *     the caller's home. A company needs `work` on it; home needs only a session.
+         *     the caller's home. A company needs `work` on it; home needs `access` to the workspace, which a
+         *     customer role does not have.
          */
         post: operations["create_conversation"];
         delete?: never;
@@ -282,7 +283,10 @@ export interface paths {
         get: operations["get_conversation"];
         put?: never;
         post?: never;
-        /** Delete one of the caller's conversations and its turns. */
+        /**
+         * Delete one of the caller's conversations and its turns. Only its holder, who may delete it even
+         *     after losing access to its company. An audit row names it; no content is kept.
+         */
         delete: operations["delete_conversation"];
         options?: never;
         head?: never;
@@ -4189,15 +4193,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The caller's, bound as asked */
+            /** @description The caller's, bound as asked, and still theirs to use */
             204: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Forbidden */
-            403: {
+            /** @description Any refusal: not the caller's, bound elsewhere, or no longer theirs to use */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4205,8 +4209,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not the caller's, or bound elsewhere */
-            404: {
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
