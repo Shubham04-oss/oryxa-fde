@@ -107,7 +107,8 @@ const records = new Map<string, Record_>();
 const calls: Array<{ method: string; path: string; origin: string | null; csrf: string | null; status: number }> = [];
 const tries = new Map<string, number>();
 
-const BLOCK_TYPES = ["suggestion", "brief", "plan", "rules", "people", "checklist"];
+/** The API's `BlockType`, read from openapi.json so the fake follows it. */
+const BLOCK_TYPES = (schemaOf("BlockType").enum ?? []).map(String);
 const ACTIONS = ["create_company", "open_route"];
 const VISIBLE = ["cmp_kestrel", "cmp_harbor"];
 const PROJECTS = ["prj_dispatch"];
@@ -150,6 +151,7 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   const found: Array<Record<string, unknown>> = [];
   destinations([blocks, proposals.map((p) => p.proposal)], found);
   const home = record.company === null;
+  // `VISIBLE` and `PROJECTS` stand in for the Rust's id parsing and its company and project checks alike.
   for (const d of found) {
     // At home, a company the person may work on and never a project; in a company, that company and its projects.
     if (typeof d.screen !== "string") return "invalid_destination";

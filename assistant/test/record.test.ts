@@ -495,6 +495,30 @@ describe("a turn the record will not take", () => {
   });
 });
 
+describe("a home turn that showed a project", () => {
+  it("is written without the project's card, and the drop is logged by ids only", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    const project = { screen: "project", company: "cmp_kestrel", project: "prj_dispatch" };
+    await plant(conversation, {
+      id: "t_project",
+      text: "Open it below.",
+      blocks: [{ type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: project } }],
+    });
+    const logged = await logsOf(async () => {
+      await sayAs(conversation, binding, "and then?");
+      await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    });
+    expect((await recorded(conversation))[1]).toMatchObject({ id: "t_project", blocks: [], state: "done" });
+    expect(JSON.parse(logged)).toContainEqual([
+      JSON.stringify({ event: "assistant_record", conversation, turn: "t_project", n: 2, dropped: "home_project" }),
+    ]);
+    expect(logged).not.toContain("prj_dispatch");
+  });
+});
+
 describe("another turn in the record's place", () => {
   it("stops the writes, leaves the turn waiting, and lines up with the record at the next session", async () => {
     const conversation = freshConversation();

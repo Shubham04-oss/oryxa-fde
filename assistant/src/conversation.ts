@@ -16,6 +16,7 @@ import {
   Lender,
   TURN_LEND_MS,
   fallbackOf,
+  namesProject,
   readPlaces,
   readRecord,
   recordOf,
@@ -569,7 +570,11 @@ export class Conversation extends DurableObject<Env> {
       .toArray()
       .map((p) => JSON.parse(p.body) as unknown);
     const blocks = JSON.parse(t.blocks) as Array<unknown>;
-    const record = recordOf({ ...t, blocks, proposals }, binding.company === null);
+    const home = binding.company === null;
+    const record = recordOf({ ...t, blocks, proposals }, home);
+    if (home && (namesProject(blocks) || namesProject(proposals))) {
+      logRecord({ conversation: binding.conversation, turn: t.id, n, dropped: "home_project" });
+    }
     if (record !== null) {
       const whole = await writeTurn(api, held, binding.conversation, n, record);
       if (whole !== "destination" && whole !== "refused") return { outcome: whole, how: "whole" };

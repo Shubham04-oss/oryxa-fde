@@ -149,8 +149,12 @@ export interface Folded {
  */
 function recordable(home: boolean, value: BlockValue | ProposalValue): boolean {
   if (!storable(value)) return false;
-  return !home || !names(value, "project");
+  // ponytail: the person saw this project card at home but the record lacks it, until the API accepts a project there.
+  return !home || !namesProject(value);
 }
+
+/** Whether `value` names a project's screen anywhere, which a home record leaves out. */
+export const namesProject = (value: unknown): boolean => names(value, "project");
 
 /** Whether `value` holds a destination (an object with a `screen`, as the API finds them), of `screen` if given. */
 function names(value: unknown, screen?: string): boolean {
