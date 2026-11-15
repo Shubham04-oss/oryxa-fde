@@ -6840,6 +6840,8 @@ async fn a_home_turn_names_a_project_only_of_a_company_the_caller_works_on() {
         ),
         // A project that does not exist, in a company the lead works on.
         (to_project(&t.company, "prj_missing"), "no such project"),
+        // A project id that is not one.
+        (to_project(&t.company, "prj/1"), "not a project id"),
         (
             json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": other.project }))] }),
             "a proposal, not the company's project",
@@ -6882,24 +6884,64 @@ async fn a_home_turn_names_a_project_only_of_a_company_the_caller_works_on() {
         (StatusCode::BAD_REQUEST, Some("invalid_destination"))
     );
 
-    // SpiceDB failing: 503, never a pass. A replica whose SpiceDB key is wrong fails every check.
+    // SpiceDB failing at the project's own `work` check: 503, never a pass. Another SpiceDB key is
+    // another datastore; its schema has no project type, so the company lookup there works and the
+    // project check errors.
     let endpoint = std::env::var("SPICEDB_ENDPOINT").unwrap();
-    let broken = SpiceDb::connect_lazy(&endpoint, "wrong-key", Duration::from_secs(2)).unwrap();
-    let broken = router(App::with_integrations(
+    let key = new_id("fde-test");
+    let no_projects = SCHEMA.split("// Customer people get guest").next().unwrap();
+    oryxa_authz::write_schema(&endpoint, &key, no_projects).await.unwrap();
+    let partial = SpiceDb::connect(&endpoint, &key, Duration::from_secs(2)).await.unwrap();
+    let tenant = TenantId::new(&org).unwrap();
+    let lead = oryxa_authz::SubjectRef::object(oryxa_authz::ObjectRef::new(&tenant, "user", &t.lead.id));
+    let relate = |kind: &'static str, id: &str, relation: &'static str| {
+        oryxa_authz::Write::Touch(oryxa_authz::Relationship {
+            resource: oryxa_authz::ObjectRef::new(&tenant, kind, id),
+            relation,
+            subject: lead.clone(),
+            caveat: None,
+            expires_at: None,
+        })
+    };
+    partial
+        .write(
+            &tenant,
+            &[
+                relate("workspace", "root", "member"),
+                relate("fde_company", &t.company, "lead"),
+            ],
+            &[],
+        )
+        .await
+        .unwrap();
+    let partial = router(App::with_integrations(
         w.store.clone(),
-        broken,
+        partial,
         support::verifier(),
         w.context.clone(),
         Some(sign_in_config(&w.authkit, &w.password)),
         integrations(&w.github, &w.slack, &w.secrets),
     ));
+    let turn = |n: u32| format!("{conversations}/{}/turns/{n}", home["id"].as_str().unwrap());
+    // The company alone passes there, so the replica is sound up to the project check.
+    let to_company = json!({ "proposals": [open_route("p", json!({ "screen": "company", "company": t.company }))] });
     let (status, body) = w
         .call_on(
-            &broken,
+            &partial,
             Some(&t.lead.token),
             "PUT",
-            &home_turn,
-            Some(turn_body("t_1", to_project(&t.company, &t.project))),
+            &turn(1),
+            Some(turn_body("t_1", to_company)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = w
+        .call_on(
+            &partial,
+            Some(&t.lead.token),
+            "PUT",
+            &turn(2),
+            Some(turn_body("t_2", to_project(&t.company, &t.project))),
         )
         .await;
     assert_eq!(
@@ -6907,7 +6949,16 @@ async fn a_home_turn_names_a_project_only_of_a_company_the_caller_works_on() {
         (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable"))
     );
 
-    // The lead's own project, in a block and a proposal: stored.
+    // The lead's own project, in a proposal alone, then in a block and a proposal: stored.
+    let proposal_only = json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": t.project }))] });
+    w.ok(
+        &t.lead,
+        "PUT",
+        &turn(2),
+        Some(turn_body("t_2", proposal_only)),
+        StatusCode::CREATED,
+    )
+    .await;
     let mut ok = to_project(&t.company, &t.project);
     ok["proposals"] = json!([open_route(
         "p",
@@ -6917,8 +6968,8 @@ async fn a_home_turn_names_a_project_only_of_a_company_the_caller_works_on() {
         .ok(
             &t.lead,
             "PUT",
-            &home_turn,
-            Some(turn_body("t_1", ok)),
+            &turn(3),
+            Some(turn_body("t_3", ok)),
             StatusCode::CREATED,
         )
         .await;
