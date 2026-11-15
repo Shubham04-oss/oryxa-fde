@@ -134,11 +134,11 @@ describe("writing each finished turn", () => {
       [2, (second.events[0] as { turn: string }).turn, "What needs me today?", "done", null],
     ]);
     expect(turns[0]!.text).toBe(replyText(first.events));
-    // The proposal as the person saw it, waiting; the home record leaves out the brief block it does not take.
+    // The blocks and the proposal as the person saw them, the proposal waiting.
     expect(turns[0]!.proposals).toEqual([
       { proposal: (first.events.at(-1) as { proposal: unknown }).proposal, state: "waiting" },
     ]);
-    expect(turns[0]!.blocks).toEqual([]);
+    expect(turns[0]!.blocks).toEqual([{ type: "brief", items: [{ label: "Company", value: "Kestrel Logistics" }] }]);
     expect(await marks(conversation)).toEqual([
       { n: 1, record: "written" },
       { n: 2, record: "written" },
@@ -314,6 +314,25 @@ describe("a new object for a known conversation", () => {
     const puts = (await callsFor(conversation)).filter((c) => c.method === "PUT" && !c.path.startsWith("/test"));
     // Two turns and an answer seeded here, and the new turn: nothing rewritten.
     expect(puts.map((c) => c.path.split("/").slice(-1)[0])).toEqual(["1", "p_seed1", "2", "3"]);
+  });
+
+  it("keeps a home conversation's brief block when rebuilt from the record", async () => {
+    const conversation = freshConversation();
+    await sayAs(conversation, await as(conversation), NEW_COMPANY);
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    // A new object with no working copy: all it shows comes from the record.
+    await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (_instance, state) =>
+      state.storage.deleteAll(),
+    );
+    await abortAllDurableObjects();
+    const view = await call(`/internal/v1/conversations/${conversation}`, {
+      binding: await as(conversation),
+      session: SESSION,
+    });
+    expect(view.status).toBe(200);
+    expect(parseView(await view.json())).toMatchObject([
+      { blocks: [{ type: "brief", items: [{ label: "Company", value: "Kestrel Logistics" }] }] },
+    ]);
   });
 
   it("answers plainly when the record cannot be read, rather than starting empty", async () => {

@@ -89,12 +89,6 @@ export const FINISHED = ["done", "failed"] as const;
 export const ANSWERS = ["confirmed", "dismissed"] as const;
 export type Answer = (typeof ANSWERS)[number];
 
-/**
- * The block types the API's record takes (`BLOCK_TYPES`, and `HOME_BLOCK_TYPES` at home).
- * ponytail: openapi.json does not name these as an enum yet, so test/record-shape.test.ts cannot pin them (#280).
- */
-export const HOME_BLOCK_TYPES = ["suggestion"] as const;
-
 const plain = (v: string) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v);
 /** No lone surrogate: the API's JSON parser refuses one. */
 const wellFormed = (v: string) => !/\p{Cs}/u.test(v);
@@ -150,14 +144,12 @@ export interface Folded {
 }
 
 /**
- * Whether the record of a conversation in this scope takes `value`: the home conversation holds list-level blocks
- * only, and never a project's screen, which it cannot name.
+ * Whether the record of a conversation in this scope takes `value`: every block type in every scope, but never a
+ * project's screen at home, which it cannot name. A company the person may not work on is the API's to refuse.
  */
 function recordable(home: boolean, value: BlockValue | ProposalValue): boolean {
   if (!storable(value)) return false;
-  if (!home) return true;
-  if ("type" in value && !(HOME_BLOCK_TYPES as ReadonlyArray<string>).includes(value.type)) return false;
-  return !names(value, "project");
+  return !home || !names(value, "project");
 }
 
 /** Whether `value` holds a destination (an object with a `screen`, as the API finds them), of `screen` if given. */
@@ -172,7 +164,6 @@ function names(value: unknown, screen?: string): boolean {
 /**
  * The record of a finished turn: what was said and shown, each proposal `waiting` (only the answer route records an
  * answer), or null when it does not pass the API's rules. A part the scope's record does not take is left out of it.
- * ponytail: the home record leaves out the brief block the home conversation shows, until the API takes it (#280).
  */
 export function recordOf(turn: Folded, home: boolean): TurnRecord | null {
   const blocks = parseBlocks(turn.blocks).filter((b) => recordable(home, b));
