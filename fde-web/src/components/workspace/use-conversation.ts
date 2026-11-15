@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react"
 import type { Block } from "@/lib/workspace/blocks"
 import {
+  CONVERSATION_ID,
+  CONVERSATION_TEXT,
+  HOME_KEY,
   NOTICE_TEXT,
   REFUSAL_TEXT,
+  WAITING_PREFIX,
+  createConversation,
   followTurn,
-  newConversation,
   openConversation,
   sendTurn,
   settleProposal,
@@ -15,13 +19,12 @@ import type { Notice, Proposal, ProposalState, Step, Turn, WireEvent } from "@/l
 import type { Reply } from "@/lib/workspace/welcome"
 
 // The welcome screen's conversation (issue #236): with the assistant where it is configured, and the
-// scripted answers where it is not. The conversation's id is kept in this browser, so a second tab, or
-// the same one after a reload, shows the same conversation; the assistant checks it is this person's.
+// scripted answers where it is not. The API makes the conversation, as the person, before its first
+// message (issue #273), and its id is kept in this browser, so a second tab, or the same one after a
+// reload, shows the same conversation; this app's server asks the API it is this person's on every call.
 // While a turn runs the person can stop it (issue #264), and a message typed meanwhile waits, one at
 // most, until the turn ends: it is sent then, or handed back to edit if the turn was stopped or failed.
 
-/** Where this browser keeps the home conversation's id. Not a secret: the assistant checks whose it is. */
-const STORED = "fde.assistant.home"
 // A short pause before a scripted reply, so it reads as an answer; none in tests.
 const THINK_MS = import.meta.env.MODE === "test" ? 0 : 450
 
@@ -91,16 +94,22 @@ function finished(turn: WorkspaceTurn, ended: "done" | "failed" | "timed_out"): 
   return { ...turn, notice, steps, streaming: false }
 }
 
+/** How a turn ended, for a message waiting on it: sent on after "done", handed back otherwise. */
+type How = "done" | "stopped" | "failed"
+
 /** A message handed back to the box: queued while a turn ran that was then stopped or failed, or taken back to edit. */
 export type Returned = {
   text: string
-  /** `reload`: it was waiting when the page reloaded, and is never sent without the person. */
-  why: "stopped" | "failed" | "edit" | "reload"
+  /**
+   * `reload`: it was waiting when the page reloaded, and is never sent without the person. `gone` and
+   * `unstarted`: it never reached a conversation, and the reply says why.
+   */
+  why: "stopped" | "failed" | "edit" | "reload" | "gone" | "unstarted"
   at: number
 }
 
 /** Where this tab keeps a waiting message, per conversation, so a reload does not lose it. */
-const waitingKey = (conversation: string) => `fde.assistant.waiting.${conversation}`
+const waitingKey = (conversation: string) => `${WAITING_PREFIX}${conversation}`
 
 /** Keeps `text` for this tab, cut to a message's own limit, or forgets it; without storage it lasts as long as the page. */
 function keepWaiting(conversation: string, text: string | null) {
@@ -128,16 +137,20 @@ function takeWaiting(conversation: string): string | null {
 
 function readStored() {
   try {
-    const id = window.localStorage.getItem(STORED)
-    return id && /^c_[A-Za-z0-9_-]{1,126}$/.test(id) ? id : null
+    const id = window.localStorage.getItem(HOME_KEY)
+    if (id !== null && CONVERSATION_ID.test(id)) return id
+    // An id from before the API made them (`c_...`), or anything else: never used, so not kept.
+    if (id !== null) window.localStorage.removeItem(HOME_KEY)
+    return null
   } catch {
     return null
   }
 }
 
-function store(id: string) {
+function store(id: string | null) {
   try {
-    window.localStorage.setItem(STORED, id)
+    if (id === null) window.localStorage.removeItem(HOME_KEY)
+    else window.localStorage.setItem(HOME_KEY, id)
   } catch {
     // Without storage the conversation lasts as long as the tab.
   }
@@ -196,9 +209,11 @@ export function useConversation(scripted: (said: string) => Reply) {
     if (live.current.stop && conversation.current) askStop(event.turn)
   }
 
-  /** The turn is over: the waiting message goes now if it went well, and back to the box if not. */
-  const end = (ok: boolean) => {
-    const stopped = live.current.stop
+  /**
+   * The turn is over: the waiting message goes now if the turn finished, and back to the box if it was stopped
+   * or failed. How it ended decides, not whether Stop was pressed: a stop refused or too slow left it to finish.
+   */
+  const end = (how: How) => {
     busy.current = false
     live.current = { turn: null, stop: false }
     setThinking(false)
@@ -206,21 +221,37 @@ export function useConversation(scripted: (said: string) => Reply) {
     const message = waiting.current
     hold(null)
     if (message === null) return
-    if (ok && !stopped) void run(message)
-    else setReturned({ text: message, why: stopped ? "stopped" : "failed", at: Date.now() })
+    if (how === "done") void run(message)
+    else setReturned({ text: message, why: how, at: Date.now() })
+  }
+
+  /**
+   * The message never reached the assistant: `line` says why in the reply, and the message goes back in the box,
+   * with one that was waiting after it, for the person to send again; it is never resent by itself.
+   */
+  const handBack = (reply: number, text: string, line: string, why: "gone" | "unstarted") => {
+    update(reply, (t) => ({ ...t, text: line, streaming: false }))
+    const held = waiting.current
+    hold(null)
+    end("failed")
+    setReturned({ text: held === null ? text : `${text}\n${held}`, why, at: Date.now() })
   }
 
   // Whether the assistant answers here, and the conversation so far, with a live turn followed.
   useEffect(() => {
     const mounted = { current: true }
     mode.current = (async () => {
-      let id = readStored() ?? newConversation()
-      let opened = await openConversation(id)
-      if (opened.kind === "not_yours") {
-        id = newConversation()
-        opened = { kind: "on", turns: [] }
-      }
+      const id = readStored()
+      // None yet: the API makes one at the first message, which also finds out if the assistant is here.
+      if (id === null) return "on"
+      const opened = await openConversation(id)
       if (opened.kind === "off") return "off"
+      if (opened.kind === "gone") {
+        // Not this person's, or not there: neither it nor a message kept waiting on it is used again.
+        keepWaiting(id, null)
+        store(null)
+        return "on"
+      }
       conversation.current = id
       store(id)
       if (!mounted.current) return "on"
@@ -240,7 +271,7 @@ export function useConversation(scripted: (said: string) => Reply) {
           update(liveTurn.id, (t) => applyEvent(t, event))
         }).then((ended) => {
           update(liveTurn.id, (t) => finished(t, ended))
-          end(ended === "done" && !stoppedShort(notice))
+          end(howEnded(ended, notice))
         })
       }
       return "on"
@@ -291,36 +322,64 @@ export function useConversation(scripted: (said: string) => Reply) {
     setTurns((all) => [...all, { id: you, who: "you", text }])
     begin(null)
     const on = (await (mode.current ?? Promise.resolve("off"))) === "on"
-    const answerScripted = async () => {
+    /** Answers from the script, and says how that ended. */
+    const answerScripted = async (): Promise<How> => {
       if (THINK_MS) await new Promise((resolve) => setTimeout(resolve, THINK_MS))
       // Stopped before the script answered: nothing was said, and it says so.
-      const replied = live.current.stop
+      const stopped = live.current.stop
+      const replied = stopped
         ? { text: "", blocks: [], notice: NOTICE_TEXT.stopped }
         : scripted(text)
       setTurns((all) => [
         ...all.filter((t) => t.id !== reply),
         { ...workspace(reply, false), ...replied },
       ])
+      return stopped ? "stopped" : "done"
     }
     if (!on) {
-      await answerScripted()
-      end(true)
+      end(await answerScripted())
       return
     }
     setTurns((all) => [...all, workspace(reply, true)])
+    if (!conversation.current) {
+      const made = await createConversation()
+      if (made.kind === "off") {
+        mode.current = Promise.resolve("off")
+        end(await answerScripted())
+        return
+      }
+      if (made.kind === "refused") {
+        handBack(reply, text, CONVERSATION_TEXT.unstarted, "unstarted")
+        return
+      }
+      conversation.current = made.id
+      store(made.id)
+    }
     let notice: Notice | null = null
     const ended = await sendTurn(conversation.current, text, (event) => {
       heard(event)
       if (event.type === "notice") notice = event.notice
       update(reply, (t) => applyEvent(t, event))
     })
-    if (ended.kind === "off") await answerScripted()
+    if (ended.kind === "gone") {
+      // No longer this person's (another sign-in, or access lost): it and what waited on it are dropped, and
+      // the next message starts a new one.
+      const gone = conversation.current
+      handBack(reply, text, CONVERSATION_TEXT.gone, "gone")
+      conversation.current = ""
+      store(null)
+      keepWaiting(gone, null)
+      return
+    }
+    let how: How = "failed"
+    if (ended.kind === "off") how = await answerScripted()
     else if (ended.kind === "refused")
       update(reply, (t) => ({ ...t, text: REFUSAL_TEXT[ended.refusal] }))
-    if (ended.kind !== "off" && ended.kind !== "refused")
+    if (ended.kind !== "off" && ended.kind !== "refused") {
       update(reply, (t) => finished(t, ended.kind))
-    else update(reply, (t) => ({ ...t, streaming: false }))
-    end((ended.kind === "done" || ended.kind === "off") && !stoppedShort(notice))
+      how = howEnded(ended.kind, notice)
+    } else update(reply, (t) => ({ ...t, streaming: false }))
+    end(how)
   }
 
   /** Records the person's answer to a proposal, here and with the assistant; the action itself is the caller's. */
@@ -340,6 +399,12 @@ export function useConversation(scripted: (said: string) => Reply) {
 /** Whether a reply ended so that a message typed meanwhile should not go on as if it had answered. */
 const stoppedShort = (notice: Notice | null) =>
   notice === "stopped" || notice === "failed" || notice === "timed_out"
+
+/** How a turn from the assistant ended: stopped only when it says so, done only when it finished whole. */
+function howEnded(ended: "done" | "failed" | "timed_out", notice: Notice | null): How {
+  if (notice === "stopped") return "stopped"
+  return ended === "done" && !stoppedShort(notice) ? "done" : "failed"
+}
 
 /** A turn the assistant holds, as the thread shows it: what the person said, then the reply. */
 function fromView(turn: Turn, id: number): Array<ThreadTurn> {

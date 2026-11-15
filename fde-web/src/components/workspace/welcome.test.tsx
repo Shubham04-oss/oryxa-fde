@@ -6,7 +6,12 @@ import { Welcome } from "./welcome"
 import { CompaniesHome } from "@/components/companies-home"
 import { mockApi } from "@/dev/mock-api"
 import { Home } from "@/components/home"
-import { NOTICE_TEXT, TURN_DEADLINE_MS } from "@/lib/workspace/assistant"
+import {
+  CONVERSATION_TEXT,
+  NOTICE_TEXT,
+  TURN_DEADLINE_MS,
+  forgetConversation,
+} from "@/lib/workspace/assistant"
 import type { Block } from "@/lib/workspace/blocks"
 import { MAX_SAID } from "@/lib/workspace/wire"
 import { renderWithRouter } from "@/test/render"
@@ -439,7 +444,11 @@ describe("the conversation with the assistant", () => {
     `${events.map((e, i) => `id: ${i}\ndata: ${JSON.stringify(e)}\n\n`).join("")}event: done\ndata: {}\n\n`
   let turnAnswer: () => Response = () => new Response(null, { status: 500 })
   /** What the stop route does; it answers 204 unless this returns another answer. */
-  let onStop: () => Response | void = () => {}
+  let onStop: () => Response | void | Promise<Response | void> = () => {}
+  /** What a view of a stored conversation answers: by default, one of the person's with nothing said yet. */
+  /** The ids the API makes, one per new conversation. */
+  let made: Array<string> = []
+  let onView: () => Response = () => Response.json({ error: "no_conversation" }, { status: 404 })
 
   /** A turn's stream the test writes to as it goes, as the assistant would. */
   function liveTurn() {
@@ -464,6 +473,9 @@ describe("the conversation with the assistant", () => {
   beforeEach(() => {
     asked.length = 0
     onStop = () => {}
+    onView = () => Response.json({ error: "no_conversation" }, { status: 404 })
+    made = []
+    window.localStorage.removeItem("fde.assistant.home")
     original.fetch = mockApi.fetch
     // The assistant's routes, as this app's server answers them once it has checked the person.
     mockApi.fetch = async (request) => {
@@ -471,10 +483,12 @@ describe("the conversation with the assistant", () => {
       if (!pathname.startsWith("/assistant/")) return original.fetch(request)
       const text = request.method === "POST" ? await request.text() : ""
       asked.push({ method: request.method, path: pathname, body: text ? JSON.parse(text) : null })
-      if (/^\/assistant\/conversations\/c_\w+$/.test(pathname))
-        return Response.json({ error: "no_conversation" }, { status: 404 })
+      // The API makes the conversation, through this app's server, before the first message.
+      if (pathname === "/assistant/conversations" && request.method === "POST")
+        return Response.json({ id: made.shift() ?? "cnv_made" }, { status: 201 })
+      if (/^\/assistant\/conversations\/cnv_\w+$/.test(pathname)) return onView()
       if (pathname.endsWith("/turns")) return turnAnswer()
-      if (pathname.endsWith("/stop")) return onStop() ?? new Response(null, { status: 204 })
+      if (pathname.endsWith("/stop")) return (await onStop()) ?? new Response(null, { status: 204 })
       if (pathname.includes("/proposals/")) return new Response(null, { status: 204 })
       return Response.json({ error: "not_found" }, { status: 404 })
     }
@@ -744,6 +758,179 @@ describe("the conversation with the assistant", () => {
     expect(screen.queryByText(/^Not sent/)).toBeNull()
   })
 
+  it("sends the held message when the answer finishes before a slow stop is taken", async () => {
+    const first = liveTurn()
+    const answers = [
+      first.response,
+      () =>
+        new Response(frames([{ v: 1, type: "turn", turn: "t_2", said: "And tomorrow?" }]), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    ]
+    turnAnswer = () => answers.shift()!()
+    // The stop is still on its way when the answer ends.
+    onStop = () => new Promise<void>(() => {})
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("What needs me today?")
+    first.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("And tomorrow?")
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }))
+    first.push({ v: 1, type: "text", delta: "Two things are open." })
+    first.end()
+    // It finished whole, so it is not said to have been stopped, and the waiting message goes.
+    await waitFor(() =>
+      expect(turnsSent()).toEqual([{ text: "What needs me today?" }, { text: "And tomorrow?" }]),
+    )
+    expect(within(log).queryByText(NOTICE_TEXT.stopped)).toBeNull()
+    expect(screen.queryByText(/^Not sent/)).toBeNull()
+  })
+
+  it("has the API make the conversation before the first message, and keeps its id", async () => {
+    turnAnswer = () =>
+      new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "hello" }]), {
+        headers: { "content-type": "text/event-stream" },
+      })
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("hello")
+    await waitFor(() => expect(turnsSent()).toEqual([{ text: "hello" }]))
+    // Nothing was made before the person wrote, and the browser named no binding of its own.
+    expect(asked.map((a) => `${a.method} ${a.path}`)).toEqual([
+      "POST /assistant/conversations",
+      "POST /assistant/conversations/cnv_made/turns",
+    ])
+    expect(asked[0]!.body).toBeNull()
+    expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_made")
+  })
+
+  it("starts again with a new conversation when the kept one is not this person's, and drops what waited on it", async () => {
+    window.localStorage.setItem("fde.assistant.home", "cnv_someone")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_someone", "Their message")
+    onView = () => Response.json({ error: "unknown_conversation" }, { status: 404 })
+    turnAnswer = () =>
+      new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "hello" }]), {
+        headers: { "content-type": "text/event-stream" },
+      })
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await waitFor(() => expect(waitingKeys()).toEqual([]))
+    expect(window.localStorage.getItem("fde.assistant.home")).toBeNull()
+    // The other person's waiting message is not put in the box.
+    expect(screen.getByRole("textbox", { name: "What do you want to work on?" })).toHaveValue("")
+    await said("hello")
+    await waitFor(() => expect(turnsSent()).toEqual([{ text: "hello" }]))
+    expect(asked.map((a) => a.path)).toEqual([
+      "/assistant/conversations/cnv_someone",
+      "/assistant/conversations",
+      "/assistant/conversations/cnv_made/turns",
+    ])
+  })
+
+  it("says plainly when the conversation cannot be made, and hands the message back to send again", async () => {
+    const answer = mockApi.fetch
+    mockApi.fetch = async (request) =>
+      new URL(request.url).pathname === "/assistant/conversations"
+        ? Response.json({ error: "bad_gateway" }, { status: 502 })
+        : answer(request)
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("hello")
+    expect(await within(log).findByText(CONVERSATION_TEXT.unstarted)).toBeInTheDocument()
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("hello"))
+    expect(turnsSent()).toEqual([])
+  })
+
+  it("never falls back to the scripted answers when making a conversation fails on the network", async () => {
+    turnAnswer = () =>
+      new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "hello" }]), {
+        headers: { "content-type": "text/event-stream" },
+      })
+    const answer = mockApi.fetch
+    let drops = 1
+    mockApi.fetch = async (request) => {
+      if (new URL(request.url).pathname === "/assistant/conversations" && drops-- > 0)
+        throw new TypeError("network")
+      return answer(request)
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("new customer to set up")
+    expect(await within(log).findByText(CONVERSATION_TEXT.unstarted)).toBeInTheDocument()
+    // Not the script's demo answer.
+    expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("new customer to set up"))
+
+    // Sent again, it reaches the assistant in a new conversation.
+    await userEvent.type(box, "{Enter}")
+    await waitFor(() => expect(turnsSent()).toEqual([{ text: "new customer to set up" }]))
+    expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+  })
+
+  it("drops a conversation that stops being this person's mid-session, and starts a new one only when sent again", async () => {
+    window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+    made = ["cnv_fresh"]
+    const answers = [
+      () => Response.json({ error: "unknown_conversation" }, { status: 404 }),
+      () =>
+        new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "hello" }]), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    ]
+    turnAnswer = () => answers.shift()!()
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("hello")
+    expect(await within(log).findByText(CONVERSATION_TEXT.gone)).toBeInTheDocument()
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("hello"))
+    expect(window.localStorage.getItem("fde.assistant.home")).toBeNull()
+    expect(waitingKeys()).toEqual([])
+    // Nothing is made or resent by itself.
+    expect(asked.map((a) => `${a.method} ${a.path}`)).toEqual([
+      "GET /assistant/conversations/cnv_mine",
+      "POST /assistant/conversations/cnv_mine/turns",
+    ])
+
+    await userEvent.type(box, "{Enter}")
+    await waitFor(() => expect(turnsSent()).toHaveLength(2))
+    expect(asked.slice(2).map((a) => `${a.method} ${a.path}`)).toEqual([
+      "POST /assistant/conversations",
+      "POST /assistant/conversations/cnv_fresh/turns",
+    ])
+    expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_fresh")
+  })
+
+  it("drops a kept id from before the API made them, without asking anyone about it", async () => {
+    window.localStorage.setItem("fde.assistant.home", "c_0123456789abcdef")
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await waitFor(() => expect(window.localStorage.getItem("fde.assistant.home")).toBeNull())
+    expect(asked).toEqual([])
+  })
+
+  it("keeps both status regions rendered, hidden only visually when empty, so the first message is heard", async () => {
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const regions = screen.getAllByRole("status").map((r) => r.className)
+    expect(regions.filter((c) => c.includes("empty:sr-only"))).toHaveLength(2)
+    expect(regions.filter((c) => c.includes("empty:hidden"))).toEqual([])
+  })
+
+  it("forgets the kept conversation and every waiting message, and nothing else", () => {
+    window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_a", "one")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_b", "two")
+    window.sessionStorage.setItem("other", "kept")
+    forgetConversation()
+    expect(window.localStorage.getItem("fde.assistant.home")).toBeNull()
+    expect(waitingKeys()).toEqual([])
+    expect(window.sessionStorage.getItem("other")).toBe("kept")
+    window.sessionStorage.removeItem("other")
+  })
+
   it("keeps a waiting message across a reload, back in the box and never sent by itself", async () => {
     const turn = liveTurn()
     turnAnswer = turn.response
@@ -773,8 +960,8 @@ describe("the conversation with the assistant", () => {
   })
 
   it("puts back no more of a kept message than one message may hold", async () => {
-    window.localStorage.setItem("fde.assistant.home", "c_capped")
-    window.sessionStorage.setItem("fde.assistant.waiting.c_capped", "x".repeat(MAX_SAID + 50))
+    window.localStorage.setItem("fde.assistant.home", "cnv_capped")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_capped", "x".repeat(MAX_SAID + 50))
     renderWithRouter(<Welcome now={MORNING} />)
     await suggested()
     const box = await screen.findByRole("textbox", { name: "What do you want to work on?" })

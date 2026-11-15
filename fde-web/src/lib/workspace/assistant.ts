@@ -49,15 +49,71 @@ async function codeOf(response: Response): Promise<string | null> {
   }
 }
 
-/** A new conversation's id: random, so it cannot be guessed, and checked by the platform's id rule. */
-export const newConversation = () => `c_${crypto.randomUUID().replaceAll("-", "")}`
+/** A conversation id as the API makes them (`cnv_...`), checked by the platform's id rule. */
+export const CONVERSATION_ID = /^cnv_[A-Za-z0-9_-]{1,124}$/
+
+/** Where this browser keeps the home conversation's id. Not a secret: the API checks whose it is. */
+export const HOME_KEY = "fde.assistant.home"
+
+/** Where this tab keeps a message waiting on a turn, per conversation (`fde.assistant.waiting.<id>`). */
+export const WAITING_PREFIX = "fde.assistant.waiting."
+
+/**
+ * Forgets the kept home conversation and every waiting message this tab kept: they belonged to the session that
+ * is ending, and the next person on this browser starts with nothing of it.
+ */
+export function forgetConversation() {
+  try {
+    window.localStorage.removeItem(HOME_KEY)
+  } catch {
+    // No storage: nothing was kept.
+  }
+  try {
+    const keys = Object.keys(window.sessionStorage).filter((k) => k.startsWith(WAITING_PREFIX))
+    for (const key of keys) window.sessionStorage.removeItem(key)
+  } catch {
+    // No storage: nothing was kept.
+  }
+}
+
+export type Made =
+  /** No assistant here: the scripted answers stand in. */
+  { kind: "off" } | { kind: "made"; id: string } | { kind: "refused" }
+
+/**
+ * A new home conversation, made by the API as the signed-in person through this app's server, which binds it;
+ * the browser names nothing but where it is asked. Only the explicit "not here" codes mean off: a dropped
+ * request or any other answer is a refusal, so a deploy with the assistant never falls back to the script.
+ */
+export async function createConversation(): Promise<Made> {
+  let response: Response
+  try {
+    response = await send("/assistant/conversations", { method: "POST", headers: HEADERS })
+  } catch {
+    return { kind: "refused" }
+  }
+  if (response.status === 201) {
+    const body: unknown = await response.json().catch(() => null)
+    const id = typeof body === "object" && body !== null ? (body as { id?: unknown }).id : null
+    return typeof id === "string" && CONVERSATION_ID.test(id)
+      ? { kind: "made", id }
+      : { kind: "refused" }
+  }
+  const code = await codeOf(response)
+  // The dev mock and an unconfigured server answer with codes of their own: no assistant here.
+  if (code === "assistant_not_configured" || code === "not_found") return { kind: "off" }
+  return { kind: "refused" }
+}
 
 export type Opened =
   /** No assistant here: the scripted answers stand in. */
   | { kind: "off" }
   | { kind: "on"; turns: Array<Turn> }
-  /** The conversation belongs to someone else (another sign-in on this browser): start a new one. */
-  | { kind: "not_yours" }
+  /**
+   * Not this person's to use (another sign-in on this browser), or not there at all: the server says the same
+   * for both. A new one is made at the next message.
+   */
+  | { kind: "gone" }
 
 /** The conversation so far, and whether the assistant answers here at all. */
 export async function openConversation(conversation: string): Promise<Opened> {
@@ -72,8 +128,10 @@ export async function openConversation(conversation: string): Promise<Opened> {
     return turns === null ? { kind: "off" } : { kind: "on", turns }
   }
   const code = await codeOf(response)
+  // Theirs, with nothing said in it yet.
   if (response.status === 404 && code === "no_conversation") return { kind: "on", turns: [] }
-  if (response.status === 403 && code === "not_your_conversation") return { kind: "not_yours" }
+  if (response.status === 404 && code === "unknown_conversation") return { kind: "gone" }
+  if (response.status === 403 && code === "not_your_conversation") return { kind: "gone" }
   return { kind: "off" }
 }
 
@@ -84,6 +142,8 @@ export type Ended =
   | { kind: "timed_out" }
   /** The turn never started; `refusal` says why, in a code the screen puts in words. */
   | { kind: "refused"; refusal: Refusal | "unknown" }
+  /** The conversation is no longer this person's, or not there: a new one is needed. */
+  | { kind: "gone" }
   | { kind: "off" }
 
 type Frame = { id: number | null; event: string | null; data: string | null }
@@ -261,6 +321,7 @@ export async function sendTurn(
     const code = await codeOf(response)
     if ((REFUSALS as ReadonlyArray<string>).includes(code ?? ""))
       return { kind: "refused", refusal: code as Refusal }
+    if (response.status === 404 && code === "unknown_conversation") return { kind: "gone" }
     // The dev mock and an unconfigured server answer with codes of their own: no assistant here.
     if (code === "assistant_not_configured" || code === "not_found") return { kind: "off" }
     return { kind: "refused", refusal: "unknown" }
@@ -316,6 +377,13 @@ export const REFUSAL_TEXT: Record<Refusal | "unknown", string> = {
   model_unavailable: "I can't answer right now: no model is switched on for the workspace.",
   unknown: "I couldn't answer that. Try again in a moment.",
 }
+
+/** What the screen says when a message could not reach a conversation; the message goes back in the box. */
+export const CONVERSATION_TEXT = {
+  gone: "This conversation is no longer available to you. Your message is back in the box: send it again to start a new one.",
+  unstarted:
+    "I couldn't start a conversation just now. Your message is back in the box: try sending it again in a moment.",
+} as const
 
 /** What a notice says, plainly. */
 export const NOTICE_TEXT = {

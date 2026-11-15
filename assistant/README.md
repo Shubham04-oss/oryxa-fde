@@ -14,8 +14,11 @@ Only fde-web's server, by service binding. There is no workers.dev URL, no previ
 SDK's default routing by name (`routeAgentRequest`) is not used: the Worker reaches each object over RPC, and the
 object answers no HTTP of its own.
 
-On every call (a turn, a reconnect, a view, a proposal's answer) fde-web asks the API who the person is
-(`/v1/me`) and, for a company's conversation, reads the company; then it signs a binding and calls with:
+On every call (a turn, a reconnect, a view, a stop, a proposal's answer) fde-web asks the API who the person is
+(`/v1/me`) and whether they hold this conversation, bound to this company or to home, and may still use it
+(`/v1/assistant/conversations/{id}/check`); anything but its 204 refuses, and someone else's conversation gets the
+same answer as one that does not exist. A new conversation is made by the API, as the person, before its first turn,
+so the API alone decides the binding. Then fde-web signs a binding and calls with:
 
 | Header                                  | What                                                                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
