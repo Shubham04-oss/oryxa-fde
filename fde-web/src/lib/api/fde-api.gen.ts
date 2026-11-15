@@ -3291,7 +3291,7 @@ export interface components {
             text?: string;
         };
         /** @enum {string} */
-        TurnNotice: "tool_limit" | "reply_limit" | "timed_out" | "failed";
+        TurnNotice: "tool_limit" | "reply_limit" | "timed_out" | "failed" | "stopped";
         TurnOut: {
             blocks: Record<string, never>[];
             created_at: string;

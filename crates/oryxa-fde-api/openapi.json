@@ -13943,7 +13943,8 @@
           "tool_limit",
           "reply_limit",
           "timed_out",
-          "failed"
+          "failed",
+          "stopped"
         ]
       },
       "TurnOut": {

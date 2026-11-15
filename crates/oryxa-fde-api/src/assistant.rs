@@ -98,6 +98,8 @@ pub enum TurnNotice {
     ReplyLimit,
     TimedOut,
     Failed,
+    /// The person stopped the turn.
+    Stopped,
 }
 
 impl TurnNotice {
@@ -107,6 +109,7 @@ impl TurnNotice {
             TurnNotice::ReplyLimit => "reply_limit",
             TurnNotice::TimedOut => "timed_out",
             TurnNotice::Failed => "failed",
+            TurnNotice::Stopped => "stopped",
         }
     }
 }
@@ -662,6 +665,24 @@ mod tests {
         assert_eq!(
             code(shape(false, 1, body(json!({ "said": "one\r\ntwo", "text": "a\r\nb" })))),
             "ok"
+        );
+        // A turn the person stopped: notice `stopped`, and its reply may be empty, as for any notice.
+        let stopped = shape(
+            false,
+            1,
+            body(json!({ "text": "", "notice": "stopped", "state": "done" })),
+        )
+        .unwrap();
+        assert_eq!(
+            (stopped.notice.as_deref(), stopped.reply.as_str()),
+            (Some("stopped"), "")
+        );
+        // A notice the Worker does not send is refused.
+        assert!(
+            serde_json::from_value::<TurnBody>(
+                json!({ "id": "t_1", "said": "x", "state": "done", "notice": "paused" })
+            )
+            .is_err()
         );
         // Unknown fields and states are refused before any of that.
         assert!(serde_json::from_value::<TurnBody>(json!({ "id": "t_1", "said": "x", "state": "live" })).is_err());

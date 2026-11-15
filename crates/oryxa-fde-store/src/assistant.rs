@@ -220,7 +220,8 @@ pub enum Settled {
     Answered,
 }
 
-const NOTICES: [&str; 4] = ["tool_limit", "reply_limit", "timed_out", "failed"];
+/// The Worker's notices (`wire.ts`); `stopped` is a turn the person stopped.
+const NOTICES: [&str; 5] = ["tool_limit", "reply_limit", "timed_out", "failed", "stopped"];
 
 /// A stored turn.
 #[derive(Clone, PartialEq)]

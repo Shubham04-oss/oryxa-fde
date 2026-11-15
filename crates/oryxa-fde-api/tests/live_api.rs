@@ -6630,10 +6630,22 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
         );
     }
 
+    // A turn the person stopped is kept with its notice, its reply empty; a notice the Worker does not
+    // send is refused.
+    let paused = turn_body("t_2", json!({ "notice": "paused" }));
+    let (status, body) = w.call(Some(&t.lead.token), "PUT", &turn(2), Some(paused)).await;
+    assert!(status.is_client_error(), "{status} {body}");
+    let stopped = turn_body("t_2", json!({ "text": "", "notice": "stopped" }));
+    let stored = w.ok(&t.lead, "PUT", &turn(2), Some(stopped), StatusCode::CREATED).await;
+    assert_eq!(
+        (stored["notice"].clone(), stored["text"].clone()),
+        (json!("stopped"), json!(""))
+    );
+
     // Only its holder appends or answers.
     for who in [&t.engineer, &other.lead] {
         assert_eq!(
-            w.status(who, "PUT", &turn(2), Some(turn_body("t_2", json!({})))).await,
+            w.status(who, "PUT", &turn(3), Some(turn_body("t_3", json!({})))).await,
             StatusCode::NOT_FOUND
         );
         let answer = format!("{}/proposals/p1", turn(1));
@@ -6728,5 +6740,6 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
     .fetch_all(&owner)
     .await
     .unwrap();
-    assert_eq!(filed, [None, Some(t.company.clone())]);
+    // The home turn, and the company conversation's two (the plan and the stopped one).
+    assert_eq!(filed, [None, Some(t.company.clone()), Some(t.company.clone())]);
 }
