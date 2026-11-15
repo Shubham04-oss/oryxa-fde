@@ -11,6 +11,8 @@ import type { Notice, Refusal } from "./catalogue/wire.js";
 import type { Env } from "./env.js";
 import { IDLE_MS } from "./limits.js";
 import { modelFor } from "./model/provider.js";
+import { readRecord, recordOf, withoutDestinations, writeAnswer, writeTurn } from "./record.js";
+import type { Answer, Lent, Written } from "./record.js";
 import { apiReader } from "./tools.js";
 import { runTurn } from "./turn.js";
 import type { Folded } from "./turn.js";
@@ -19,17 +21,37 @@ import type { Folded } from "./turn.js";
 // reached only over RPC from this Worker's fetch handler, after the service token and the binding are checked:
 // it has no `onRequest`, so a request that reaches it any other way gets the Lifecycle's 404. Its storage is a
 // working copy of sample data only, deleted when idle; the session lent for a turn lives in memory only.
+// The record is the API's (issue #279): each finished turn, and each answer to a proposal, is written there with the
+// session lent for the call, in the background and in order, and an object that holds nothing is rebuilt from it.
 
 const FORGET = "forget";
 const SSE_HEARTBEAT_MS = 15_000;
 /** The words a failed stream carries to the browser: fixed, so nothing from the failure leaks out. */
 const FAILED = "failed";
 
-type TurnRow = { id: string; said: string; state: string; text: string; blocks: string; notice: string | null };
+type TurnRow = {
+  n: number;
+  id: string;
+  said: string;
+  state: string;
+  text: string;
+  blocks: string;
+  notice: string | null;
+};
 type ProposalRow = { turn: string; body: string; state: string };
 
-const refuse = (status: number, error: Refusal | "no_conversation" | "not_your_conversation" | "not_found") =>
-  Response.json({ error }, { status });
+type Refused =
+  | Refusal
+  | "no_conversation"
+  | "not_your_conversation"
+  | "not_found"
+  | "unknown_conversation"
+  | "record_unavailable";
+const refuse = (status: number, error: Refused) => Response.json({ error }, { status });
+
+/** Ids and an outcome only, never what was said or the session. */
+const logRecord = (fields: Record<string, string | number>) =>
+  console.warn(JSON.stringify({ event: "assistant_record", ...fields }));
 
 export class Conversation extends DurableObject<Env> {
   readonly streams = new Streams({ maxChunkBytes: 64 * 1024 });
@@ -39,17 +61,33 @@ export class Conversation extends DurableObject<Env> {
   /** Stops the running turn when the person asks (`stop`). */
   #stopper: AbortController | null = null;
   #swept = false;
+  /** The record's writes, one after another, so turns reach the API in order. */
+  #writes: Promise<void> = Promise.resolve();
+  /** A rebuild under way, which a second call waits on rather than starting its own. */
+  #rebuilding: Promise<"ok" | "gone" | "error"> | null = null;
 
   onStart(): void {
     const sql = this.ctx.storage.sql;
     // Ids only, no session: whom this conversation belongs to, set by its first turn and never changed.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_binding (
       only INTEGER PRIMARY KEY CHECK (only = 1), tenant TEXT NOT NULL, person TEXT NOT NULL, company TEXT)`);
+    // `n` is the turn's place in the record too; `record` is whether it is written there yet.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_turns (
       n INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, said TEXT NOT NULL, state TEXT NOT NULL,
       text TEXT NOT NULL DEFAULT '', blocks TEXT NOT NULL DEFAULT '[]', notice TEXT)`);
+    // `owed`: the person answered it and the record does not have the answer yet.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_proposals (
       id TEXT PRIMARY KEY, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL)`);
+    // Added for the record (issue #279), also to a working copy made before it.
+    this.#column("assistant_binding", "full", "INTEGER NOT NULL DEFAULT 0");
+    this.#column("assistant_turns", "record", "TEXT NOT NULL DEFAULT 'pending'");
+    this.#column("assistant_proposals", "owed", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  #column(table: string, column: string, definition: string): void {
+    const sql = this.ctx.storage.sql;
+    const has = sql.exec("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", table, column).toArray().length > 0;
+    if (!has) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   /** Starts the Lifecycle, which RPC does not do by itself, and ends a turn this instance can no longer run. */
@@ -87,25 +125,32 @@ export class Conversation extends DurableObject<Env> {
     return same ? null : refuse(403, "not_your_conversation");
   }
 
-  /** Starts a turn and answers with its stream. `session` is the person's, for this turn's reads only. */
-  async turn(binding: Binding, said: string, session: string): Promise<Response> {
+  /**
+   * Starts a turn and answers with its stream. `lent` is the person's session, for this turn's reads and the
+   * record's writes only.
+   */
+  async turn(binding: Binding, said: string, lent: Lent): Promise<Response> {
     await this.#ready();
-    const checked = this.#check(binding);
-    if (checked instanceof Response) return checked;
+    const checked = await this.#bound(binding, lent);
+    if (checked !== null) return checked;
     if ([...said.trim()].length > MAX_SAID) return refuse(413, "too_long");
     const words = Said.safeParse(said);
-    if (!words.success) return Response.json({ error: "invalid_message" }, { status: 400 });
+    // A lone surrogate cannot be stored in the record, so it is refused like any other malformed message.
+    if (!words.success || /\p{Cs}/u.test(words.data)) {
+      return Response.json({ error: "invalid_message" }, { status: 400 });
+    }
     const model = modelFor(this.env);
     if (model === null) return refuse(503, "model_unavailable");
     if (this.#running !== null) return refuse(409, "busy");
     const { n } = this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM assistant_turns").one();
-    if (n >= MAX_TURNS) return refuse(409, "turn_limit");
+    if (n >= MAX_TURNS || this.#full()) return refuse(409, "turn_limit");
     if (!(await this.env.PERSON_TURNS.getByName(`${binding.tenant}:${binding.person}`).take())) {
       return refuse(429, "rate_limited");
     }
-    // Another turn may have started, or bound the conversation to someone, while the rate was checked.
+    // Another turn may have started, or the working copy gone idle, while the rate was checked.
     const again = this.#check(binding);
     if (again instanceof Response) return again;
+    if (again === "unbound") return refuse(503, "record_unavailable");
     if (this.#running !== null) return refuse(409, "busy");
 
     const id = `t_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -114,15 +159,11 @@ export class Conversation extends DurableObject<Env> {
     this.#stopper = stopper;
     let writer: StreamWriter;
     try {
-      if (again === "unbound") {
-        this.ctx.storage.sql.exec(
-          "INSERT INTO assistant_binding (only, tenant, person, company) VALUES (1, ?, ?, ?)",
-          binding.tenant,
-          binding.person,
-          binding.company,
-        );
-      }
-      this.ctx.storage.sql.exec("INSERT INTO assistant_turns (id, said, state) VALUES (?, ?, 'live')", id, words.data);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO assistant_turns (id, said, state, record) VALUES (?, ?, 'live', 'pending')",
+        id,
+        words.data,
+      );
       writer = await this.streams.open(id);
       writer.append({ v: WIRE_VERSION, type: "turn", turn: id, said: words.data });
     } catch (failure) {
@@ -131,7 +172,9 @@ export class Conversation extends DurableObject<Env> {
       this.#stopper = null;
       throw failure;
     }
-    this.ctx.waitUntil(this.#run(binding, id, words.data, session, model, writer, stopper.signal));
+    // What an earlier turn could not write goes first, in the background: the stream does not wait on it.
+    this.#record(binding, lent);
+    this.ctx.waitUntil(this.#run(binding, id, words.data, lent, model, writer, stopper.signal));
     await this.#touch();
     return sseResponse(this.streams, id, { from: 0, heartbeatMs: SSE_HEARTBEAT_MS });
   }
@@ -140,7 +183,7 @@ export class Conversation extends DurableObject<Env> {
     binding: Binding,
     id: string,
     said: string,
-    session: string,
+    lent: Lent,
     model: LanguageModel,
     writer: StreamWriter,
     stop: AbortSignal,
@@ -152,7 +195,7 @@ export class Conversation extends DurableObject<Env> {
         binding,
         said,
         history: this.#history(id),
-        read: apiReader(this.env.API, session),
+        read: apiReader(this.env.API, lent.session),
         // A checked event is plain JSON; its type only lacks the index signature Streams asks for.
         emit: (event) => writer.append(event as unknown as StreamJson),
         out,
@@ -174,6 +217,8 @@ export class Conversation extends DurableObject<Env> {
     } finally {
       this.#running = null;
       this.#stopper = null;
+      // However it ended, the finished turn goes to the record, after anything still waiting to.
+      this.#record(binding, lent);
     }
   }
 
@@ -213,11 +258,10 @@ export class Conversation extends DurableObject<Env> {
   }
 
   /** The conversation so far: each turn folded, and the live one, which the screen then follows on its stream. */
-  async view(binding: Binding): Promise<Response> {
+  async view(binding: Binding, lent: Lent | null): Promise<Response> {
     await this.#ready();
-    const checked = this.#check(binding);
-    if (checked instanceof Response) return checked;
-    if (checked === "unbound") return refuse(404, "no_conversation");
+    const checked = await this.#bound(binding, lent);
+    if (checked !== null) return checked;
     const sql = this.ctx.storage.sql;
     const proposals = sql.exec<ProposalRow>("SELECT turn, body, state FROM assistant_proposals ORDER BY n").toArray();
     const turns = sql
@@ -252,19 +296,152 @@ export class Conversation extends DurableObject<Env> {
    * Records the person's answer to a waiting proposal, which the web has already acted on (or not) with the API.
    * Nothing runs here: this only stops the proposal waiting.
    */
-  async settle(binding: Binding, proposal: string, outcome: "confirmed" | "dismissed"): Promise<Response> {
+  async settle(binding: Binding, proposal: string, outcome: Answer, lent: Lent | null): Promise<Response> {
     await this.#ready();
-    const checked = this.#check(binding);
-    if (checked instanceof Response) return checked;
-    if (checked === "unbound") return refuse(404, "no_conversation");
+    const checked = await this.#bound(binding, lent);
+    if (checked !== null) return checked;
     const changed = this.ctx.storage.sql.exec(
-      "UPDATE assistant_proposals SET state = ? WHERE id = ? AND state = 'waiting'",
+      "UPDATE assistant_proposals SET state = ?, owed = 1 WHERE id = ? AND state = 'waiting'",
       outcome,
       proposal,
     ).rowsWritten;
     if (changed === 0) return refuse(404, "not_found");
+    // Recorded in the background; without a session now, at the next turn.
+    if (lent !== null) this.#record(binding, lent);
     await this.#touch();
     return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Refuses a binding `#check` refuses. An object that holds nothing yet is rebuilt from the API's record first, with
+   * the session lent for this call; without one it answers that the conversation has nothing in it yet.
+   */
+  async #bound(binding: Binding, lent: Lent | null): Promise<Response | null> {
+    const checked = this.#check(binding);
+    if (checked !== "unbound") return checked;
+    if (lent === null) return refuse(404, "no_conversation");
+    this.#rebuilding ??= this.#rebuild(binding, lent.session).finally(() => {
+      this.#rebuilding = null;
+    });
+    const rebuilt = await this.#rebuilding;
+    if (rebuilt === "gone") return refuse(404, "unknown_conversation");
+    if (rebuilt === "error") return refuse(503, "record_unavailable");
+    const again = this.#check(binding);
+    return again === "unbound" ? refuse(503, "record_unavailable") : again;
+  }
+
+  /**
+   * Fills an empty working copy from the record, which the API keeps for the person fde-web checked on this call:
+   * the binding, then each turn at its place with its proposals as the person left them. Nothing is written back.
+   * Without an API binding there is no record, and it starts empty.
+   */
+  async #rebuild(binding: Binding, session: string): Promise<"ok" | "gone" | "error"> {
+    const record = this.env.API === undefined ? { turns: [] } : await readRecord(this.env.API, session, binding);
+    if (record === "gone" || record === "error") return record;
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      if (this.#check(binding) !== "unbound") return;
+      sql.exec(
+        "INSERT INTO assistant_binding (only, tenant, person, company) VALUES (1, ?, ?, ?)",
+        binding.tenant,
+        binding.person,
+        binding.company,
+      );
+      for (const t of record.turns) {
+        sql.exec(
+          `INSERT INTO assistant_turns (n, id, said, state, text, blocks, notice, record)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'written')`,
+          t.n,
+          t.id,
+          t.said,
+          t.state,
+          t.text,
+          JSON.stringify(t.blocks),
+          t.notice,
+        );
+        t.proposals.forEach(({ proposal, state }, i) => {
+          sql.exec(
+            "INSERT OR IGNORE INTO assistant_proposals (id, turn, n, body, state) VALUES (?, ?, ?, ?, ?)",
+            proposal.id,
+            t.id,
+            i,
+            JSON.stringify(proposal),
+            state,
+          );
+        });
+      }
+    });
+    return "ok";
+  }
+
+  /** Whether the record has refused a turn for the conversation being full. */
+  #full(): boolean {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM assistant_binding WHERE full = 1").toArray().length > 0;
+  }
+
+  /** Queues a write of whatever the record does not have yet, with `lent`, after any write already queued. */
+  #record(binding: Binding, lent: Lent): void {
+    const next = this.#writes
+      .then(() => this.#flush(binding, lent))
+      .catch(() => {
+        // Ids only: never the error, which may carry the turn or the session.
+        logRecord({ conversation: binding.conversation, outcome: "failed" });
+      });
+    this.#writes = next;
+    this.ctx.waitUntil(next);
+  }
+
+  /**
+   * Writes each finished turn the record does not have, in order, then each answer it does not have. It stops at the
+   * first that has to wait (no answer, or no longer this session's to write), so a later turn never lands first; what
+   * is left is written with the next session lent. A turn the API refuses is marked so and not tried again.
+   */
+  async #flush(binding: Binding, lent: Lent): Promise<void> {
+    const api = this.env.API;
+    if (api === undefined) return;
+    const sql = this.ctx.storage.sql;
+    const { conversation } = binding;
+    const pending = sql
+      .exec<TurnRow>(
+        `SELECT n, id, said, state, text, blocks, notice FROM assistant_turns
+         WHERE record = 'pending' AND state != 'live' ORDER BY n`,
+      )
+      .toArray();
+    for (const t of pending) {
+      const proposals = sql
+        .exec<{ body: string }>("SELECT body FROM assistant_proposals WHERE turn = ? ORDER BY n", t.id)
+        .toArray()
+        .map((p) => JSON.parse(p.body) as unknown);
+      const blocks = JSON.parse(t.blocks) as Array<unknown>;
+      const record = recordOf({ ...t, blocks, proposals }, binding.company === null);
+      let outcome: Written = "refused";
+      if (record !== null) {
+        outcome = await writeTurn(api, lent, conversation, t.n, record);
+        // A record the API refuses to name (not the person's to see, or not there): kept without what names it.
+        if (outcome === "destination")
+          outcome = await writeTurn(api, lent, conversation, t.n, withoutDestinations(record));
+      }
+      if (outcome !== "written") logRecord({ conversation, turn: t.id, n: t.n, outcome });
+      if (outcome === "later") return;
+      sql.exec(
+        "UPDATE assistant_turns SET record = ? WHERE id = ?",
+        outcome === "written" ? "written" : "refused",
+        t.id,
+      );
+      if (outcome === "full") sql.exec("UPDATE assistant_binding SET full = 1");
+    }
+    const owed = sql
+      .exec<{ id: string; state: Answer; n: number }>(
+        `SELECT p.id, p.state, t.n FROM assistant_proposals p JOIN assistant_turns t ON t.id = p.turn
+         WHERE p.owed = 1 AND t.record = 'written' ORDER BY t.n, p.n`,
+      )
+      .toArray();
+    for (const p of owed) {
+      const outcome = await writeAnswer(api, lent, conversation, p.n, p.id, p.state);
+      if (outcome !== "recorded") logRecord({ conversation, proposal: p.id, n: p.n, outcome });
+      if (outcome === "later") return;
+      sql.exec("UPDATE assistant_proposals SET owed = 0 WHERE id = ?", p.id);
+    }
   }
 
   /**

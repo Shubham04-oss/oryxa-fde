@@ -193,12 +193,16 @@ async function stream(
       break;
     }
     if (part.type === "text-delta") {
-      if ([...out.text].length + [...part.text].length > MAX_REPLY) {
+      // UTF-16 units, as the API's record counts a reply: never more than the screen's own count.
+      if (out.text.length + part.text.length > MAX_REPLY) {
         notice("reply_limit");
         break;
       }
+      // Only what the wire takes is kept, so the folded reply is the one the person saw.
+      const delta = parseEvent({ v: WIRE_VERSION, type: "text", delta: part.text });
+      if (delta === null) continue;
       out.text += part.text;
-      emit({ v: WIRE_VERSION, type: "text", delta: part.text });
+      emit(delta);
       continue;
     }
     // A call the SDK could not match to a tool, or whose input did not fit, comes marked dynamic: it is dropped.

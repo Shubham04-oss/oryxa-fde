@@ -2,14 +2,33 @@ import { authorized, validId, verifyBinding } from "./auth.js";
 import { Settle } from "./catalogue/wire.js";
 import type { Env } from "./env.js";
 import { MAX_BODY_BYTES, MAX_SESSION_BYTES } from "./limits.js";
+import type { Lent } from "./record.js";
 
 export { Conversation } from "./conversation.js";
 export { PersonTurns } from "./limits.js";
 
 /** The binding fde-web signed for this request (auth.ts). */
 export const BINDING_HEADER = "x-assistant-binding";
-/** The person's session, as their browser sent it to fde-web: on a turn only, for that turn's reads. */
+/**
+ * The person's session, as their browser sent it to fde-web: lent for one call (a turn, a view, an answer) for that
+ * call's reads of the API and the record's writes, and never kept.
+ */
 export const SESSION_HEADER = "x-assistant-session";
+/** fde-web's own origin, sent with the session: the API takes a write made with a session only from the web app's. */
+export const ORIGIN_HEADER = "x-assistant-origin";
+
+/** An origin and nothing more: https, or http on localhost for a local API. */
+const WEB_ORIGIN = /^(?:https:\/\/[a-z0-9.-]{1,253}|http:\/\/localhost)(?::\d{1,5})?$/;
+
+/** What fde-web lent for this call, null when it lent nothing, or "bad" when what it sent is malformed. */
+export function lentBy(request: Request): Lent | null | "bad" {
+  const session = request.headers.get(SESSION_HEADER);
+  const origin = request.headers.get(ORIGIN_HEADER);
+  if (session === null && origin === null) return null;
+  if (session === null || session === "" || session.length > MAX_SESSION_BYTES) return "bad";
+  if (origin === null || !WEB_ORIGIN.test(origin)) return "bad";
+  return { session, origin };
+}
 
 export type Route =
   | { action: "view"; conversation: string }
@@ -67,27 +86,29 @@ async function handle(request: Request, env: Env): Promise<Response> {
   const binding = await verifyBinding(request.headers.get(BINDING_HEADER), env.BINDING_KEY, route.conversation);
   if (binding === null) return json(403, "forbidden");
   const conversation = env.CONVERSATIONS.getByName(route.conversation);
+  // Only a turn, a view and an answer borrow the session; a stream's replay and a stop never do.
+  const lent = route.action === "turn" || route.action === "view" || route.action === "settle" ? lentBy(request) : null;
+  if (lent === "bad") return json(400, "no_session");
 
   switch (route.action) {
     case "view":
-      return conversation.view(binding);
+      return conversation.view(binding, lent);
     case "events":
       return conversation.events(binding, route.turn, resumeFrom(request));
     case "turn": {
-      const session = request.headers.get(SESSION_HEADER);
-      if (session === null || session === "" || session.length > MAX_SESSION_BYTES) return json(400, "no_session");
+      if (lent === null) return json(400, "no_session");
       const body = await jsonBody(request);
       if (body === TOO_LARGE) return json(413, "too_long");
       const text = (body as { text?: unknown } | null)?.text;
       if (typeof text !== "string") return json(400, "invalid_message");
-      return conversation.turn(binding, text, session);
+      return conversation.turn(binding, text, lent);
     }
     case "stop":
       return conversation.stop(binding, route.turn);
     case "settle": {
       const settle = Settle.safeParse(await jsonBody(request));
       if (!settle.success) return json(400, "invalid_outcome");
-      return conversation.settle(binding, route.proposal, settle.data.outcome);
+      return conversation.settle(binding, route.proposal, settle.data.outcome, lent);
     }
   }
 }

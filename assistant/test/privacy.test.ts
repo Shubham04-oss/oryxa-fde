@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseView } from "../src/catalogue/wire.js";
 import { OutboundRefused, runtime } from "../src/model/provider.js";
 import { SESSION } from "./fake-api.js";
-import { PERSON, TENANT, call, freshConversation, replyText, say } from "./helpers.js";
+import { PERSON, TENANT, call, dump, freshConversation, logsOf, replyText, say } from "./helpers.js";
 
 // The person's session is lent for one turn (ADR 0009): it reaches the API and nothing else. Not the object's
 // storage, not a log, and no host but the API.
@@ -16,34 +16,6 @@ const SECRET = SESSION.split("=")[1]!;
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-/** Everything an object holds: every row of every table, and every key. */
-async function dump(stub: DurableObjectStub): Promise<string> {
-  return runInDurableObject(stub, async (_instance, state) => {
-    const tables = state.storage.sql
-      // The runtime's own tables (`_cf_*`) cannot be read; its key-value one is read through `list()` below.
-      .exec<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
-      )
-      .toArray()
-      .map(({ name }) => name);
-    const rows = tables.map((name) => [name, state.storage.sql.exec(`SELECT * FROM "${name}"`).toArray()]);
-    const keys = [...(await state.storage.list()).entries()];
-    return JSON.stringify({ rows, keys });
-  });
-}
-
-/** Every argument of every console call while `work` runs. */
-async function logsOf(work: () => Promise<unknown>): Promise<string> {
-  const calls: Array<unknown> = [];
-  for (const level of ["log", "info", "warn", "error", "debug"] as const) {
-    vi.spyOn(console, level).mockImplementation((...args: Array<unknown>) => {
-      calls.push(args.map(String));
-    });
-  }
-  await work();
-  return JSON.stringify(calls);
-}
 
 describe("the person's session", () => {
   it("is never written to the conversation's storage, nor the rate's", async () => {

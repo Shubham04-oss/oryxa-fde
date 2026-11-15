@@ -86,7 +86,7 @@ async function respond(request: Request, env: Env, nonce: string): Promise<Respo
   // Without the new workspace the assistant's routes are not there at all, configured or not.
   if (asked !== null && !assistantBuilt()) return refuse(404, "not_found")
   if (path !== null && !sameOriginWrite(request)) return refuse(403, "csrf")
-  // The stored transcript is written only by this server, for the assistant, never from the browser.
+  // The stored transcript is written only by the assistant, with a lent session, never from the browser.
   if (path !== null && relayOnly(request.method, path)) return refuse(403, "forbidden")
   const api = upstream(env, import.meta.env.DEV)
   if (!api) return refuse(503, "api_not_configured")

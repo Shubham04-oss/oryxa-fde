@@ -20,15 +20,41 @@ On every call (a turn, a reconnect, a view, a stop, a proposal's answer) fde-web
 same answer as one that does not exist. A new conversation is made by the API, as the person, before its first turn,
 so the API alone decides the binding. Then fde-web signs a binding and calls with:
 
-| Header                                  | What                                                                                                                            |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Authorization: Bearer <SERVICE_TOKEN>` | fde-web's `ASSISTANT_SERVICE_TOKEN`. Unset or shorter than 32 characters here: everyone is refused.                             |
-| `x-assistant-binding`                   | `base64url(JSON).base64url(HMAC-SHA256)` under `BINDING_KEY`: `{v:1, conv, tenant, person, company or null, exp}`, a minute.    |
-| `x-assistant-session`                   | On a turn only: the person's session cookie alone (`__Host-fde_session=…`). Held in memory for that turn's reads, then dropped. |
+| Header                                  | What                                                                                                                         |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `Authorization: Bearer <SERVICE_TOKEN>` | fde-web's `ASSISTANT_SERVICE_TOKEN`. Unset or shorter than 32 characters here: everyone is refused.                          |
+| `x-assistant-binding`                   | `base64url(JSON).base64url(HMAC-SHA256)` under `BINDING_KEY`: `{v:1, conv, tenant, person, company or null, exp}`, a minute. |
+| `x-assistant-session`                   | On a turn, a view and an answer: the person's session cookie alone (`__Host-fde_session=…`), lent for that call. See below.  |
+| `x-assistant-origin`                    | With the session: fde-web's own origin, which the API asks of a write made with a session.                                   |
 
-The first turn binds the conversation to its person, organisation and company (or none, for the home conversation);
-any later binding that names another is refused, as is one for another conversation, an expired one, or one that
-lives longer than two minutes.
+The first call with a session binds the conversation to its person, organisation and company (or none, for the home
+conversation); any later binding that names another is refused, as is one for another conversation, an expired one, or
+one that lives longer than two minutes.
+
+## The record
+
+The API holds the conversation's record (ADR 0009, issue #279); the object's storage is a working copy. The session
+lent for a call is held in memory for that call's reads and writes, and never written to storage, a log or a prompt.
+
+- **Each finished turn** (done, or with a notice: `tool_limit`, `reply_limit`, `timed_out`, `failed`, `stopped`) is
+  written with `PUT /v1/assistant/conversations/{id}/turns/{n}`, `n` being its place in the working copy, after the
+  stream has ended, so the stream never waits on it. Step events are not written. What is written is checked first
+  with the API's rules (`src/record.ts`); `test/record-shape.test.ts` pins it to `crates/oryxa-fde-api/openapi.json`. A
+  part the record does not take in the conversation's scope is left out of it (a home conversation's record holds
+  suggestion blocks only), and a part naming a record the API refuses (`invalid_destination`) is left out on a second
+  try.
+- **A write is tried three times** on a timeout, a dropped connection or a 5xx. One that cannot be made (or that the
+  session no longer allows) stays marked in the working copy and is written, in order, at the start of the next turn.
+  The API answers a retry of a stored turn with 200, so a write is never doubled. A turn the API refuses is marked so
+  and not tried again; `409 rejected_turn_limit` ends the conversation (the next turn is refused `turn_limit`).
+- **An answer to a proposal** is recorded with `PUT .../turns/{n}/proposals/{p}` once its turn is written, with the
+  session the answer lent, or at the next turn. Recording performs nothing: the web has already called the action's
+  own route, or not (ADR 0008).
+- **An object that holds nothing** is rebuilt from `GET /v1/assistant/conversations/{id}` on the first call that lends
+  a session (a view or a turn); without one a view answers `no_conversation`. A record the API does not know for this
+  person answers `404 unknown_conversation`, and one it cannot read `503 record_unavailable`: it never starts empty
+  over a record it could not read.
+- Logs carry ids and an outcome only.
 
 ## Routes
 
@@ -36,7 +62,7 @@ All under `/internal/v1/conversations/<conversation>`, ids with the platform's r
 
 | Method and path             | Does                                                                                                                   |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `GET`                       | The conversation so far (`ConversationView` in the wire format), or 404 `no_conversation`.                             |
+| `GET`                       | The conversation so far (`ConversationView` in the wire format), or 404 `no_conversation`; rebuilt from the record.    |
 | `POST turns`                | `{ "text": … }`: starts a turn and answers with its stream (SSE).                                                      |
 | `GET turns/<turn>/events`   | The turn's stream again, after `Last-Event-ID` (or from `?from=`): a dropped connection resumes, a second tab replays. |
 | `POST proposals/<proposal>` | `{ "outcome": "confirmed" \| "dismissed" }`: the person has answered it. Nothing runs here.                            |
@@ -81,5 +107,5 @@ accepted), and the vars `VERTEX_PROJECT` and `VERTEX_LOCATION` (`global` or one 
 ```bash
 npm ci
 npm run check   # prettier, tsc, eslint, and that src/catalogue matches fde-web
-npm test        # vitest in workerd: auth, the turn, resume, the idle alarm, limits, drops, injection, privacy
+npm test        # vitest in workerd: auth, the turn, resume, the idle alarm, limits, drops, injection, privacy, record
 ```
