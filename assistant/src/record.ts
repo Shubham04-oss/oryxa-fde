@@ -144,43 +144,72 @@ export interface Folded {
 }
 
 /**
- * Whether the record of a conversation in this scope takes `value`: every block type in every scope, but never a
- * project's screen at home, which it cannot name. A company the person may not work on is the API's to refuse.
+ * The most distinct destinations one turn may name (the API's `MAX_DESTINATIONS`): `today`, `companies` and
+ * `new-company` count as one, the lists; each company and each project once.
  */
-function recordable(home: boolean, value: BlockValue | ProposalValue): boolean {
-  if (!storable(value)) return false;
-  // ponytail: the person saw this project card at home but the record lacks it, until the API accepts a project there.
-  return !home || !namesProject(value);
+export const MAX_DESTINATIONS = 16;
+
+/** Whether `value` holds a destination (an object with a `screen`, as the API finds them). */
+function names(value: unknown): boolean {
+  return keysOf(value).size > 0;
 }
 
-/** Whether `value` names a project's screen anywhere, which a home record leaves out. */
-export const namesProject = (value: unknown): boolean => names(value, "project");
+/** The distinct destinations in `value`, keyed as the API tells them apart. */
+function keysOf(value: unknown, out: Set<string> = new Set()): Set<string> {
+  if (Array.isArray(value)) value.forEach((v) => keysOf(v, out));
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
+  const d = value as { screen?: unknown; company?: unknown; project?: unknown };
+  if (d.screen !== undefined) {
+    const list = ["today", "companies", "new-company"].includes(String(d.screen));
+    out.add(list ? "list" : JSON.stringify([d.screen, d.company ?? null, d.project ?? null]));
+  }
+  Object.values(value).forEach((v) => keysOf(v, out));
+  return out;
+}
 
-/** Whether `value` holds a destination (an object with a `screen`, as the API finds them), of `screen` if given. */
-function names(value: unknown, screen?: string): boolean {
-  if (Array.isArray(value)) return value.some((v) => names(v, screen));
-  if (typeof value !== "object" || value === null) return false;
-  const s = (value as { screen?: unknown }).screen;
-  if (s !== undefined && (screen === undefined || s === screen)) return true;
-  return Object.values(value).some((v) => names(v, screen));
+/**
+ * `blocks` then `proposals`, in the order the API finds them, without each part that would take the turn past
+ * `MAX_DESTINATIONS`; `over` says whether any was left out. The catalogue's own caps name at most 9 today.
+ */
+export function withinCap<B, P>(
+  blocks: ReadonlyArray<B>,
+  proposals: ReadonlyArray<P>,
+): { blocks: Array<B>; proposals: Array<P>; over: boolean } {
+  const seen = new Set<string>();
+  let over = false;
+  const fits = (value: unknown) => {
+    const more = [...keysOf(value)].filter((k) => !seen.has(k));
+    if (seen.size + more.length > MAX_DESTINATIONS) {
+      over = true;
+      return false;
+    }
+    more.forEach((k) => seen.add(k));
+    return true;
+  };
+  return { blocks: blocks.filter(fits), proposals: proposals.filter(fits), over };
 }
 
 /**
  * The record of a finished turn: what was said and shown, each proposal `waiting` (only the answer route records an
- * answer), or null when it does not pass the API's rules. A part the scope's record does not take is left out of it.
+ * answer), or null when it does not pass the API's rules. A part that cannot be stored is left out, and so is one
+ * past `MAX_DESTINATIONS` (`withinCap`), which `capped` hears of. A destination the scope does not allow is the API's
+ * to refuse.
  */
-export function recordOf(turn: Folded, home: boolean): TurnRecord | null {
-  const blocks = parseBlocks(turn.blocks).filter((b) => recordable(home, b));
-  const proposals = turn.proposals.flatMap((raw) => {
-    const p = Proposal.safeParse(raw);
-    return p.success && recordable(home, p.data) ? [{ proposal: p.data, state: "waiting" as const }] : [];
-  });
+export function recordOf(turn: Folded, capped?: () => void): TurnRecord | null {
+  const parts = withinCap(
+    parseBlocks(turn.blocks).filter(storable),
+    turn.proposals.flatMap((raw) => {
+      const p = Proposal.safeParse(raw);
+      return p.success && storable(p.data) ? [p.data] : [];
+    }),
+  );
+  if (parts.over) capped?.();
   const parsed = TurnRecord.safeParse({
     id: turn.id,
     said: turn.said,
     text: turn.text,
-    blocks,
-    proposals,
+    blocks: parts.blocks,
+    proposals: parts.proposals.map((proposal) => ({ proposal, state: "waiting" as const })),
     notice: turn.notice,
     state: turn.state,
   });

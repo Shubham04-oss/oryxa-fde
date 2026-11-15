@@ -43,8 +43,10 @@ session alone, to rebuild, and never writes.
   written with `PUT /v1/assistant/conversations/{id}/turns/{n}` after the stream has ended, so the stream never waits
   on it, one at a time and in order, each at the record's next place. Step events are not written. What is written is
   checked first with the API's rules (`src/record.ts`): a part the record does not take in the conversation's scope,
-  or that holds a NUL or a lone surrogate, is left out: a home conversation's record keeps every block the person saw,
-  but no part naming a project, which home cannot name.
+  or that holds a NUL or a lone surrogate, is left out. Every block type is kept in every scope, and so is every part
+  naming a destination, a project at home included: the API checks that the person may work on it. A turn names at
+  most 16 distinct destinations (the lists count as one, each company and project once), as the API takes; past that,
+  the extra parts are left out, blocks first and then proposals, and the drop is logged by turn id.
 - **A write is tried three times** on a timeout, a dropped connection or a 5xx. One that cannot be made (or that the
   session no longer allows) stays marked in the working copy and is written at the start of the next turn. The API
   answers a retry of a stored turn with 200, so a write is never doubled.

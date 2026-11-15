@@ -111,7 +111,13 @@ const tries = new Map<string, number>();
 const BLOCK_TYPES = (schemaOf("BlockType").enum ?? []).map(String);
 const ACTIONS = ["create_company", "open_route"];
 const VISIBLE = ["cmp_kestrel", "cmp_harbor"];
-const PROJECTS = ["prj_dispatch"];
+/** Each project the person may work on, and its company; enough of them that the cap, not a check, is what refuses. */
+const PROJECTS = new Map<string, string>([
+  ["prj_dispatch", "cmp_kestrel"],
+  ...Array.from({ length: 20 }, (_, i) => [`prj_sample_${i}`, "cmp_kestrel"] as const),
+]);
+/** The most distinct destinations one turn may name (the API's `MAX_DESTINATIONS`). */
+const MAX_DESTINATIONS = 16;
 const MAX_TURNS = 50;
 
 const fail = (status: number, error: string) => Response.json({ error }, { status });
@@ -150,14 +156,24 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   if (JSON.stringify([blocks, proposals]).includes("\\u0000")) return "invalid_blocks";
   const found: Array<Record<string, unknown>> = [];
   destinations([blocks, proposals.map((p) => p.proposal)], found);
+  // Each distinct destination once, at most 16 (`MAX_DESTINATIONS`), before any is checked.
+  const distinct = new Map<string, Record<string, unknown>>();
+  for (const d of found) {
+    if (typeof d.screen !== "string") return "invalid_destination";
+    const list = ["today", "companies", "new-company"].includes(d.screen);
+    const key = list ? "list" : JSON.stringify([d.screen, d.company ?? null, d.project ?? null]);
+    if (!distinct.has(key) && distinct.size === MAX_DESTINATIONS) return "invalid_destination";
+    distinct.set(key, d);
+  }
   const home = record.company === null;
   // `VISIBLE` and `PROJECTS` stand in for the Rust's id parsing and its company and project checks alike.
-  for (const d of found) {
-    // At home, a company the person may work on and never a project; in a company, that company and its projects.
-    if (typeof d.screen !== "string") return "invalid_destination";
+  for (const d of distinct.values()) {
+    // At home, the lists, a company the person may work on and a project of it; in a company, it and its projects.
     if (["today", "companies", "new-company"].includes(String(d.screen))) continue;
-    if (d.screen === "company" && (home ? VISIBLE.includes(String(d.company)) : d.company === record.company)) continue;
-    if (d.screen === "project" && !home && d.company === record.company && PROJECTS.includes(String(d.project)))
+    const company = String(d.company);
+    if (d.screen === "company" && (home ? VISIBLE.includes(company) : company === record.company)) continue;
+    const owner = PROJECTS.get(String(d.project));
+    if (d.screen === "project" && owner === company && (home ? VISIBLE.includes(company) : company === record.company))
       continue;
     return "invalid_destination";
   }
