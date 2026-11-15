@@ -109,7 +109,8 @@ real model (ADR 0009 leaves budgets per organisation open).
 Not yet: the deploy workflow is a follow-up. It will need the Worker secrets `SERVICE_TOKEN` and `BINDING_KEY`
 (each at least 32 random characters), the API's `vpc_services` binding named `API`, and fde-web's service binding
 `ASSISTANT` with `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY` equal to them, and the var `WEB_ORIGIN` set to
-fde-web's origin (not set yet: an infra follow-up). For Gemini on Vertex it also sets the var `ASSISTANT_MODEL` to
+fde-web's origin (`deploy-workers` sets it to `https://<WEB_HOSTNAME>`, infra/README.md, Deploys).
+For Gemini on Vertex it also sets the var `ASSISTANT_MODEL` to
 `vertex:<model id>` (for example `vertex:gemini-2.5-flash`), the secrets
 `VERTEX_CLIENT_EMAIL` (a service account's email) and `VERTEX_PRIVATE_KEY` (its PKCS #8 PEM key, escaped newlines
 accepted), and the vars `VERTEX_PROJECT` and `VERTEX_LOCATION` (`global` or one region). Sample data only (ADR 0009).
