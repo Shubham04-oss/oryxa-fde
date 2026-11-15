@@ -4,12 +4,18 @@
 //! it reads it, appends to it or deletes it, and for a company's conversation only while they may
 //! still `work` on that company. fde-web's server asks `.../check` before every turn and reconnect.
 //!
-//! A finished turn is checked against the Worker's wire format (`assistant/src/catalogue/wire.ts`):
-//! its text rules and sizes, the block types and proposal actions of the catalogue, and every record a
-//! block or proposal names. In a company's conversation those must be that company's; in a home
-//! conversation only a company the person may see (to open its conversation), or a new company. A
-//! proposal's answer (confirmed or dismissed) is recorded once the person gives it. Turn content is
-//! never logged.
+//! A finished turn is checked against the Worker's wire format (`assistant/src/catalogue/wire.ts`): its
+//! text rules, sizes and counts, each block's `type` and each proposal's `action` (not their full shape,
+//! which the Worker and the web check), and every record a block or proposal names. In a company's
+//! conversation those must be that company's (in a project's, a project the holder may work on); in a
+//! home conversation only a company the person may see (to open its conversation), or a new company.
+//! A proposal is stored `waiting`; the person's answer (confirmed or dismissed) is recorded once. Turn
+//! content is never logged.
+//!
+//! What the record is worth: a transcript the holder attests to. The holder's own session writes it,
+//! so it proves neither that the model said a turn's text nor, by `confirmed`, that the person approved
+//! an action or that one ran: the action's own route, and its audit row, are the only proof of a
+//! change. It grants nothing, and nothing else in the API may read it as authority.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -349,17 +355,22 @@ pub(crate) async fn delete(
 }
 
 /// Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes
-/// nothing (200). Only the conversation's holder; blocks and proposals as the scope allows.
+/// nothing (200, also after the person answered its proposals). Only the conversation's holder; blocks
+/// and proposals as the scope allows, each proposal `waiting`. The record is a transcript the holder
+/// attests to: it grants nothing and proves no approval or action, which only the action's own route
+/// and its audit row do.
 #[utoipa::path(put, operation_id = "put_turn", path = "/v1/assistant/conversations/{conversation}/turns/{n}",
     tag = "assistant", request_body = TurnBody,
     params(("conversation" = String, Path, description = "Conversation id"), ("n" = u32, Path, description = "Turn number, from 1")),
     responses((status = 201, body = TurnOut, description = "Stored"),
         (status = 200, body = TurnOut, description = "Stored before with the same contents"),
         (status = 400, body = ErrorBody, description = "`invalid_*` naming what broke a limit or names a record \
-            outside the scope (`invalid_destination`), or a block or proposal the scope does not allow"),
+            outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal \
+            not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0"),
         (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "`rejected_turn_taken`: another turn is at `n`, or `n` is \
-            not next; `rejected_turn_limit`: the conversation holds 50 turns")))]
+            not next; `rejected_turn_limit`: `n` is past 50, the most turns a conversation holds"),
+        (status = 503, body = ErrorBody)))]
 pub(crate) async fn put_turn(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -368,8 +379,11 @@ pub(crate) async fn put_turn(
 ) -> Result<Response, ApiError> {
     let id = conversation_id(raw)?;
     let scope = scope_of(&app, &who, &id).await?;
-    if !(1..=MAX_TURNS).contains(&n) {
+    if n == 0 {
         return Err(ApiError::Invalid("n"));
+    }
+    if n > MAX_TURNS {
+        return Err(ApiError::Rejected("turn_limit"));
     }
     let mut tx = app.store.assistant(&scope).await?;
     let v = turn_in(&app, &who, &scope, &mut tx, n, body).await?;
@@ -436,6 +450,17 @@ fn shape(home: bool, n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
             Some(id) if PROPOSAL_ACTIONS.contains(&action) && ids.insert(id) => {}
             _ => return Err(ApiError::Invalid("proposal")),
         }
+        // Only the answer route records an answer.
+        if entry.state != ProposalState::Waiting {
+            return Err(ApiError::Invalid("proposal_state"));
+        }
+    }
+    // Postgres' jsonb takes no NUL, so one is refused here, never by the insert.
+    if body.blocks.iter().any(has_nul) {
+        return Err(ApiError::Invalid("blocks"));
+    }
+    if body.proposals.iter().any(|e| has_nul(&e.proposal)) {
+        return Err(ApiError::Invalid("proposals"));
     }
     // The byte caps are the table's, measured in its form by the store.
     let blocks = Value::Array(body.blocks);
@@ -453,6 +478,16 @@ fn shape(home: bool, n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
             FinishedState::Failed => TurnState::Failed,
         },
     })
+}
+
+/// Whether a NUL sits in any string or key of `v`.
+fn has_nul(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.contains('\0'),
+        Value::Array(a) => a.iter().any(has_nul),
+        Value::Object(o) => o.iter().any(|(k, v)| k.contains('\0') || has_nul(v)),
+        _ => false,
+    }
 }
 
 /// The wire's `PartId`: 1 to 64 of `A-Za-z0-9_-`.
@@ -485,7 +520,8 @@ pub enum AnswerState {
 
 /// Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting
 /// proposal takes it; the same answer again changes nothing; an answered one is not changed. Only
-/// the conversation's holder.
+/// the conversation's holder. It only records: `confirmed` is the holder's word, not proof that an
+/// action was approved or ran (the action's own route and its audit row are), and grants nothing.
 #[utoipa::path(put, operation_id = "answer_proposal",
     path = "/v1/assistant/conversations/{conversation}/turns/{n}/proposals/{proposal}", tag = "assistant",
     request_body = AnswerBody,
@@ -580,8 +616,24 @@ async fn check_destinations(
                 let project = field("project")
                     .and_then(|p| ProjectId::new(p).ok())
                     .ok_or_else(refuse)?;
-                if c.company != named || !tx.has_project(&project).await? {
+                if c.company != named {
                     return Err(refuse());
+                }
+                match scope {
+                    // A project's conversation may name only projects its holder may work on.
+                    ConversationScope::Project(_) => {
+                        app.require(who, crate::authz::project(&c.project(project)), "work")
+                            .await
+                            .map_err(|e| match e {
+                                ApiError::Forbidden => refuse(),
+                                e => e,
+                            })?;
+                    }
+                    _ => {
+                        if !tx.has_project(&project).await? {
+                            return Err(refuse());
+                        }
+                    }
                 }
             }
             _ => return Err(refuse()),
@@ -615,7 +667,7 @@ mod tests {
         let ok = shape(false, 1, body(json!({
             "blocks": [{ "type": "plan", "steps": [] }, suggestion(json!({ "screen": "today" }))],
             "proposals": [{ "proposal": { "id": "p1", "action": "open_route", "args": { "to": { "screen": "today" } } },
-                           "state": "confirmed" }],
+                           "state": "waiting" }],
             "notice": "tool_limit",
         })))
         .unwrap();
@@ -623,7 +675,7 @@ mod tests {
             (ok.n, ok.id.as_str(), ok.notice.as_deref()),
             (1, "t_1", Some("tool_limit"))
         );
-        assert_eq!(ok.proposals[0]["state"], "confirmed");
+        assert_eq!(ok.proposals[0]["state"], "waiting");
 
         let many_blocks = Value::Array(vec![json!({ "type": "brief", "items": [] }); MAX_BLOCKS + 1]);
         let many_proposals = Value::Array(vec![
@@ -666,6 +718,25 @@ mod tests {
             code(shape(false, 1, body(json!({ "said": "one\r\ntwo", "text": "a\r\nb" })))),
             "ok"
         );
+        // Only the answer route records an answer: a proposal is appended `waiting`.
+        for state in ["confirmed", "dismissed"] {
+            let b =
+                body(json!({ "proposals": [{ "proposal": { "id": "p1", "action": "open_route" }, "state": state }] }));
+            assert_eq!(code(shape(false, 1, b)), "invalid_proposal_state", "{state}");
+        }
+        // A NUL anywhere in a part, value or key, escaped or not, is refused before Postgres sees it.
+        let nul_value: TurnBody = serde_json::from_str(
+            r#"{"id":"t_1","said":"x","state":"done","blocks":[{"type":"brief","items":[{"label":"a","value":"b\u0000c"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(code(shape(false, 1, nul_value)), "invalid_blocks");
+        let nul_key = body(json!({ "blocks": [{ "type": "brief", "x\u{0}": 1 }] }));
+        assert_eq!(code(shape(false, 1, nul_key)), "invalid_blocks");
+        let nul_proposal = body(
+            json!({ "proposals": [{ "proposal": { "id": "p1", "action": "create_company",
+            "args": { "name": "a\u{0}b" } }, "state": "waiting" }] }),
+        );
+        assert_eq!(code(shape(false, 1, nul_proposal)), "invalid_proposals");
         // A turn the person stopped: notice `stopped`, and its reply may be empty, as for any notice.
         let stopped = shape(
             false,

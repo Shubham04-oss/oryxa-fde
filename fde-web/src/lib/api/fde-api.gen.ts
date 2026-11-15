@@ -324,7 +324,10 @@ export interface paths {
         get?: never;
         /**
          * Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes
-         *     nothing (200). Only the conversation's holder; blocks and proposals as the scope allows.
+         *     nothing (200, also after the person answered its proposals). Only the conversation's holder; blocks
+         *     and proposals as the scope allows, each proposal `waiting`. The record is a transcript the holder
+         *     attests to: it grants nothing and proves no approval or action, which only the action's own route
+         *     and its audit row do.
          */
         put: operations["put_turn"];
         post?: never;
@@ -345,7 +348,8 @@ export interface paths {
         /**
          * Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting
          *     proposal takes it; the same answer again changes nothing; an answered one is not changed. Only
-         *     the conversation's holder.
+         *     the conversation's holder. It only records: `confirmed` is the holder's word, not proof that an
+         *     action was approved or ran (the action's own route and its audit row are), and grants nothing.
          */
         put: operations["answer_proposal"];
         post?: never;
@@ -4340,7 +4344,7 @@ export interface operations {
                     "application/json": components["schemas"]["TurnOut"];
                 };
             };
-            /** @description `invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), or a block or proposal the scope does not allow */
+            /** @description `invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4367,8 +4371,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description `rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: the conversation holds 50 turns */
+            /** @description `rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: `n` is past 50, the most turns a conversation holds */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

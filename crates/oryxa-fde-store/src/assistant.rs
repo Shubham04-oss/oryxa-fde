@@ -237,6 +237,17 @@ pub struct Turn {
     pub created_at: OffsetDateTime,
 }
 
+/// The proposals without their states, so a retry of an append after the person answered is the same
+/// turn.
+fn unanswered(proposals: &Value) -> Vec<&Value> {
+    proposals
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| e.get("proposal").unwrap_or(e))
+        .collect()
+}
+
 impl Turn {
     fn same(&self, v: &TurnIn) -> bool {
         self.n == v.n
@@ -244,7 +255,7 @@ impl Turn {
             && self.said == v.said
             && self.reply == v.reply
             && self.blocks == v.blocks
-            && self.proposals == v.proposals
+            && unanswered(&self.proposals) == unanswered(&v.proposals)
             && self.notice == v.notice
             && self.state == v.state
     }

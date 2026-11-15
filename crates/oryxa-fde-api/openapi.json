@@ -1192,7 +1192,7 @@
         "tags": [
           "assistant"
         ],
-        "summary": "Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes\nnothing (200). Only the conversation's holder; blocks and proposals as the scope allows.",
+        "summary": "Store a finished turn at place `n` (from 1): the next one, or the same turn again, which changes\nnothing (200, also after the person answered its proposals). Only the conversation's holder; blocks\nand proposals as the scope allows, each proposal `waiting`. The record is a transcript the holder\nattests to: it grants nothing and proves no approval or action, which only the action's own route\nand its audit row do.",
         "operationId": "put_turn",
         "parameters": [
           {
@@ -1248,7 +1248,7 @@
             }
           },
           "400": {
-            "description": "`invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), or a block or proposal the scope does not allow",
+            "description": "`invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0",
             "content": {
               "application/json": {
                 "schema": {
@@ -1278,7 +1278,17 @@
             }
           },
           "409": {
-            "description": "`rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: the conversation holds 50 turns",
+            "description": "`rejected_turn_taken`: another turn is at `n`, or `n` is not next; `rejected_turn_limit`: `n` is past 50, the most turns a conversation holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1295,7 +1305,7 @@
         "tags": [
           "assistant"
         ],
-        "summary": "Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting\nproposal takes it; the same answer again changes nothing; an answered one is not changed. Only\nthe conversation's holder.",
+        "summary": "Record the person's answer to a proposal of a stored turn: `confirmed` or `dismissed`. A waiting\nproposal takes it; the same answer again changes nothing; an answered one is not changed. Only\nthe conversation's holder. It only records: `confirmed` is the holder's word, not proof that an\naction was approved or ran (the action's own route and its audit row are), and grants nothing.",
         "operationId": "answer_proposal",
         "parameters": [
           {
