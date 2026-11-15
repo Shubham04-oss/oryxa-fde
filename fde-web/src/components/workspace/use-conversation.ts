@@ -382,6 +382,8 @@ export function useConversation(scripted: (said: string) => Reply) {
       return
     }
     if (ended.kind === "unsent") {
+      // ponytail: a request that threw may still have reached the assistant, so its turn can run unseen
+      // and a resend gets the busy line.
       handBack(reply, text, CONVERSATION_TEXT.unsent, "unstarted")
       return
     }

@@ -898,10 +898,73 @@ describe("the conversation with the assistant", () => {
     expect(within(log).queryByText("Let's set it up together.")).toBeNull()
   })
 
-  it("never shows a scripted answer when sending a message fails on the network", async () => {
+  it.each([
+    ["the request throws", () => Promise.reject(new TypeError("network"))],
+    ["a 200 has a body it cannot read", () => new Response("not json", { status: 200 })],
+    [
+      "the API is not configured on the server",
+      () => Response.json({ error: "api_not_configured" }, { status: 503 }),
+    ],
+  ])(
+    "says plainly when a kept conversation cannot be opened because %s, and keeps it",
+    async (_, view) => {
+      window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+      const answer = mockApi.fetch
+      mockApi.fetch = async (request) =>
+        new URL(request.url).pathname === "/assistant/conversations/cnv_mine"
+          ? view()
+          : answer(request)
+      turnAnswer = () =>
+        new Response(
+          frames([{ v: 1, type: "turn", turn: "t_1", said: "new customer to set up" }]),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        )
+      renderWithRouter(<Welcome now={MORNING} />)
+      await suggested()
+      const log = await screen.findByRole("log", { name: "Conversation" })
+      expect(await within(log).findByText(CONVERSATION_TEXT.unopened)).toBeInTheDocument()
+      await said("new customer to set up")
+      await waitFor(() => expect(turnsSent()).toEqual([{ text: "new customer to set up" }]))
+      expect(asked.at(-1)?.path).toBe("/assistant/conversations/cnv_mine/turns")
+      expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+      expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_mine")
+    },
+  )
+
+  it.each([
+    ["assistant_not_configured", 503],
+    ["not_found", 404],
+  ])(
+    "keeps the scripted answers when opening a kept conversation says %s",
+    async (error, status) => {
+      window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+      onView = () => Response.json({ error }, { status })
+      renderWithRouter(<Welcome now={MORNING} />)
+      await suggested()
+      const log = await said("new customer to set up")
+      expect(await within(log).findByText("Let's set it up together.")).toBeInTheDocument()
+      expect(within(log).queryByText(CONVERSATION_TEXT.unopened)).toBeNull()
+      expect(asked.map((a) => `${a.method} ${a.path}`)).toEqual([
+        "GET /assistant/conversations/cnv_mine",
+      ])
+    },
+  )
+
+  it("never shows a scripted answer when sending a message fails on the network, and sends to the same conversation again", async () => {
+    turnAnswer = () =>
+      new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "new customer to set up" }]), {
+        headers: { "content-type": "text/event-stream" },
+      })
     const answer = mockApi.fetch
+    const thrown: Array<string> = []
     mockApi.fetch = async (request) => {
-      if (new URL(request.url).pathname.endsWith("/turns")) throw new TypeError("network")
+      const { pathname } = new URL(request.url)
+      if (pathname.endsWith("/turns") && thrown.length === 0) {
+        thrown.push(pathname)
+        throw new TypeError("network")
+      }
       return answer(request)
     }
     renderWithRouter(<Welcome now={MORNING} />)
@@ -911,8 +974,48 @@ describe("the conversation with the assistant", () => {
     expect(within(log).queryByText("Let's set it up together.")).toBeNull()
     const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
     await waitFor(() => expect(box).toHaveValue("new customer to set up"))
-    // The conversation is still this person's, and is used again at the next send.
+    // The conversation is still this person's.
     expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_made")
+    expect(thrown).toEqual(["/assistant/conversations/cnv_made/turns"])
+
+    // Sent again, it goes to the same conversation, and no new one is made.
+    await userEvent.type(box, "{Enter}")
+    await waitFor(() => expect(turnsSent()).toEqual([{ text: "new customer to set up" }]))
+    expect(asked.map((a) => `${a.method} ${a.path}`)).toEqual([
+      "POST /assistant/conversations",
+      "POST /assistant/conversations/cnv_made/turns",
+    ])
+    expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+  })
+
+  it("hands both messages back when a send fails on the network while another waits, and sends neither again", async () => {
+    const answer = mockApi.fetch
+    let fail!: () => void
+    const failed = new Promise<void>((resolve) => void (fail = resolve))
+    let posts = 0
+    mockApi.fetch = async (request) => {
+      if (new URL(request.url).pathname.endsWith("/turns")) {
+        posts++
+        await failed
+        throw new TypeError("network")
+      }
+      return answer(request)
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("What needs me today?")
+    await said("Only the blocked ones")
+    expect(
+      await screen.findByText("Sends when this answer ends: Only the blocked ones"),
+    ).toBeInTheDocument()
+    fail()
+    const log = screen.getByRole("log", { name: "Conversation" })
+    expect(await within(log).findByText(CONVERSATION_TEXT.unsent)).toBeInTheDocument()
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("What needs me today?\nOnly the blocked ones"))
+    expect(screen.queryByText(/^Sends when this answer ends/)).toBeNull()
+    expect(waitingKeys()).toEqual([])
+    expect(posts).toBe(1)
   })
 
   it("drops a conversation that stops being this person's mid-session, and starts a new one only when sent again", async () => {
