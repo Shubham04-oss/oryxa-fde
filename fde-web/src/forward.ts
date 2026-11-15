@@ -79,7 +79,8 @@ async function bounded(request: Request, max: number): Promise<ArrayBuffer | nul
 }
 
 /** What the link answers when the API's end of it is going away mid-deploy, so a read is worth repeating. */
-const RETRIED_STATUSES = new Set([502, 503, 504])
+// Not 504: a gateway timeout means the API may still be working, so a retry would double the work and the wait.
+const RETRIED_STATUSES = new Set([502, 503])
 
 /** How long a read waits before its one retry: short, so a reader barely notices, and fixed. */
 export const RETRY_PAUSE_MS = 250
@@ -101,9 +102,9 @@ function underAuth(path: string): boolean {
 /**
  * Forwards `request` to `path` on the API, cookies and all, and hands back its answer as it is.
  * Redirects are not followed: an AuthKit 302 belongs to the browser, never to this server.
- * A read (GET, HEAD) whose connection fails or that the link answers 502, 503 or 504 is sent once
- * more after `RETRY_PAUSE_MS`, and that answer is passed on whatever it is. A write never is, nor
- * anything under `/auth`.
+ * A read (GET, HEAD) whose first try fails or that the link answers 502 or 503 is sent once more
+ * after `RETRY_PAUSE_MS`, unless the browser has gone, and that answer is passed on whatever it is.
+ * A write never is, nor anything under `/auth`.
  */
 export async function forward(request: Request, path: string, api: Upstream): Promise<Response> {
   const target = new URL(api.origin)
@@ -134,8 +135,10 @@ export async function forward(request: Request, path: string, api: Upstream): Pr
     if (!RETRIED_STATUSES.has(first.status)) return first
     await first.body?.cancel()
   } catch {
-    // A connection error: the second try's answer, or what it throws, is the one passed on.
+    // Any failure of the first try: the second try's answer, or what it throws, is the one passed on.
   }
   await new Promise((resolve) => setTimeout(resolve, RETRY_PAUSE_MS))
+  // Nobody is waiting for the answer any more, so the API is not asked again.
+  if (request.signal.aborted) throw new DOMException("aborted", "AbortError")
   return send()
 }

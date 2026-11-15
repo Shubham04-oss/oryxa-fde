@@ -28,7 +28,7 @@ describe("forward's one retry", () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
 
-  for (const status of [502, 503, 504]) {
+  for (const status of [502, 503]) {
     it(`repeats a read that the link answered ${status}, once, after a pause`, async () => {
       const { api, fetch } = apiAnswering(status, 200)
 
@@ -42,6 +42,60 @@ describe("forward's one retry", () => {
       expect(fetch.mock.calls[1]![0].url).toBe("http://api.internal/v1/companies?x=1")
     })
   }
+
+  it("resends the same headers and cookies, with the page's credential still stripped", async () => {
+    const { api, fetch } = apiAnswering(502, 200)
+    const headers = {
+      Cookie: "__Host-fde_session=sealed",
+      "X-Oryxa-Request": "1",
+      Authorization: "Bearer from-the-page",
+      "CF-Connecting-IP": "203.0.113.7",
+    }
+
+    await settle(forward(new Request(`${APP}/api/v1/companies`, { headers }), "/v1/companies", api))
+
+    const [first, second] = fetch.mock.calls.map(([request]) => request)
+    expect([...second!.headers]).toEqual([...first!.headers])
+    expect(second!.headers.get("Cookie")).toBe("__Host-fde_session=sealed")
+    expect(second!.headers.get("X-Oryxa-Request")).toBe("1")
+    expect(second!.headers.get("X-Forwarded-For")).toBe("203.0.113.7")
+    expect(second!.headers.get("Authorization")).toBeNull()
+  })
+
+  it("cancels the first answer's body before the retry", async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream({ cancel })
+    const fetch = vi
+      .fn(async (_request: Request) => new Response("again", { status: 200 }))
+      .mockResolvedValueOnce(new Response(body, { status: 502 }))
+
+    await settle(
+      forward(new Request(`${APP}/api/v1/companies`), "/v1/companies", {
+        fetch,
+        origin: "http://api.internal",
+      }),
+    )
+
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not send the second try when the browser has gone during the pause", async () => {
+    const { api, fetch } = apiAnswering(502, 200)
+    const browser = new AbortController()
+
+    const call = forward(
+      new Request(`${APP}/api/v1/companies`, { signal: browser.signal }),
+      "/v1/companies",
+      api,
+    )
+    await vi.advanceTimersByTimeAsync(RETRY_PAUSE_MS - 1)
+    browser.abort()
+    const outcome = await settle(call)
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect((outcome as Error).name).toBe("AbortError")
+  })
 
   it("repeats a read whose connection failed, and a HEAD", async () => {
     const { api, fetch } = apiAnswering(new TypeError("network connection lost"), 200, 502, 200)
@@ -82,7 +136,7 @@ describe("forward's one retry", () => {
     expect((thrown as Error).message).toBe("lost again")
   })
 
-  for (const status of [400, 401, 403, 404, 409, 429, 500]) {
+  for (const status of [400, 401, 403, 404, 409, 429, 500, 504]) {
     it(`never repeats a read the API answered ${status}`, async () => {
       const { api, fetch } = apiAnswering(status, 200)
 
