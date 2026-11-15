@@ -134,11 +134,11 @@ describe("writing each finished turn", () => {
       [2, (second.events[0] as { turn: string }).turn, "What needs me today?", "done", null],
     ]);
     expect(turns[0]!.text).toBe(replyText(first.events));
-    // The proposal as the person saw it, waiting; the home record leaves out the brief block it does not take.
+    // The blocks and the proposal as the person saw them, the proposal waiting.
     expect(turns[0]!.proposals).toEqual([
       { proposal: (first.events.at(-1) as { proposal: unknown }).proposal, state: "waiting" },
     ]);
-    expect(turns[0]!.blocks).toEqual([]);
+    expect(turns[0]!.blocks).toEqual([{ type: "brief", items: [{ label: "Company", value: "Kestrel Logistics" }] }]);
     expect(await marks(conversation)).toEqual([
       { n: 1, record: "written" },
       { n: 2, record: "written" },
@@ -316,6 +316,25 @@ describe("a new object for a known conversation", () => {
     expect(puts.map((c) => c.path.split("/").slice(-1)[0])).toEqual(["1", "p_seed1", "2", "3"]);
   });
 
+  it("keeps a home conversation's brief block when rebuilt from the record", async () => {
+    const conversation = freshConversation();
+    await sayAs(conversation, await as(conversation), NEW_COMPANY);
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    // A new object with no working copy: all it shows comes from the record.
+    await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (_instance, state) =>
+      state.storage.deleteAll(),
+    );
+    await abortAllDurableObjects();
+    const view = await call(`/internal/v1/conversations/${conversation}`, {
+      binding: await as(conversation),
+      session: SESSION,
+    });
+    expect(view.status).toBe(200);
+    expect(parseView(await view.json())).toMatchObject([
+      { blocks: [{ type: "brief", items: [{ label: "Company", value: "Kestrel Logistics" }] }] },
+    ]);
+  });
+
   it("answers plainly when the record cannot be read, rather than starting empty", async () => {
     const gone = `c_gone_${crypto.randomUUID().slice(0, 8)}`;
     const turn = await sayAs(gone, await as(gone), "hello");
@@ -473,6 +492,30 @@ describe("a turn the record will not take", () => {
     expect(second.proposals.map((p) => p.proposal.id)).toEqual(["p_make"]);
     const tries = (await putsOf(conversation)).filter((c) => c.path.endsWith("/turns/2"));
     expect(tries.map((c) => c.status)).toEqual([400, 201]);
+  });
+});
+
+describe("a home turn that showed a project", () => {
+  it("is written without the project's card, and the drop is logged by ids only", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    const project = { screen: "project", company: "cmp_kestrel", project: "prj_dispatch" };
+    await plant(conversation, {
+      id: "t_project",
+      text: "Open it below.",
+      blocks: [{ type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: project } }],
+    });
+    const logged = await logsOf(async () => {
+      await sayAs(conversation, binding, "and then?");
+      await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    });
+    expect((await recorded(conversation))[1]).toMatchObject({ id: "t_project", blocks: [], state: "done" });
+    expect(JSON.parse(logged)).toContainEqual([
+      JSON.stringify({ event: "assistant_record", conversation, turn: "t_project", n: 2, dropped: "home_project" }),
+    ]);
+    expect(logged).not.toContain("prj_dispatch");
   });
 });
 

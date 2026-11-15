@@ -107,7 +107,8 @@ const records = new Map<string, Record_>();
 const calls: Array<{ method: string; path: string; origin: string | null; csrf: string | null; status: number }> = [];
 const tries = new Map<string, number>();
 
-const BLOCK_TYPES = ["suggestion", "brief", "plan", "rules", "people", "checklist"];
+/** The API's `BlockType`, read from openapi.json so the fake follows it. */
+const BLOCK_TYPES = (schemaOf("BlockType").enum ?? []).map(String);
 const ACTIONS = ["create_company", "open_route"];
 const VISIBLE = ["cmp_kestrel", "cmp_harbor"];
 const PROJECTS = ["prj_dispatch"];
@@ -135,9 +136,8 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   if (text.length > 8000 || !plain(text) || text.includes(REFUSED_TEXT)) return "invalid_text";
   if (blocks.length > 6) return "invalid_blocks";
   if (proposals.length > 3) return "invalid_proposals";
-  const home = record.company === null;
-  const allowed = home ? ["suggestion"] : BLOCK_TYPES;
-  if (blocks.some((b) => !allowed.includes(String(b.type)))) return "invalid_block";
+  // Every block type in every scope; what a block may name is the scope's, below.
+  if (blocks.some((b) => typeof b.type !== "string" || !BLOCK_TYPES.includes(b.type))) return "invalid_block";
   const ids = proposals.map((p) => p.proposal.id);
   if (
     proposals.some(
@@ -150,7 +150,11 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   if (JSON.stringify([blocks, proposals]).includes("\\u0000")) return "invalid_blocks";
   const found: Array<Record<string, unknown>> = [];
   destinations([blocks, proposals.map((p) => p.proposal)], found);
+  const home = record.company === null;
+  // `VISIBLE` and `PROJECTS` stand in for the Rust's id parsing and its company and project checks alike.
   for (const d of found) {
+    // At home, a company the person may work on and never a project; in a company, that company and its projects.
+    if (typeof d.screen !== "string") return "invalid_destination";
     if (["today", "companies", "new-company"].includes(String(d.screen))) continue;
     if (d.screen === "company" && (home ? VISIBLE.includes(String(d.company)) : d.company === record.company)) continue;
     if (d.screen === "project" && !home && d.company === record.company && PROJECTS.includes(String(d.project)))

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { Block } from "../src/catalogue/blocks.js";
 import { NOTICES, PROPOSAL_STATES } from "../src/catalogue/wire.js";
 import type { Binding } from "../src/auth.js";
 import {
@@ -28,8 +29,8 @@ import { problems, schemaOf } from "./openapi.js";
 
 // What the Worker writes to the record, pinned to the API's own openapi.json (issue #279): the same fields, the same
 // enums, every ending's record fitting `TurnBody` exactly, and the error codes the Worker acts on named by the routes
-// that answer them. What openapi.json does not say is not pinned here: the block types each scope's record takes
-// (record.ts `HOME_BLOCK_TYPES`, until #280) and the API's text and size rules, which fake-api.ts copies by hand.
+// that answer them. What openapi.json does not say is not pinned here: the API's text, size and destination rules,
+// which fake-api.ts copies by hand.
 
 /** A session lent now, fresh for a minute unless said otherwise. */
 const held = (ms = 60_000) => ({ session: SESSION, origin: WEB_ORIGIN, until: Date.now() + ms });
@@ -64,6 +65,12 @@ describe("the record's shape", () => {
     expect(keys("AnswerBody")).toEqual(["state"]);
   });
 
+  it("has the catalogue's block types, every one and no other, as the API's BlockType", () => {
+    const catalogue = Block.options.map((b) => b.shape.type.value);
+    expect([...catalogue].sort()).toEqual([...(enumOf("BlockType") ?? [])].sort());
+    expect(new Set(catalogue).size).toBe(catalogue.length);
+  });
+
   it("acts only on error codes the API's routes say they answer", () => {
     type Op = { responses: Record<string, { description?: string }> };
     const paths = (openapi as unknown as { paths: Record<string, { put?: Op }> }).paths;
@@ -90,7 +97,7 @@ describe("the record's shape", () => {
     }
   });
 
-  it("leaves out what the home conversation's record does not take, and keeps it for a company's", () => {
+  it("keeps every block at home but leaves out what names a project, which a company's record keeps", () => {
     const blocks = [
       { type: "brief", items: [{ label: "Company", value: "Kestrel" }] },
       {
@@ -104,7 +111,7 @@ describe("the record's shape", () => {
     const proposals = [
       { id: "p_1", action: "open_route", args: { to: { screen: "project", company: "cmp_a", project: "prj_1" } } },
     ];
-    expect(recordOf(folded({ blocks, proposals }), true)).toMatchObject({ blocks: [], proposals: [] });
+    expect(recordOf(folded({ blocks, proposals }), true)).toMatchObject({ blocks: [{ type: "brief" }], proposals: [] });
     const company = recordOf(folded({ blocks, proposals }), false)!;
     expect(company.blocks.map((b) => (b as { type: string }).type)).toEqual(["brief", "suggestion"]);
     expect(company.proposals).toHaveLength(1);
