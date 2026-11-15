@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTICES, PROPOSAL_STATES } from "../src/catalogue/wire.js";
 import type { Binding } from "../src/auth.js";
@@ -10,6 +10,7 @@ import {
   RECORD_TRIES,
   TURN_LIMIT,
   TURN_TAKEN,
+  Lender,
   TurnRecord,
   fallbackOf,
   readPlaces,
@@ -68,10 +69,11 @@ describe("the record's shape", () => {
     const paths = (openapi as unknown as { paths: Record<string, { put?: Op }> }).paths;
     const said = (path: string, status: string) => paths[path]?.put?.responses[status]?.description ?? "";
     const turns = "/v1/assistant/conversations/{conversation}/turns/{n}";
-    expect(said(turns, "409")).toContain(TURN_LIMIT);
-    expect(said(turns, "409")).toContain(TURN_TAKEN);
-    expect(said(turns, "400")).toContain(BAD_DESTINATION);
-    expect(said(`${turns}/proposals/{proposal}`, "409")).toContain(ANSWERED);
+    // Each code as the descriptions write it, in backticks, so a longer code that starts with it does not pass.
+    expect(said(turns, "409")).toContain(`\`${TURN_LIMIT}\``);
+    expect(said(turns, "409")).toContain(`\`${TURN_TAKEN}\``);
+    expect(said(turns, "400")).toContain(`\`${BAD_DESTINATION}\``);
+    expect(said(`${turns}/proposals/{proposal}`, "409")).toContain(`\`${ANSWERED}\``);
   });
 
   it("fits TurnBody for every way a turn ends, each proposal waiting", () => {
@@ -253,6 +255,49 @@ describe("a lent session's deadline", () => {
     const record = recordOf(folded(), false)!;
     expect(await writeTurn(fetcher, { ...held(), origin: null }, "cnv_1", 1, record, FAST)).toBe("later");
     expect(asked).toHaveLength(0);
+  });
+});
+
+describe("the lent session in memory", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is let go at its deadline with no further call, by a timer that sends nothing", () => {
+    vi.useFakeTimers();
+    const lender = new Lender();
+    lender.lend({ session: SESSION, origin: WEB_ORIGIN }, 15_000);
+    expect(lender.holding).toBe(true);
+    vi.advanceTimersByTime(14_999);
+    expect(lender.holding).toBe(true);
+    vi.advanceTimersByTime(2);
+    // Nothing asked for it: the timer alone let it go.
+    expect(lender.holding).toBe(false);
+  });
+
+  it("keeps the newest session past an older one's deadline, and never holds a view's", () => {
+    vi.useFakeTimers();
+    const lender = new Lender();
+    lender.lend({ session: SESSION, origin: WEB_ORIGIN }, 1_000);
+    vi.advanceTimersByTime(500);
+    lender.lend({ session: "newer", origin: WEB_ORIGIN }, 1_000);
+    vi.advanceTimersByTime(600);
+    expect(lender.fresh()?.session).toBe("newer");
+    vi.advanceTimersByTime(500);
+    expect(lender.holding).toBe(false);
+    lender.lend({ session: SESSION, origin: null }, 1_000);
+    expect(lender.holding).toBe(false);
+  });
+
+  it("is let go when the writes are done, but not if another call lent one meanwhile", () => {
+    const lender = new Lender();
+    lender.lend({ session: SESSION, origin: WEB_ORIGIN }, 60_000);
+    const mark = lender.mark();
+    lender.lend({ session: "newer", origin: WEB_ORIGIN }, 60_000);
+    lender.clearSince(mark);
+    expect(lender.fresh()?.session).toBe("newer");
+    lender.clearSince(lender.mark());
+    expect(lender.holding).toBe(false);
   });
 });
 

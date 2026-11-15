@@ -13,6 +13,7 @@ import { IDLE_MS } from "./limits.js";
 import { modelFor } from "./model/provider.js";
 import {
   LEND_GRACE_MS,
+  Lender,
   TURN_LEND_MS,
   fallbackOf,
   readPlaces,
@@ -78,7 +79,7 @@ export class Conversation extends DurableObject<Env> {
   /** A rebuild under way, which a second call waits on rather than starting its own. */
   #rebuilding: Promise<"ok" | "gone" | "error"> | null = null;
   /** The newest session lent by a call that may write, in memory only, until its short deadline. */
-  #lent: Held | null = null;
+  readonly #lent = new Lender();
 
   onStart(): void {
     const sql = this.ctx.storage.sql;
@@ -120,14 +121,17 @@ export class Conversation extends DurableObject<Env> {
     if (!has("assistant_turns", "rn")) sql.exec("ALTER TABLE assistant_turns ADD COLUMN rn INTEGER");
     if (!has("assistant_proposals", "owed")) {
       // Keyed by turn and id now; and a proposal answered before the record existed owes its answer to it, so the
-      // record never shows it waiting, and confirmable again, after a rebuild.
-      sql.exec("ALTER TABLE assistant_proposals RENAME TO assistant_proposals_before");
-      sql.exec(`CREATE TABLE assistant_proposals (
-        id TEXT NOT NULL, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL,
-        owed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (turn, id))`);
-      sql.exec(`INSERT OR IGNORE INTO assistant_proposals (id, turn, n, body, state, owed)
-        SELECT id, turn, n, body, state, CASE WHEN state = 'waiting' THEN 0 ELSE 1 END FROM assistant_proposals_before`);
-      sql.exec("DROP TABLE assistant_proposals_before");
+      // record never shows it waiting, and confirmable again, after a rebuild. All or nothing, so a failure part way
+      // cannot leave a table behind that makes every later start fail.
+      this.ctx.storage.transactionSync(() => {
+        sql.exec("ALTER TABLE assistant_proposals RENAME TO assistant_proposals_before");
+        sql.exec(`CREATE TABLE assistant_proposals (
+          id TEXT NOT NULL, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL,
+          owed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (turn, id))`);
+        sql.exec(`INSERT OR IGNORE INTO assistant_proposals (id, turn, n, body, state, owed)
+          SELECT id, turn, n, body, state, CASE WHEN state = 'waiting' THEN 0 ELSE 1 END FROM assistant_proposals_before`);
+        sql.exec("DROP TABLE assistant_proposals_before");
+      });
     }
   }
 
@@ -434,13 +438,17 @@ export class Conversation extends DurableObject<Env> {
 
   /** Holds `lent` as the newest session for the record's writes, for `ms` from now; a view lends none for them. */
   #lend(lent: Lent, ms: number): void {
-    if (lent.origin !== null) this.#lent = { ...lent, until: Date.now() + ms };
+    this.#lent.lend(lent, ms);
   }
 
-  /** The newest session lent, while it is fresh; once its time is up it is forgotten. */
+  /** The newest session lent, while it is fresh; once its time is up it is let go. */
   #fresh(): Held | null {
-    if (this.#lent !== null && this.#lent.until <= Date.now()) this.#lent = null;
-    return this.#lent;
+    return this.#lent.fresh();
+  }
+
+  /** For tests: whether a lent session is still in memory. Never the session itself. */
+  holdsSession(): boolean {
+    return this.#lent.holding;
   }
 
   /** Queues a write of whatever the record does not have yet, after any write already queued. */
@@ -466,6 +474,7 @@ export class Conversation extends DurableObject<Env> {
     if (api === undefined) return;
     const sql = this.ctx.storage.sql;
     const { conversation } = binding;
+    const lent = this.#lent.mark();
     if (!(await this.#reconcile(api, conversation))) return;
     let next = sql
       .exec<{ next: number }>(
@@ -515,6 +524,9 @@ export class Conversation extends DurableObject<Env> {
       if (outcome === "later") return;
       sql.exec("UPDATE assistant_proposals SET owed = 0 WHERE turn = ? AND id = ?", p.turn, p.id);
     }
+    // Everything is written: the session has nothing left to do here, so it is let go before its deadline, unless a
+    // call lent one while this ran. A turn still running lends it again when it ends.
+    this.#lent.clearSince(lent);
   }
 
   /**

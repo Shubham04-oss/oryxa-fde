@@ -39,6 +39,45 @@ export interface Held extends Lent {
   readonly until: number;
 }
 
+/**
+ * The newest session lent by a call that may write, held in memory until its deadline and cleared at it by a timer
+ * that only clears (it holds no session and sends nothing), or sooner when the writes are done.
+ */
+export class Lender {
+  #held: Held | null = null;
+  /** Counts lends, so a flush lets go only of what it was given, never a session lent while it ran. */
+  #lends = 0;
+
+  /** Holds `lent` for `ms` from now, in place of any older one; a lend with no origin (a view's) is not held. */
+  lend(lent: Lent, ms: number): void {
+    if (lent.origin === null) return;
+    this.#held = { ...lent, until: Date.now() + ms };
+    this.#lends += 1;
+    setTimeout(() => this.fresh(), ms + 1);
+  }
+
+  /** The session held, while its deadline has not passed; once it has, it is let go. */
+  fresh(): Held | null {
+    if (this.#held !== null && this.#held.until <= Date.now()) this.#held = null;
+    return this.#held;
+  }
+
+  /** A mark of the lends so far, for `clearSince`. */
+  mark(): number {
+    return this.#lends;
+  }
+
+  /** Lets the session go now, unless another was lent since `mark`: that call's writes still need it. */
+  clearSince(mark: number): void {
+    if (this.#lends === mark) this.#held = null;
+  }
+
+  /** Whether a session is held at all, fresh or not: for tests, which check that none outlives its deadline. */
+  get holding(): boolean {
+    return this.#held !== null;
+  }
+}
+
 /** How long a lent session may still be used after the call that lent it has ended: long enough for its writes. */
 export const LEND_GRACE_MS = 15_000;
 /** A turn lends its session for as long as it may run, and the grace after it. */

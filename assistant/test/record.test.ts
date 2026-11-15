@@ -664,3 +664,30 @@ describe("an object with no API binding", () => {
     expect(answer).toEqual({ status: 503, body: { error: "record_unavailable" } });
   });
 });
+
+describe("the lent session once the writes are done", () => {
+  it("is let go at once, before its deadline", async () => {
+    const conversation = freshConversation();
+    await sayAs(conversation, await as(conversation), "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    await vi.waitFor(
+      async () =>
+        expect(
+          await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (instance: Conversation) =>
+            instance.holdsSession(),
+          ),
+        ).toBe(false),
+      { timeout: 2_000 },
+    );
+  });
+
+  it("is kept for its grace while a write still waits", async () => {
+    const conversation = freshConversation();
+    await sayAs(conversation, await as(conversation), "hello", DOWN_SESSION);
+    await vi.waitFor(async () => expect(await putsOf(conversation)).toHaveLength(3), { timeout: 5_000 });
+    const holds = await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (instance: Conversation) =>
+      instance.holdsSession(),
+    );
+    expect(holds).toBe(true);
+  });
+});
