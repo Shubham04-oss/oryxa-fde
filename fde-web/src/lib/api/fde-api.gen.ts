@@ -4189,7 +4189,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description `rejected_conversation_limit`: the caller holds 200 conversations already; delete one first */
+            /** @description `rejected_conversation_limit`: the caller holds 200 conversations already, counting those the list shows (home, and companies they may still use); delete one first */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -406,8 +406,21 @@ impl AssistantTx {
 
     /// Makes conversation `id` for `user` in this scope. A project named by the scope must be one of
     /// its company's, or `StoreError::Missing("project")`; a company must exist, or `Missing("company")`.
-    /// A person holding [`MAX_CONVERSATIONS`] already is refused with `Rejected("conversation_limit")`.
-    pub async fn create(&mut self, id: &ConversationId, user: &UserId) -> Result<Conversation, StoreError> {
+    /// A person holding [`MAX_CONVERSATIONS`] already is refused with `Rejected("conversation_limit")`,
+    /// counting, as [`Store::conversations`] lists, their home ones and those of `companies` (the
+    /// companies they may still work on): the cap never counts one they cannot see to delete.
+    // ponytail: a conversation in a company the person can no longer use is kept, uncounted and
+    // unlisted, until they regain it; nothing removes those yet.
+    pub async fn create(
+        &mut self,
+        id: &ConversationId,
+        user: &UserId,
+        companies: &[CompanyScope],
+    ) -> Result<Conversation, StoreError> {
+        if companies.iter().any(|c| &c.tenant != self.scope.tenant()) {
+            return Err(StoreError::MixedTenants);
+        }
+        let visible: Vec<&str> = companies.iter().map(|c| c.company.as_str()).collect();
         let (t, c, p) = self.keys();
         // The holder's lock, until this transaction ends: two creates by one person count one after the
         // other, so neither can pass the cap on a count the other is about to change.
@@ -415,13 +428,16 @@ impl AssistantTx {
             .bind(format!("oryxa-fde|assistant-conversations|{t}|{}", user.as_str()))
             .execute(&mut *self.tx)
             .await?;
-        // The conversations table's policy is tenant-level, so this counts every one the person holds.
-        let held: i64 =
-            sqlx::query_scalar("select count(*) from assistant_conversations where tenant_id = $1 and user_id = $2")
-                .bind(&t)
-                .bind(user.as_str())
-                .fetch_one(&mut *self.tx)
-                .await?;
+        // The conversations table's policy is tenant-level, so this sees every company's, not just this scope's.
+        let held: i64 = sqlx::query_scalar(
+            "select count(*) from assistant_conversations
+             where tenant_id = $1 and user_id = $2 and (company_id is null or company_id = any($3))",
+        )
+        .bind(&t)
+        .bind(user.as_str())
+        .bind(&visible)
+        .fetch_one(&mut *self.tx)
+        .await?;
         if held >= MAX_CONVERSATIONS {
             return Err(StoreError::Rejected("conversation_limit"));
         }

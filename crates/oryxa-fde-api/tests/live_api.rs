@@ -7050,3 +7050,78 @@ async fn a_person_holds_at_most_two_hundred_conversations() {
     w.ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
         .await;
 }
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn two_creates_at_once_at_the_cap_less_one_make_exactly_one() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let conversations = "/v1/assistant/conversations";
+    let owner = testing::admin().await;
+    sqlx::query(
+        "insert into assistant_conversations (tenant_id, conversation_id, user_id)
+         select $1, 'cnv_seed_' || n, $2 from generate_series(1, 199) as n",
+    )
+    .bind(&org)
+    .bind(&t.lead.id)
+    .execute(&owner)
+    .await
+    .unwrap();
+    // One at home and one in the company, so they take different scopes' transactions.
+    let (a, b) = tokio::join!(
+        w.call(Some(&t.lead.token), "POST", conversations, Some(json!({}))),
+        w.call(
+            Some(&t.lead.token),
+            "POST",
+            conversations,
+            Some(json!({"company": t.company}))
+        ),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT], "{a:?} {b:?}");
+    let held: i64 =
+        sqlx::query_scalar("select count(*) from assistant_conversations where tenant_id = $1 and user_id = $2")
+            .bind(&org)
+            .bind(&t.lead.id)
+            .fetch_one(&owner)
+            .await
+            .unwrap();
+    assert_eq!(held, 200);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn the_cap_counts_only_the_conversations_the_list_shows() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    // A company of the same organisation that the lead does not work on.
+    let other = company(&w, &org, "beta").await;
+    let conversations = "/v1/assistant/conversations";
+    let owner = testing::admin().await;
+    sqlx::query(
+        "insert into assistant_conversations (tenant_id, conversation_id, user_id, company_id)
+         select $1, 'cnv_gone_' || n, $2, $3 from generate_series(1, 200) as n",
+    )
+    .bind(&org)
+    .bind(&t.lead.id)
+    .bind(&other.company)
+    .execute(&owner)
+    .await
+    .unwrap();
+    // The list hides all 200, so the person cannot find them to delete; nor do they count.
+    let listed = w.ok(&t.lead, "GET", conversations, None, StatusCode::OK).await;
+    assert_eq!(listed, json!([]));
+    w.ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    w.ok(
+        &t.lead,
+        "POST",
+        conversations,
+        Some(json!({"company": t.company})),
+        StatusCode::CREATED,
+    )
+    .await;
+}

@@ -238,7 +238,8 @@ fn conversation_id(raw: String) -> Result<ConversationId, ApiError> {
     request_body = ConversationBody,
     responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "`rejected_conversation_limit`: the caller holds 200 \
-            conversations already; delete one first"),
+            conversations already, counting those the list shows (home, and companies they may still use); delete one \
+            first"),
         (status = 503, body = ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
@@ -252,9 +253,11 @@ pub(crate) async fn create(
         (None, Some(_)) => return Err(ApiError::Invalid("project")),
     };
     require(&app, &who, &scope).await?;
+    // The cap counts only what the list shows: home, and the companies the caller may still use.
+    let companies = app.companies_for(&who).await?;
     let id = new("cnv", ConversationId::new)?;
     let mut tx = app.store.assistant(&scope).await?;
-    let made = tx.create(&id, &who.user).await?;
+    let made = tx.create(&id, &who.user, &companies).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(made.into())))
 }
