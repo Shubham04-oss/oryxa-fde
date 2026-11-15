@@ -6171,19 +6171,28 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
         w.call(Some(&t.lead.token), "POST", &foreign, None).await.0,
         StatusCode::NOT_FOUND
     );
-    // Not a suggestion id at all: refused before anything is read.
-    let (status, body) = w
-        .call(
-            Some(&t.lead.token),
-            "POST",
-            "/v1/home/suggestions/Bad.prj%2F1/dismiss",
-            None,
-        )
-        .await;
-    assert_eq!(
-        (status, body["error"].as_str()),
-        (StatusCode::BAD_REQUEST, Some("invalid_suggestion"))
-    );
+    // Not an id the server issues: refused before anything is read. An encoded slash, a kind it never
+    // issues, and a kind with or without the project its kind takes.
+    for bad in [
+        "blocked_tasks.prj%2F1",
+        "made_up.prj_1",
+        "due_today.prj_1",
+        "blocked_tasks",
+    ] {
+        let (status, body) = w
+            .call(
+                Some(&t.lead.token),
+                "POST",
+                &format!("/v1/home/suggestions/{bad}/dismiss"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_suggestion")),
+            "{bad}"
+        );
+    }
     // Never to a customer role.
     assert_eq!(home_of(&w, &t.guest).await.0, StatusCode::FORBIDDEN);
 }
@@ -6908,6 +6917,43 @@ async fn turns_stay_with_their_holder_their_tenant_their_access_and_their_projec
         w.status(&t.guest, "PUT", &guest_turn, Some(turn_body("t_1", json!({}))))
             .await,
         StatusCode::FORBIDDEN
+    );
+
+    // In a project's conversation, a project the holder works on in another company is still not this
+    // company's: refused, though the permission check alone would pass.
+    let other = company(&w, &org, "globex").await;
+    w.ok(
+        &other.lead,
+        "PUT",
+        &format!(
+            "/v1/companies/{}/projects/{}/assignees/{}",
+            other.company, other.project, t.lead.id
+        ),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let lead_narrow = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company, "project": t.project})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let crossed = json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": other.project }))] });
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &turn_of(&lead_narrow, 1),
+            Some(turn_body("t_1", crossed)),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_destination"))
     );
 
     // A project's conversation, held by its assignee, names only projects they may work on.

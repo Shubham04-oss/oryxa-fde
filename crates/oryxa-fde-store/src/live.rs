@@ -4672,3 +4672,106 @@ async fn a_company_has_at_most_one_main_contact() {
         .await
         .expect_err("two main contacts in one company");
 }
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn home_facts_read_only_what_can_make_a_suggestion() {
+    use oryxa_fde_core::{AccessRequestId, TaskId};
+    use oryxa_fde_events::AccessStatus;
+    let store = store().await;
+    let by = actor("alice");
+    let t = tenant();
+    let c = scope(&t, &new_id("cmp"));
+    create_company(&store, &c).await;
+    let (busy, idle) = (
+        add_project(&store, &c, "Busy").await,
+        add_project(&store, &c, "Idle").await,
+    );
+    let today = time::Date::from_calendar_date(2026, time::Month::November, 15).unwrap();
+    let mut tx = store.project(&busy).await.unwrap();
+    let ids: Vec<TaskId> = (0..4).map(|_| TaskId::new(new_id("tsk")).unwrap()).collect();
+    for (id, (status, due)) in ids.iter().zip([
+        (TaskStatus::Blocked, None),
+        (TaskStatus::Todo, Some(today)),
+        (TaskStatus::Todo, today.previous_day()),
+        (TaskStatus::Todo, today.next_day()),
+    ]) {
+        let mut v = task_in("Secret plan", status);
+        v.due_on = due;
+        tx.add_task(id, &v, &by).await.unwrap().unwrap();
+    }
+    let access = |status| AccessRequestIn {
+        description: Text::new("Prod password").unwrap(),
+        system: None,
+        owner: None,
+        status,
+    };
+    let waiting = AccessRequestId::new(new_id("acc")).unwrap();
+    tx.add_access_request(&waiting, &access(AccessStatus::Requested), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    let denied = AccessRequestId::new(new_id("acc")).unwrap();
+    tx.add_access_request(&denied, &access(AccessStatus::Requested), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.update_access_request(&denied, None, &access(AccessStatus::Denied), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let facts = store.home_facts(&[busy.clone(), idle.clone()], today).await.unwrap();
+    let mut seen: Vec<String> = facts
+        .iter()
+        .map(|f| match f {
+            HomeFact::DueTask { task, .. } => format!("due {task}"),
+            HomeFact::BlockedTask { task, .. } => format!("blocked {task}"),
+            HomeFact::WaitingAccess { access, days, .. } => format!("waiting {access} {days}"),
+            HomeFact::NoNextStep { project, .. } => format!("idle {}", project.id),
+        })
+        .collect();
+    seen.sort();
+    let mut want = vec![
+        format!("blocked {}", ids[0]),
+        format!("due {}", ids[1]),
+        format!("due {}", ids[2]),
+        format!("waiting {waiting} 0"),
+        format!("idle {}", idle.project),
+    ];
+    want.sort();
+    assert_eq!(seen, want, "not the task due later, not the denied request");
+    assert!(!format!("{facts:?}").contains("Secret plan"), "ids and names only");
+    assert!(store.home_facts(&[], today).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs Postgres (DATABASE_URL)"]
+async fn a_dismissal_is_forgotten_only_while_it_holds_the_facts_it_was_read_with() {
+    let store = store().await;
+    let t = tenant();
+    let user = oryxa_core::UserId::new("user_home").unwrap();
+    let key = SuggestionKey::new("blocked_tasks.prj_1").unwrap();
+    let (old, new) = ([1u8; 32], [2u8; 32]);
+    let mut tx = store.organisation(&t).await.unwrap();
+    tx.dismiss_home(&user, &key, &new).await.unwrap();
+    // A read from before that dismissal saw the old facts: forgetting what it read keeps the new one.
+    let stale = Dismissal {
+        suggestion: key.clone(),
+        facts: old,
+    };
+    tx.forget_home_dismissals(&user, std::slice::from_ref(&stale))
+        .await
+        .unwrap();
+    assert_eq!(tx.home_dismissals(&user).await.unwrap().len(), 1);
+    let current = Dismissal {
+        suggestion: key,
+        facts: new,
+    };
+    tx.forget_home_dismissals(&user, std::slice::from_ref(&current))
+        .await
+        .unwrap();
+    assert!(tx.home_dismissals(&user).await.unwrap().is_empty());
+    tx.commit().await.unwrap();
+}

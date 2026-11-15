@@ -619,21 +619,19 @@ async fn check_destinations(
                 if c.company != named {
                     return Err(refuse());
                 }
-                match scope {
-                    // A project's conversation may name only projects its holder may work on.
-                    ConversationScope::Project(_) => {
-                        app.require(who, crate::authz::project(&c.project(project)), "work")
-                            .await
-                            .map_err(|e| match e {
-                                ApiError::Forbidden => refuse(),
-                                e => e,
-                            })?;
-                    }
-                    _ => {
-                        if !tx.has_project(&project).await? {
-                            return Err(refuse());
-                        }
-                    }
+                // A project's conversation may name only projects its holder may work on. A project object
+                // is its id alone, so that check passes for another company's project too: it must also
+                // be one of this company's.
+                if let ConversationScope::Project(_) = scope {
+                    app.require(who, crate::authz::project(&c.project(project.clone())), "work")
+                        .await
+                        .map_err(|e| match e {
+                            ApiError::Forbidden => refuse(),
+                            e => e,
+                        })?;
+                }
+                if !tx.has_project(&project).await? {
+                    return Err(refuse());
                 }
             }
             _ => return Err(refuse()),

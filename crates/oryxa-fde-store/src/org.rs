@@ -226,22 +226,24 @@ impl OrgTx {
         Ok(())
     }
 
-    /// Forgets `user`'s dismissals of `suggestions`, so each shows again if it comes back.
-    pub async fn forget_home_dismissals(
-        &mut self,
-        user: &UserId,
-        suggestions: &[SuggestionKey],
-    ) -> Result<(), StoreError> {
-        if suggestions.is_empty() {
+    /// Forgets `user`'s dismissals in `read`, each only while it still holds the facts it was read
+    /// with: a dismissal made (or remade) since that read is a different row and is kept.
+    pub async fn forget_home_dismissals(&mut self, user: &UserId, read: &[Dismissal]) -> Result<(), StoreError> {
+        if read.is_empty() {
             return Ok(());
         }
-        let ids: Vec<&str> = suggestions.iter().map(SuggestionKey::as_str).collect();
-        sqlx::query("delete from home_dismissals where tenant_id = $1 and user_id = $2 and suggestion_id = any($3)")
-            .bind(self.tenant.as_str())
-            .bind(user.as_str())
-            .bind(&ids)
-            .execute(&mut *self.tx)
-            .await?;
+        let ids: Vec<&str> = read.iter().map(|d| d.suggestion.as_str()).collect();
+        let facts: Vec<String> = read.iter().map(|d| to_hex(&d.facts)).collect();
+        sqlx::query(
+            "delete from home_dismissals where tenant_id = $1 and user_id = $2
+               and (suggestion_id, facts_sha256) in (select * from unnest($3::text[], $4::text[]))",
+        )
+        .bind(self.tenant.as_str())
+        .bind(user.as_str())
+        .bind(&ids)
+        .bind(&facts)
+        .execute(&mut *self.tx)
+        .await?;
         Ok(())
     }
 }

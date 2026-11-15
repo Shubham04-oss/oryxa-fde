@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oryxa_core::{TenantId, UserId};
-use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId, ProjectScope};
+use oryxa_fde_core::{AccessRequestId, CompanyId, CompanyScope, ProjectId, ProjectScope, TaskId};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
+use time::Date;
 
 use crate::access::{self, AccessRequest};
 use crate::companies::{self, Company, Role};
@@ -38,6 +39,34 @@ pub enum TodayItem {
         project: Named<ProjectId>,
     },
     /// A project with no next step: every task is done, or it has none (direction section 4).
+    NoNextStep {
+        company: Named<CompanyId>,
+        project: Named<ProjectId>,
+    },
+}
+
+/// A fact behind a home suggestion (#227): ids and names only, never a record's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeFact {
+    /// A task not done and due on or before the day asked about.
+    DueTask {
+        task: TaskId,
+        company: Named<CompanyId>,
+        project: Named<ProjectId>,
+    },
+    BlockedTask {
+        task: TaskId,
+        company: Named<CompanyId>,
+        project: Named<ProjectId>,
+    },
+    /// An access request still waiting on the customer (requested or in progress), for `days`.
+    WaitingAccess {
+        access: AccessRequestId,
+        days: i64,
+        company: Named<CompanyId>,
+        project: Named<ProjectId>,
+    },
+    /// A project with no task left to do.
     NoNextStep {
         company: Named<CompanyId>,
         project: Named<ProjectId>,
@@ -139,20 +168,7 @@ impl Store {
         .bind(&pair_p)
         .fetch_all(&mut *tx)
         .await?;
-        let idle = sqlx::query(
-            "select p.company_id, p.project_id, c.name as company_name, p.name as project_name from projects p
-             join companies c on c.tenant_id = $1 and c.company_id = p.company_id
-             where p.tenant_id = $1
-               and (p.company_id, p.project_id) in (select * from unnest($2::text[], $3::text[]))
-               and not exists (select 1 from tasks t where t.tenant_id = $1 and t.company_id = p.company_id
-                   and t.project_id = p.project_id and t.status <> 'done')
-             order by p.created_at, p.project_id",
-        )
-        .bind(tenant.as_str())
-        .bind(&pair_c)
-        .bind(&pair_p)
-        .fetch_all(&mut *tx)
-        .await?;
+        let idle = idle_projects(&mut tx, &tenant, &pair_c, &pair_p).await?;
         tx.commit().await?;
         let mut items = Vec::with_capacity(tasks.len() + access.len() + idle.len());
         for r in idle {
@@ -178,6 +194,91 @@ impl Store {
             });
         }
         Ok(items)
+    }
+
+    /// The facts behind the home suggestions in `projects`: only the rows that can make one (tasks
+    /// blocked, or due on or before `today`; requests still waiting; projects with no task left), and
+    /// of those only ids and names, so a home read stays small however much open work there is.
+    pub async fn home_facts(&self, projects: &[ProjectScope], today: Date) -> Result<Vec<HomeFact>, StoreError> {
+        let Some(first) = projects.first() else {
+            return Ok(Vec::new());
+        };
+        let tenant = first.tenant().clone();
+        if projects.iter().any(|p| p.tenant() != &tenant) {
+            return Err(StoreError::MixedTenants);
+        }
+        let companies: BTreeSet<&CompanyId> = projects.iter().map(|p| &p.company.company).collect();
+        let companies: Vec<&CompanyId> = companies.into_iter().collect();
+        let mut tx = self.scoped(&tenant, &companies).await?;
+        let pair_c: Vec<&str> = projects.iter().map(|p| p.company.company.as_str()).collect();
+        let pair_p: Vec<&str> = projects.iter().map(|p| p.project.as_str()).collect();
+        let tasks = sqlx::query(
+            "select t.task_id, t.status, t.due_on, t.company_id, t.project_id, c.name as company_name,
+                 p.name as project_name
+             from tasks t
+             join companies c on c.tenant_id = $1 and c.company_id = t.company_id
+             join projects p on p.tenant_id = $1 and p.company_id = t.company_id and p.project_id = t.project_id
+             where t.tenant_id = $1 and t.status <> 'done' and (t.status = 'blocked' or t.due_on <= $4)
+               and (t.company_id, t.project_id) in (select * from unnest($2::text[], $3::text[]))
+             order by t.task_id",
+        )
+        .bind(tenant.as_str())
+        .bind(&pair_c)
+        .bind(&pair_p)
+        .bind(today)
+        .fetch_all(&mut *tx)
+        .await?;
+        let access = sqlx::query(
+            "select a.access_request_id, floor(extract(epoch from (now() - a.requested_at)) / 86400)::bigint as days,
+                 a.company_id, a.project_id, c.name as company_name, p.name as project_name
+             from access_requests a
+             join companies c on c.tenant_id = $1 and c.company_id = a.company_id
+             join projects p on p.tenant_id = $1 and p.company_id = a.company_id and p.project_id = a.project_id
+             where a.tenant_id = $1 and a.status in ('requested', 'in_progress')
+               and (a.company_id, a.project_id) in (select * from unnest($2::text[], $3::text[]))
+             order by a.access_request_id",
+        )
+        .bind(tenant.as_str())
+        .bind(&pair_c)
+        .bind(&pair_p)
+        .fetch_all(&mut *tx)
+        .await?;
+        let idle = idle_projects(&mut tx, &tenant, &pair_c, &pair_p).await?;
+        tx.commit().await?;
+        let mut facts = Vec::with_capacity(tasks.len() + access.len() + idle.len());
+        for r in tasks {
+            let (company, project) = place(&r)?;
+            let task = id("task id", TaskId::new, r.try_get("task_id")?)?;
+            let due_on: Option<Date> = r.try_get("due_on")?;
+            if due_on.is_some_and(|d| d <= today) {
+                facts.push(HomeFact::DueTask {
+                    task: task.clone(),
+                    company: company.clone(),
+                    project: project.clone(),
+                });
+            }
+            if r.try_get::<String, _>("status")? == "blocked" {
+                facts.push(HomeFact::BlockedTask { task, company, project });
+            }
+        }
+        for r in access {
+            let (company, project) = place(&r)?;
+            facts.push(HomeFact::WaitingAccess {
+                access: id(
+                    "access request id",
+                    AccessRequestId::new,
+                    r.try_get("access_request_id")?,
+                )?,
+                days: r.try_get("days")?,
+                company,
+                project,
+            });
+        }
+        for r in idle {
+            let (company, project) = place(&r)?;
+            facts.push(HomeFact::NoNextStep { company, project });
+        }
+        Ok(facts)
     }
 
     /// The companies in `scopes` (the ones the caller works on) by name, each with the caller's
@@ -243,6 +344,29 @@ impl Store {
             })
             .collect()
     }
+}
+
+/// The projects among the pairs with no task left to do.
+async fn idle_projects(
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    tenant: &TenantId,
+    pair_c: &[&str],
+    pair_p: &[&str],
+) -> Result<Vec<PgRow>, StoreError> {
+    Ok(sqlx::query(
+        "select p.company_id, p.project_id, c.name as company_name, p.name as project_name from projects p
+         join companies c on c.tenant_id = $1 and c.company_id = p.company_id
+         where p.tenant_id = $1
+           and (p.company_id, p.project_id) in (select * from unnest($2::text[], $3::text[]))
+           and not exists (select 1 from tasks t where t.tenant_id = $1 and t.company_id = p.company_id
+               and t.project_id = p.project_id and t.status <> 'done')
+         order by p.created_at, p.project_id",
+    )
+    .bind(tenant.as_str())
+    .bind(pair_c)
+    .bind(pair_p)
+    .fetch_all(&mut **tx)
+    .await?)
 }
 
 fn place(r: &PgRow) -> Result<(Named<CompanyId>, Named<ProjectId>), StoreError> {

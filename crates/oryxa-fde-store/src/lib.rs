@@ -89,7 +89,7 @@ pub use threads::{Comment, PromoteIn, Subject, Thread};
 pub use setup::SetupClaim;
 pub use share::{Redeemed, ShareLink};
 pub use sign_in::Hit as SignInHit;
-pub use views::{CompanySummary, Named, TodayItem};
+pub use views::{CompanySummary, HomeFact, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskPlace, TaskStatus};
 
 #[derive(Debug, thiserror::Error)]

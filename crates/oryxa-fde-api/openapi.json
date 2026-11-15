@@ -9157,7 +9157,7 @@
         "tags": [
           "projects"
         ],
-        "summary": "Hide a suggestion from the caller's home until its facts change: a new blocked task, another\naccess request, a project gaining or losing its next step. Only a suggestion the caller has now.",
+        "summary": "Hide a suggestion from the caller's home until its facts change (a new blocked task, another\naccess request) or it goes away; if it comes back, it shows again. Only a suggestion the caller\nhas now.",
         "operationId": "dismiss_home_suggestion",
         "parameters": [
           {
@@ -9175,7 +9175,7 @@
             "description": "Dismissed"
           },
           "400": {
-            "description": "`invalid_suggestion`: not a suggestion id",
+            "description": "`invalid_suggestion`: not an id the server issues",
             "content": {
               "application/json": {
                 "schema": {
@@ -9206,6 +9206,16 @@
           },
           "404": {
             "description": "Not one the caller has now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -11208,6 +11218,7 @@
           "count": {
             "type": "integer",
             "format": "int32",
+            "description": "How many: `due_today`, the tasks due today or earlier; `access_waiting`, the project's waiting\nrequests; `blocked_tasks`, the project's blocked tasks; `no_next_step`, always 1 (the project).",
             "minimum": 0
           },
           "days": {
