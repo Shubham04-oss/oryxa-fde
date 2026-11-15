@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Block } from "../src/catalogue/blocks.js";
-import { NOTICES, PROPOSAL_STATES } from "../src/catalogue/wire.js";
+import { MAX_BLOCKS, MAX_PROPOSALS, NOTICES, PROPOSAL_STATES } from "../src/catalogue/wire.js";
 import type { Binding } from "../src/auth.js";
 import {
   ANSWERED,
   ANSWERS,
   BAD_DESTINATION,
   FINISHED,
+  MAX_DESTINATIONS,
   RECORD_TRIES,
   TURN_LIMIT,
   TURN_TAKEN,
@@ -19,6 +20,7 @@ import {
   recordOf,
   storable,
   withoutDestinations,
+  withinCap,
   writeAnswer,
   writeTurn,
 } from "../src/record.js";
@@ -90,14 +92,14 @@ describe("the record's shape", () => {
       { notice: "failed", state: "failed", text: "", blocks: [], proposals: [] },
     ];
     for (const ending of endings) {
-      const record = recordOf(folded(ending), true);
+      const record = recordOf(folded(ending));
       expect(record, JSON.stringify(ending)).not.toBeNull();
       expect(problems(record, schemaOf("TurnBody"))).toEqual([]);
       expect(record!.proposals.every((p) => p.state === "waiting")).toBe(true);
     }
   });
 
-  it("keeps every block at home but leaves out what names a project, which a company's record keeps", () => {
+  it("keeps every part that names a destination, in every scope, and leaves out what cannot be stored", () => {
     const blocks = [
       { type: "brief", items: [{ label: "Company", value: "Kestrel" }] },
       {
@@ -111,11 +113,49 @@ describe("the record's shape", () => {
     const proposals = [
       { id: "p_1", action: "open_route", args: { to: { screen: "project", company: "cmp_a", project: "prj_1" } } },
     ];
-    expect(recordOf(folded({ blocks, proposals }), true)).toMatchObject({ blocks: [{ type: "brief" }], proposals: [] });
-    const company = recordOf(folded({ blocks, proposals }), false)!;
-    expect(company.blocks.map((b) => (b as { type: string }).type)).toEqual(["brief", "suggestion"]);
-    expect(company.proposals).toHaveLength(1);
-    expect(withoutDestinations(company)).toMatchObject({ blocks: [{ type: "brief" }], proposals: [] });
+    let capped = false;
+    const record = recordOf(folded({ blocks, proposals }), () => (capped = true))!;
+    expect(record.blocks.map((b) => (b as { type: string }).type)).toEqual(["brief", "suggestion"]);
+    expect(record.proposals).toHaveLength(1);
+    expect(capped).toBe(false);
+    expect(withoutDestinations(record)).toMatchObject({ blocks: [{ type: "brief" }], proposals: [] });
+  });
+
+  it("keeps a turn to 16 distinct destinations, blocks first, the lists counting as one", () => {
+    const to = (i: number) => ({ screen: "project", company: "cmp_a", project: `prj_${i}` });
+    const block = (i: number) => ({ type: "suggestion", id: `s${i}`, approve: { to: to(i) } });
+    // The lists are one destination, and one named again is not counted twice.
+    const blocks = [
+      { approve: { to: { screen: "today" } } },
+      { approve: { to: { screen: "companies" } } },
+      ...Array.from({ length: 15 }, (_, i) => block(i)),
+      block(3),
+      block(15),
+    ];
+    const proposals = [{ args: { to: to(0) } }, { args: { to: to(16) } }, { args: { to: { screen: "new-company" } } }];
+    const kept = withinCap(blocks, proposals);
+    expect(kept.over).toBe(true);
+    expect(kept.blocks).toEqual(blocks.slice(0, 18));
+    expect(kept.proposals).toEqual([proposals[0], proposals[2]]);
+    expect(withinCap(blocks.slice(0, 18), proposals.slice(0, 1)).over).toBe(false);
+    // What the catalogue can name today stays under the cap: six blocks and three proposals, each its own place.
+    const many = recordOf(
+      folded({
+        blocks: Array.from({ length: MAX_BLOCKS }, (_, i) => ({
+          type: "suggestion",
+          id: `s${i}`,
+          title: "Open",
+          approve: { label: "Open", to: { screen: "project", company: "cmp_a", project: `prj_${i}` } },
+        })),
+        proposals: Array.from({ length: MAX_PROPOSALS }, (_, i) => ({
+          id: `p_${i}`,
+          action: "open_route",
+          args: { to: { screen: "company", company: `cmp_${i}` } },
+        })),
+      }),
+    )!;
+    expect([many.blocks.length, many.proposals.length]).toEqual([MAX_BLOCKS, MAX_PROPOSALS]);
+    expect(MAX_DESTINATIONS).toBe(16);
   });
 
   it("leaves out a block or a proposal holding a lone surrogate, which the API cannot parse", () => {
@@ -124,7 +164,7 @@ describe("the record's shape", () => {
     expect(storable(blocks)).toBe(false);
     expect(storable({ ["k\ud800"]: 1 })).toBe(false);
     expect(storable([{ fine: "😀 and \t" }])).toBe(true);
-    expect(recordOf(folded({ blocks, proposals }), false)).toMatchObject({ blocks: [], proposals: [] });
+    expect(recordOf(folded({ blocks, proposals }))).toMatchObject({ blocks: [], proposals: [] });
   });
 
   it("stands a plain failed turn in for one the API will not take, keeping what was said", () => {
@@ -159,7 +199,7 @@ describe("the record's shape", () => {
         ],
       },
     ] as Array<Partial<Folded>>) {
-      expect(recordOf(folded(bad), false), JSON.stringify(bad)).toBeNull();
+      expect(recordOf(folded(bad)), JSON.stringify(bad)).toBeNull();
     }
   });
 });
@@ -187,7 +227,7 @@ const answer = (status: number, body: unknown = {}) => Response.json(body, { sta
 const FAST = { timeoutMs: 50, backoffMs: 1 };
 
 describe("writing a turn", () => {
-  const record = recordOf(folded(), false)!;
+  const record = recordOf(folded())!;
 
   it("puts it at its place as the person, from the web app's origin, and nothing else", async () => {
     const { fetcher, asked } = api([answer(201)]);
@@ -240,7 +280,7 @@ describe("writing a turn", () => {
 
 describe("a lent session's deadline", () => {
   it("sends nothing once it has passed", async () => {
-    const record = recordOf(folded(), false)!;
+    const record = recordOf(folded())!;
     const { fetcher, asked } = api([answer(201)]);
     expect(await writeTurn(fetcher, held(0), "cnv_1", 1, record, FAST)).toBe("later");
     expect(await writeAnswer(fetcher, held(-1), "cnv_1", 1, "p_1", "confirmed", FAST)).toBe("later");
@@ -249,7 +289,7 @@ describe("a lent session's deadline", () => {
   });
 
   it("cuts a try short at the deadline, and starts no other after it", async () => {
-    const record = recordOf(folded(), false)!;
+    const record = recordOf(folded())!;
     const { fetcher, asked } = api(["hang", answer(201)]);
     const started = Date.now();
     expect(await writeTurn(fetcher, held(40), "cnv_1", 1, record, { timeoutMs: 5_000, backoffMs: 1 })).toBe("later");
@@ -259,7 +299,7 @@ describe("a lent session's deadline", () => {
 
   it("asks a write for the web app's origin, and sends none without it", async () => {
     const { fetcher, asked } = api([answer(201)]);
-    const record = recordOf(folded(), false)!;
+    const record = recordOf(folded())!;
     expect(await writeTurn(fetcher, { ...held(), origin: null }, "cnv_1", 1, record, FAST)).toBe("later");
     expect(asked).toHaveLength(0);
   });

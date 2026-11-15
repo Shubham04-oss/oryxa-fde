@@ -496,26 +496,88 @@ describe("a turn the record will not take", () => {
 });
 
 describe("a home turn that showed a project", () => {
-  it("is written without the project's card, and the drop is logged by ids only", async () => {
+  it("is written with the project's card, which a rebuilt conversation shows again", async () => {
     const conversation = freshConversation();
     const binding = await as(conversation);
     await sayAs(conversation, binding, "hello");
     await until(conversation, (turns) => expect(turns).toHaveLength(1));
     const project = { screen: "project", company: "cmp_kestrel", project: "prj_dispatch" };
+    const card = { type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: project } };
     await plant(conversation, {
       id: "t_project",
       text: "Open it below.",
-      blocks: [{ type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: project } }],
+      blocks: [card],
+      proposals: [{ id: "p_open", action: "open_route", args: { to: project } }],
     });
-    const logged = await logsOf(async () => {
-      await sayAs(conversation, binding, "and then?");
-      await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    await sayAs(conversation, binding, "and then?");
+    await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    expect((await recorded(conversation))[1]).toMatchObject({ id: "t_project", blocks: [card], state: "done" });
+    expect((await putsOf(conversation)).filter((c) => c.path.endsWith("/turns/2")).map((c) => c.status)).toEqual([201]);
+
+    // A new object with no working copy: all it shows comes from the record.
+    await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (_instance, state) =>
+      state.storage.deleteAll(),
+    );
+    await abortAllDurableObjects();
+    const view = await call(`/internal/v1/conversations/${conversation}`, {
+      binding: await as(conversation),
+      session: SESSION,
     });
-    expect((await recorded(conversation))[1]).toMatchObject({ id: "t_project", blocks: [], state: "done" });
-    expect(JSON.parse(logged)).toContainEqual([
-      JSON.stringify({ event: "assistant_record", conversation, turn: "t_project", n: 2, dropped: "home_project" }),
-    ]);
-    expect(logged).not.toContain("prj_dispatch");
+    expect(view.status).toBe(200);
+    expect(parseView(await view.json())?.[1]).toMatchObject({
+      id: "t_project",
+      blocks: [card],
+      proposals: [{ proposal: { id: "p_open", args: { to: project } }, state: "waiting" }],
+    });
+  });
+
+  it("is refused by the API for a project of a company the person may not work on, and written without it", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    const elsewhere = { screen: "project", company: "cmp_harbor", project: "prj_dispatch" };
+    await plant(conversation, {
+      id: "t_elsewhere",
+      blocks: [{ type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: elsewhere } }],
+    });
+    await sayAs(conversation, binding, "and then?");
+    await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    expect((await recorded(conversation))[1]).toMatchObject({ id: "t_elsewhere", blocks: [], state: "done" });
+  });
+});
+
+describe("the sample API's cap on destinations", () => {
+  it("takes 16 distinct destinations in a turn and refuses a 17th, as the API does", async () => {
+    const put = (conversation: string, count: number) =>
+      env.API!.fetch(`http://api.internal/v1/assistant/conversations/${conversation}/turns/1`, {
+        method: "PUT",
+        headers: { cookie: SESSION, origin: WEB_ORIGIN, "x-oryxa-request": "1" },
+        body: JSON.stringify({
+          id: "t_many",
+          said: "Open them",
+          // The lists count once; each project of a company the person may work on once more.
+          blocks: [
+            {
+              type: "brief",
+              items: [
+                { screen: "today" },
+                { screen: "companies" },
+                ...Array.from({ length: count - 1 }, (_, i) => ({
+                  screen: "project",
+                  company: "cmp_kestrel",
+                  project: `prj_sample_${i}`,
+                })),
+              ],
+            },
+          ],
+          state: "done",
+        }),
+      });
+    expect((await put(freshConversation(), 16)).status).toBe(201);
+    const over = await put(freshConversation(), 17);
+    expect(over.status).toBe(400);
+    expect(await over.json()).toEqual({ error: "invalid_destination" });
   });
 });
 
