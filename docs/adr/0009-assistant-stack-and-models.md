@@ -134,6 +134,18 @@ What building the first version settled. Where this differs from the text above,
   acceptable for sample data only. The retention and training terms and the price are still not
   recorded here, so "Before real customer data" stands unchanged, and a model served in India
   is still preferred once one is good enough.
+- **When the session is lent.** "The person's session is lent for one turn" now reads: for one
+  call. fde-web lends it with a turn, with opening a conversation (so a new object can be rebuilt
+  from the record) and with an answer to a proposal (so the answer can be recorded). It is not
+  lent on a reconnect or a stop. The rule is otherwise unchanged: it is held in memory for that
+  call only, sent only to the API, and never stored, logged or put in a prompt. A write still
+  waiting when the call ends waits for the next lent session; nothing is sent after sign-out.
+- **What the record is.** The stored conversation is a transcript the person's own session
+  attests to. It grants nothing, and a proposal marked `confirmed` in it does not prove that an
+  action ran or was approved: the action's own route and its audit row do. Anything rebuilt from
+  it is checked like any other input before it reaches a prompt or the wire. Only fde-web's
+  server and the assistant write it; the browser cannot.
+- **A person holds at most 200 conversations,** and a conversation at most 50 turns.
 - **The model credential** is a service account that may call models and nothing else. The
   Worker's outbound guard allows Google's token endpoint for that credential only.
 
