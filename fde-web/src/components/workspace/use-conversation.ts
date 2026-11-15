@@ -102,7 +102,7 @@ export type Returned = {
   text: string
   /**
    * `reload`: it was waiting when the page reloaded, and is never sent without the person. `gone` and
-   * `unstarted`: it never reached a conversation, and the reply says why.
+   * `unstarted`: it never reached a conversation, or its request got no answer, and the reply says why.
    */
   why: "stopped" | "failed" | "edit" | "reload" | "gone" | "unstarted"
   at: number
@@ -246,6 +246,16 @@ export function useConversation(scripted: (said: string) => Reply) {
       if (id === null) return "on"
       const opened = await openConversation(id)
       if (opened.kind === "off") return "off"
+      if (opened.kind === "error") {
+        // A failure, not "no assistant": the conversation stays, the next message goes to it, and the reply
+        // says plainly that what was said before could not be shown.
+        conversation.current = id
+        if (!mounted.current) return "on"
+        setTurns([{ ...workspace(++next.current, false), text: CONVERSATION_TEXT.unopened }])
+        const kept = takeWaiting(id)
+        if (kept !== null) setReturned({ text: kept, why: "reload", at: Date.now() })
+        return "on"
+      }
       if (opened.kind === "gone") {
         // Not this person's, or not there: neither it nor a message kept waiting on it is used again.
         keepWaiting(id, null)
@@ -369,6 +379,12 @@ export function useConversation(scripted: (said: string) => Reply) {
       conversation.current = ""
       store(null)
       keepWaiting(gone, null)
+      return
+    }
+    if (ended.kind === "unsent") {
+      // ponytail: a request that threw may still have reached the assistant, so its turn can run unseen
+      // and a resend gets the busy line.
+      handBack(reply, text, CONVERSATION_TEXT.unsent, "unstarted")
       return
     }
     let how: How = "failed"

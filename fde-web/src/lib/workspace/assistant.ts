@@ -114,25 +114,32 @@ export type Opened =
    * for both. A new one is made at the next message.
    */
   | { kind: "gone" }
+  /** A dropped request or an answer it does not name: a failure, never a sign that there is no assistant. */
+  | { kind: "error" }
 
-/** The conversation so far, and whether the assistant answers here at all. */
+/**
+ * The conversation so far, and whether the assistant answers here at all. Only the explicit "not here" codes mean
+ * off, as for `createConversation`.
+ */
 export async function openConversation(conversation: string): Promise<Opened> {
   let response: Response
   try {
     response = await send(path(conversation))
   } catch {
-    return { kind: "off" }
+    return { kind: "error" }
   }
   if (response.status === 200) {
     const turns = parseView(await response.json().catch(() => null))
-    return turns === null ? { kind: "off" } : { kind: "on", turns }
+    return turns === null ? { kind: "error" } : { kind: "on", turns }
   }
   const code = await codeOf(response)
   // Theirs, with nothing said in it yet.
   if (response.status === 404 && code === "no_conversation") return { kind: "on", turns: [] }
   if (response.status === 404 && code === "unknown_conversation") return { kind: "gone" }
   if (response.status === 403 && code === "not_your_conversation") return { kind: "gone" }
-  return { kind: "off" }
+  // The dev mock and an unconfigured server answer with codes of their own: no assistant here.
+  if (code === "assistant_not_configured" || code === "not_found") return { kind: "off" }
+  return { kind: "error" }
 }
 
 export type Ended =
@@ -144,6 +151,8 @@ export type Ended =
   | { kind: "refused"; refusal: Refusal | "unknown" }
   /** The conversation is no longer this person's, or not there: a new one is needed. */
   | { kind: "gone" }
+  /** The request never got an answer: the turn may not have started, so the screen hands the message back. */
+  | { kind: "unsent" }
   | { kind: "off" }
 
 type Frame = { id: number | null; event: string | null; data: string | null }
@@ -315,7 +324,7 @@ export async function sendTurn(
       body: JSON.stringify({ text }),
     })
   } catch {
-    return { kind: "off" }
+    return { kind: "unsent" }
   }
   if (response.status !== 200 || !response.body) {
     const code = await codeOf(response)
@@ -378,11 +387,18 @@ export const REFUSAL_TEXT: Record<Refusal | "unknown", string> = {
   unknown: "I couldn't answer that. Try again in a moment.",
 }
 
-/** What the screen says when a message could not reach a conversation; the message goes back in the box. */
+/**
+ * What the screen says when a message could not reach a conversation, or a kept one could not be read; a message
+ * goes back in the box.
+ */
 export const CONVERSATION_TEXT = {
   gone: "This conversation is no longer available to you. Your message is back in the box: send it again to start a new one.",
   unstarted:
     "I couldn't start a conversation just now. Your message is back in the box: try sending it again in a moment.",
+  unsent:
+    "I couldn't send that just now. Your message is back in the box: try sending it again in a moment.",
+  unopened:
+    "I couldn't load this conversation just now. Reload the page to see it, or send a message to carry on.",
 } as const
 
 /** What a notice says, plainly. */
