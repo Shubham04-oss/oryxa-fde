@@ -2971,19 +2971,33 @@ async fn sign_in_refuses_bad_return_paths_states_and_codes() {
     let org = new_id("org");
     // A redirect route: a return_to that is not one of our paths sends the person home instead.
     *w.authkit.who.lock().unwrap() = (Some(org.clone()), "user_r".into(), "member".into());
+    // Each value is percent-encoded into the query, so the type sees it as written here.
+    let encoded = |v: &str| -> String {
+        v.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+                b => format!("%{b:02X}"),
+            })
+            .collect()
+    };
     for bad in [
         "//evil.example",
+        "/\t/evil.example",
         "/%09/evil.example",
         "https://evil.example",
+        "/\\evil",
         "/%5C%5Cevil",
         "companies",
         "/.//evil.example",
         "/%2e//evil.example",
         "/%2F/evil.example",
+        "/%2Fevil.example/../../x",
+        "/%252F/evil.example",
+        "/\u{FF0F}evil.example",
     ] {
         let (status, headers, _) = w
             .send(
-                Request::get(format!("/auth/login?return_to={bad}"))
+                Request::get(format!("/auth/login?return_to={}", encoded(bad)))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3638,6 +3652,11 @@ async fn a_failed_callback_ends_its_sign_in_and_return_to_is_checked_again() {
         set_cookie(&headers, "__Host-fde_signin").as_deref(),
         Some(""),
         "cleared"
+    );
+    // Its sealing was valid, so the person is signed in, only somewhere else than it named.
+    assert!(
+        set_cookie(&headers, "__Host-fde_session").is_some_and(|c| !c.is_empty()),
+        "session set"
     );
     // Any failed callback clears its sign-in cookie, a wrong state too.
     let (_, pending) = start_sign_in(&w).await;

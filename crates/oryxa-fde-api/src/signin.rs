@@ -1849,6 +1849,80 @@ mod tests {
         assert_eq!(w.kit.calls(), calls + 1);
     }
 
+    /// Return paths a browser could take off our origin, each refused by every fetch route.
+    const BAD_RETURN_TO: [&str; 8] = [
+        "//evil.example",
+        "/.//evil.example",
+        "/%2e//evil.example",
+        "/%2F/evil.example",
+        "/%5Cevil.example",
+        "/\\\\evil",
+        "/%2Fevil.example/../../x",
+        "/\u{FF0F}evil.example",
+    ];
+
+    #[tokio::test(start_paused = true)]
+    async fn every_fetch_route_refuses_a_return_to_that_leaves_our_origin() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        for r in BAD_RETURN_TO {
+            let password = serde_json::json!({ "email": KNOWN, "password": PASSWORD, "return_to": r });
+            let code = serde_json::json!({ "email": KNOWN, "code": "123456", "return_to": r });
+            let invitation = serde_json::json!({ "token": "inv_new", "password": "x", "return_to": r });
+            for (route, a) in [
+                (
+                    "password",
+                    read(password_sign_in(&w.ctx(), &headers(&[]), password.to_string().as_bytes()).await).await,
+                ),
+                (
+                    "code",
+                    read(code_sign_in(&w.ctx(), &headers(&[]), code.to_string().as_bytes()).await).await,
+                ),
+                (
+                    "invitation",
+                    read(accept_invitation(&w.ctx(), &headers(&[]), invitation.to_string().as_bytes()).await).await,
+                ),
+            ] {
+                assert_eq!(
+                    (a.status, a.body.as_str()),
+                    (StatusCode::BAD_REQUEST, r#"{"error":"invalid_return_to"}"#),
+                    "{route} {r:?}"
+                );
+            }
+        }
+        assert_eq!(w.kit.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_cookie_whose_return_to_is_not_ours_is_no_sign_in() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let pending = Pending {
+            purpose: PENDING_PURPOSE.into(),
+            step: Step::ChooseOrganisation,
+            token: "pt_choose".into(),
+            organisations: vec!["org_01A".into()],
+            address: [0; 32],
+            return_to: ReturnTo::home(),
+            expires: now() + 60,
+            verification: None,
+        };
+        let mut sealed = serde_json::to_value(&pending).unwrap();
+        let w = &w;
+        let choose = |cookie: String| async move {
+            let cookie = format!("{PENDING_COOKIE}={cookie}");
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&cookie]), br#"{"organisation":"org_01A"}"#).await)
+                .await
+        };
+        // However it came to be sealed, a bad return_to makes the cookie unreadable: no sign-in in progress.
+        sealed["return_to"] = "/.//evil.example".into();
+        let a = choose(w.sign_in.seal(&sealed).unwrap()).await;
+        assert_eq!(a.body, r#"{"error":"invalid_sign_in"}"#);
+        assert_eq!(w.kit.calls(), 0);
+        // The same cookie with one of our paths goes on to sign in there.
+        sealed["return_to"] = "/companies".into();
+        let a = choose(w.sign_in.seal(&sealed).unwrap()).await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_pending_step_lapses() {
         let w = World::new(signed_in("user_1", "org_01A"));
@@ -1927,21 +2001,7 @@ mod tests {
                 r#"{"email":"known@example.com","password":"x","return_to":"https://evil.example/"}"#.to_owned(),
                 "invalid_return_to",
             ),
-        ]
-        .into_iter()
-        .chain(
-            [
-                "/.//evil.example",
-                "/%2e//evil.example",
-                "/%2F/evil.example",
-                "/%5Cevil.example",
-                "/\\\\evil",
-            ]
-            .map(|r| {
-                let body = serde_json::json!({ "email": "known@example.com", "password": "x", "return_to": r });
-                (body.to_string(), "invalid_return_to")
-            }),
-        ) {
+        ] {
             let a = read(password_sign_in(&w.ctx(), &headers(&[]), body.as_bytes()).await).await;
             assert_eq!(a.status, StatusCode::BAD_REQUEST);
             assert_eq!(a.body, format!(r#"{{"error":"{code}"}}"#), "{body}");

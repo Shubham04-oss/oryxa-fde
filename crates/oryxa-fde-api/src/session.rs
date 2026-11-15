@@ -1156,9 +1156,10 @@ pub(crate) fn clear_cookie(name: &str) -> HeaderValue {
     set_cookie(name, "", Duration::ZERO)
 }
 
-/// A same-origin path to return to after sign-in. It starts with exactly one `/`, and still does
-/// once percent-decoded and its dot segments removed, as a browser would; it has no backslash or
-/// control character (raw or decoded), no raw whitespace, and is at most `MAX_RETURN_TO` bytes.
+/// A same-origin path to return to after sign-in: ASCII, at most `MAX_RETURN_TO` bytes, with no
+/// backslash, control character or whitespace. Its path starts with exactly one `/`, percent-decoded
+/// or not, and before or after dot-segment removal as a browser does it. The path holds no escape that
+/// decodes to `.`, `/`, `\` or `%`, so decoding it, once or again, cannot change its structure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct ReturnTo(String);
@@ -1166,18 +1167,22 @@ pub(crate) struct ReturnTo(String);
 impl ReturnTo {
     pub(crate) fn parse(raw: &str) -> Option<Self> {
         let raw_ok = raw.len() <= MAX_RETURN_TO
+            && raw.is_ascii()
             && !raw.contains('\\')
             && !raw.chars().any(|c| c.is_control() || c.is_whitespace());
         // Only the path can name another host; a query or fragment is the page's own.
         let path = raw.split(['?', '#']).next().unwrap_or_default();
-        if !raw_ok || !one_leading_slash(path) {
+        if !raw_ok || !one_leading_slash(path) || has_structural_escape(path) {
             return None;
         }
         let decoded = percent_decoded(path)?;
         if decoded.contains('\\') || decoded.chars().any(char::is_control) {
             return None;
         }
-        if !one_leading_slash(&remove_dot_segments(path)) || !one_leading_slash(&remove_dot_segments(&decoded)) {
+        if [path, decoded.as_str()]
+            .iter()
+            .any(|p| !one_leading_slash(p) || !one_leading_slash(&remove_dot_segments(p)))
+        {
             return None;
         }
         // And what a URL parser makes of it stays on our origin.
@@ -1214,15 +1219,30 @@ fn one_leading_slash(path: &str) -> bool {
     path.starts_with('/') && !path.starts_with("//")
 }
 
-/// `path` with each `%XX` decoded; `None` for a bad escape or bytes that are not UTF-8.
+/// Whether `path` escapes `.`, `/`, `\` or `%` (any case): no path of ours needs them, and each
+/// could make the decoded path, or a second decoding, differ in structure from the raw one.
+fn has_structural_escape(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|w| {
+        w[0] == b'%'
+            && matches!(
+                (w[1], w[2].to_ascii_lowercase()),
+                (b'2', b'e') | (b'2', b'f') | (b'5', b'c') | (b'2', b'5')
+            )
+    })
+}
+
+/// `path` with each `%XX` decoded, once; `None` for an escape not of two hex digits, or bytes that
+/// are not UTF-8.
 fn percent_decoded(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&b) = bytes.get(i) {
         if b == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(b);
@@ -1805,8 +1825,8 @@ mod tests {
             "/companies/cmp_1?tab=scope#top",
             "/a%20b",
             "/a/../b",
-            "/a%2Fb",
             "/x?next=//elsewhere",
+            "/x?q=%2F%25",
         ] {
             assert_eq!(ReturnTo::parse(ok).as_ref().map(ReturnTo::as_str), Some(ok), "{ok}");
         }
@@ -1834,6 +1854,24 @@ mod tests {
             "/%0D%0Ax",
             "/%zz",
             "/%ff",
+            "/%+a",
+            // Dot segments that pop the empty segment a decoded `%2F` made.
+            "/%2Fevil.example/../../x",
+            "/%2F../evil.example",
+            "/%2Fevil.example/%2e%2e/%2e%2e/x",
+            // Escapes that could change the path once decoded again, in any case.
+            "/%252F/host",
+            "/%252e//host",
+            "/a%2Fb",
+            "/a%2fb",
+            "/a%2Eb",
+            "/a%5cb",
+            "/a%25",
+            // Not ASCII: look-alike slashes and invisible characters.
+            "/\u{FF0F}host",
+            "/\u{2215}host",
+            "/\u{200B}/host",
+            "/\u{FEFF}",
         ] {
             assert_eq!(ReturnTo::parse(bad), None, "{bad:?}");
         }
