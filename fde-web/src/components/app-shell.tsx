@@ -7,6 +7,7 @@ import type { SwitchTarget } from "./quick-switch"
 import { api, queries } from "@/lib/api/client"
 import type { CompanySummary, Me } from "@/lib/api/schemas"
 import { applyTheme, nextTheme, readTheme } from "@/lib/theme"
+import { forgetWaiting } from "@/lib/workspace/assistant"
 import { newWorkspace } from "@/lib/workspace/flag"
 import type { Theme } from "@/lib/theme"
 import { Icon } from "@/components/ui/icon"
@@ -159,8 +160,9 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
     setProfileError("")
     try {
       await api.signOut()
-      // Every cached read belonged to the session just ended.
+      // Every cached read, and every message kept waiting on the assistant, belonged to the session just ended.
       queryClient.clear()
+      forgetWaiting()
       await navigate({ to: "/sign-in", search: { return_to: "/" } })
     } catch {
       setProfileError("Couldn't sign out. Try again.")

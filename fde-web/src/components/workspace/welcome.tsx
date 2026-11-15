@@ -82,7 +82,7 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
 
         <div className="grid gap-3">
           {/* Always there, so a screen reader hears the waiting message once it is taken. */}
-          <div role="status" className="grid gap-1 text-meta text-muted-foreground empty:hidden">
+          <div role="status" className="grid gap-1 text-meta text-muted-foreground empty:sr-only">
             {queued !== null && (
               <p className="flex min-w-0 items-center gap-2">
                 <span className="truncate">Sends when this answer ends: {queued}</span>
@@ -108,8 +108,8 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
             stopping={stopping}
             draft={returned}
           />
-          {/* Takes no room unless a message came back to the box. */}
-          <p role="status" className="text-meta text-muted-foreground empty:hidden">
+          {/* Takes no room unless a message came back to the box, but stays rendered so the first one is heard. */}
+          <p role="status" className="text-meta text-muted-foreground empty:sr-only">
             {returned?.why === "reload" && (
               <span>
                 Your message was still waiting when the page reloaded. It is back in the box, not

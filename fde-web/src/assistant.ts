@@ -1,8 +1,9 @@
 // The workspace assistant for the browser (assistant/README.md, ADR 0009). The browser calls `/assistant/*` on
 // this app's own origin and never reaches the assistant Worker. On every call, a turn and a reconnect alike, this
-// Worker asks the API who the person is and, for a company's conversation, that they may read the company; then
-// it signs a binding for that conversation, person and company, valid for a minute, and calls the assistant over
-// its service binding with the service token. Any error, timeout or mismatch refuses.
+// Worker asks the API who the person is and whether they hold this conversation, bound to this company (or home),
+// and may still use it (the API's check route); then it signs a binding for that conversation, person and company,
+// valid for a minute, and calls the assistant over its service binding with the service token. Any error, timeout
+// or mismatch refuses. A new conversation is made by the API, as the person, so the API alone decides the binding.
 
 import type { Upstream } from "./forward"
 
@@ -14,7 +15,8 @@ export type Assistant = {
 }
 
 export type AssistantTarget = {
-  conversation: string
+  /** Null for `POST .../conversations`, which asks the API for a new one. */
+  conversation: string | null
   /** The company the conversation is bound to; null for the home conversation, which spans the list. */
   company: string | null
   /** What is asked of it, after the conversation's own path. */
@@ -23,19 +25,24 @@ export type AssistantTarget = {
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/
 const PATH =
-  /^\/assistant\/(?:companies\/([^/]+)\/)?conversations\/([^/]+)(\/turns|\/turns\/([^/]+)\/(?:events|stop)|\/proposals\/([^/]+))?$/
+  /^\/assistant\/(?:companies\/([^/]+)\/)?conversations(?:\/([^/]+)(\/turns|\/turns\/([^/]+)\/(?:events|stop)|\/proposals\/([^/]+))?)?$/
 
 /**
  * The conversation in `/assistant/conversations/<c>[...]` (the home one) or
- * `/assistant/companies/<company>/conversations/<c>[...]`, or null for any other path or a bad id.
+ * `/assistant/companies/<company>/conversations/<c>[...]`, with no conversation for a new one, or null for any
+ * other path or a bad id.
  */
 export function assistantPath(url: URL): AssistantTarget | null {
   const match = PATH.exec(url.pathname)
   if (!match) return null
-  const [, company, conversation = "", rest = "", turn, proposal] = match
+  const [, company, conversation, rest = "", turn, proposal] = match
   const ids = [conversation, company, turn, proposal].filter((id) => id !== undefined)
   if (!ids.every((id) => ID.test(id))) return null
-  return { conversation, company: company ?? null, rest: rest as AssistantTarget["rest"] }
+  return {
+    conversation: conversation ?? null,
+    company: company ?? null,
+    rest: rest as AssistantTarget["rest"],
+  }
 }
 
 /** The API's session cookie (`SESSION_COOKIE` in crates/oryxa-fde-api/src/session.rs). */
@@ -70,20 +77,80 @@ class Refused extends Error {
   }
 }
 
-/** Asks the API, as the browser's session, and answers with the parsed body. */
-async function ask(request: Request, api: Upstream, path: string): Promise<unknown> {
+/** A read of the API, as the browser's session, given up after `CHECK_TIMEOUT_MS`. */
+function asking(request: Request, api: Upstream, path: string): Promise<Response> {
   const headers = new Headers({ accept: "application/json" })
   const cookie = request.headers.get("cookie")
   if (cookie) headers.set("cookie", cookie)
-  const response = await api.fetch(
+  return api.fetch(
     new Request(new URL(path, api.origin), {
       headers,
       redirect: "manual",
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     }),
   )
+}
+
+/** Asks the API, as the browser's session, and answers with the parsed body. */
+async function ask(request: Request, api: Upstream, path: string): Promise<unknown> {
+  const response = await asking(request, api, path)
   if (!response.ok) throw new Refused(response)
   return response.json()
+}
+
+/**
+ * The API's check route: "yes" only for its 204 (the person holds `conversation`, bound to `company` or to home,
+ * and may still use it), "no" for its 404, and "error" for anything else, which refuses as well.
+ */
+async function check(
+  request: Request,
+  api: Upstream,
+  conversation: string,
+  company: string | null,
+): Promise<"yes" | "no" | "error"> {
+  const query = company === null ? "" : `?company=${company}`
+  const response = await asking(
+    request,
+    api,
+    `/v1/assistant/conversations/${conversation}/check${query}`,
+  )
+  if (response.status === 204) return "yes"
+  return response.status === 404 ? "no" : "error"
+}
+
+/**
+ * Asks the API for a new conversation, as the person, bound to `company` (or home): the API mints its id and
+ * binds it to the session's person, so nothing the browser sends decides the binding. Answers `{ id }`.
+ */
+async function start(request: Request, api: Upstream, company: string | null): Promise<Response> {
+  const headers = new Headers({
+    accept: "application/json",
+    "content-type": "application/json",
+    // The API's own proof of a write from the web app; the origin was checked equal to this app's.
+    "x-oryxa-request": "1",
+    origin: new URL(request.url).origin,
+  })
+  const cookie = request.headers.get("cookie")
+  if (cookie) headers.set("cookie", cookie)
+  const response = await api.fetch(
+    new Request(new URL("/v1/assistant/conversations", api.origin), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(company === null ? {} : { company }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+    }),
+  )
+  // A refusal (signed out, no right to the company) is passed on; anything else unexpected is a 502.
+  if (response.status >= 400 && response.status < 500) return new Response(response.body, response)
+  if (response.status !== 201) return refuse(502, "bad_gateway")
+  const made = (await response.json().catch(() => null)) as {
+    id?: unknown
+    company?: unknown
+  } | null
+  if (typeof made?.id !== "string" || !ID.test(made.id)) return refuse(502, "bad_gateway")
+  if ((made.company ?? null) !== company) return refuse(502, "bad_gateway")
+  return Response.json({ id: made.id }, { status: 201, headers: { "cache-control": "no-store" } })
 }
 
 export type BindingClaims = {
@@ -163,8 +230,10 @@ export async function openAssistant(
   api: Upstream,
   assistant: Assistant,
 ): Promise<Response> {
+  const { conversation, company } = target
   // Stopping a turn is a write too: only this app's pages may ask for it, and only as the person checked here.
   const write =
+    conversation === null ||
     target.rest === "/turns" ||
     target.rest.startsWith("/proposals/") ||
     (target.rest.startsWith("/turns/") && target.rest.endsWith("/stop"))
@@ -172,18 +241,23 @@ export async function openAssistant(
   if (write && request.headers.get("origin") !== new URL(request.url).origin)
     return refuse(403, "csrf")
 
-  let me: unknown
-  try {
-    ;[me] = await Promise.all([
-      ask(request, api, "/v1/me"),
-      target.company === null ? null : ask(request, api, `/v1/companies/${target.company}`),
-    ])
-  } catch (failure) {
-    if (failure instanceof Refused) return new Response(failure.response.body, failure.response)
+  if (conversation === null) return start(request, api, company)
+
+  const [me, bound] = await Promise.allSettled([
+    ask(request, api, "/v1/me"),
+    check(request, api, conversation, company),
+  ])
+  if (me.status === "rejected") {
+    if (me.reason instanceof Refused)
+      return new Response(me.reason.response.body, me.reason.response)
     return refuse(502, "bad_gateway")
   }
+  // Not theirs, bound elsewhere and not there at all are one answer, so it says nothing of whose it is.
+  if (bound.status === "fulfilled" && bound.value === "no")
+    return refuse(404, "unknown_conversation")
+  if (bound.status === "rejected" || bound.value !== "yes") return refuse(502, "bad_gateway")
   const { user, organisation } =
-    (me as { user?: { id?: unknown }; organisation?: { id?: unknown } } | null) ?? {}
+    (me.value as { user?: { id?: unknown }; organisation?: { id?: unknown } } | null) ?? {}
   const person = user?.id
   const tenant = organisation?.id
   if (typeof person !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(person))
@@ -191,7 +265,7 @@ export async function openAssistant(
   if (typeof tenant !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(tenant))
     return refuse(502, "bad_gateway")
 
-  const binding = await signBinding({ ...target, tenant, person }, assistant.key)
+  const binding = await signBinding({ conversation, company, tenant, person }, assistant.key)
   const headers = new Headers({
     authorization: `Bearer ${assistant.token}`,
     "x-assistant-binding": binding,
@@ -214,7 +288,7 @@ export async function openAssistant(
   }
   const answer = await assistant.fetch(
     new Request(
-      `https://assistant.internal/internal/v1/conversations/${target.conversation}${target.rest}`,
+      `https://assistant.internal/internal/v1/conversations/${conversation}${target.rest}`,
       { method: request.method, headers, body, redirect: "manual" },
     ),
   )

@@ -18,15 +18,50 @@ const ME = {
   role: "member",
 }
 
-/** An API that knows the session and one company, and records what reaches it. */
-function apiBinding(answer?: (request: Request) => Response) {
+const OTHER_COOKIE = "__Host-fde_session=omar"
+const PEOPLE: Record<string, typeof ME> = {
+  [COOKIE]: ME,
+  [OTHER_COOKIE]: { ...ME, user: { id: "user_omar", name: "Omar" } },
+}
+/** The conversations the API holds: whose each is, and the company it is bound to (null for home). */
+const HELD: Record<string, { person: string; company: string | null }> = {
+  c_1: { person: "user_riya", company: null },
+  c_2: { person: "user_riya", company: "cmp_kestrel" },
+  c_omar: { person: "user_omar", company: null },
+}
+
+/** The API's check route, as `crates/oryxa-fde-api/src/assistant.rs` answers it: 204, or 404 for every refusal. */
+function checkAnswer(request: Request): Response {
+  const url = new URL(request.url)
+  const conversation = /^\/v1\/assistant\/conversations\/([^/]+)\/check$/.exec(url.pathname)?.[1]
+  const person = PEOPLE[request.headers.get("cookie") ?? ""]?.user.id
+  const held = HELD[conversation ?? ""]
+  if (held && held.person === person && held.company === url.searchParams.get("company"))
+    return new Response(null, { status: 204 })
+  return Response.json({ error: "not_found" }, { status: 404 })
+}
+
+/**
+ * An API that knows two sessions and the conversations above, and records what reaches it; `answer` stands in
+ * for every route, or `onCheck` for the check route alone.
+ */
+function apiBinding(
+  answer?: (request: Request) => Response,
+  onCheck: (request: Request) => Response = checkAnswer,
+) {
   const fetch = vi.fn(async (request: Request) => {
     if (answer) return answer(request)
-    if (request.headers.get("cookie") !== COOKIE)
-      return Response.json({ error: "unauthorized" }, { status: 401 })
     const path = new URL(request.url).pathname
-    if (path === "/v1/me") return Response.json(ME)
-    if (path === "/v1/companies/cmp_kestrel") return Response.json({ id: "cmp_kestrel" })
+    if (path.endsWith("/check")) return onCheck(request)
+    const me = PEOPLE[request.headers.get("cookie") ?? ""]
+    if (!me) return Response.json({ error: "unauthorized" }, { status: 401 })
+    if (path === "/v1/me") return Response.json(me)
+    if (path === "/v1/assistant/conversations" && request.method === "POST") {
+      const { company = null } = await request.clone().json<{ company?: string }>()
+      if (company !== null && company !== "cmp_kestrel")
+        return Response.json({ error: "forbidden" }, { status: 403 })
+      return Response.json({ id: "cnv_new", company, project: null }, { status: 201 })
+    }
     return Response.json({ error: "not_found" }, { status: 404 })
   })
   return { binding: { fetch } as unknown as Fetcher, fetch }
@@ -112,6 +147,13 @@ describe("the assistant's routes on this app", () => {
       rest: "/turns/t_1/events",
     })
     expect(at("/assistant/conversations/c_1/turns/t_1/stop")?.rest).toBe("/turns/t_1/stop")
+    // A new conversation: the API makes it, so there is no id yet.
+    expect(at("/assistant/conversations")).toEqual({ conversation: null, company: null, rest: "" })
+    expect(at("/assistant/companies/cmp_1/conversations")).toEqual({
+      conversation: null,
+      company: "cmp_1",
+      rest: "",
+    })
     for (const path of [
       "/assistant/conversations/c%2F1",
       "/assistant/conversations/c:1/turns",
@@ -119,6 +161,8 @@ describe("the assistant's routes on this app", () => {
       "/assistant/conversations/c_1/turns/t:1/events",
       "/assistant/conversations/c_1/turns/t%2F1/stop",
       "/assistant/conversations/c_1/turns/stop",
+      "/assistant/conversations/",
+      "/assistant/companies/cmp:1/conversations",
       "/agents/conversation/c_1",
     ])
       expect(at(path), path).toBeNull()
@@ -143,7 +187,12 @@ describe("the assistant's routes on this app", () => {
     const now = Date.now()
     const response = await call(turn(), env)
     expect(response.status).toBe(200)
-    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname)).toEqual(["/v1/me"])
+    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname)).toEqual([
+      "/v1/me",
+      "/v1/assistant/conversations/c_1/check",
+    ])
+    // A home conversation is checked as one: no company is named.
+    expect(new URL(api.mock.calls[1]![0].url).search).toBe("")
 
     const forwarded = helper.mock.calls[0]![0]
     expect(forwarded.url).toBe("https://assistant.internal/internal/v1/conversations/c_1/turns")
@@ -173,10 +222,11 @@ describe("the assistant's routes on this app", () => {
       env,
     )
     expect(response.status).toBe(200)
-    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname).sort()).toEqual([
-      "/v1/companies/cmp_kestrel",
+    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname)).toEqual([
       "/v1/me",
+      "/v1/assistant/conversations/c_2/check",
     ])
+    expect(new URL(api.mock.calls[1]![0].url).searchParams.get("company")).toBe("cmp_kestrel")
     expect(claimsOf(helper.mock.calls[0]![0].headers.get("x-assistant-binding")).company).toBe(
       "cmp_kestrel",
     )
@@ -192,9 +242,11 @@ describe("the assistant's routes on this app", () => {
       assistant: helper,
     } = setup(
       apiBinding((request) =>
-        request.headers.get("cookie")?.includes(COOKIE)
-          ? Response.json(ME)
-          : Response.json({ error: "unauthorized" }, { status: 401 }),
+        !request.headers.get("cookie")?.includes(COOKIE)
+          ? Response.json({ error: "unauthorized" }, { status: 401 })
+          : request.url.endsWith("/check")
+            ? new Response(null, { status: 204 })
+            : Response.json(ME),
       ),
     )
     const response = await call(
@@ -214,7 +266,7 @@ describe("the assistant's routes on this app", () => {
         apiBinding((request) =>
           new URL(request.url).pathname === "/v1/me"
             ? Response.json(ME)
-            : Response.json({ error: "not_found" }, { status: 404 }),
+            : new Response(null, { status: 204 }),
         ),
       )
       const response = await call(turn(undefined, { cookie }), env)
@@ -229,7 +281,7 @@ describe("the assistant's routes on this app", () => {
       headers: { cookie: COOKIE, "last-event-id": "7" },
     })
     expect((await call(reconnect, env)).status).toBe(200)
-    expect(api).toHaveBeenCalledTimes(1)
+    expect(api).toHaveBeenCalledTimes(2)
     const forwarded = helper.mock.calls[0]![0]
     expect(forwarded.headers.get("last-event-id")).toBe("7")
     expect(forwarded.headers.get("x-assistant-session")).toBeNull()
@@ -282,7 +334,7 @@ describe("stopping a turn through this app", () => {
   it("checks the person like any call, then asks the assistant with a fresh binding and no session", async () => {
     const { env, api, assistant: helper } = setup()
     expect((await call(stop(), env)).status).toBe(200)
-    expect(api).toHaveBeenCalledTimes(1)
+    expect(api).toHaveBeenCalledTimes(2)
     const forwarded = helper.mock.calls[0]![0]
     expect(forwarded.method).toBe("POST")
     expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_1/turns/t_1/stop")
@@ -300,25 +352,25 @@ describe("stopping a turn through this app", () => {
   it("checks the company too for a company's conversation, and binds the stop to it", async () => {
     const { env, api, assistant: helper } = setup()
     const company = new Request(
-      `${APP}/assistant/companies/cmp_kestrel/conversations/c_1/turns/t_1/stop`,
+      `${APP}/assistant/companies/cmp_kestrel/conversations/c_2/turns/t_1/stop`,
       { method: "POST", headers: { cookie: COOKIE, origin: APP } },
     )
     expect((await call(company, env)).status).toBe(200)
-    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname).sort()).toEqual([
-      "/v1/companies/cmp_kestrel",
+    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname)).toEqual([
       "/v1/me",
+      "/v1/assistant/conversations/c_2/check",
     ])
     const forwarded = helper.mock.calls[0]![0]
-    expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_1/turns/t_1/stop")
+    expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_2/turns/t_1/stop")
     expect(claimsOf(forwarded.headers.get("x-assistant-binding"))).toMatchObject({
-      conv: "c_1",
+      conv: "c_2",
       company: "cmp_kestrel",
     })
 
-    // A company the person cannot read: the API's refusal, and the assistant never hears of it.
+    // A company the conversation is not bound to: the API's refusal, and the assistant never hears of it.
     const { env: other, assistant: unseen } = setup()
     const elsewhere = new Request(
-      `${APP}/assistant/companies/cmp_other/conversations/c_1/turns/t_1/stop`,
+      `${APP}/assistant/companies/cmp_other/conversations/c_2/turns/t_1/stop`,
       { method: "POST", headers: { cookie: COOKIE, origin: APP } },
     )
     expect((await call(elsewhere, other)).status).toBe(404)
@@ -353,6 +405,177 @@ describe("stopping a turn through this app", () => {
     })
     expect((await call(signedOut, env)).status).toBe(401)
     expect(helper).not.toHaveBeenCalled()
+  })
+})
+
+describe("the API's check on every call", () => {
+  const get = (path: string, cookie = COOKIE) =>
+    new Request(`${APP}${path}`, { headers: { cookie, "last-event-id": "3" } })
+  const post = (path: string, body: unknown, cookie = COOKIE) =>
+    new Request(`${APP}${path}`, {
+      method: "POST",
+      headers: { cookie, origin: APP, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  /** Each relay route, for the conversation at `base` (e.g. `/assistant/conversations/c_1`). */
+  const routes = (base: string, cookie = COOKIE) => ({
+    turn: () => post(`${base}/turns`, { text: "hello" }, cookie),
+    view: () => get(base, cookie),
+    events: () => get(`${base}/turns/t_1/events`, cookie),
+    stop: () => post(`${base}/turns/t_1/stop`, {}, cookie),
+    answer: () => post(`${base}/proposals/p_1`, { outcome: "dismissed" }, cookie),
+  })
+
+  it("lets every route through for the person who holds the conversation, bound as asked", async () => {
+    for (const [name, request] of Object.entries({
+      ...routes("/assistant/conversations/c_1"),
+    })) {
+      const { env, api, assistant: helper } = setup()
+      expect((await call(request(), env)).status, name).toBe(200)
+      expect(
+        api.mock.calls.some(([r]) => r.url.endsWith("/c_1/check")),
+        name,
+      ).toBe(true)
+      expect(helper, name).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it("refuses another person's conversation on every route, as if it were not there", async () => {
+    for (const [name, request] of Object.entries(routes("/assistant/conversations/c_omar"))) {
+      const { env, assistant: helper } = setup()
+      const response = await call(request(), env)
+      expect(response.status, name).toBe(404)
+      expect(await response.json(), name).toEqual({ error: "unknown_conversation" })
+      expect(helper, name).not.toHaveBeenCalled()
+    }
+    // The holder signed in as someone else: the same.
+    for (const [name, request] of Object.entries(
+      routes("/assistant/conversations/c_1", OTHER_COOKIE),
+    )) {
+      const { env, assistant: helper } = setup()
+      expect((await call(request(), env)).status, name).toBe(404)
+      expect(helper, name).not.toHaveBeenCalled()
+    }
+  })
+
+  it("refuses the conversation in a company it is not bound to, or as home when it is bound, on every route", async () => {
+    for (const base of [
+      "/assistant/companies/cmp_other/conversations/c_2",
+      "/assistant/conversations/c_2",
+      "/assistant/companies/cmp_kestrel/conversations/c_1",
+    ])
+      for (const [name, request] of Object.entries(routes(base))) {
+        const { env, assistant: helper } = setup()
+        const response = await call(request(), env)
+        expect(response.status, `${base} ${name}`).toBe(404)
+        expect(await response.json()).toEqual({ error: "unknown_conversation" })
+        expect(helper, `${base} ${name}`).not.toHaveBeenCalled()
+      }
+  })
+
+  it("answers a view or a reconnect of someone else's conversation exactly as one that does not exist", async () => {
+    const answer = async (request: Request) => {
+      const response = await call(request, setup().env)
+      return { status: response.status, body: await response.text() }
+    }
+    for (const route of ["view", "events"] as const) {
+      const missing = await answer(routes("/assistant/conversations/c_missing")[route]())
+      expect(await answer(routes("/assistant/conversations/c_omar")[route]())).toEqual(missing)
+      expect(
+        await answer(routes("/assistant/companies/cmp_other/conversations/c_2")[route]()),
+      ).toEqual(missing)
+    }
+  })
+
+  it("refuses with 502 on every route when the check times out, fails, or answers anything but 204 or 404", async () => {
+    for (const onCheck of [
+      () => {
+        throw new DOMException("The operation timed out.", "TimeoutError")
+      },
+      () => {
+        throw new TypeError("network")
+      },
+      () => Response.json({ error: "internal" }, { status: 500 }),
+      () => Response.json({ error: "unavailable" }, { status: 503 }),
+      // Not the route's answer: a body where none belongs is not a yes.
+      () => Response.json({ ok: true }),
+      () => Response.json({ error: "forbidden" }, { status: 403 }),
+    ])
+      for (const [name, request] of Object.entries(routes("/assistant/conversations/c_1"))) {
+        const { env, assistant: helper } = setup(apiBinding(undefined, onCheck))
+        const response = await call(request(), env)
+        expect(response.status, name).toBe(502)
+        expect(helper, name).not.toHaveBeenCalled()
+      }
+  })
+
+  it("gives up on the check after a while, with the request's own deadline", async () => {
+    const { env, api } = setup()
+    await call(routes("/assistant/conversations/c_1").view(), env)
+    const checked = api.mock.calls.find(([r]) => r.url.includes("/check"))![0]
+    expect(checked.signal.aborted).toBe(false)
+    expect(checked.redirect).toBe("manual")
+  })
+})
+
+describe("a new conversation through this app", () => {
+  const start = (path = "/assistant/conversations", headers: Record<string, string> = {}) =>
+    new Request(`${APP}${path}`, {
+      method: "POST",
+      headers: { cookie: COOKIE, origin: APP, "content-type": "application/json", ...headers },
+      // The browser's body is never read: it cannot choose the binding.
+      body: JSON.stringify({ company: "cmp_other", person: "user_omar" }),
+    })
+
+  it("is made by the API as the person, home or in the company of the path, and answers its id", async () => {
+    for (const [path, company] of [
+      ["/assistant/conversations", null],
+      ["/assistant/companies/cmp_kestrel/conversations", "cmp_kestrel"],
+    ] as const) {
+      const { env, api, assistant: helper } = setup()
+      const response = await call(start(path), env)
+      expect(response.status, path).toBe(201)
+      expect(await response.json()).toEqual({ id: "cnv_new" })
+      const made = api.mock.calls[0]![0]
+      expect(made.method).toBe("POST")
+      expect(new URL(made.url).pathname).toBe("/v1/assistant/conversations")
+      expect(made.headers.get("cookie")).toBe(COOKIE)
+      expect(made.headers.get("x-oryxa-request")).toBe("1")
+      expect(made.headers.get("origin")).toBe(APP)
+      expect(await made.json()).toEqual(company === null ? {} : { company })
+      expect(api).toHaveBeenCalledTimes(1)
+      // Nothing is asked of the assistant until the first turn.
+      expect(helper).not.toHaveBeenCalled()
+    }
+  })
+
+  it("passes on the API's refusal, and refuses what it cannot trust with 502", async () => {
+    const { env } = setup()
+    expect((await call(start("/assistant/companies/cmp_other/conversations"), env)).status).toBe(
+      403,
+    )
+    expect((await call(start(undefined, { cookie: "theme=dark" }), env)).status).toBe(401)
+    for (const answer of [
+      () => {
+        throw new DOMException("The operation timed out.", "TimeoutError")
+      },
+      () => Response.json({ error: "internal" }, { status: 500 }),
+      () => Response.json({ id: "cnv:bad", company: null }, { status: 201 }),
+      // Bound elsewhere than asked: never handed to the browser.
+      () => Response.json({ id: "cnv_new", company: "cmp_other" }, { status: 201 }),
+      () => new Response("not json", { status: 201 }),
+    ]) {
+      const response = await call(start(), setup(apiBinding(answer)).env)
+      expect(response.status).toBe(502)
+    }
+  })
+
+  it("is refused from another site or by GET before the API hears of it", async () => {
+    const { env, api } = setup()
+    expect((await call(start(undefined, { origin: "https://evil.example" }), env)).status).toBe(403)
+    const read = new Request(`${APP}/assistant/conversations`, { headers: { cookie: COOKIE } })
+    expect((await call(read, env)).status).toBe(405)
+    expect(api).not.toHaveBeenCalled()
   })
 })
 

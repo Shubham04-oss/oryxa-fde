@@ -110,6 +110,42 @@ describe("the Worker", () => {
     expect(await fetch.mock.calls[0]![0].json()).toEqual({ name: "Kestrel Freight" })
   })
 
+  it("refuses the assistant's conversation writes from the browser, however the path is spelled", async () => {
+    const { env, fetch } = apiAnswering()
+    const write = (path: string, method = "PUT") =>
+      new Request(`${APP}/api${path}`, {
+        method,
+        headers: { Origin: APP, "Content-Type": "application/json", "X-Oryxa-Request": "1" },
+        body: JSON.stringify({ outcome: "confirmed" }),
+      })
+    for (const [path, method] of [
+      // Append a turn, and answer a proposal: only this app's server sends them, for the assistant.
+      ["/v1/assistant/conversations/cnv_1/turns/1", "PUT"],
+      ["/v1/assistant/conversations/cnv_1/turns/1/proposals/p_1", "PUT"],
+      // Any other write there, and other spellings of the same paths.
+      ["/v1/assistant/conversations/cnv_1/turns", "POST"],
+      ["/v1/assistant/conversations/cnv_1/turns/1/", "PUT"],
+      ["/v1/assistant/conversations/cnv_1/turns/1/proposals/p_1", "PATCH"],
+      ["/v1/assistant/conversations/cnv_1/turns/1/proposals/p_1", "DELETE"],
+      ["//v1//assistant/conversations/cnv_1//turns/1", "PUT"],
+      ["/V1/Assistant/Conversations/cnv_1/Turns/1", "PUT"],
+      ["/v1/assistant/conversations/cnv_1/%74urns/1", "PUT"],
+      ["/v1/assistant/conversations/cnv%2F1/turns/1", "PUT"],
+      ["/v1/assistant/conversations/cnv_1/turns/%E0%A4%A", "PUT"],
+    ]) {
+      const refused = await call(write(path!, method), env)
+      expect(refused.status, `${method} ${path}`).toBe(403)
+      expect(await refused.json()).toEqual({ error: "forbidden" })
+    }
+    expect(fetch).not.toHaveBeenCalled()
+
+    // Reading a conversation, and the browser's own conversation routes, still reach the API.
+    await call(new Request(`${APP}/api/v1/assistant/conversations/cnv_1`), env)
+    await call(write("/v1/assistant/conversations", "POST"), env)
+    await call(write("/v1/assistant/conversations/cnv_1", "DELETE"), env)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
   it("passes a file's bytes and type through untouched, up to the API's 20 MiB limit", async () => {
     const { env, fetch } = apiAnswering(() => Response.json({ id: "doc_1" }, { status: 201 }))
     const bytes = new Uint8Array(20 * 1024 * 1024).fill(7)
