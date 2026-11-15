@@ -2969,21 +2969,36 @@ fn mcp_succeeded(status: StatusCode, resp: &Value) -> bool {
 async fn sign_in_refuses_bad_return_paths_states_and_codes() {
     let w = world().await;
     let org = new_id("org");
+    // A redirect route: a return_to that is not one of our paths sends the person home instead.
+    *w.authkit.who.lock().unwrap() = (Some(org.clone()), "user_r".into(), "member".into());
     for bad in [
         "//evil.example",
         "/%09/evil.example",
         "https://evil.example",
-        "/\\\\evil",
+        "/%5C%5Cevil",
         "companies",
+        "/.//evil.example",
+        "/%2e//evil.example",
+        "/%2F/evil.example",
     ] {
-        let path = format!("/auth/login?return_to={bad}");
-        let (status, _, body) = w.send(Request::get(&path).body(Body::empty()).unwrap()).await;
-        // %09 decodes to a tab, which is refused like the rest.
-        assert_eq!(
-            (status, body["error"].as_str()),
-            (StatusCode::BAD_REQUEST, Some("invalid_return_to")),
-            "{bad}"
-        );
+        let (status, headers, _) = w
+            .send(
+                Request::get(format!("/auth/login?return_to={bad}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FOUND, "{bad}");
+        let location = headers["location"].to_str().unwrap();
+        let state = location.split("state=").nth(1).unwrap().split('&').next().unwrap();
+        let pending = set_cookie(&headers, "__Host-fde_signin").unwrap();
+        let req = Request::get(format!("/auth/callback?code=code-{state}&state={state}"))
+            .header("cookie", format!("__Host-fde_signin={pending}"))
+            .body(Body::empty())
+            .unwrap();
+        let (status, headers, _) = w.send(req).await;
+        let to = headers.get("location").and_then(|l| l.to_str().ok());
+        assert_eq!((status, to), (StatusCode::FOUND, Some("/")), "{bad}");
     }
     // A callback with no sign-in in progress, or another sign-in's state or code.
     let (status, _, body) = w
@@ -3605,28 +3620,25 @@ async fn a_failed_callback_ends_its_sign_in_and_return_to_is_checked_again() {
     let w = world().await;
     let org = new_id("org");
     *w.authkit.who.lock().unwrap() = (Some(org.clone()), "user_z".into(), "member".into());
-    // A sign-in cookie whose return_to is not ours, however it was made, is refused at the callback.
-    let (state, _) = start_sign_in(&w).await;
-    let forged = json!({
-        "purpose": "fde_sign_in", "state": state, "verifier": "v", "return_to": "//evil.example",
-        "expires": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600,
-    });
+    // A sign-in cookie whose return_to is not ours, however it was made, sends the person home.
+    let (state, pending) = start_sign_in(&w).await;
+    let mut forged: Value = workos::helpers::session::unseal(&pending, &w.password).unwrap();
+    forged["return_to"] = json!("/.//evil.example");
     let forged = workos::helpers::session::seal(&forged, &w.password).unwrap();
     let req = Request::get(format!("/auth/callback?code=code-{state}&state={state}"))
         .header("cookie", format!("__Host-fde_signin={forged}"))
         .body(Body::empty())
         .unwrap();
-    let (status, headers, body) = w.send(req).await;
+    let (status, headers, _) = w.send(req).await;
     assert_eq!(
-        (status, body["error"].as_str()),
-        (StatusCode::BAD_REQUEST, Some("invalid_return_to"))
+        (status, headers.get("location").and_then(|l| l.to_str().ok())),
+        (StatusCode::FOUND, Some("/"))
     );
     assert_eq!(
         set_cookie(&headers, "__Host-fde_signin").as_deref(),
         Some(""),
         "cleared"
     );
-    assert_eq!(set_cookie(&headers, "__Host-fde_session"), None);
     // Any failed callback clears its sign-in cookie, a wrong state too.
     let (_, pending) = start_sign_in(&w).await;
     let req = Request::get("/auth/callback?code=code-x&state=wrong")

@@ -1102,6 +1102,7 @@ struct SignInState {
     purpose: String,
     state: String,
     verifier: String,
+    /// Kept as sent, and parsed again at the callback, which falls back to `/`.
     return_to: String,
     expires: u64,
 }
@@ -1155,20 +1156,105 @@ pub(crate) fn clear_cookie(name: &str) -> HeaderValue {
     set_cookie(name, "", Duration::ZERO)
 }
 
-/// A same-origin path to return to after sign-in: `/` then anything but a second `/` or `\`, no
-/// control characters or whitespace, and nothing that resolves to another origin.
-pub(crate) fn safe_return_to(raw: &str) -> Option<String> {
-    let ok = raw.starts_with('/')
-        && !raw.starts_with("//")
-        && raw.len() <= MAX_RETURN_TO
-        && !raw.contains('\\')
-        && !raw.chars().any(|c| c.is_control() || c.is_whitespace());
-    if !ok {
-        return None;
+/// A same-origin path to return to after sign-in. It starts with exactly one `/`, and still does
+/// once percent-decoded and its dot segments removed, as a browser would; it has no backslash or
+/// control character (raw or decoded), no raw whitespace, and is at most `MAX_RETURN_TO` bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct ReturnTo(String);
+
+impl ReturnTo {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let raw_ok = raw.len() <= MAX_RETURN_TO
+            && !raw.contains('\\')
+            && !raw.chars().any(|c| c.is_control() || c.is_whitespace());
+        // Only the path can name another host; a query or fragment is the page's own.
+        let path = raw.split(['?', '#']).next().unwrap_or_default();
+        if !raw_ok || !one_leading_slash(path) {
+            return None;
+        }
+        let decoded = percent_decoded(path)?;
+        if decoded.contains('\\') || decoded.chars().any(char::is_control) {
+            return None;
+        }
+        if !one_leading_slash(&remove_dot_segments(path)) || !one_leading_slash(&remove_dot_segments(&decoded)) {
+            return None;
+        }
+        // And what a URL parser makes of it stays on our origin.
+        let base = url::Url::parse("https://fde.invalid/").ok()?;
+        let resolved = base.join(raw).ok()?;
+        (resolved.origin() == base.origin()).then(|| Self(raw.to_owned()))
     }
-    let base = url::Url::parse("https://fde.invalid/").ok()?;
-    let resolved = base.join(raw).ok()?;
-    (resolved.origin() == base.origin()).then(|| raw.to_owned())
+
+    /// Where a sign-in goes when it named nowhere, or nowhere it may go.
+    pub(crate) fn home() -> Self {
+        Self("/".to_owned())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReturnTo {
+    type Error = &'static str;
+
+    fn try_from(v: String) -> Result<Self, Self::Error> {
+        Self::parse(&v).ok_or("invalid return_to")
+    }
+}
+
+impl From<ReturnTo> for String {
+    fn from(v: ReturnTo) -> Self {
+        v.0
+    }
+}
+
+fn one_leading_slash(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//")
+}
+
+/// `path` with each `%XX` decoded; `None` for a bad escape or bytes that are not UTF-8.
+fn percent_decoded(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// RFC 3986 dot-segment removal for a path starting with `/`; empty segments are kept, so a
+/// result starting `//` shows what a browser would take for another host.
+fn remove_dot_segments(path: &str) -> String {
+    let segments: Vec<&str> = path.get(1..).unwrap_or_default().split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *seg {
+            "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => {
+                out.push(s);
+                continue;
+            }
+        }
+        // `/a/.` and `/a/..` end in a directory.
+        if last {
+            out.push("");
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 /// Authenticates a request from its session cookie when it carries no bearer token. See the
@@ -1336,7 +1422,8 @@ fn is_expiry(kind: &impl std::fmt::Debug) -> bool {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct LoginParams {
-    /// Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`.
+    /// Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`, as
+    /// does a value that is not one path on the web app.
     pub return_to: Option<String>,
 }
 
@@ -1350,11 +1437,15 @@ pub struct CallbackParams {
 /// Start sign-in: redirects to WorkOS AuthKit.
 #[utoipa::path(get, operation_id = "sign_in", path = "/auth/login", tag = "auth", params(LoginParams),
     security(()),
-    responses((status = 302, description = "To WorkOS AuthKit"), (status = 400, body = ErrorBody),
-        (status = 503, body = ErrorBody)))]
+    responses((status = 302, description = "To WorkOS AuthKit"), (status = 503, body = ErrorBody)))]
 pub(crate) async fn login(State(app): State<Arc<App>>, Query(p): Query<LoginParams>) -> Result<Response, ApiError> {
     let sign_in = app.sign_in.as_ref().ok_or(ApiError::Unavailable)?;
-    let return_to = safe_return_to(p.return_to.as_deref().unwrap_or("/")).ok_or(ApiError::Invalid("return_to"))?;
+    // A redirect route: a return_to we may not use sends the person home instead.
+    let return_to = p
+        .return_to
+        .as_deref()
+        .and_then(ReturnTo::parse)
+        .unwrap_or_else(ReturnTo::home);
     let pkce = workos::helpers::pkce::generate_pkce_pair().map_err(|_| ApiError::Internal)?;
     let state = workos::helpers::pkce::generate_code_verifier(None).map_err(|_| ApiError::Internal)?;
     let url = sign_in
@@ -1368,7 +1459,7 @@ pub(crate) async fn login(State(app): State<Arc<App>>, Query(p): Query<LoginPara
         purpose: SIGN_IN_PURPOSE.into(),
         state,
         verifier: pkce.code_verifier,
-        return_to,
+        return_to: return_to.into(),
         expires: now() + SIGN_IN_TTL.as_secs(),
     };
     let cookie = set_cookie(SIGN_IN_COOKIE, &sign_in.seal(&pending)?, SIGN_IN_TTL);
@@ -1398,7 +1489,7 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
         .filter(|s: &SignInState| s.purpose == SIGN_IN_PURPOSE && s.expires > now())
         .ok_or(ApiError::Invalid("sign_in"))?;
     // Checked again: whatever made the cookie, the redirect only ever goes to our own pages.
-    let return_to = safe_return_to(&pending.return_to).ok_or(ApiError::Invalid("return_to"))?;
+    let return_to = ReturnTo::parse(&pending.return_to).unwrap_or_else(ReturnTo::home);
     // Constant time: the state is the only thing tying this callback to its login.
     let same = pending.state.len() == p.state.len()
         && pending
@@ -1419,7 +1510,7 @@ async fn finish_sign_in(app: &App, headers: &HeaderMap, p: &CallbackParams) -> R
             ApiError::Unauthorized
         })?;
     let cookie = session_cookie(app.tokens.as_ref(), sign_in, tokens).await?;
-    let location = HeaderValue::from_str(&return_to).map_err(|_| ApiError::Internal)?;
+    let location = HeaderValue::from_str(return_to.as_str()).map_err(|_| ApiError::Internal)?;
     let mut resp = (StatusCode::FOUND, [(LOCATION, location)]).into_response();
     let h = resp.headers_mut();
     h.append(SET_COOKIE, cookie);
@@ -1708,8 +1799,16 @@ mod tests {
 
     #[test]
     fn return_to_must_be_a_same_origin_path() {
-        for ok in ["/", "/companies", "/companies/cmp_1?tab=scope#top", "/a%20b"] {
-            assert_eq!(safe_return_to(ok).as_deref(), Some(ok), "{ok}");
+        for ok in [
+            "/",
+            "/companies",
+            "/companies/cmp_1?tab=scope#top",
+            "/a%20b",
+            "/a/../b",
+            "/a%2Fb",
+            "/x?next=//elsewhere",
+        ] {
+            assert_eq!(ReturnTo::parse(ok).as_ref().map(ReturnTo::as_str), Some(ok), "{ok}");
         }
         for bad in [
             "",
@@ -1722,8 +1821,38 @@ mod tests {
             "/ /x",
             "/\u{7f}",
             &format!("/{}", "a".repeat(MAX_RETURN_TO)),
+            // A browser resolves each of these to `//host` (another origin) or `/\host`.
+            "/.//evil.example",
+            "/%2e//evil.example",
+            "/%2E%2E//evil.example",
+            "/a/..//evil.example",
+            "/%2F/evil.example",
+            "/%2f%2fevil.example",
+            "/%5Cevil.example",
+            "/%09/evil.example",
+            "/%0a/x",
+            "/%0D%0Ax",
+            "/%zz",
+            "/%ff",
         ] {
-            assert_eq!(safe_return_to(bad), None, "{bad:?}");
+            assert_eq!(ReturnTo::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dot_segments_go_as_a_browser_removes_them() {
+        for (path, want) in [
+            ("/", "/"),
+            ("/a/./b", "/a/b"),
+            ("/a/../b", "/b"),
+            ("/../a", "/a"),
+            ("/a/..", "/"),
+            ("/a/.", "/a/"),
+            ("/.//x", "//x"),
+            ("/..//x", "//x"),
+            ("/a//b", "/a//b"),
+        ] {
+            assert_eq!(remove_dot_segments(path), want, "{path}");
         }
     }
 

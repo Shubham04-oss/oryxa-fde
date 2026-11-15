@@ -3533,7 +3533,10 @@ export interface operations {
     sign_in: {
         parameters: {
             query?: {
-                /** @description Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`. */
+                /**
+                 * @description Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`, as
+                 *     does a value that is not one path on the web app.
+                 */
                 return_to?: string;
             };
             header?: never;
@@ -3548,15 +3551,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
             };
             /** @description Service Unavailable */
             503: {
