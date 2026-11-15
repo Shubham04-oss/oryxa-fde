@@ -33,6 +33,9 @@ export default tseslint.config(
           'MemberExpression[property.name="runtime"]',
           'MemberExpression[property.value="runtime"]',
           'ImportSpecifier[imported.name="runtime"]',
+          'ExportSpecifier[local.name="runtime"]',
+          'ObjectPattern > Property[key.name="runtime"]',
+          'ObjectPattern > Property[key.value="runtime"]',
         ].map((selector) => ({
           selector,
           message: "The runtime's own fetch is unguarded; only src/model/provider.ts uses it.",

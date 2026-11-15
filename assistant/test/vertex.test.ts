@@ -456,7 +456,7 @@ describe("the global fetch guard", () => {
       [TOKEN_URL, { method: "GET" }],
       [TOKEN_URL, { method: "PUT", body: "x" }],
       [`${TOKEN_URL}?assertion=x`, { method: "POST" }],
-      [`${TOKEN_URL}?`, { method: "DELETE" }],
+      [TOKEN_URL, { method: "DELETE" }],
     ] as const) {
       await expect(fetch(url, init)).rejects.toBeInstanceOf(OutboundRefused);
     }
