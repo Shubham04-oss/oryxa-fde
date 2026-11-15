@@ -335,7 +335,12 @@ describe("a turn on Gemini through Vertex", () => {
     expect(out.blocks).toEqual([{ type: "brief", items: [{ label: "Company", value: "Kestrel Logistics" }] }]);
     expect(out.proposals).toMatchObject([{ action: "create_company", args: { name: "Kestrel Logistics" } }]);
     expect(out.notice).toBeNull();
-    expect(emitted.map((e) => e.type)).toEqual(["text", "text", "block", "proposal"]);
+    expect(emitted.map((e) => e.type)).toEqual(["step", "step", "text", "text", "block", "proposal"]);
+    // The read shows as a step: its tool and state, never its arguments or what it read.
+    expect(emitted.slice(0, 2)).toMatchObject([
+      { type: "step", step: { id: "s_1", tool: "list_companies", state: "running" } },
+      { type: "step", step: { id: "s_1", tool: "list_companies" } },
+    ]);
 
     // Both steps went to the one Vertex URL for `global`, with the Worker's own token and the turn's signal.
     expect(vertex.sent).toHaveLength(2);

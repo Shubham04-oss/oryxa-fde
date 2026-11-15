@@ -437,9 +437,29 @@ describe("the conversation with the assistant", () => {
   const frames = (events: Array<unknown>) =>
     `${events.map((e, i) => `id: ${i}\ndata: ${JSON.stringify(e)}\n\n`).join("")}event: done\ndata: {}\n\n`
   let turnAnswer: () => Response = () => new Response(null, { status: 500 })
+  let onStop = () => {}
+
+  /** A turn's stream the test writes to as it goes, as the assistant would. */
+  function liveTurn() {
+    const encoder = new TextEncoder()
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    let n = 0
+    const body = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c) })
+    return {
+      response: () => new Response(body, { headers: { "content-type": "text/event-stream" } }),
+      push: (event: unknown) =>
+        controller.enqueue(encoder.encode(`id: ${n++}\ndata: ${JSON.stringify(event)}\n\n`)),
+      end: () => {
+        controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"))
+        controller.close()
+      },
+    }
+  }
+  const turnsSent = () => asked.filter((a) => a.path.endsWith("/turns")).map((a) => a.body)
 
   beforeEach(() => {
     asked.length = 0
+    onStop = () => {}
     original.fetch = mockApi.fetch
     // The assistant's routes, as this app's server answers them once it has checked the person.
     mockApi.fetch = async (request) => {
@@ -450,6 +470,10 @@ describe("the conversation with the assistant", () => {
       if (/^\/assistant\/conversations\/c_\w+$/.test(pathname))
         return Response.json({ error: "no_conversation" }, { status: 404 })
       if (pathname.endsWith("/turns")) return turnAnswer()
+      if (pathname.endsWith("/stop")) {
+        onStop()
+        return new Response(null, { status: 204 })
+      }
       if (pathname.includes("/proposals/")) return new Response(null, { status: 204 })
       return Response.json({ error: "not_found" }, { status: 404 })
     }
@@ -548,6 +572,135 @@ describe("the conversation with the assistant", () => {
         body: { outcome: "confirmed" },
       },
     ])
+  })
+
+  it("shows each read as one quiet line, and Stop in place of Send while the turn runs", async () => {
+    const turn = liveTurn()
+    turnAnswer = turn.response
+    onStop = () => {
+      turn.push({ v: 1, type: "step", step: { id: "s_1", tool: "read_today", state: "failed" } })
+      turn.push({ v: 1, type: "notice", notice: "stopped" })
+      turn.end()
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("What needs me today?")
+    turn.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    turn.push({ v: 1, type: "step", step: { id: "s_1", tool: "read_today", state: "running" } })
+    turn.push({ v: 1, type: "text", delta: "Looking at your day. " })
+    expect(await within(log).findByText("Reading today's work…")).toBeInTheDocument()
+    expect(within(log).getByText("Looking at your day.")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }))
+    // What was said stays, the read says it did not finish, and the reply ends plainly.
+    expect(await within(log).findByText(NOTICE_TEXT.stopped)).toBeInTheDocument()
+    expect(within(log).getByText("Couldn't read today's work")).toBeInTheDocument()
+    expect(within(log).getByText("Looking at your day.")).toBeInTheDocument()
+    expect(asked.filter((a) => a.path.endsWith("/stop"))).toEqual([
+      { method: "POST", path: expect.stringMatching(/\/turns\/t_1\/stop$/), body: null },
+    ])
+    expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull()
+  })
+
+  it("asks to stop once the turn is known when Stop comes before its first event", async () => {
+    const turn = liveTurn()
+    turnAnswer = turn.response
+    onStop = () => {
+      turn.push({ v: 1, type: "notice", notice: "stopped" })
+      turn.end()
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("hello")
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }))
+    expect(asked.filter((a) => a.path.endsWith("/stop"))).toEqual([])
+    turn.push({ v: 1, type: "turn", turn: "t_9", said: "hello" })
+    expect(await within(log).findByText(NOTICE_TEXT.stopped)).toBeInTheDocument()
+    expect(asked.filter((a) => a.path.endsWith("/stop"))).toHaveLength(1)
+  })
+
+  it("holds one message typed while a turn runs, shows it, and sends it when the turn ends", async () => {
+    const first = liveTurn()
+    const answers = [
+      first.response,
+      () =>
+        new Response(frames([{ v: 1, type: "turn", turn: "t_2", said: "And tomorrow?" }]), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    ]
+    turnAnswer = () => answers.shift()!()
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("What needs me today?")
+    first.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("And tomorrow?")
+    expect(
+      await screen.findByText("Sends when this answer ends: And tomorrow?"),
+    ).toBeInTheDocument()
+    // One at most: a third waits in the box, where it was typed.
+    await said("And next week?")
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    expect(box).toHaveValue("And next week?")
+    expect(turnsSent()).toEqual([{ text: "What needs me today?" }])
+
+    first.push({ v: 1, type: "text", delta: "Two things are open." })
+    first.end()
+    await waitFor(() =>
+      expect(turnsSent()).toEqual([{ text: "What needs me today?" }, { text: "And tomorrow?" }]),
+    )
+    await waitFor(() => expect(screen.queryByText(/^Sends when this answer ends/)).toBeNull())
+    expect(box).toHaveValue("And next week?")
+  })
+
+  it("hands a held message back to the box, not sent, when the turn is stopped", async () => {
+    const turn = liveTurn()
+    turnAnswer = turn.response
+    onStop = () => {
+      turn.push({ v: 1, type: "notice", notice: "stopped" })
+      turn.end()
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("What needs me today?")
+    turn.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("Only the blocked ones")
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }))
+    expect(
+      await screen.findByText(
+        "Not sent, because the answer was stopped. Your message is back in the box.",
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByRole("textbox", { name: "What do you want to work on?" })).toHaveValue(
+      "Only the blocked ones",
+    )
+    expect(turnsSent()).toHaveLength(1)
+  })
+
+  it("hands a held message back when the turn fails, and lets one be taken back to edit", async () => {
+    const turn = liveTurn()
+    turnAnswer = turn.response
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("What needs me today?")
+    turn.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("Only the blocked ones")
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }))
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    expect(box).toHaveValue("Only the blocked ones")
+    expect(screen.queryByText(/^Sends when this answer ends/)).toBeNull()
+
+    await userEvent.type(box, "{Enter}")
+    turn.push({ v: 1, type: "notice", notice: "failed" })
+    turn.end()
+    expect(
+      await screen.findByText(
+        "Not sent, because the answer didn't finish. Your message is back in the box.",
+      ),
+    ).toBeInTheDocument()
+    expect(box).toHaveValue("Only the blocked ones")
+    expect(turnsSent()).toHaveLength(1)
   })
 
   it("says plainly why a turn was refused", async () => {

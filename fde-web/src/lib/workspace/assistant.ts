@@ -1,6 +1,14 @@
 import { HEADERS, selected } from "@/lib/api/client"
-import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, REFUSALS, parseEvent, parseView } from "./wire"
-import type { ProposalState, Refusal, Turn, WireEvent } from "./wire"
+import {
+  MAX_BLOCKS,
+  MAX_PROPOSALS,
+  MAX_READ_STEPS,
+  MAX_REPLY,
+  REFUSALS,
+  parseEvent,
+  parseView,
+} from "./wire"
+import type { ProposalState, Refusal, Step, StepTool, Turn, WireEvent } from "./wire"
 
 // The welcome screen's side of the assistant (issue #236): a small client of our own over this app's
 // `/assistant/*` routes (src/assistant.ts), rather than the AI SDK's chat hook, so every event is checked
@@ -99,6 +107,7 @@ export type Budget = {
   text: number
   blocks: number
   proposals: number
+  steps: number
   /** When the screen gives up on the turn (ms since the epoch). */
   until: number
   /** How long one read may hear nothing. */
@@ -109,6 +118,7 @@ export const budget = (now = Date.now()): Budget => ({
   text: 0,
   blocks: 0,
   proposals: 0,
+  steps: 0,
   until: now + TURN_DEADLINE_MS,
   idleMs: READ_IDLE_MS,
 })
@@ -118,6 +128,8 @@ function within(given: Budget, event: WireEvent): boolean {
   if (event.type === "text") return (given.text += [...event.delta].length) <= MAX_REPLY
   if (event.type === "block") return ++given.blocks <= MAX_BLOCKS
   if (event.type === "proposal") return ++given.proposals <= MAX_PROPOSALS
+  // Each read starts and ends: two events.
+  if (event.type === "step") return ++given.steps <= 2 * MAX_READ_STEPS
   return true
 }
 
@@ -279,6 +291,22 @@ export async function settleProposal(
   }
 }
 
+/**
+ * Asks the assistant to stop `turn`. It ends the turn with the `stopped` notice, keeping what was said, on
+ * the stream the screen is already reading; a turn that is no longer running is left as it is.
+ */
+export async function stopTurn(conversation: string, turn: string): Promise<boolean> {
+  try {
+    const response = await send(path(conversation, `/turns/${turn}/stop`), {
+      method: "POST",
+      headers: HEADERS,
+    })
+    return response.status === 204
+  } catch {
+    return false
+  }
+}
+
 /** What a refusal says, plainly. */
 export const REFUSAL_TEXT: Record<Refusal | "unknown", string> = {
   too_long: "That message is too long for me. Keep it under 2,000 characters.",
@@ -296,4 +324,19 @@ export const NOTICE_TEXT = {
   timed_out:
     "I ran out of time on that one, so this answer is incomplete. Try again, or ask for less at once.",
   failed: "Something went wrong part way through, so this answer is incomplete.",
+  stopped: "Stopped. What I said before that is kept.",
 } as const
+
+/** What each read is called on screen: fixed words of ours, never anything the model or the data said. */
+const STEP_LABEL: Record<StepTool, string> = {
+  list_companies: "your companies",
+  read_today: "today's work",
+}
+
+/** One quiet line for a step: what is being read, then whether it was, and how many records came back. */
+export function stepLine(step: Step): string {
+  const what = STEP_LABEL[step.tool]
+  if (step.state === "running") return `Reading ${what}…`
+  if (step.state === "failed") return `Couldn't read ${what}`
+  return step.count === undefined ? `Read ${what}` : `Read ${what}: ${step.count} found`
+}

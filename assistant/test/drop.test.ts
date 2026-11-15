@@ -3,10 +3,11 @@ import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 
 import type { Binding } from "../src/auth.js";
-import { MAX_REPLY } from "../src/catalogue/wire.js";
+import { MAX_READ_STEPS, MAX_REPLY, MAX_STEP_COUNT, parseEvent } from "../src/catalogue/wire.js";
 import type { WireEvent } from "../src/catalogue/wire.js";
 import { MAX_TOOL_CALLS } from "../src/limits.js";
 import { streamOf } from "../src/model/fake.js";
+import { stepEnd } from "../src/tools.js";
 import { TurnFailed, runTurn } from "../src/turn.js";
 import type { Folded } from "../src/turn.js";
 
@@ -139,6 +140,57 @@ describe("the Worker drops what is outside the catalogue", () => {
     );
     expect(reads).toBe(MAX_TOOL_CALLS);
     expect(emitted).toContainEqual({ v: 1, type: "notice", notice: "tool_limit" });
+    // Each read is a step that starts and ends; the calls past the limit read nothing and show no step.
+    const steps = emitted.flatMap((e) => (e.type === "step" ? [e.step] : []));
+    expect(steps).toHaveLength(2 * MAX_TOOL_CALLS);
+    expect(new Set(steps.map((s) => s.id))).toEqual(new Set(["s_1", "s_2", "s_3", "s_4"]));
+    expect(steps.filter((s) => s.state === "done")).toHaveLength(MAX_TOOL_CALLS);
+    expect(steps.find((s) => s.tool === "read_today" && s.state === "done")).toEqual({
+      id: "s_4",
+      tool: "read_today",
+      state: "done",
+      count: 0,
+    });
+    // The web holds a turn to this many steps.
+    expect(MAX_TOOL_CALLS).toBeLessThanOrEqual(MAX_READ_STEPS);
+  });
+
+  it("says a read that could not be read failed, with no count", async () => {
+    const { emitted } = await turn(HOME, model([tool("list_companies", {}), finish(true)], [finish(false)]), () =>
+      Promise.resolve(null),
+    );
+    expect(emitted.filter((e) => e.type === "step")).toEqual([
+      { v: 1, type: "step", step: { id: "s_1", tool: "list_companies", state: "running" } },
+      { v: 1, type: "step", step: { id: "s_1", tool: "list_companies", state: "failed" } },
+    ]);
+  });
+
+  it("caps a step's count", () => {
+    expect(stepEnd({ found: Array.from({ length: MAX_STEP_COUNT + 5 }), truncated: false })).toEqual({
+      state: "done",
+      count: MAX_STEP_COUNT,
+    });
+    expect(stepEnd({ refused: "tool_limit" })).toEqual({ state: "failed" });
+  });
+
+  it("refuses a step frame that is malformed, over a cap, or carries anything else", () => {
+    const step = { id: "s_1", tool: "list_companies", state: "done", count: 3 };
+    expect(parseEvent({ v: 1, type: "step", step })).toEqual({ v: 1, type: "step", step });
+    for (const bad of [
+      { ...step, count: MAX_STEP_COUNT + 1 },
+      { ...step, count: -1 },
+      { ...step, count: 1.5 },
+      { ...step, tool: "fetch" },
+      { ...step, state: "paused" },
+      { ...step, id: "s 1" },
+      { ...step, id: "s".repeat(65) },
+      { ...step, args: { url: "https://evil.example" } },
+      { ...step, output: [{ name: "Kestrel" }] },
+    ]) {
+      expect(parseEvent({ v: 1, type: "step", step: bad }), JSON.stringify(bad)).toBeNull();
+    }
+    expect(parseEvent({ v: 1, type: "step", step, extra: true })).toBeNull();
+    expect(parseEvent({ v: 2, type: "step", step })).toBeNull();
   });
 
   it("fails the turn plainly when the model's stream fails", async () => {

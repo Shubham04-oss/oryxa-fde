@@ -347,3 +347,163 @@ describe("a turn's time limit", () => {
     expect(TURN_TIMEOUT_MS).toBeLessThanOrEqual(180_000);
   });
 });
+
+/** An API that never answers until its request is aborted, and says whether it was. */
+function hangingApi() {
+  const state = { aborted: false };
+  const api = {
+    fetch: (request: Request) =>
+      new Promise<Response>((_, reject) => {
+        request.signal.addEventListener("abort", () => {
+          state.aborted = true;
+          reject(request.signal.reason as Error);
+        });
+      }),
+  } as unknown as Fetcher;
+  return { api, state };
+}
+
+describe("stopping a turn", () => {
+  it("aborts a read in flight, keeps what was said, and ends with the stopped notice", async () => {
+    const { api, state } = hangingApi();
+    const emitted: Array<WireEvent> = [];
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    const stop = new AbortController();
+    const reader = apiReader(api, SESSION);
+    let settled = false;
+    const started = Date.now();
+    const running = runTurn({
+      model: readingModel("Looking. "),
+      binding: { conversation: "c_stop", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: (path, signal) => reader(path, signal).finally(() => (settled = true)),
+      emit: (event) => emitted.push(event),
+      out,
+      stop: stop.signal,
+    });
+    await new Promise((done) => setTimeout(done, 30));
+    expect(emitted.map((e) => e.type)).toContain("step");
+    stop.abort();
+    await running;
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(state.aborted).toBe(true);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(settled).toBe(true);
+    expect(out).toMatchObject({ text: "Looking. ", notice: "stopped" });
+    // The read's step ends as failed, once, and nothing reaches the stream after the notice.
+    const steps = emitted.flatMap((e) => (e.type === "step" ? [e.step.state] : []));
+    expect(steps).toEqual(["running", "failed"]);
+    expect(emitted.filter((e) => e.type === "notice")).toEqual([{ v: 1, type: "notice", notice: "stopped" }]);
+    expect(emitted.at(-1)?.type).not.toBe("text");
+  });
+
+  it("stops before it starts when the stop came first", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    await runTurn({
+      model: stuckModel(),
+      binding: { conversation: "c_stop_first", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: () => Promise.resolve(null),
+      emit: () => {},
+      out,
+      stop: stop.signal,
+    });
+    expect(out.notice).toBe("stopped");
+  });
+
+  // Each test as its own person, so the turns this file starts do not meet the per person rate.
+  const as = async (conversation: string) =>
+    bindingFor(conversation, { person: `user_stop_${crypto.randomUUID().slice(0, 8)}` });
+  const start = (conversation: string, binding: string, text: string) =>
+    call(`/internal/v1/conversations/${conversation}/turns`, {
+      method: "POST",
+      session: SLOW_SESSION,
+      body: { text },
+      binding,
+    });
+  const stopRoute = (conversation: string, turn: string, binding: string) =>
+    call(`/internal/v1/conversations/${conversation}/turns/${turn}/stop`, { method: "POST", binding });
+  const after = async (conversation: string, turn: string, last: number, binding: string) =>
+    readAll(
+      await call(`/internal/v1/conversations/${conversation}/turns/${turn}/events`, {
+        headers: { "last-event-id": String(last) },
+        binding,
+      }),
+    );
+  const viewOf = async (conversation: string, binding: string) =>
+    parseView(await (await call(`/internal/v1/conversations/${conversation}`, { binding })).json());
+
+  it("stops the running turn for the person who holds the conversation, through the Worker", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    const first = await start(conversation, binding, "What needs me today?");
+    expect(first.status).toBe(200);
+    // The turn's id, then its read starting: the API answers slowly, so the read is in flight.
+    const seen = await readSome(first, 2);
+    const turn = (seen[0]!.data as { turn: string }).turn;
+    expect(seen[1]!.data).toEqual({
+      v: 1,
+      type: "step",
+      step: { id: "s_1", tool: "read_today", state: "running" },
+    });
+    const stopped = await stopRoute(conversation, turn, binding);
+    expect(stopped.status).toBe(204);
+
+    const rest = await after(conversation, turn, seen[1]!.id!, binding);
+    expect(rest.filter((f) => f.event === null).map((f) => f.data)).toEqual([
+      { v: 1, type: "step", step: { id: "s_1", tool: "read_today", state: "failed" } },
+      { v: 1, type: "notice", notice: "stopped" },
+    ]);
+    expect(rest.at(-1)?.event).toBe("done");
+    expect((await viewOf(conversation, binding))![0]).toMatchObject({ id: turn, state: "done", notice: "stopped" });
+    // The conversation is free for the next message.
+    expect((await say(conversation, "hello", SESSION, binding)).response.status).toBe(200);
+  });
+
+  it("refuses someone else, and leaves the turn running", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    const first = await start(conversation, binding, "What needs me today?");
+    const seen = await readSome(first, 1);
+    const turn = (seen[0]!.data as { turn: string }).turn;
+    const other = await stopRoute(conversation, turn, await as(conversation));
+    expect(other.status).toBe(403);
+    expect(await other.json()).toEqual({ error: "not_your_conversation" });
+
+    const got = (await after(conversation, turn, seen[0]!.id!, binding))
+      .filter((f) => f.event === null)
+      .map((f) => f.data as { type: string });
+    expect(got.at(-1)).toMatchObject({ type: "proposal" });
+    expect(got.map((e) => e.type)).not.toContain("notice");
+  });
+
+  it("answers a conversation nobody has started as it answers someone else's, and binds nothing", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    const stopped = await stopRoute(conversation, "t_1", binding);
+    expect(stopped.status).toBe(403);
+    expect(await stopped.json()).toEqual({ error: "not_your_conversation" });
+    expect((await call(`/internal/v1/conversations/${conversation}`, { binding })).status).toBe(404);
+  });
+
+  it("does nothing when no turn is running, or the turn named is not the running one", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    const { events: got } = await say(conversation, NEW_COMPANY, SESSION, binding);
+    const turn = (got[0] as { turn: string }).turn;
+    expect((await stopRoute(conversation, turn, binding)).status).toBe(204);
+    expect((await stopRoute(conversation, "t_unknown", binding)).status).toBe(204);
+    expect((await viewOf(conversation, binding))![0]).toMatchObject({ state: "done", notice: null });
+
+    // A stale stop, for an earlier turn, leaves the running one alone.
+    const second = await start(conversation, binding, NEW_COMPANY);
+    expect((await stopRoute(conversation, turn, binding)).status).toBe(204);
+    const all = (await readAll(second)).filter((f) => f.event === null).map((f) => f.data as { type: string });
+    expect(all.at(-1)).toMatchObject({ type: "proposal" });
+  });
+});

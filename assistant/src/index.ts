@@ -15,13 +15,15 @@ export type Route =
   | { action: "view"; conversation: string }
   | { action: "turn"; conversation: string }
   | { action: "events"; conversation: string; turn: string }
-  | { action: "settle"; conversation: string; proposal: string };
+  | { action: "settle"; conversation: string; proposal: string }
+  | { action: "stop"; conversation: string; turn: string };
 
 /**
  * The route for `pathname`, or null. Not URI-decoded: an encoded `/` stays in an id and is refused.
  * - `GET  /internal/v1/conversations/<c>`: the conversation so far (JSON);
  * - `POST /internal/v1/conversations/<c>/turns`: a turn, answered with its stream (SSE);
  * - `GET  /internal/v1/conversations/<c>/turns/<t>/events`: a turn's stream again, from `Last-Event-ID` (SSE);
+ * - `POST /internal/v1/conversations/<c>/turns/<t>/stop`: stops the turn if it is running;
  * - `POST /internal/v1/conversations/<c>/proposals/<p>`: the person's answer to a proposal.
  */
 export function parseRoute(method: string, pathname: string): Route | "method" | null {
@@ -31,8 +33,9 @@ export function parseRoute(method: string, pathname: string): Route | "method" |
   const want = (m: string, route: Route) => (method === m ? route : "method");
   if (rest.length === 0) return want("GET", { action: "view", conversation });
   if (rest.length === 1 && rest[0] === "turns") return want("POST", { action: "turn", conversation });
-  if (rest.length === 3 && rest[0] === "turns" && validId(rest[1], 80) && rest[2] === "events") {
-    return want("GET", { action: "events", conversation, turn: rest[1] });
+  if (rest.length === 3 && rest[0] === "turns" && validId(rest[1], 80)) {
+    if (rest[2] === "events") return want("GET", { action: "events", conversation, turn: rest[1] });
+    if (rest[2] === "stop") return want("POST", { action: "stop", conversation, turn: rest[1] });
   }
   if (rest.length === 2 && rest[0] === "proposals" && validId(rest[1], 80)) {
     return want("POST", { action: "settle", conversation, proposal: rest[1] });
@@ -79,6 +82,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       if (typeof text !== "string") return json(400, "invalid_message");
       return conversation.turn(binding, text, session);
     }
+    case "stop":
+      return conversation.stop(binding, route.turn);
     case "settle": {
       const settle = Settle.safeParse(await jsonBody(request));
       if (!settle.success) return json(400, "invalid_outcome");

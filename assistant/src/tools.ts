@@ -2,6 +2,8 @@ import { tool } from "ai";
 import { z } from "zod";
 
 import type { Binding } from "./auth.js";
+import { MAX_STEP_COUNT } from "./catalogue/wire.js";
+import type { Step, StepTool } from "./catalogue/wire.js";
 import { MAX_TOOL_CALLS } from "./limits.js";
 
 // The tools the model may call to read (issue #236): read-only API routes from an explicit list, called as the
@@ -176,33 +178,56 @@ export function asData(source: string, output: ToolAnswer) {
   };
 }
 
+/** What a read's step says once it is over: how many records came back, capped, or that it failed. */
+export function stepEnd(answer: ToolAnswer): Pick<Step, "state" | "count"> {
+  return "found" in answer
+    ? { state: "done", count: Math.min(answer.found.length, MAX_STEP_COUNT) }
+    : { state: "failed" };
+}
+
 /**
  * The read tools for one turn. Each call counts against `MAX_TOOL_CALLS`; past it the API is not called and
- * `onLimit` says so once.
+ * `onLimit` says so once. Each read within it is a step: `onStep` hears it start and end, by tool name and
+ * count only, never its arguments or what it read.
  */
-export function readTools(binding: Binding, read: Reader, onLimit: () => void) {
+export function readTools(
+  binding: Binding,
+  read: Reader,
+  onLimit: () => void,
+  onStep: (step: Step) => void = () => {},
+) {
   let calls = 0;
-  const within = async (work: () => Promise<ToolAnswer>): Promise<ToolAnswer> => {
+  const within = async (tool: StepTool, work: () => Promise<ToolAnswer>): Promise<ToolAnswer> => {
     calls += 1;
     if (calls > MAX_TOOL_CALLS) {
       onLimit();
       return { refused: "tool_limit" };
     }
-    return work();
+    // Our own id, in call order: the model's call id is not trusted.
+    const id = `s_${calls}`;
+    onStep({ id, tool, state: "running" });
+    let answer: ToolAnswer = { unreadable: true };
+    try {
+      answer = await work();
+      return answer;
+    } finally {
+      onStep({ id, tool, ...stepEnd(answer) });
+    }
   };
   return {
     list_companies: tool({
       description: "List the companies this person works with, with their projects' names and stages.",
       inputSchema: z.strictObject({}),
       execute: (_, { abortSignal }) =>
-        within(async () => companiesAnswer(binding, await read("/v1/companies", abortSignal))),
+        within("list_companies", async () => companiesAnswer(binding, await read("/v1/companies", abortSignal))),
       toModelOutput: ({ output }) => asData("the companies list", output),
     }),
     read_today: tool({
       description: "Read what needs this person today: open work by kind, state, company and project.",
       inputSchema: z.strictObject({}),
-      execute: (_, { abortSignal }) => within(async () => todayAnswer(binding, await read("/v1/today", abortSignal))),
+      execute: (_, { abortSignal }) =>
+        within("read_today", async () => todayAnswer(binding, await read("/v1/today", abortSignal))),
       toModelOutput: ({ output }) => asData("today's work", output),
     }),
-  };
+  } satisfies Record<StepTool, unknown>;
 }

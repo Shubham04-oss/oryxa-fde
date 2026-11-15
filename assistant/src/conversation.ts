@@ -36,6 +36,8 @@ export class Conversation extends DurableObject<Env> {
   readonly lifecycle = Lifecycle.install<Env>(this).use(this.streams);
   /** The turn this instance is running, if any. Only one runs at a time. */
   #running: string | null = null;
+  /** Stops the running turn when the person asks (`stop`). */
+  #stopper: AbortController | null = null;
   #swept = false;
 
   onStart(): void {
@@ -108,6 +110,8 @@ export class Conversation extends DurableObject<Env> {
 
     const id = `t_${crypto.randomUUID().replaceAll("-", "")}`;
     this.#running = id;
+    const stopper = new AbortController();
+    this.#stopper = stopper;
     let writer: StreamWriter;
     try {
       if (again === "unbound") {
@@ -124,9 +128,10 @@ export class Conversation extends DurableObject<Env> {
     } catch (failure) {
       // The turn never started, so the conversation must not stay busy with it.
       this.#running = null;
+      this.#stopper = null;
       throw failure;
     }
-    this.ctx.waitUntil(this.#run(binding, id, words.data, session, model, writer));
+    this.ctx.waitUntil(this.#run(binding, id, words.data, session, model, writer, stopper.signal));
     await this.#touch();
     return sseResponse(this.streams, id, { from: 0, heartbeatMs: SSE_HEARTBEAT_MS });
   }
@@ -138,6 +143,7 @@ export class Conversation extends DurableObject<Env> {
     session: string,
     model: LanguageModel,
     writer: StreamWriter,
+    stop: AbortSignal,
   ): Promise<void> {
     const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
     try {
@@ -150,6 +156,7 @@ export class Conversation extends DurableObject<Env> {
         // A checked event is plain JSON; its type only lacks the index signature Streams asks for.
         emit: (event) => writer.append(event as unknown as StreamJson),
         out,
+        stop,
       });
       writer.close({ commit: () => this.#fold(id, out, "done") });
     } catch {
@@ -166,6 +173,7 @@ export class Conversation extends DurableObject<Env> {
       }
     } finally {
       this.#running = null;
+      this.#stopper = null;
     }
   }
 
@@ -256,6 +264,18 @@ export class Conversation extends DurableObject<Env> {
     ).rowsWritten;
     if (changed === 0) return refuse(404, "not_found");
     await this.#touch();
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Stops `turn` if it is the one running, for the person who holds the conversation: it ends with the `stopped`
+   * notice, keeping what it had said. Anyone else is refused alike whether the conversation exists or not, and a
+   * turn that is not running (finished, unknown, or another's id) is a no-op, so the answer tells nothing more.
+   */
+  async stop(binding: Binding, turn: string): Promise<Response> {
+    await this.#ready();
+    if (this.#check(binding) !== null) return refuse(403, "not_your_conversation");
+    if (this.#running === turn) this.#stopper?.abort();
     return new Response(null, { status: 204 });
   }
 
