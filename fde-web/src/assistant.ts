@@ -70,11 +70,20 @@ const MAX_BODY_BYTES = 16 * 1024
 
 const refuse = (status: number, error: string) => Response.json({ error }, { status })
 
-/** A refusal from the API, passed on as it is; anything else that fails becomes a 502. */
+/** A refusal from the API (401 or 403), passed on; anything else that fails becomes a 502. */
 class Refused extends Error {
   constructor(readonly response: Response) {
     super("refused")
   }
+}
+
+/** Another service's answer, with only its status, type and body: it sets nothing else on the browser. */
+function passOn(answer: Response): Response {
+  const type = answer.headers.get("content-type")
+  return new Response(answer.body, {
+    status: answer.status,
+    headers: { ...(type ? { "content-type": type } : {}), "cache-control": "no-store" },
+  })
 }
 
 /** A read of the API, as the browser's session, given up after `CHECK_TIMEOUT_MS`. */
@@ -86,6 +95,8 @@ function asking(request: Request, api: Upstream, path: string): Promise<Response
     new Request(new URL(path, api.origin), {
       headers,
       redirect: "manual",
+      // Who someone is, and what they may use, is asked fresh every time.
+      cache: "no-store",
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     }),
   )
@@ -94,7 +105,8 @@ function asking(request: Request, api: Upstream, path: string): Promise<Response
 /** Asks the API, as the browser's session, and answers with the parsed body. */
 async function ask(request: Request, api: Upstream, path: string): Promise<unknown> {
   const response = await asking(request, api, path)
-  if (!response.ok) throw new Refused(response)
+  if (response.status === 401 || response.status === 403) throw new Refused(response)
+  if (!response.ok) throw new Error("api")
   return response.json()
 }
 
@@ -142,7 +154,7 @@ async function start(request: Request, api: Upstream, company: string | null): P
     }),
   )
   // A refusal (signed out, no right to the company) is passed on; anything else unexpected is a 502.
-  if (response.status >= 400 && response.status < 500) return new Response(response.body, response)
+  if (response.status >= 400 && response.status < 500) return passOn(response)
   if (response.status !== 201) return refuse(502, "bad_gateway")
   const made = (await response.json().catch(() => null)) as {
     id?: unknown
@@ -248,8 +260,7 @@ export async function openAssistant(
     check(request, api, conversation, company),
   ])
   if (me.status === "rejected") {
-    if (me.reason instanceof Refused)
-      return new Response(me.reason.response.body, me.reason.response)
+    if (me.reason instanceof Refused) return passOn(me.reason.response)
     return refuse(502, "bad_gateway")
   }
   // Not theirs, bound elsewhere and not there at all are one answer, so it says nothing of whose it is.
@@ -292,10 +303,5 @@ export async function openAssistant(
       { method: request.method, headers, body, redirect: "manual" },
     ),
   )
-  // Only its status, type and body come back: the assistant sets nothing else on the browser.
-  const type = answer.headers.get("content-type")
-  return new Response(answer.body, {
-    status: answer.status,
-    headers: { ...(type ? { "content-type": type } : {}), "cache-control": "no-store" },
-  })
+  return passOn(answer)
 }

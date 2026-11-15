@@ -55,7 +55,9 @@ describe("SessionGate", () => {
     expect(router.state.location.search).toEqual({ return_to: "/companies/cmp_lumen?tab=x" })
   })
 
-  it("signs out to sign-in and forgets the session's reads", async () => {
+  it("signs out to sign-in and forgets the session's reads, conversation and waiting messages", async () => {
+    window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_mine", "Only the blocked ones")
     const { router, queryClient } = renderWithRouter(
       <SessionGate>
         <p>Canvas</p>
@@ -68,5 +70,7 @@ describe("SessionGate", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/sign-in"))
     expect(queryClient.getQueryData(["companies"])).toBeUndefined()
+    expect(window.localStorage.getItem("fde.assistant.home")).toBeNull()
+    expect(window.sessionStorage.getItem("fde.assistant.waiting.cnv_mine")).toBeNull()
   })
 })

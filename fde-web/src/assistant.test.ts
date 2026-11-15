@@ -377,20 +377,39 @@ describe("stopping a turn through this app", () => {
     expect(unseen).not.toHaveBeenCalled()
   })
 
-  it("refuses when the API times out (502) or fails (its own 5xx), and never reaches the assistant", async () => {
-    for (const [answer, status] of [
-      [
-        () => {
-          throw new DOMException("The operation timed out.", "TimeoutError")
-        },
-        502,
-      ],
-      [() => Response.json({ error: "internal" }, { status: 500 }), 500],
-      [() => Response.json({ error: "unavailable" }, { status: 503 }), 503],
-    ] as const) {
+  it("refuses with 502 when the API times out, fails or redirects, and never reaches the assistant", async () => {
+    for (const answer of [
+      () => {
+        throw new DOMException("The operation timed out.", "TimeoutError")
+      },
+      () => Response.json({ error: "internal" }, { status: 500 }),
+      () => Response.json({ error: "unavailable" }, { status: 503 }),
+      () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example" } }),
+    ]) {
       const { env, assistant: helper } = setup(apiBinding(answer))
       const response = await call(stop(), env)
+      expect(response.status).toBe(502)
+      expect(await response.json()).toEqual({ error: "bad_gateway" })
+      expect(helper).not.toHaveBeenCalled()
+    }
+  })
+
+  it("passes on who-are-you refusals with only their status, type and body", async () => {
+    for (const status of [401, 403]) {
+      const { env, assistant: helper } = setup(
+        apiBinding(() =>
+          Response.json(
+            { error: "refused" },
+            { status, headers: { "set-cookie": "planted=1", "x-other": "1" } },
+          ),
+        ),
+      )
+      const response = await call(stop(), env)
       expect(response.status).toBe(status)
+      expect(await response.json()).toEqual({ error: "refused" })
+      expect(response.headers.get("set-cookie")).toBeNull()
+      expect(response.headers.get("x-other")).toBeNull()
+      expect(response.headers.get("cache-control")).toBe("no-store")
       expect(helper).not.toHaveBeenCalled()
     }
   })
@@ -512,9 +531,13 @@ describe("the API's check on every call", () => {
   it("gives up on the check after a while, with the request's own deadline", async () => {
     const { env, api } = setup()
     await call(routes("/assistant/conversations/c_1").view(), env)
-    const checked = api.mock.calls.find(([r]) => r.url.includes("/check"))![0]
-    expect(checked.signal.aborted).toBe(false)
-    expect(checked.redirect).toBe("manual")
+    for (const [asked] of api.mock.calls) {
+      expect(asked.signal.aborted).toBe(false)
+      expect(asked.redirect).toBe("manual")
+      // Never answered from a cache: who the person is and what they may use is asked fresh.
+      expect(asked.cache).toBe("no-store")
+    }
+    expect(api).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -555,6 +578,22 @@ describe("a new conversation through this app", () => {
       403,
     )
     expect((await call(start(undefined, { cookie: "theme=dark" }), env)).status).toBe(401)
+    // A refusal comes back with its status, type and body alone.
+    const refused = await call(
+      start(),
+      setup(
+        apiBinding(() =>
+          Response.json(
+            { error: "forbidden" },
+            { status: 403, headers: { "set-cookie": "planted=1" } },
+          ),
+        ),
+      ).env,
+    )
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toEqual({ error: "forbidden" })
+    expect(refused.headers.get("set-cookie")).toBeNull()
+    expect(refused.headers.get("cache-control")).toBe("no-store")
     for (const answer of [
       () => {
         throw new DOMException("The operation timed out.", "TimeoutError")

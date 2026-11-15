@@ -13,11 +13,11 @@ export function apiPath(url: URL): string | null {
 }
 
 /**
- * Whether a call is one of the assistant's conversation writes, which only this server sends (append a turn,
+ * Whether a call is one of the assistant's conversation writes, which the browser never sends (append a turn,
  * answer a proposal: PUT `/v1/assistant/conversations/{c}/turns/{n}` and `.../turns/{n}/proposals/{p}`), so the
- * browser cannot write the stored transcript by hand. Every method but a read, on any path under a conversation's
+ * stored transcript cannot be written by hand. Every method but a read, on any path under a conversation's
  * `turns`, after decoding, in lower case and with runs of slashes as one, so no spelling slips through; a path that
- * cannot be decoded counts as one. The API's own writes from this server (src/assistant.ts) do not come this way.
+ * cannot be decoded counts as one.
  */
 export function relayOnly(method: string, path: string): boolean {
   if (method === "GET" || method === "HEAD") return false

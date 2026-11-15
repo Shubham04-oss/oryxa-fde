@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react"
 import type { Block } from "@/lib/workspace/blocks"
 import {
   CONVERSATION_ID,
+  CONVERSATION_TEXT,
+  HOME_KEY,
   NOTICE_TEXT,
   REFUSAL_TEXT,
   WAITING_PREFIX,
@@ -23,8 +25,6 @@ import type { Reply } from "@/lib/workspace/welcome"
 // While a turn runs the person can stop it (issue #264), and a message typed meanwhile waits, one at
 // most, until the turn ends: it is sent then, or handed back to edit if the turn was stopped or failed.
 
-/** Where this browser keeps the home conversation's id. Not a secret: the API checks whose it is. */
-const STORED = "fde.assistant.home"
 // A short pause before a scripted reply, so it reads as an answer; none in tests.
 const THINK_MS = import.meta.env.MODE === "test" ? 0 : 450
 
@@ -100,8 +100,11 @@ type How = "done" | "stopped" | "failed"
 /** A message handed back to the box: queued while a turn ran that was then stopped or failed, or taken back to edit. */
 export type Returned = {
   text: string
-  /** `reload`: it was waiting when the page reloaded, and is never sent without the person. */
-  why: "stopped" | "failed" | "edit" | "reload"
+  /**
+   * `reload`: it was waiting when the page reloaded, and is never sent without the person. `gone` and
+   * `unstarted`: it never reached a conversation, and the reply says why.
+   */
+  why: "stopped" | "failed" | "edit" | "reload" | "gone" | "unstarted"
   at: number
 }
 
@@ -134,8 +137,11 @@ function takeWaiting(conversation: string): string | null {
 
 function readStored() {
   try {
-    const id = window.localStorage.getItem(STORED)
-    return id && CONVERSATION_ID.test(id) ? id : null
+    const id = window.localStorage.getItem(HOME_KEY)
+    if (id !== null && CONVERSATION_ID.test(id)) return id
+    // An id from before the API made them (`c_...`), or anything else: never used, so not kept.
+    if (id !== null) window.localStorage.removeItem(HOME_KEY)
+    return null
   } catch {
     return null
   }
@@ -143,8 +149,8 @@ function readStored() {
 
 function store(id: string | null) {
   try {
-    if (id === null) window.localStorage.removeItem(STORED)
-    else window.localStorage.setItem(STORED, id)
+    if (id === null) window.localStorage.removeItem(HOME_KEY)
+    else window.localStorage.setItem(HOME_KEY, id)
   } catch {
     // Without storage the conversation lasts as long as the tab.
   }
@@ -217,6 +223,18 @@ export function useConversation(scripted: (said: string) => Reply) {
     if (message === null) return
     if (how === "done") void run(message)
     else setReturned({ text: message, why: how, at: Date.now() })
+  }
+
+  /**
+   * The message never reached the assistant: `line` says why in the reply, and the message goes back in the box,
+   * with one that was waiting after it, for the person to send again; it is never resent by itself.
+   */
+  const handBack = (reply: number, text: string, line: string, why: "gone" | "unstarted") => {
+    update(reply, (t) => ({ ...t, text: line, streaming: false }))
+    const held = waiting.current
+    hold(null)
+    end("failed")
+    setReturned({ text: held === null ? text : `${text}\n${held}`, why, at: Date.now() })
   }
 
   // Whether the assistant answers here, and the conversation so far, with a live turn followed.
@@ -331,8 +349,7 @@ export function useConversation(scripted: (said: string) => Reply) {
         return
       }
       if (made.kind === "refused") {
-        update(reply, (t) => ({ ...t, text: REFUSAL_TEXT.unknown, streaming: false }))
-        end("failed")
+        handBack(reply, text, CONVERSATION_TEXT.unstarted, "unstarted")
         return
       }
       conversation.current = made.id
@@ -344,6 +361,16 @@ export function useConversation(scripted: (said: string) => Reply) {
       if (event.type === "notice") notice = event.notice
       update(reply, (t) => applyEvent(t, event))
     })
+    if (ended.kind === "gone") {
+      // No longer this person's (another sign-in, or access lost): it and what waited on it are dropped, and
+      // the next message starts a new one.
+      const gone = conversation.current
+      handBack(reply, text, CONVERSATION_TEXT.gone, "gone")
+      conversation.current = ""
+      store(null)
+      keepWaiting(gone, null)
+      return
+    }
     let how: How = "failed"
     if (ended.kind === "off") how = await answerScripted()
     else if (ended.kind === "refused")
