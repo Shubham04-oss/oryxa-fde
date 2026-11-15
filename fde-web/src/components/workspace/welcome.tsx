@@ -60,7 +60,7 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
     setFocusTo(null)
   }, [focusTo])
   // Until the API has answered, the scripted reply knows nothing of the day, so it never claims an all clear.
-  const { turns, thinking, stopping, queued, returned, say, stop, unqueue, settle } =
+  const { turns, thinking, stopping, queued, full, returned, say, stop, unqueue, settle } =
     useConversation((text) => replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null))
 
   return (
@@ -81,18 +81,26 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         {turns.length > 0 && <Thread turns={turns} thinking={thinking} onSettle={settle} />}
 
         <div className="grid gap-3">
-          {queued !== null && (
-            <p className="flex min-w-0 items-center gap-2 text-meta text-muted-foreground">
-              <span className="truncate">Sends when this answer ends: {queued}</span>
-              <button
-                type="button"
-                onClick={unqueue}
-                className="flex-none rounded-sm text-soft underline-offset-4 hover:text-foreground hover:underline"
-              >
-                Edit
-              </button>
-            </p>
-          )}
+          {/* Always there, so a screen reader hears the waiting message once it is taken. */}
+          <div role="status" className="grid gap-1 text-meta text-muted-foreground empty:hidden">
+            {queued !== null && (
+              <p className="flex min-w-0 items-center gap-2">
+                <span className="truncate">Sends when this answer ends: {queued}</span>
+                <button
+                  type="button"
+                  onClick={unqueue}
+                  className="flex-none rounded-sm text-soft underline-offset-4 hover:text-foreground hover:underline"
+                >
+                  Edit
+                </button>
+              </p>
+            )}
+            {queued !== null && full && (
+              <p>
+                One message is already waiting. Send this one after it has gone, or edit that one.
+              </p>
+            )}
+          </div>
           <Composer
             onSend={say}
             busy={thinking}
@@ -102,7 +110,13 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
           />
           {/* Takes no room unless a message came back to the box. */}
           <p role="status" className="text-meta text-muted-foreground empty:hidden">
-            {returned && returned.why !== "edit" && (
+            {returned?.why === "reload" && (
+              <span>
+                Your message was still waiting when the page reloaded. It is back in the box, not
+                sent.
+              </span>
+            )}
+            {(returned?.why === "stopped" || returned?.why === "failed") && (
               <span>
                 Not sent, because the answer{" "}
                 {returned.why === "stopped" ? "was stopped" : "didn't finish"}. Your message is back
@@ -345,7 +359,11 @@ export function Composer({
             type="button"
             aria-label="Stop"
             disabled={stopping}
-            onClick={onStop}
+            onClick={() => {
+              onStop()
+              // The button goes once the turn ends: focus waits in the box, ready for the next message.
+              box.current?.focus()
+            }}
             className="ml-auto grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,opacity,transform] duration-150 hover:bg-primary/85 disabled:bg-selected disabled:text-muted-foreground motion-safe:active:scale-[0.94]"
           >
             <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />

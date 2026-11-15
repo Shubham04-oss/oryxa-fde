@@ -113,7 +113,8 @@ export async function runTurn(input: TurnInput): Promise<void> {
     if (open && checked !== null) input.emit(checked);
   };
   const notice = (n: Notice) => {
-    if (out.notice !== null) return;
+    // A stop after the tool limit still ended reads in flight, so the person's stop is the true end; else the first stands.
+    if (out.notice !== null && !(n === "stopped" && out.notice === "tool_limit")) return;
     out.notice = n;
     emit({ v: WIRE_VERSION, type: "notice", notice: n });
   };

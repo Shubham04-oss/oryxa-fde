@@ -8,6 +8,7 @@ import { mockApi } from "@/dev/mock-api"
 import { Home } from "@/components/home"
 import { NOTICE_TEXT, TURN_DEADLINE_MS } from "@/lib/workspace/assistant"
 import type { Block } from "@/lib/workspace/blocks"
+import { MAX_SAID } from "@/lib/workspace/wire"
 import { renderWithRouter } from "@/test/render"
 import { installWire, resetWire, wire } from "@/test/wire"
 
@@ -437,7 +438,8 @@ describe("the conversation with the assistant", () => {
   const frames = (events: Array<unknown>) =>
     `${events.map((e, i) => `id: ${i}\ndata: ${JSON.stringify(e)}\n\n`).join("")}event: done\ndata: {}\n\n`
   let turnAnswer: () => Response = () => new Response(null, { status: 500 })
-  let onStop = () => {}
+  /** What the stop route does; it answers 204 unless this returns another answer. */
+  let onStop: () => Response | void = () => {}
 
   /** A turn's stream the test writes to as it goes, as the assistant would. */
   function liveTurn() {
@@ -455,6 +457,8 @@ describe("the conversation with the assistant", () => {
       },
     }
   }
+  const waitingKeys = () =>
+    Object.keys(window.sessionStorage).filter((k) => k.startsWith("fde.assistant.waiting."))
   const turnsSent = () => asked.filter((a) => a.path.endsWith("/turns")).map((a) => a.body)
 
   beforeEach(() => {
@@ -470,16 +474,14 @@ describe("the conversation with the assistant", () => {
       if (/^\/assistant\/conversations\/c_\w+$/.test(pathname))
         return Response.json({ error: "no_conversation" }, { status: 404 })
       if (pathname.endsWith("/turns")) return turnAnswer()
-      if (pathname.endsWith("/stop")) {
-        onStop()
-        return new Response(null, { status: 204 })
-      }
+      if (pathname.endsWith("/stop")) return onStop() ?? new Response(null, { status: 204 })
       if (pathname.includes("/proposals/")) return new Response(null, { status: 204 })
       return Response.json({ error: "not_found" }, { status: 404 })
     }
   })
   afterEach(() => {
     mockApi.fetch = original.fetch
+    for (const key of waitingKeys()) window.sessionStorage.removeItem(key)
   })
 
   const said = async (text: string) => {
@@ -593,6 +595,8 @@ describe("the conversation with the assistant", () => {
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
 
     await userEvent.click(screen.getByRole("button", { name: "Stop" }))
+    // Focus waits in the box, ready for the next message, not on a button that is about to go.
+    expect(screen.getByRole("textbox", { name: "What do you want to work on?" })).toHaveFocus()
     // What was said stays, the read says it did not finish, and the reply ends plainly.
     expect(await within(log).findByText(NOTICE_TEXT.stopped)).toBeInTheDocument()
     expect(within(log).getByText("Couldn't read today's work")).toBeInTheDocument()
@@ -643,6 +647,11 @@ describe("the conversation with the assistant", () => {
     await said("And next week?")
     const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
     expect(box).toHaveValue("And next week?")
+    expect(
+      screen.getByText(
+        "One message is already waiting. Send this one after it has gone, or edit that one.",
+      ),
+    ).toBeInTheDocument()
     expect(turnsSent()).toEqual([{ text: "What needs me today?" }])
 
     first.push({ v: 1, type: "text", delta: "Two things are open." })
@@ -703,6 +712,74 @@ describe("the conversation with the assistant", () => {
     ).toBeInTheDocument()
     await waitFor(() => expect(box).toHaveValue("Only the blocked ones"))
     expect(turnsSent()).toHaveLength(1)
+  })
+
+  it("lets Stop be pressed again when the assistant did not take it, and the turn goes on as usual", async () => {
+    const first = liveTurn()
+    const answers = [
+      first.response,
+      () =>
+        new Response(frames([{ v: 1, type: "turn", turn: "t_2", said: "And tomorrow?" }]), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    ]
+    turnAnswer = () => answers.shift()!()
+    onStop = () => Response.json({ error: "bad_gateway" }, { status: 502 })
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("What needs me today?")
+    first.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("And tomorrow?")
+    const stopButton = await screen.findByRole("button", { name: "Stop" })
+    await userEvent.click(stopButton)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled())
+
+    first.push({ v: 1, type: "text", delta: "Two things are open." })
+    first.end()
+    // It was not stopped, so it says nothing of a stop, and the waiting message goes as usual.
+    await waitFor(() =>
+      expect(turnsSent()).toEqual([{ text: "What needs me today?" }, { text: "And tomorrow?" }]),
+    )
+    expect(within(log).queryByText(NOTICE_TEXT.stopped)).toBeNull()
+    expect(screen.queryByText(/^Not sent/)).toBeNull()
+  })
+
+  it("keeps a waiting message across a reload, back in the box and never sent by itself", async () => {
+    const turn = liveTurn()
+    turnAnswer = turn.response
+    const first = renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    await said("What needs me today?")
+    turn.push({ v: 1, type: "turn", turn: "t_1", said: "What needs me today?" })
+    await said("Only the blocked ones")
+    expect(
+      await screen.findByText("Sends when this answer ends: Only the blocked ones"),
+    ).toBeInTheDocument()
+    first.unmount()
+
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const box = await screen.findByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("Only the blocked ones"))
+    expect(
+      screen.getByText(
+        "Your message was still waiting when the page reloaded. It is back in the box, not sent.",
+      ),
+    ).toBeInTheDocument()
+    expect(turnsSent()).toEqual([{ text: "What needs me today?" }])
+    // Taken once: a second reload does not bring it back again.
+    expect(waitingKeys()).toEqual([])
+    turn.end()
+  })
+
+  it("puts back no more of a kept message than one message may hold", async () => {
+    window.localStorage.setItem("fde.assistant.home", "c_capped")
+    window.sessionStorage.setItem("fde.assistant.waiting.c_capped", "x".repeat(MAX_SAID + 50))
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const box = await screen.findByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("x".repeat(MAX_SAID)))
+    expect(turnsSent()).toEqual([])
   })
 
   it("says plainly why a turn was refused", async () => {

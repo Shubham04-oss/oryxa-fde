@@ -5,12 +5,14 @@ import { describe, expect, it } from "vitest";
 import { parseView } from "../src/catalogue/wire.js";
 import type { Conversation } from "../src/conversation.js";
 import { MAX_REPLY, MAX_TURNS } from "../src/catalogue/wire.js";
-import { PersonTurns, TURNS_PER_WINDOW, TURN_TIMEOUT_MS } from "../src/limits.js";
+import { MAX_TOOL_CALLS, PersonTurns, TURNS_PER_WINDOW, TURN_TIMEOUT_MS } from "../src/limits.js";
 import { apiReader } from "../src/tools.js";
 import { runTurn } from "../src/turn.js";
 import type { Folded } from "../src/turn.js";
 import type { WireEvent } from "../src/catalogue/wire.js";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
+import { MockLanguageModelV4 } from "ai/test";
+import { streamOf } from "../src/model/fake.js";
 import { SESSION, SLOW_SESSION } from "./fake-api.js";
 import { PERSON, TENANT, bindingFor, call, freshConversation, readAll, readSome, replyText, say } from "./helpers.js";
 
@@ -205,6 +207,11 @@ describe("limits", () => {
   });
 });
 
+const USAGE = {
+  inputTokens: { total: 0, noCache: 0, cacheRead: undefined, cacheWrite: undefined },
+  outputTokens: { total: 0, text: 0, reasoning: undefined },
+};
+
 /** A model that starts its answer and then never finishes it, as a stuck provider would. */
 function stuckModel(): LanguageModelV4 {
   return {
@@ -348,12 +355,18 @@ describe("a turn's time limit", () => {
   });
 });
 
-/** An API that never answers until its request is aborted, and says whether it was. */
+/** Waits until `check` holds, looking again after each turn of the event loop. */
+async function until(check: () => boolean): Promise<void> {
+  while (!check()) await new Promise((done) => setTimeout(done, 0));
+}
+
+/** An API that never answers until its request is aborted, and says whether it was asked and aborted. */
 function hangingApi() {
-  const state = { aborted: false };
+  const state = { aborted: false, reading: false };
   const api = {
     fetch: (request: Request) =>
       new Promise<Response>((_, reject) => {
+        state.reading = true;
         request.signal.addEventListener("abort", () => {
           state.aborted = true;
           reject(request.signal.reason as Error);
@@ -382,7 +395,8 @@ describe("stopping a turn", () => {
       out,
       stop: stop.signal,
     });
-    await new Promise((done) => setTimeout(done, 30));
+    // Stop once the read is in flight and the text before it has gone out, however long that takes.
+    await until(() => state.reading && emitted.some((e) => e.type === "text"));
     expect(emitted.map((e) => e.type)).toContain("step");
     stop.abort();
     await running;
@@ -397,6 +411,53 @@ describe("stopping a turn", () => {
     expect(steps).toEqual(["running", "failed"]);
     expect(emitted.filter((e) => e.type === "notice")).toEqual([{ v: 1, type: "notice", notice: "stopped" }]);
     expect(emitted.at(-1)?.type).not.toBe("text");
+  });
+
+  it("ends as stopped when the person stops after the tool limit, while reads are still in flight", async () => {
+    const { api, state } = hangingApi();
+    const reader = apiReader(api, SESSION);
+    const emitted: Array<WireEvent> = [];
+    const out: Folded = { text: "", blocks: [], proposals: [], notice: null };
+    const stop = new AbortController();
+    const calls = Array.from({ length: MAX_TOOL_CALLS + 1 }, (_, i) => ({
+      type: "tool-call" as const,
+      toolCallId: `call-${i}`,
+      toolName: "list_companies",
+      input: "{}",
+    }));
+    const running = runTurn({
+      model: new MockLanguageModelV4({
+        doStream: () =>
+          Promise.resolve({
+            stream: streamOf([
+              { type: "stream-start", warnings: [] },
+              ...calls,
+              { type: "finish", usage: USAGE, finishReason: { unified: "tool-calls", raw: undefined } },
+            ]),
+          }),
+      }),
+      binding: { conversation: "c_stop_limit", tenant: TENANT, person: PERSON, company: null },
+      said: "hello",
+      history: [],
+      read: reader,
+      emit: (event) => emitted.push(event),
+      out,
+      stop: stop.signal,
+    });
+    // The fifth read is refused at once while the first four still wait on the API: then the person stops.
+    await until(() => emitted.some((e) => e.type === "notice"));
+    expect(emitted.filter((e) => e.type === "notice")).toEqual([{ v: 1, type: "notice", notice: "tool_limit" }]);
+    stop.abort();
+    await running;
+
+    expect(state.aborted).toBe(true);
+    expect(out.notice).toBe("stopped");
+    expect(emitted.filter((e) => e.type === "notice").map((e) => e.type === "notice" && e.notice)).toEqual([
+      "tool_limit",
+      "stopped",
+    ]);
+    const ends = emitted.flatMap((e) => (e.type === "step" && e.step.state !== "running" ? [e.step.state] : []));
+    expect(ends).toEqual(Array.from({ length: MAX_TOOL_CALLS }, () => "failed"));
   });
 
   it("stops before it starts when the stop came first", async () => {

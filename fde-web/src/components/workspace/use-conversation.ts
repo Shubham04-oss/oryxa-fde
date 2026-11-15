@@ -10,7 +10,7 @@ import {
   settleProposal,
   stopTurn,
 } from "@/lib/workspace/assistant"
-import { MAX_READ_STEPS } from "@/lib/workspace/wire"
+import { MAX_READ_STEPS, MAX_SAID } from "@/lib/workspace/wire"
 import type { Notice, Proposal, ProposalState, Step, Turn, WireEvent } from "@/lib/workspace/wire"
 import type { Reply } from "@/lib/workspace/welcome"
 
@@ -92,7 +92,39 @@ function finished(turn: WorkspaceTurn, ended: "done" | "failed" | "timed_out"): 
 }
 
 /** A message handed back to the box: queued while a turn ran that was then stopped or failed, or taken back to edit. */
-export type Returned = { text: string; why: "stopped" | "failed" | "edit"; at: number }
+export type Returned = {
+  text: string
+  /** `reload`: it was waiting when the page reloaded, and is never sent without the person. */
+  why: "stopped" | "failed" | "edit" | "reload"
+  at: number
+}
+
+/** Where this tab keeps a waiting message, per conversation, so a reload does not lose it. */
+const waitingKey = (conversation: string) => `fde.assistant.waiting.${conversation}`
+
+/** Keeps `text` for this tab, cut to a message's own limit, or forgets it; without storage it lasts as long as the page. */
+function keepWaiting(conversation: string, text: string | null) {
+  if (!conversation) return
+  try {
+    if (text === null) window.sessionStorage.removeItem(waitingKey(conversation))
+    else
+      window.sessionStorage.setItem(waitingKey(conversation), [...text].slice(0, MAX_SAID).join(""))
+  } catch {
+    // Kept in memory only.
+  }
+}
+
+/** The message that was waiting in this tab, once: it is taken out of storage as it is read. */
+function takeWaiting(conversation: string): string | null {
+  try {
+    const text = window.sessionStorage.getItem(waitingKey(conversation))
+    window.sessionStorage.removeItem(waitingKey(conversation))
+    const kept = text === null ? "" : [...text].slice(0, MAX_SAID).join("").trim()
+    return kept === "" ? null : kept
+  } catch {
+    return null
+  }
+}
 
 function readStored() {
   try {
@@ -117,6 +149,8 @@ export function useConversation(scripted: (said: string) => Reply) {
   const [stopping, setStopping] = useState(false)
   const [queued, setQueued] = useState<string | null>(null)
   const [returned, setReturned] = useState<Returned | null>(null)
+  /** The person pressed Enter while a message was already waiting: the screen says why nothing happened. */
+  const [full, setFull] = useState(false)
   const mode = useRef<Promise<"on" | "off"> | null>(null)
   const conversation = useRef("")
   const next = useRef(0)
@@ -125,6 +159,26 @@ export function useConversation(scripted: (said: string) => Reply) {
   const waiting = useRef<string | null>(null)
   /** The running turn's id once its stream names it, and whether the person asked to stop it. */
   const live = useRef<{ turn: string | null; stop: boolean }>({ turn: null, stop: false })
+
+  /** Sets the waiting message, here and in this tab's storage. */
+  const hold = (text: string | null) => {
+    waiting.current = text
+    setQueued(text)
+    setFull(false)
+    keepWaiting(conversation.current, text)
+  }
+
+  /**
+   * Sends the stop for `turn`. If the assistant did not take it (refused, or unreachable), the turn is not
+   * stopping after all: the flag clears and Stop can be pressed again.
+   */
+  const askStop = (turn: string) => {
+    void stopTurn(conversation.current, turn).then((taken) => {
+      if (taken || live.current.turn !== turn) return
+      live.current.stop = false
+      setStopping(false)
+    })
+  }
 
   const update = (id: number, change: (turn: WorkspaceTurn) => WorkspaceTurn) =>
     setTurns((all) => all.map((t) => (t.id === id && t.who === "workspace" ? change(t) : t)))
@@ -139,7 +193,7 @@ export function useConversation(scripted: (said: string) => Reply) {
   const heard = (event: WireEvent) => {
     if (event.type !== "turn" || live.current.turn !== null) return
     live.current.turn = event.turn
-    if (live.current.stop && conversation.current) void stopTurn(conversation.current, event.turn)
+    if (live.current.stop && conversation.current) askStop(event.turn)
   }
 
   /** The turn is over: the waiting message goes now if it went well, and back to the box if not. */
@@ -150,8 +204,7 @@ export function useConversation(scripted: (said: string) => Reply) {
     setThinking(false)
     setStopping(false)
     const message = waiting.current
-    waiting.current = null
-    setQueued(null)
+    hold(null)
     if (message === null) return
     if (ok && !stopped) void run(message)
     else setReturned({ text: message, why: stopped ? "stopped" : "failed", at: Date.now() })
@@ -173,6 +226,9 @@ export function useConversation(scripted: (said: string) => Reply) {
       if (!mounted.current) return "on"
       const shown = opened.turns.flatMap((t) => fromView(t, (next.current += 2)))
       setTurns(shown)
+      // A message that was waiting when the page reloaded goes back in the box; it is never sent by itself.
+      const kept = takeWaiting(id)
+      if (kept !== null) setReturned({ text: kept, why: "reload", at: Date.now() })
       const running = opened.turns.find((t) => t.state === "live")
       const liveTurn = shown.at(-1)
       if (running && liveTurn?.who === "workspace" && !busy.current) {
@@ -203,9 +259,11 @@ export function useConversation(scripted: (said: string) => Reply) {
       void run(text)
       return true
     }
-    if (waiting.current !== null) return false
-    waiting.current = text
-    setQueued(text)
+    if (waiting.current !== null) {
+      setFull(true)
+      return false
+    }
+    hold(text)
     return true
   }
 
@@ -213,8 +271,7 @@ export function useConversation(scripted: (said: string) => Reply) {
   function unqueue() {
     const message = waiting.current
     if (message === null) return
-    waiting.current = null
-    setQueued(null)
+    hold(null)
     setReturned({ text: message, why: "edit", at: Date.now() })
   }
 
@@ -224,7 +281,7 @@ export function useConversation(scripted: (said: string) => Reply) {
     live.current.stop = true
     setStopping(true)
     const turn = live.current.turn
-    if (turn !== null && conversation.current) void stopTurn(conversation.current, turn)
+    if (turn !== null && conversation.current) askStop(turn)
   }
 
   async function run(text: string) {
@@ -277,7 +334,7 @@ export function useConversation(scripted: (said: string) => Reply) {
     if (conversation.current) void settleProposal(conversation.current, proposal, outcome)
   }
 
-  return { turns, thinking, stopping, queued, returned, say, stop, unqueue, settle }
+  return { turns, thinking, stopping, queued, full, returned, say, stop, unqueue, settle }
 }
 
 /** Whether a reply ended so that a message typed meanwhile should not go on as if it had answered. */
