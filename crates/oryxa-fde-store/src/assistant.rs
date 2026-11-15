@@ -22,8 +22,8 @@ pub const MAX_TURNS: u32 = 50;
 pub const MAX_CONVERSATIONS: i64 = 200;
 /// The longest message a person may send (`MAX_SAID`).
 pub const MAX_SAID_CHARS: usize = 2000;
-/// The most text one reply holds (`MAX_REPLY`), in UTF-16 code units as the web's `z.string().max`
-/// counts it.
+/// The most text one reply holds (`MAX_REPLY`), in UTF-16 code units. The web's zod 4 check counts
+/// code points, never more than UTF-16 units, so a reply within this always passes it.
 pub const MAX_REPLY_CHARS: usize = 8000;
 /// The most blocks, and proposals, one turn holds (`MAX_BLOCKS`, `MAX_PROPOSALS`); the table checks
 /// them too.
@@ -133,8 +133,8 @@ fn js_trim(v: &str) -> &str {
     v.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
 }
 
-/// Whether a reply fits the wire: plain text of at most [`MAX_REPLY_CHARS`] UTF-16 code units, the
-/// unit the web's view counts, so a stored reply never makes the web drop the conversation.
+/// Whether a reply fits the wire: plain text of at most [`MAX_REPLY_CHARS`] UTF-16 code units. The web
+/// counts code points, never more than UTF-16 units, so a stored reply never makes it drop the conversation.
 pub fn reply_fits(v: &str) -> bool {
     v.encode_utf16().count() <= MAX_REPLY_CHARS && plain(v)
 }
@@ -410,7 +410,8 @@ impl AssistantTx {
     /// counting, as [`Store::conversations`] lists, their home ones and those of `companies` (the
     /// companies they may still work on): the cap never counts one they cannot see to delete.
     // ponytail: a conversation in a company the person can no longer use is kept, uncounted and
-    // unlisted, until they regain it; nothing removes those yet.
+    // unlisted; nothing removes those yet. Regaining the company counts them again, which can put the
+    // person over 200: creates are then refused until they delete enough.
     pub async fn create(
         &mut self,
         id: &ConversationId,

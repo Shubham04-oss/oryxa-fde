@@ -6738,13 +6738,29 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
         (StatusCode::BAD_REQUEST, Some("invalid_proposal_state"))
     );
 
-    // A home conversation: list-level only, and a company only if the caller may see it.
+    // A home conversation: every block type, as in a company, but a company only if the caller may work
+    // on it, and no project.
     let home = w
         .ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
         .await;
     let home_turn = format!("{conversations}/{}/turns/1", home["id"].as_str().unwrap());
+    let brief_to = |to: Value| json!({ "blocks": [{ "type": "brief", "items": [{ "label": "Beta", "to": to }] }] });
     for (extra, code) in [
-        (json!({ "blocks": [{ "type": "plan", "steps": [] }] }), "invalid_block"),
+        (json!({ "blocks": [{ "type": "html", "body": "x" }] }), "invalid_block"),
+        // A brief block naming a company the caller cannot work on, or a project, is refused like a proposal.
+        (
+            brief_to(json!({ "screen": "company", "company": other.company })),
+            "invalid_destination",
+        ),
+        (
+            brief_to(json!({ "screen": "project", "company": t.company, "project": t.project })),
+            "invalid_destination",
+        ),
+        (
+            json!({ "blocks": [{ "type": "suggestion", "id": "s", "title": "Open Beta",
+                "approve": { "label": "Open", "to": { "screen": "company", "company": other.company } } }] }),
+            "invalid_destination",
+        ),
         (
             json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": t.project }))] }),
             "invalid_destination",
@@ -6772,11 +6788,14 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
         "t_1",
         json!({
             "blocks": [{ "type": "suggestion", "id": "s", "title": "Open Acme",
-                "approve": { "label": "Open", "to": { "screen": "company", "company": t.company } } }],
+                "approve": { "label": "Open", "to": { "screen": "company", "company": t.company } } },
+                { "type": "brief", "items": [{ "label": "Acme", "to": { "screen": "company", "company": t.company } }] },
+                { "type": "plan", "steps": [] }],
             "proposals": [{ "proposal": { "id": "p", "action": "create_company", "args": { "name": "Initech" } }, "state": "waiting" }],
         }),
     );
-    w.ok(&t.lead, "PUT", &home_turn, Some(ok), StatusCode::CREATED).await;
+    let stored = w.ok(&t.lead, "PUT", &home_turn, Some(ok), StatusCode::CREATED).await;
+    assert_eq!(stored["blocks"][1]["type"], "brief");
 
     // Stored as the app role, under the conversation's own company.
     let owner = testing::admin().await;
