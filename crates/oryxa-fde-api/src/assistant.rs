@@ -236,7 +236,10 @@ fn conversation_id(raw: String) -> Result<ConversationId, ApiError> {
 /// customer role does not have.
 #[utoipa::path(post, operation_id = "create_conversation", path = "/v1/assistant/conversations", tag = "assistant",
     request_body = ConversationBody,
-    responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "`rejected_conversation_limit`: the caller holds 200 \
+            conversations already; delete one first"),
+        (status = 503, body = ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     who: Principal,

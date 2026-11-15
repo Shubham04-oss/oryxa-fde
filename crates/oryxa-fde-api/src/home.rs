@@ -242,6 +242,8 @@ async fn current(app: &App, who: &Principal) -> Result<Vec<Suggestion>, ApiError
     responses((status = 200, body = HomeOut), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 503, body = ErrorBody)))]
 pub(crate) async fn home(State(app): State<Arc<App>>, who: Principal) -> Result<Json<HomeOut>, ApiError> {
+    // Permission before any read: a customer role is refused even with the database down.
+    app.require(&who, workspace(&who.tenant), "access").await?;
     // The dismissals first: one made while this read runs is not among them, so it is never forgotten.
     let mut tx = app.store.organisation(&who.tenant).await?;
     let read = tx.home_dismissals(&who.user).await?;
@@ -395,6 +397,7 @@ mod tests {
         Dismissal {
             suggestion: s.key.clone(),
             facts: s.facts,
+            dismissed_at: time::OffsetDateTime::UNIX_EPOCH,
         }
     }
 

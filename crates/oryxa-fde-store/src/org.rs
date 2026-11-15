@@ -165,6 +165,8 @@ impl SuggestionKey {
 pub struct Dismissal {
     pub suggestion: SuggestionKey,
     pub facts: [u8; 32],
+    /// When it was made: with the id and hash, what tells this dismissal from a later one alike.
+    pub dismissed_at: OffsetDateTime,
 }
 
 fn to_hex(bytes: &[u8; 32]) -> String {
@@ -186,7 +188,7 @@ impl OrgTx {
     /// The home suggestions `user` dismissed in this organisation.
     pub async fn home_dismissals(&mut self, user: &UserId) -> Result<Vec<Dismissal>, StoreError> {
         let rows = sqlx::query(
-            "select suggestion_id, facts_sha256 from home_dismissals where tenant_id = $1 and user_id = $2",
+            "select suggestion_id, facts_sha256, dismissed_at from home_dismissals where tenant_id = $1 and user_id = $2",
         )
         .bind(self.tenant.as_str())
         .bind(user.as_str())
@@ -199,6 +201,7 @@ impl OrgTx {
                 Ok(Dismissal {
                     suggestion: SuggestionKey::new(&suggestion).ok_or(StoreError::Corrupt("suggestion id"))?,
                     facts: from_hex(&facts).ok_or(StoreError::Corrupt("facts"))?,
+                    dismissed_at: r.try_get("dismissed_at")?,
                 })
             })
             .collect()
@@ -226,22 +229,26 @@ impl OrgTx {
         Ok(())
     }
 
-    /// Forgets `user`'s dismissals in `read`, each only while it still holds the facts it was read
-    /// with: a dismissal made (or remade) since that read is a different row and is kept.
+    /// Forgets `user`'s dismissals in `read`, each only while it is still the very row that was read
+    /// (its id, facts and time): a dismissal made or remade since that read, even with the same facts,
+    /// is kept.
     pub async fn forget_home_dismissals(&mut self, user: &UserId, read: &[Dismissal]) -> Result<(), StoreError> {
         if read.is_empty() {
             return Ok(());
         }
         let ids: Vec<&str> = read.iter().map(|d| d.suggestion.as_str()).collect();
         let facts: Vec<String> = read.iter().map(|d| to_hex(&d.facts)).collect();
+        let at: Vec<OffsetDateTime> = read.iter().map(|d| d.dismissed_at).collect();
         sqlx::query(
             "delete from home_dismissals where tenant_id = $1 and user_id = $2
-               and (suggestion_id, facts_sha256) in (select * from unnest($3::text[], $4::text[]))",
+               and (suggestion_id, facts_sha256, dismissed_at)
+                   in (select * from unnest($3::text[], $4::text[], $5::timestamptz[]))",
         )
         .bind(self.tenant.as_str())
         .bind(user.as_str())
         .bind(&ids)
         .bind(&facts)
+        .bind(&at)
         .execute(&mut *self.tx)
         .await?;
         Ok(())

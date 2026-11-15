@@ -4687,27 +4687,47 @@ async fn home_facts_read_only_what_can_make_a_suggestion() {
         add_project(&store, &c, "Busy").await,
         add_project(&store, &c, "Idle").await,
     );
+    // Projects the scope does not list: one in the same company, one in another.
+    let unlisted = add_project(&store, &c, "Unlisted").await;
+    let elsewhere_c = scope(&t, &new_id("cmp"));
+    create_company(&store, &elsewhere_c).await;
+    let elsewhere = add_project(&store, &elsewhere_c, "Elsewhere").await;
     let today = time::Date::from_calendar_date(2026, time::Month::November, 15).unwrap();
-    let mut tx = store.project(&busy).await.unwrap();
-    let ids: Vec<TaskId> = (0..4).map(|_| TaskId::new(new_id("tsk")).unwrap()).collect();
-    for (id, (status, due)) in ids.iter().zip([
-        (TaskStatus::Blocked, None),
-        (TaskStatus::Todo, Some(today)),
-        (TaskStatus::Todo, today.previous_day()),
-        (TaskStatus::Todo, today.next_day()),
-    ]) {
+    let yesterday = today.previous_day();
+    let task = |status, due| {
         let mut v = task_in("Secret plan", status);
         v.due_on = due;
-        tx.add_task(id, &v, &by).await.unwrap().unwrap();
-    }
+        v
+    };
     let access = |status| AccessRequestIn {
         description: Text::new("Prod password").unwrap(),
         system: None,
         owner: None,
         status,
     };
+
+    let mut tx = store.project(&busy).await.unwrap();
+    let ids: Vec<TaskId> = (0..5).map(|_| TaskId::new(new_id("tsk")).unwrap()).collect();
+    for (id, v) in ids.iter().zip([
+        task(TaskStatus::Blocked, None),
+        task(TaskStatus::Todo, Some(today)),
+        task(TaskStatus::Todo, yesterday),
+        task(TaskStatus::Todo, today.next_day()),
+        task(TaskStatus::Done, yesterday),
+    ]) {
+        tx.add_task(id, &v, &by).await.unwrap().unwrap();
+    }
     let waiting = AccessRequestId::new(new_id("acc")).unwrap();
     tx.add_access_request(&waiting, &access(AccessStatus::Requested), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    let in_progress = AccessRequestId::new(new_id("acc")).unwrap();
+    tx.add_access_request(&in_progress, &access(AccessStatus::Requested), &by)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.update_access_request(&in_progress, None, &access(AccessStatus::InProgress), &by)
         .await
         .unwrap()
         .unwrap();
@@ -4721,57 +4741,110 @@ async fn home_facts_read_only_what_can_make_a_suggestion() {
         .unwrap()
         .unwrap();
     tx.commit().await.unwrap();
+    // A request made three days ago: its wait counts whole days, as Today's does.
+    let admin = admin().await;
+    sqlx::query(
+        "update access_requests set requested_at = now() - interval '3 days 2 hours' where access_request_id = $1",
+    )
+    .bind(waiting.as_str())
+    .execute(&admin)
+    .await
+    .unwrap();
+    for p in [&unlisted, &elsewhere] {
+        let mut tx = store.project(p).await.unwrap();
+        for v in [task(TaskStatus::Blocked, None), task(TaskStatus::Todo, yesterday)] {
+            tx.add_task(&TaskId::new(new_id("tsk")).unwrap(), &v, &by)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
 
     let facts = store.home_facts(&[busy.clone(), idle.clone()], today).await.unwrap();
     let mut seen: Vec<String> = facts
         .iter()
         .map(|f| match f {
-            HomeFact::DueTask { task, .. } => format!("due {task}"),
-            HomeFact::BlockedTask { task, .. } => format!("blocked {task}"),
+            HomeFact::DueTask { task, project, .. } => format!("due {task} {}", project.id),
+            HomeFact::BlockedTask { task, project, .. } => format!("blocked {task} {}", project.id),
             HomeFact::WaitingAccess { access, days, .. } => format!("waiting {access} {days}"),
             HomeFact::NoNextStep { project, .. } => format!("idle {}", project.id),
         })
         .collect();
     seen.sort();
     let mut want = vec![
-        format!("blocked {}", ids[0]),
-        format!("due {}", ids[1]),
-        format!("due {}", ids[2]),
-        format!("waiting {waiting} 0"),
+        format!("blocked {} {}", ids[0], busy.project),
+        format!("due {} {}", ids[1], busy.project),
+        format!("due {} {}", ids[2], busy.project),
+        format!("waiting {waiting} 3"),
+        format!("waiting {in_progress} 0"),
         format!("idle {}", idle.project),
     ];
     want.sort();
-    assert_eq!(seen, want, "not the task due later, not the denied request");
+    assert_eq!(
+        seen, want,
+        "not a task due later or done, not a denied request, nothing of a project not listed"
+    );
     assert!(!format!("{facts:?}").contains("Secret plan"), "ids and names only");
     assert!(store.home_facts(&[], today).await.unwrap().is_empty());
 }
 
 #[tokio::test]
 #[ignore = "needs Postgres (DATABASE_URL)"]
-async fn a_dismissal_is_forgotten_only_while_it_holds_the_facts_it_was_read_with() {
+async fn a_dismissal_is_forgotten_only_while_it_is_the_row_that_was_read() {
     let store = store().await;
     let t = tenant();
     let user = oryxa_core::UserId::new("user_home").unwrap();
     let key = SuggestionKey::new("blocked_tasks.prj_1").unwrap();
     let (old, new) = ([1u8; 32], [2u8; 32]);
-    let mut tx = store.organisation(&t).await.unwrap();
-    tx.dismiss_home(&user, &key, &new).await.unwrap();
-    // A read from before that dismissal saw the old facts: forgetting what it read keeps the new one.
-    let stale = Dismissal {
-        suggestion: key.clone(),
-        facts: old,
+    let read = |store: &Store| {
+        let (store, t, user) = (store.clone(), t.clone(), user.clone());
+        async move {
+            let mut tx = store.organisation(&t).await.unwrap();
+            let d = tx.home_dismissals(&user).await.unwrap();
+            tx.commit().await.unwrap();
+            d
+        }
     };
-    tx.forget_home_dismissals(&user, std::slice::from_ref(&stale))
-        .await
-        .unwrap();
-    assert_eq!(tx.home_dismissals(&user).await.unwrap().len(), 1);
-    let current = Dismissal {
-        suggestion: key,
-        facts: new,
+    let forget = |store: &Store, d: Vec<Dismissal>| {
+        let (store, t, user) = (store.clone(), t.clone(), user.clone());
+        async move {
+            let mut tx = store.organisation(&t).await.unwrap();
+            tx.forget_home_dismissals(&user, &d).await.unwrap();
+            tx.commit().await.unwrap();
+        }
     };
-    tx.forget_home_dismissals(&user, std::slice::from_ref(&current))
-        .await
-        .unwrap();
-    assert!(tx.home_dismissals(&user).await.unwrap().is_empty());
-    tx.commit().await.unwrap();
+    let dismiss = |store: &Store, facts: [u8; 32]| {
+        let (store, t, user, key) = (store.clone(), t.clone(), user.clone(), key.clone());
+        async move {
+            let mut tx = store.organisation(&t).await.unwrap();
+            tx.dismiss_home(&user, &key, &facts).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+
+    // Remade with new facts since the read: kept.
+    dismiss(&store, old).await;
+    let first = read(&store).await;
+    dismiss(&store, new).await;
+    forget(&store, first).await;
+    assert_eq!(read(&store).await.len(), 1);
+
+    // Remade with the same facts since the read (the suggestion went away, came back, and was
+    // dismissed again): a different row, so it is kept too.
+    let before = read(&store).await;
+    forget(&store, before.clone()).await;
+    assert!(read(&store).await.is_empty());
+    dismiss(&store, new).await;
+    forget(&store, before).await;
+    assert_eq!(
+        read(&store).await.len(),
+        1,
+        "the newer dismissal with the same id and facts stays"
+    );
+
+    // The very row that was read: forgotten.
+    let current = read(&store).await;
+    forget(&store, current).await;
+    assert!(read(&store).await.is_empty());
 }

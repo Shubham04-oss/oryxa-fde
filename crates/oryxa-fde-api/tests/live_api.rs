@@ -6997,3 +6997,56 @@ async fn turns_stay_with_their_holder_their_tenant_their_access_and_their_projec
     )
     .await;
 }
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_person_holds_at_most_two_hundred_conversations() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let conversations = "/v1/assistant/conversations";
+    // 199 seeded directly, not by 199 calls.
+    let owner = testing::admin().await;
+    sqlx::query(
+        "insert into assistant_conversations (tenant_id, conversation_id, user_id)
+         select $1, 'cnv_seed_' || n, $2 from generate_series(1, 199) as n",
+    )
+    .bind(&org)
+    .bind(&t.lead.id)
+    .execute(&owner)
+    .await
+    .unwrap();
+    // The 200th is fine, in a company or at home alike; the 201st is refused, plainly.
+    w.ok(
+        &t.lead,
+        "POST",
+        conversations,
+        Some(json!({"company": t.company})),
+        StatusCode::CREATED,
+    )
+    .await;
+    for body in [json!({}), json!({"company": t.company})] {
+        let (status, answer) = w
+            .call(Some(&t.lead.token), "POST", conversations, Some(body.clone()))
+            .await;
+        assert_eq!(
+            (status, answer["error"].as_str()),
+            (StatusCode::CONFLICT, Some("rejected_conversation_limit")),
+            "{body}"
+        );
+    }
+    // Someone else is not counted against it.
+    w.ok(&t.engineer, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    // Deleting one makes room again.
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("{conversations}/cnv_seed_1"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    w.ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+}

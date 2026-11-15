@@ -196,6 +196,9 @@ impl Store {
         Ok(items)
     }
 
+    // ponytail: one row per blocked or overdue task and per waiting request, across all the caller's
+    // projects, with no cap; overdue tasks never closed pile up. Next: group by project and kind in SQL
+    // (a count and a hash of the ordered ids), so the read is bounded by the number of projects.
     /// The facts behind the home suggestions in `projects`: only the rows that can make one (tasks
     /// blocked, or due on or before `today`; requests still waiting; projects with no task left), and
     /// of those only ids and names, so a home read stays small however much open work there is.

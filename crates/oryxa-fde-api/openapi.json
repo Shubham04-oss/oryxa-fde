@@ -1034,6 +1034,26 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "`rejected_conversation_limit`: the caller holds 200 conversations already; delete one first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
