@@ -840,6 +840,11 @@ const UNTARGETED: &[(&str, &str)] = &[
     ("GET", "/v1/assistant/conversations/{conversation}"),
     ("DELETE", "/v1/assistant/conversations/{conversation}"),
     ("GET", "/v1/assistant/conversations/{conversation}/check"),
+    ("PUT", "/v1/assistant/conversations/{conversation}/turns/{n}"),
+    (
+        "PUT",
+        "/v1/assistant/conversations/{conversation}/turns/{n}/proposals/{proposal}",
+    ),
     ("POST", "/v1/home/suggestions/{suggestion}/dismiss"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
@@ -6518,4 +6523,431 @@ async fn a_conversation_is_bound_for_good_and_its_holders_alone() {
         .execute(&owner)
         .await;
     assert!(touched.is_ok(), "its last-active time can");
+}
+
+fn turn_body(id: &str, extra: Value) -> Value {
+    let mut t = json!({ "id": id, "said": "Plan the pilot", "text": "Here is a plan.", "state": "done" });
+    t.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    t
+}
+
+fn open_route(id: &str, to: Value) -> Value {
+    json!({ "proposal": { "id": id, "action": "open_route", "args": { "to": to } }, "state": "waiting" })
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let other = company(&w, &org, "globex").await;
+    let conversations = "/v1/assistant/conversations";
+    let made = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let path = format!("{conversations}/{}", made["id"].as_str().unwrap());
+    let turn = |n: u32| format!("{path}/turns/{n}");
+
+    // A finished turn; the same again changes nothing; another at its place, or not the next, is refused.
+    let plan = turn_body(
+        "t_1",
+        json!({
+            "said": "Plan the pilot\r\nplease",
+            "blocks": [{ "type": "plan", "steps": [] }],
+            "proposals": [open_route("p1", json!({ "screen": "project", "company": t.company, "project": t.project }))],
+        }),
+    );
+    let stored = w
+        .ok(&t.lead, "PUT", &turn(1), Some(plan.clone()), StatusCode::CREATED)
+        .await;
+    assert_eq!(
+        (stored["n"].clone(), stored["said"].clone()),
+        (json!(1), json!("Plan the pilot\r\nplease"))
+    );
+    w.ok(&t.lead, "PUT", &turn(1), Some(plan.clone()), StatusCode::OK).await;
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &turn(1), Some(turn_body("t_9", json!({}))))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_turn_taken"))
+    );
+    let (status, _) = w
+        .call(Some(&t.lead.token), "PUT", &turn(3), Some(turn_body("t_3", json!({}))))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "not the next place");
+    let read = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
+    assert!(
+        read["conversation"]["last_active_at"].as_str() > made["last_active_at"].as_str(),
+        "{read}"
+    );
+
+    // Parts naming another company's records, and anything past the wire's limits, are refused cleanly.
+    // Over 1 MiB as the table counts it (about 1.14 MB), still under the request body limit.
+    let wide = json!({ "type": "brief", "items": [{ "label": "x", "value": "v".repeat(190_000) }] });
+    for (n, extra, code) in [
+        (
+            2,
+            json!({ "proposals": [open_route("p", json!({ "screen": "company", "company": other.company }))] }),
+            "invalid_destination",
+        ),
+        (
+            2,
+            json!({ "blocks": [{ "type": "suggestion", "id": "s", "title": "x", "approve": { "label": "Go",
+                "to": { "screen": "project", "company": t.company, "project": other.project } } }] }),
+            "invalid_destination",
+        ),
+        (2, json!({ "said": "x".repeat(2001) }), "invalid_said"),
+        (2, json!({ "text": "😀".repeat(4001) }), "invalid_text"),
+        (
+            2,
+            json!({ "blocks": vec![json!({"type": "brief", "items": []}); 7] }),
+            "invalid_blocks",
+        ),
+        // Refused by the store's measure, a clean 400, never the insert's 500.
+        (2, json!({ "blocks": vec![wide; 6] }), "invalid_blocks"),
+        (0, json!({}), "invalid_n"),
+    ] {
+        let (status, body) = w
+            .call(
+                Some(&t.lead.token),
+                "PUT",
+                &turn(n),
+                Some(turn_body("t_2", extra.clone())),
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some(code)),
+            "{extra}"
+        );
+    }
+
+    // A turn the person stopped is kept with its notice, its reply empty; a notice the Worker does not
+    // send is refused.
+    let paused = turn_body("t_2", json!({ "notice": "paused" }));
+    let (status, body) = w.call(Some(&t.lead.token), "PUT", &turn(2), Some(paused)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the body's own type refuses it: {body}"
+    );
+    let stopped = turn_body("t_2", json!({ "text": "", "notice": "stopped" }));
+    let stored = w.ok(&t.lead, "PUT", &turn(2), Some(stopped), StatusCode::CREATED).await;
+    assert_eq!(
+        (stored["notice"].clone(), stored["text"].clone()),
+        (json!("stopped"), json!(""))
+    );
+
+    // Only its holder appends or answers.
+    for who in [&t.engineer, &other.lead] {
+        assert_eq!(
+            w.status(who, "PUT", &turn(3), Some(turn_body("t_3", json!({})))).await,
+            StatusCode::NOT_FOUND
+        );
+        let answer = format!("{}/proposals/p1", turn(1));
+        assert_eq!(
+            w.status(who, "PUT", &answer, Some(json!({"state": "confirmed"}))).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    // The person's answer to a proposal is kept: once, and not changed after.
+    let answer = format!("{}/proposals/p1", turn(1));
+    let answered = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &answer,
+            Some(json!({"state": "confirmed"})),
+            StatusCode::OK,
+        )
+        .await;
+    assert_eq!(answered["proposals"][0]["state"], "confirmed");
+    w.ok(
+        &t.lead,
+        "PUT",
+        &answer,
+        Some(json!({"state": "confirmed"})),
+        StatusCode::OK,
+    )
+    .await;
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &answer, Some(json!({"state": "dismissed"})))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_answered"))
+    );
+    let missing = format!("{}/proposals/p9", turn(1));
+    assert_eq!(
+        w.status(&t.lead, "PUT", &missing, Some(json!({"state": "confirmed"})))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    let read = w.ok(&t.lead, "GET", &path, None, StatusCode::OK).await;
+    assert_eq!(read["turns"][0]["proposals"][0]["state"], "confirmed");
+    // The Worker retrying that append with its folded copy (still `waiting`) is the same turn: 200, with
+    // the person's answer kept.
+    let again = w.ok(&t.lead, "PUT", &turn(1), Some(plan.clone()), StatusCode::OK).await;
+    assert_eq!(again["proposals"][0]["state"], "confirmed");
+    // An answer names its own turn: p1 is not on turn 2.
+    let elsewhere = format!("{}/proposals/p1", turn(2));
+    assert_eq!(
+        w.status(&t.lead, "PUT", &elsewhere, Some(json!({"state": "confirmed"})))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+    // Past the most turns a conversation holds: the limit, said plainly.
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &turn(51),
+            Some(turn_body("t_51", json!({}))),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::CONFLICT, Some("rejected_turn_limit"))
+    );
+    // A proposal is appended `waiting` only.
+    let confirmed = json!({ "proposals": [{ "proposal": { "id": "p", "action": "create_company", "args": { "name": "x" } },
+        "state": "confirmed" }] });
+    let (status, body) = w
+        .call(Some(&t.lead.token), "PUT", &turn(3), Some(turn_body("t_3", confirmed)))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_proposal_state"))
+    );
+
+    // A home conversation: list-level only, and a company only if the caller may see it.
+    let home = w
+        .ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    let home_turn = format!("{conversations}/{}/turns/1", home["id"].as_str().unwrap());
+    for (extra, code) in [
+        (json!({ "blocks": [{ "type": "plan", "steps": [] }] }), "invalid_block"),
+        (
+            json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": t.project }))] }),
+            "invalid_destination",
+        ),
+        (
+            json!({ "proposals": [open_route("p", json!({ "screen": "company", "company": other.company }))] }),
+            "invalid_destination",
+        ),
+    ] {
+        let (status, body) = w
+            .call(
+                Some(&t.lead.token),
+                "PUT",
+                &home_turn,
+                Some(turn_body("t_1", extra.clone())),
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some(code)),
+            "{extra}"
+        );
+    }
+    let ok = turn_body(
+        "t_1",
+        json!({
+            "blocks": [{ "type": "suggestion", "id": "s", "title": "Open Acme",
+                "approve": { "label": "Open", "to": { "screen": "company", "company": t.company } } }],
+            "proposals": [{ "proposal": { "id": "p", "action": "create_company", "args": { "name": "Initech" } }, "state": "waiting" }],
+        }),
+    );
+    w.ok(&t.lead, "PUT", &home_turn, Some(ok), StatusCode::CREATED).await;
+
+    // Stored as the app role, under the conversation's own company.
+    let owner = testing::admin().await;
+    let filed: Vec<Option<String>> = sqlx::query_scalar(
+        "select company_id from assistant_turns where conversation_id = any($1) order by company_id nulls first",
+    )
+    .bind(vec![made["id"].as_str().unwrap(), home["id"].as_str().unwrap()])
+    .fetch_all(&owner)
+    .await
+    .unwrap();
+    // The home turn, and the company conversation's two (the plan and the stopped one).
+    assert_eq!(filed, [None, Some(t.company.clone()), Some(t.company.clone())]);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn turns_stay_with_their_holder_their_tenant_their_access_and_their_project() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let conversations = "/v1/assistant/conversations";
+    let turn_of = |c: &Value, n: u32| format!("{conversations}/{}/turns/{n}", c["id"].as_str().unwrap());
+    let with_p1 = |id: &str| {
+        turn_body(
+            id,
+            json!({ "proposals": [{ "proposal": { "id": "p1", "action": "create_company",
+            "args": { "name": "Initech" } }, "state": "waiting" }] }),
+        )
+    };
+
+    // Someone in another tenant: not found on both routes.
+    let lead_conv = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company})),
+            StatusCode::CREATED,
+        )
+        .await;
+    w.ok(
+        &t.lead,
+        "PUT",
+        &turn_of(&lead_conv, 1),
+        Some(with_p1("t_1")),
+        StatusCode::CREATED,
+    )
+    .await;
+    let stranger = user(&new_id("org"), "stranger", "member");
+    assert_eq!(
+        w.status(
+            &stranger,
+            "PUT",
+            &turn_of(&lead_conv, 2),
+            Some(turn_body("t_2", json!({})))
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    let answer = format!("{}/proposals/p1", turn_of(&lead_conv, 1));
+    assert_eq!(
+        w.status(&stranger, "PUT", &answer, Some(json!({"state": "confirmed"})))
+            .await,
+        StatusCode::NOT_FOUND
+    );
+
+    // Two appends of the same place at once: one stored, the other refused, never a 500.
+    let second = turn_of(&lead_conv, 2);
+    let (a, b) = tokio::join!(
+        w.call(Some(&t.lead.token), "PUT", &second, Some(turn_body("t_2a", json!({})))),
+        w.call(Some(&t.lead.token), "PUT", &second, Some(turn_body("t_2b", json!({})))),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::CREATED, StatusCode::CONFLICT],
+        "{:?} {:?}",
+        a.1,
+        b.1
+    );
+
+    // The holder loses access to the company: neither route takes their word any more.
+    let eng_conv = w
+        .ok(
+            &t.engineer,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company})),
+            StatusCode::CREATED,
+        )
+        .await;
+    w.ok(
+        &t.engineer,
+        "PUT",
+        &turn_of(&eng_conv, 1),
+        Some(with_p1("t_1")),
+        StatusCode::CREATED,
+    )
+    .await;
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("/v1/companies/{}/members/{}", t.company, t.engineer.id),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    assert_eq!(
+        w.status(
+            &t.engineer,
+            "PUT",
+            &turn_of(&eng_conv, 2),
+            Some(turn_body("t_2", json!({})))
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    let eng_answer = format!("{}/proposals/p1", turn_of(&eng_conv, 1));
+    assert_eq!(
+        w.status(&t.engineer, "PUT", &eng_answer, Some(json!({"state": "confirmed"})))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+
+    // A customer guest's home conversation, however it came to be: refused.
+    let owner = testing::admin().await;
+    sqlx::query(
+        "insert into assistant_conversations (tenant_id, conversation_id, user_id) values ($1, 'cnv_guest_home', $2)",
+    )
+    .bind(&org)
+    .bind(&t.guest.id)
+    .execute(&owner)
+    .await
+    .unwrap();
+    let guest_turn = format!("{conversations}/cnv_guest_home/turns/1");
+    assert_eq!(
+        w.status(&t.guest, "PUT", &guest_turn, Some(turn_body("t_1", json!({}))))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+
+    // A project's conversation, held by its assignee, names only projects they may work on.
+    let sibling = w
+        .ok(
+            &t.lead,
+            "POST",
+            &format!("/v1/companies/{}/projects", t.company),
+            Some(json!({"name": "Sibling"})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let narrow = w
+        .ok(
+            &t.assignee,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company, "project": t.project})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let to = |project: &str| json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": project }))] });
+    let (status, body) = w
+        .call(
+            Some(&t.assignee.token),
+            "PUT",
+            &turn_of(&narrow, 1),
+            Some(turn_body("t_1", to(sibling["id"].as_str().unwrap()))),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_destination"))
+    );
+    w.ok(
+        &t.assignee,
+        "PUT",
+        &turn_of(&narrow, 1),
+        Some(turn_body("t_1", to(&t.project))),
+        StatusCode::CREATED,
+    )
+    .await;
 }
