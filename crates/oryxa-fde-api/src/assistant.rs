@@ -24,10 +24,11 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use oryxa_fde_core::{CompanyId, ProjectId};
+use oryxa_fde_core::{CompanyId, CompanyScope, ProjectId};
 use oryxa_fde_store::{
-    Appended, AssistantTx, Conversation, ConversationId, ConversationScope, MAX_BLOCKS, MAX_PROPOSALS, MAX_TURNS,
-    ProposalAnswer, Said, Settled, StoreError, Turn, TurnIn, TurnKey, TurnState, reply_fits,
+    Appended, AssistantTx, Conversation, ConversationId, ConversationScope, MAX_BLOCKS, MAX_BLOCKS_BYTES,
+    MAX_PROPOSALS, MAX_PROPOSALS_BYTES, MAX_TURNS, ProposalAnswer, Said, Settled, StoreError, Turn, TurnIn, TurnKey,
+    TurnState, reply_fits,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -387,8 +388,10 @@ pub(crate) async fn delete(
     responses((status = 201, body = TurnOut, description = "Stored"),
         (status = 200, body = TurnOut, description = "Stored before with the same contents"),
         (status = 400, body = ErrorBody, description = "`invalid_*` naming what broke a limit or names a record \
-            outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal \
-            not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0"),
+            outside the scope (`invalid_destination`: in a company's conversation, that company and its projects; \
+            at home, the lists, a company the caller may work on and a project of it they may work on; at most 16 \
+            distinct), a block or proposal the scope does not allow, a proposal not `waiting` \
+            (`invalid_proposal_state`), or `invalid_n` for 0"),
         (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "`rejected_turn_taken`: another turn is at `n`, or `n` is \
             not next; `rejected_turn_limit`: `n` is past 50, the most turns a conversation holds"),
@@ -407,8 +410,17 @@ pub(crate) async fn put_turn(
     if n > MAX_TURNS {
         return Err(ApiError::Rejected("turn_limit"));
     }
+    // Caps first, then each distinct destination once. Home's are checked before the turn's
+    // transaction takes a connection: they need authz and one batched read of project rows, never the tx.
+    let v = shape(n, body)?;
+    let destinations = destinations_of(&v)?;
+    if scope.company().is_none() {
+        check_home_destinations(&app, &who, &destinations).await?;
+    }
     let mut tx = app.store.assistant(&scope).await?;
-    let v = turn_in(&app, &who, &scope, &mut tx, n, body).await?;
+    if let Some(c) = scope.company() {
+        check_company_destinations(&app, &who, &scope, c, &mut tx, &destinations).await?;
+    }
     let appended = tx
         .append(&id, &who.user, &v)
         .await
@@ -424,23 +436,6 @@ pub(crate) async fn put_turn(
     Ok(resp)
 }
 
-/// The turn, checked: its sizes and parts ([`shape`]), and every record they name against the scope.
-async fn turn_in(
-    app: &App,
-    who: &Principal,
-    scope: &ConversationScope,
-    tx: &mut AssistantTx,
-    n: u32,
-    body: TurnBody,
-) -> Result<TurnIn, ApiError> {
-    let v = shape(n, body)?;
-    let mut destinations = Vec::new();
-    destinations_in(&v.blocks, &mut destinations);
-    destinations_in(&v.proposals, &mut destinations);
-    check_destinations(app, who, scope, tx, &destinations).await?;
-    Ok(v)
-}
-
 /// The turn's own limits, the Worker's: its id, sizes, block types and proposal actions, the same
 /// in every scope; what a block may name is the scope's (`check_destinations`).
 fn shape(n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
@@ -453,6 +448,14 @@ fn shape(n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
         return Err(ApiError::Invalid("blocks"));
     }
     if body.proposals.len() > MAX_PROPOSALS {
+        return Err(ApiError::Invalid("proposals"));
+    }
+    // The byte caps, early, so no destination check runs on an oversized turn. Compact JSON is never longer
+    // than the jsonb text the store measures exactly, so this refuses nothing the store would take.
+    if serde_json::to_vec(&body.blocks).map_or(true, |b| b.len() > MAX_BLOCKS_BYTES) {
+        return Err(ApiError::Invalid("blocks"));
+    }
+    if serde_json::to_vec(&body.proposals).map_or(true, |b| b.len() > MAX_PROPOSALS_BYTES) {
         return Err(ApiError::Invalid("proposals"));
     }
     for block in &body.blocks {
@@ -596,62 +599,122 @@ fn destinations_in<'a>(v: &'a Value, out: &mut Vec<&'a serde_json::Map<String, V
     }
 }
 
-/// Each destination names only what the scope allows: in a company's conversation, that company and
-/// its projects; at home, a company the caller may work on (to open its conversation) and the lists.
-async fn check_destinations(
+/// The most distinct places one turn may send a person: each costs authz checks, so the fan-out stays small.
+const MAX_DESTINATIONS: usize = 16;
+
+/// A place a turn's part sends a person, parsed from its `screen` object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Destination {
+    /// `today`, `companies` or `new-company`: the person's own lists.
+    List,
+    Company(CompanyId),
+    Project(CompanyId, ProjectId),
+}
+
+/// The turn's distinct destinations, at most [`MAX_DESTINATIONS`]; one that does not parse, or one past
+/// the cap, is `invalid_destination`.
+fn destinations_of(v: &TurnIn) -> Result<Vec<Destination>, ApiError> {
+    let refuse = || ApiError::Invalid("destination");
+    let mut found = Vec::new();
+    destinations_in(&v.blocks, &mut found);
+    destinations_in(&v.proposals, &mut found);
+    let mut out: Vec<Destination> = Vec::new();
+    for d in found {
+        let field = |k: &str| d.get(k).and_then(Value::as_str);
+        let company = || field("company").and_then(|c| CompanyId::new(c).ok()).ok_or_else(refuse);
+        let parsed = match field("screen") {
+            Some("today" | "companies" | "new-company") => Destination::List,
+            Some("company") => Destination::Company(company()?),
+            Some("project") => Destination::Project(
+                company()?,
+                field("project")
+                    .and_then(|p| ProjectId::new(p).ok())
+                    .ok_or_else(refuse)?,
+            ),
+            _ => return Err(refuse()),
+        };
+        if !out.contains(&parsed) {
+            if out.len() == MAX_DESTINATIONS {
+                return Err(refuse());
+            }
+            out.push(parsed);
+        }
+    }
+    Ok(out)
+}
+
+/// A destination authz denies is `invalid_destination`, like one that does not exist; any other error
+/// stays itself (a 503), never a pass.
+fn destination_refused(e: ApiError) -> ApiError {
+    match e {
+        ApiError::Forbidden => ApiError::Invalid("destination"),
+        e => e,
+    }
+}
+
+/// At home, a turn may name the lists, a company the caller may work on, and a project of such a company
+/// that the caller may work on. No transaction: one company lookup, one `work` check per project, and one
+/// batched read of the projects' rows.
+async fn check_home_destinations(app: &App, who: &Principal, destinations: &[Destination]) -> Result<(), ApiError> {
+    let refuse = || ApiError::Invalid("destination");
+    if destinations.iter().all(|d| *d == Destination::List) {
+        return Ok(());
+    }
+    let visible: HashSet<CompanyId> = app.companies_for(who).await?.into_iter().map(|c| c.company).collect();
+    let mut wanted = Vec::new();
+    for d in destinations {
+        match d {
+            Destination::List => {}
+            Destination::Company(c) if visible.contains(c) => {}
+            Destination::Project(c, p) if visible.contains(c) => {
+                let scope = who.company(c.clone()).project(p.clone());
+                app.require(who, crate::authz::project(&scope), "work")
+                    .await
+                    .map_err(destination_refused)?;
+                wanted.push(scope);
+            }
+            _ => return Err(refuse()),
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    // A project object is its id alone, and work on a company gives work on all its projects, so this
+    // row check (the project is the named company's) is what decides; keep it.
+    let ids: Vec<ProjectId> = wanted.iter().map(|w| w.project.clone()).collect();
+    let found = app.store.project_scopes(&who.tenant, &ids).await?;
+    if wanted.iter().all(|w| found.contains(w)) {
+        Ok(())
+    } else {
+        Err(refuse())
+    }
+}
+
+/// In a company's conversation, a turn may name the lists, that company and its projects; in a project's,
+/// only projects its holder may work on.
+async fn check_company_destinations(
     app: &App,
     who: &Principal,
     scope: &ConversationScope,
+    c: &CompanyScope,
     tx: &mut AssistantTx,
-    destinations: &[&serde_json::Map<String, Value>],
+    destinations: &[Destination],
 ) -> Result<(), ApiError> {
     let refuse = || ApiError::Invalid("destination");
-    let mut visible: Option<HashSet<String>> = None;
     for d in destinations {
-        let field = |k: &str| d.get(k).and_then(Value::as_str);
-        match field("screen") {
-            Some("today" | "companies" | "new-company") => {}
-            Some("company") => {
-                let named = field("company")
-                    .and_then(|c| CompanyId::new(c).ok())
-                    .ok_or_else(refuse)?;
-                match scope.company() {
-                    Some(c) if c.company == named => {}
-                    Some(_) => return Err(refuse()),
-                    None => {
-                        if visible.is_none() {
-                            let list = app.companies_for(who).await?;
-                            visible = Some(list.into_iter().map(|c| c.company.to_string()).collect());
-                        }
-                        if !visible.as_ref().is_some_and(|v| v.contains(named.as_str())) {
-                            return Err(refuse());
-                        }
-                    }
-                }
-            }
-            Some("project") => {
-                let c = scope.company().ok_or_else(refuse)?;
-                let named = field("company")
-                    .and_then(|c| CompanyId::new(c).ok())
-                    .ok_or_else(refuse)?;
-                let project = field("project")
-                    .and_then(|p| ProjectId::new(p).ok())
-                    .ok_or_else(refuse)?;
-                if c.company != named {
-                    return Err(refuse());
-                }
+        match d {
+            Destination::List => {}
+            Destination::Company(named) if *named == c.company => {}
+            Destination::Project(named, project) if *named == c.company => {
                 // A project's conversation may name only projects its holder may work on. A project object
                 // is its id alone, so that check passes for another company's project too: it must also
                 // be one of this company's.
                 if let ConversationScope::Project(_) = scope {
                     app.require(who, crate::authz::project(&c.project(project.clone())), "work")
                         .await
-                        .map_err(|e| match e {
-                            ApiError::Forbidden => refuse(),
-                            e => e,
-                        })?;
+                        .map_err(destination_refused)?;
                 }
-                if !tx.has_project(&project).await? {
+                if !tx.has_project(project).await? {
                     return Err(refuse());
                 }
             }
@@ -804,6 +867,83 @@ mod tests {
             code(shape(1, body(json!({ "blocks": [{ "items": [] }] })))),
             "invalid_block"
         );
+    }
+
+    #[test]
+    fn a_destination_is_refused_on_a_deny_and_an_authz_error_stays_an_error() {
+        assert_eq!(destination_refused(ApiError::Forbidden).code(), "invalid_destination");
+        assert_eq!(destination_refused(ApiError::Unavailable).code(), "unavailable");
+        assert_eq!(
+            destination_refused(ApiError::Internal).code(),
+            ApiError::Internal.code()
+        );
+    }
+
+    fn to_project(company: &str, project: &str) -> Value {
+        json!({ "label": "Pilot", "to": { "screen": "project", "company": company, "project": project } })
+    }
+
+    fn destinations(items: Vec<Value>) -> Result<Vec<Destination>, ApiError> {
+        destinations_of(&shape(
+            1,
+            body(json!({ "blocks": [{ "type": "brief", "items": items }] })),
+        )?)
+    }
+
+    #[test]
+    fn a_destination_named_again_is_checked_once() {
+        // The same project 1000 times, with a list and a company among them: three checks, not 1002.
+        let mut items = vec![to_project("cmp_1", "prj_1"); 1000];
+        items.push(json!({ "label": "Today", "to": { "screen": "today" } }));
+        items.push(json!({ "label": "Acme", "to": { "screen": "company", "company": "cmp_1" } }));
+        let found = destinations(items).unwrap();
+        assert_eq!(
+            found,
+            [
+                Destination::Project(CompanyId::new("cmp_1").unwrap(), ProjectId::new("prj_1").unwrap()),
+                Destination::List,
+                Destination::Company(CompanyId::new("cmp_1").unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_names_at_most_sixteen_distinct_places_and_each_must_parse() {
+        let distinct = |n: usize| {
+            (0..n)
+                .map(|i| to_project("cmp_1", &format!("prj_{i}")))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(destinations(distinct(MAX_DESTINATIONS)).map(|d| d.len()).ok(), Some(16));
+        assert_eq!(
+            destinations(distinct(MAX_DESTINATIONS + 1)).unwrap_err().code(),
+            "invalid_destination"
+        );
+        for bad in [
+            to_project("cmp_1", "prj/1"),
+            to_project("cmp 1", "prj_1"),
+            json!({ "label": "x", "to": { "screen": "project", "company": "cmp_1" } }),
+            json!({ "label": "x", "to": { "screen": "elsewhere" } }),
+        ] {
+            assert_eq!(
+                destinations(vec![bad.clone()]).unwrap_err().code(),
+                "invalid_destination",
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_byte_caps_come_before_any_destination_check() {
+        let big = "x".repeat(MAX_BLOCKS_BYTES);
+        let v = body(json!({ "blocks": [{ "type": "brief", "items": [to_project("cmp_1", "prj_1")], "note": big }] }));
+        assert_eq!(code(shape(1, v)), "invalid_blocks");
+        let big = "x".repeat(MAX_PROPOSALS_BYTES);
+        let v = body(
+            json!({ "proposals": [{ "proposal": { "id": "p1", "action": "create_company",
+            "args": { "name": big } }, "state": "waiting" }] }),
+        );
+        assert_eq!(code(shape(1, v)), "invalid_proposals");
     }
 
     #[test]
