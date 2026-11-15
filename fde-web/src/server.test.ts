@@ -289,6 +289,28 @@ describe("failures", () => {
     expect(policyOf(response)).toContain("frame-ancestors 'none'")
   })
 
+  it("pass a sign-in read's 502 or lost connection through once, by either path, never retried", async () => {
+    for (const path of [
+      "/auth/callback?code=c_1&state=s_1",
+      "/api/auth/callback?code=c_1&state=s_1",
+    ]) {
+      const answered = apiAnswering(() => new Response("bad gateway", { status: 502 }))
+      const lost = {
+        fetch: vi.fn(async () => {
+          throw new TypeError("network connection lost")
+        }),
+      }
+
+      const response = await call(new Request(`${APP}${path}`), answered.env)
+      const thrown = await call(new Request(`${APP}${path}`), { API: lost as unknown as Fetcher })
+
+      expect(answered.fetch).toHaveBeenCalledTimes(1)
+      expect(response.status).toBe(502)
+      expect(lost.fetch).toHaveBeenCalledTimes(1)
+      expect(await thrown.json()).toEqual({ error: "bad_gateway" })
+    }
+  })
+
   it("answer anything else that throws with 500 and the security headers", async () => {
     page.mockImplementationOnce(() => {
       throw new Error("render failed")

@@ -85,10 +85,25 @@ const RETRIED_STATUSES = new Set([502, 503, 504])
 export const RETRY_PAUSE_MS = 250
 
 /**
+ * Whether an API path is under `/auth`, read the way `relayOnly` reads one: decoded, in lower case and with runs of
+ * slashes as one; a path that cannot be decoded counts as one.
+ */
+function underAuth(path: string): boolean {
+  let plain: string
+  try {
+    plain = decodeURIComponent(path)
+  } catch {
+    return true
+  }
+  return /^\/auth(?:\/|$)/.test(plain.toLowerCase().replace(/\/+/g, "/"))
+}
+
+/**
  * Forwards `request` to `path` on the API, cookies and all, and hands back its answer as it is.
  * Redirects are not followed: an AuthKit 302 belongs to the browser, never to this server.
  * A read (GET, HEAD) whose connection fails or that the link answers 502, 503 or 504 is sent once
- * more after `RETRY_PAUSE_MS`, and that answer is passed on whatever it is. A write never is.
+ * more after `RETRY_PAUSE_MS`, and that answer is passed on whatever it is. A write never is, nor
+ * anything under `/auth`.
  */
 export async function forward(request: Request, path: string, api: Upstream): Promise<Response> {
   const target = new URL(api.origin)
@@ -111,6 +126,8 @@ export async function forward(request: Request, path: string, api: Upstream): Pr
   const send = () =>
     api.fetch(new Request(target, { method: request.method, headers, body, redirect: "manual" }))
   if (request.method !== "GET" && request.method !== "HEAD") return send()
+  // A sign-in code is single use, and an authorization server may revoke what it issued when one is reused.
+  if (underAuth(path)) return send()
   // An API deploy replaces the tunnel connector; a read caught by the old one gets one more try.
   try {
     const first = await send()

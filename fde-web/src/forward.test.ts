@@ -113,4 +113,39 @@ describe("forward's one retry", () => {
       expect((thrown as Error).message).toBe("lost")
     })
   }
+
+  // The path forward() is given is the API's: `/auth/x` from `/auth/x`, and also from `/api/auth/x`.
+  const signIn = [
+    "/auth/callback",
+    "/auth/login",
+    "/auth//callback",
+    "//auth/callback",
+    "/AUTH/callback",
+    "/%61uth/callback",
+    "/auth%2Fcallback",
+    "/%E0%A4%A/callback",
+  ]
+  for (const path of signIn) {
+    it(`never repeats a read of ${path}, whatever the link answered`, async () => {
+      const { api, fetch } = apiAnswering(502, 503, 504, new TypeError("lost"), 200)
+      const read = () => forward(new Request(`${APP}/auth/callback?code=c_1&state=s_1`), path, api)
+
+      const answers = []
+      for (let i = 0; i < 3; i++) answers.push(await settle(read()))
+      const thrown = await settle(read())
+
+      expect(fetch).toHaveBeenCalledTimes(4)
+      expect(answers.map((answer) => (answer as Response).status)).toEqual([502, 503, 504])
+      expect((thrown as Error).message).toBe("lost")
+    })
+  }
+
+  it("still repeats a read whose path only starts like the sign-in routes", async () => {
+    const { api, fetch } = apiAnswering(502, 200)
+
+    const response = await settle(forward(new Request(`${APP}/api/authors`), "/authors", api))
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect((response as Response).status).toBe(200)
+  })
 })
