@@ -1036,7 +1036,7 @@
             }
           },
           "409": {
-            "description": "`rejected_conversation_limit`: the caller holds 200 conversations already; delete one first",
+            "description": "`rejected_conversation_limit`: the caller holds 200 conversations already, counting those the list shows (home, and companies they may still use); delete one first",
             "content": {
               "application/json": {
                 "schema": {
@@ -10291,6 +10291,31 @@
           }
         }
       },
+      "Block": {
+        "type": "object",
+        "description": "One block of the catalogue: its `type`, and the fields that type takes, which the Worker checks.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/BlockType"
+          }
+        },
+        "additionalProperties": {}
+      },
+      "BlockType": {
+        "type": "string",
+        "description": "The catalogue's block types (`assistant/src/catalogue/blocks.ts`), the same at home and in a company.",
+        "enum": [
+          "suggestion",
+          "brief",
+          "plan",
+          "rules",
+          "people",
+          "checklist"
+        ]
+      },
       "CallerRole": {
         "type": "string",
         "description": "The caller's role at a company: a member's role, or `admin` for a WorkOS admin who is not a\nmember.",
@@ -13939,7 +13964,7 @@
           "blocks": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/Block"
             },
             "description": "Up to 6 blocks of the catalogue."
           },
@@ -14004,7 +14029,7 @@
           "blocks": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/Block"
             }
           },
           "created_at": {

@@ -37,10 +37,26 @@ use crate::authz::{company, project, workspace};
 use crate::records::new;
 use crate::{ApiError, App, ErrorBody, Principal, ts};
 
-/// The catalogue's block types (`assistant/src/catalogue/blocks.ts`).
-const BLOCK_TYPES: [&str; 6] = ["suggestion", "brief", "plan", "rules", "people", "checklist"];
-/// The blocks a home conversation may hold: list-level only (ADR 0008).
-const HOME_BLOCK_TYPES: [&str; 1] = ["suggestion"];
+/// The catalogue's block types (`assistant/src/catalogue/blocks.ts`), the same at home and in a company.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockType {
+    Suggestion,
+    Brief,
+    Plan,
+    Rules,
+    People,
+    Checklist,
+}
+
+/// One block of the catalogue: its `type`, and the fields that type takes, which the Worker checks.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct Block {
+    #[serde(rename = "type")]
+    pub kind: BlockType,
+    #[serde(flatten)]
+    pub fields: std::collections::HashMap<String, Value>,
+}
 /// The catalogue's proposal actions (`wire.ts`).
 const PROPOSAL_ACTIONS: [&str; 2] = ["create_company", "open_route"];
 const DEFAULT_LIST: u32 = 20;
@@ -140,7 +156,7 @@ pub struct TurnBody {
     pub text: String,
     /// Up to 6 blocks of the catalogue.
     #[serde(default)]
-    #[schema(value_type = Vec<Object>)]
+    #[schema(value_type = Vec<Block>)]
     pub blocks: Vec<Value>,
     /// Up to 3 proposals, each with its state.
     #[serde(default)]
@@ -156,7 +172,7 @@ pub struct TurnOut {
     pub id: String,
     pub said: String,
     pub text: String,
-    #[schema(value_type = Vec<Object>)]
+    #[schema(value_type = Vec<Block>)]
     pub blocks: Value,
     #[schema(value_type = Vec<ProposalEntry>)]
     pub proposals: Value,
@@ -238,7 +254,8 @@ fn conversation_id(raw: String) -> Result<ConversationId, ApiError> {
     request_body = ConversationBody,
     responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "`rejected_conversation_limit`: the caller holds 200 \
-            conversations already; delete one first"),
+            conversations already, counting those the list shows (home, and companies they may still use); delete one \
+            first"),
         (status = 503, body = ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
@@ -252,9 +269,11 @@ pub(crate) async fn create(
         (None, Some(_)) => return Err(ApiError::Invalid("project")),
     };
     require(&app, &who, &scope).await?;
+    // The cap counts only what the list shows: home, and the companies the caller may still use.
+    let companies = app.companies_for(&who).await?;
     let id = new("cnv", ConversationId::new)?;
     let mut tx = app.store.assistant(&scope).await?;
-    let made = tx.create(&id, &who.user).await?;
+    let made = tx.create(&id, &who.user, &companies).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(made.into())))
 }
@@ -414,7 +433,7 @@ async fn turn_in(
     n: u32,
     body: TurnBody,
 ) -> Result<TurnIn, ApiError> {
-    let v = shape(scope.company().is_none(), n, body)?;
+    let v = shape(n, body)?;
     let mut destinations = Vec::new();
     destinations_in(&v.blocks, &mut destinations);
     destinations_in(&v.proposals, &mut destinations);
@@ -422,9 +441,9 @@ async fn turn_in(
     Ok(v)
 }
 
-/// The turn's own limits, the Worker's: its id, sizes, block types (list-level only at home) and
-/// proposal actions.
-fn shape(home: bool, n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
+/// The turn's own limits, the Worker's: its id, sizes, block types and proposal actions, the same
+/// in every scope; what a block may name is the scope's (`check_destinations`).
+fn shape(n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
     let id = TurnKey::new(&body.id).ok_or(ApiError::Invalid("turn"))?;
     let said = Said::new(&body.said).ok_or(ApiError::Invalid("said"))?;
     if !reply_fits(&body.text) {
@@ -436,10 +455,9 @@ fn shape(home: bool, n: u32, body: TurnBody) -> Result<TurnIn, ApiError> {
     if body.proposals.len() > MAX_PROPOSALS {
         return Err(ApiError::Invalid("proposals"));
     }
-    let allowed: &[&str] = if home { &HOME_BLOCK_TYPES } else { &BLOCK_TYPES };
     for block in &body.blocks {
-        let kind = block.get("type").and_then(Value::as_str).unwrap_or_default();
-        if !allowed.contains(&kind) {
+        let kind = block.get("type").cloned().unwrap_or_default();
+        if serde_json::from_value::<BlockType>(kind).is_err() {
             return Err(ApiError::Invalid("block"));
         }
     }
@@ -665,7 +683,7 @@ mod tests {
 
     #[test]
     fn a_turn_keeps_to_the_workers_limits() {
-        let ok = shape(false, 1, body(json!({
+        let ok = shape(1, body(json!({
             "blocks": [{ "type": "plan", "steps": [] }, suggestion(json!({ "screen": "today" }))],
             "proposals": [{ "proposal": { "id": "p1", "action": "open_route", "args": { "to": { "screen": "today" } } },
                            "state": "waiting" }],
@@ -712,39 +730,34 @@ mod tests {
                 "invalid_proposal",
             ),
         ] {
-            assert_eq!(code(shape(false, 1, body(patch.clone()))), want, "{patch}");
+            assert_eq!(code(shape(1, body(patch.clone()))), want, "{patch}");
         }
         // Pasted text keeps its carriage returns, as on the wire.
         assert_eq!(
-            code(shape(false, 1, body(json!({ "said": "one\r\ntwo", "text": "a\r\nb" })))),
+            code(shape(1, body(json!({ "said": "one\r\ntwo", "text": "a\r\nb" })))),
             "ok"
         );
         // Only the answer route records an answer: a proposal is appended `waiting`.
         for state in ["confirmed", "dismissed"] {
             let b =
                 body(json!({ "proposals": [{ "proposal": { "id": "p1", "action": "open_route" }, "state": state }] }));
-            assert_eq!(code(shape(false, 1, b)), "invalid_proposal_state", "{state}");
+            assert_eq!(code(shape(1, b)), "invalid_proposal_state", "{state}");
         }
         // A NUL anywhere in a part, value or key, escaped or not, is refused before Postgres sees it.
         let nul_value: TurnBody = serde_json::from_str(
             r#"{"id":"t_1","said":"x","state":"done","blocks":[{"type":"brief","items":[{"label":"a","value":"b\u0000c"}]}]}"#,
         )
         .unwrap();
-        assert_eq!(code(shape(false, 1, nul_value)), "invalid_blocks");
+        assert_eq!(code(shape(1, nul_value)), "invalid_blocks");
         let nul_key = body(json!({ "blocks": [{ "type": "brief", "x\u{0}": 1 }] }));
-        assert_eq!(code(shape(false, 1, nul_key)), "invalid_blocks");
+        assert_eq!(code(shape(1, nul_key)), "invalid_blocks");
         let nul_proposal = body(
             json!({ "proposals": [{ "proposal": { "id": "p1", "action": "create_company",
             "args": { "name": "a\u{0}b" } }, "state": "waiting" }] }),
         );
-        assert_eq!(code(shape(false, 1, nul_proposal)), "invalid_proposals");
+        assert_eq!(code(shape(1, nul_proposal)), "invalid_proposals");
         // A turn the person stopped: notice `stopped`, and its reply may be empty, as for any notice.
-        let stopped = shape(
-            false,
-            1,
-            body(json!({ "text": "", "notice": "stopped", "state": "done" })),
-        )
-        .unwrap();
+        let stopped = shape(1, body(json!({ "text": "", "notice": "stopped", "state": "done" }))).unwrap();
         assert_eq!(
             (stopped.notice.as_deref(), stopped.reply.as_str()),
             (Some("stopped"), "")
@@ -765,19 +778,32 @@ mod tests {
     }
 
     #[test]
-    fn a_home_conversation_holds_list_level_blocks_only() {
-        assert_eq!(
-            code(shape(
-                true,
-                1,
-                body(json!({ "blocks": [suggestion(json!({ "screen": "companies" }))] }))
-            )),
-            "ok"
-        );
-        for kind in ["brief", "plan", "rules", "people", "checklist"] {
-            let b = body(json!({ "blocks": [{ "type": kind }] }));
-            assert_eq!(code(shape(true, 1, b)), "invalid_block", "{kind}");
+    fn a_home_turn_takes_a_brief_block_as_a_company_turn_does() {
+        // Block types are the scope's no longer: `shape` has no scope, so a home turn's brief passes it.
+        let turn = shape(
+            1,
+            body(json!({ "blocks": [{ "type": "brief", "items": [] }, suggestion(json!({ "screen": "companies" }))] })),
+        )
+        .unwrap();
+        assert_eq!(turn.blocks[0]["type"], "brief");
+        for kind in ["suggestion", "brief", "plan", "rules", "people", "checklist"] {
+            assert_eq!(
+                code(shape(1, body(json!({ "blocks": [{ "type": kind }] })))),
+                "ok",
+                "{kind}"
+            );
         }
+        for kind in [json!("html"), json!("Brief"), json!(1), Value::Null] {
+            assert_eq!(
+                code(shape(1, body(json!({ "blocks": [{ "type": kind }] })))),
+                "invalid_block",
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            code(shape(1, body(json!({ "blocks": [{ "items": [] }] })))),
+            "invalid_block"
+        );
     }
 
     #[test]

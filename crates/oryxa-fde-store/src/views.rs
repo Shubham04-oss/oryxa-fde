@@ -201,7 +201,8 @@ impl Store {
     // (a count and a hash of the ordered ids), so the read is bounded by the number of projects.
     /// The facts behind the home suggestions in `projects`: only the rows that can make one (tasks
     /// blocked, or due on or before `today`; requests still waiting; projects with no task left), and
-    /// of those only ids and names, so a home read stays small however much open work there is.
+    /// of those only ids and names, so each row stays small; how many rows there are is not bounded yet
+    /// (see the note above).
     pub async fn home_facts(&self, projects: &[ProjectScope], today: Date) -> Result<Vec<HomeFact>, StoreError> {
         let Some(first) = projects.first() else {
             return Ok(Vec::new());

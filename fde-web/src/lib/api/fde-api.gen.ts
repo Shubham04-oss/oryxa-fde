@@ -2087,6 +2087,17 @@ export interface components {
             /** @description WorkOS user id. */
             user: string;
         };
+        /** @description One block of the catalogue: its `type`, and the fields that type takes, which the Worker checks. */
+        Block: {
+            type: components["schemas"]["BlockType"];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * @description The catalogue's block types (`assistant/src/catalogue/blocks.ts`), the same at home and in a company.
+         * @enum {string}
+         */
+        BlockType: "suggestion" | "brief" | "plan" | "rules" | "people" | "checklist";
         /**
          * @description The caller's role at a company: a member's role, or `admin` for a WorkOS admin who is not a
          *     member.
@@ -3287,7 +3298,7 @@ export interface components {
         /** @description A finished turn, as the Worker folded it. */
         TurnBody: {
             /** @description Up to 6 blocks of the catalogue. */
-            blocks?: Record<string, never>[];
+            blocks?: components["schemas"]["Block"][];
             /** @description The Worker's turn id, `t_` and 1 to 64 of `A-Za-z0-9_-`. */
             id: string;
             notice?: components["schemas"]["TurnNotice"] | null;
@@ -3302,7 +3313,7 @@ export interface components {
         /** @enum {string} */
         TurnNotice: "tool_limit" | "reply_limit" | "timed_out" | "failed" | "stopped";
         TurnOut: {
-            blocks: Record<string, never>[];
+            blocks: components["schemas"]["Block"][];
             created_at: string;
             id: string;
             /**
@@ -4189,7 +4200,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description `rejected_conversation_limit`: the caller holds 200 conversations already; delete one first */
+            /** @description `rejected_conversation_limit`: the caller holds 200 conversations already, counting those the list shows (home, and companies they may still use); delete one first */
             409: {
                 headers: {
                     [name: string]: unknown;
