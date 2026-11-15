@@ -22,6 +22,7 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+mod assistant;
 pub mod auth;
 mod authz;
 mod canvas;
@@ -185,6 +186,9 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(today::today))
         .routes(routes!(home::home))
         .routes(routes!(home::dismiss))
+        .routes(routes!(assistant::create, assistant::list))
+        .routes(routes!(assistant::get, assistant::delete))
+        .routes(routes!(assistant::check))
         .routes(routes!(share::create, share::list))
         .routes(routes!(share::revoke))
         .routes(routes!(share::redeem))
@@ -346,6 +350,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             for a company and for each project"),
 
         (name = "room", description = "Share links, and the customer room a project's guests see"),
+        (name = "assistant", description = "The workspace assistant's conversations: the record behind the assistant \
+            Worker's working copy, bound to one person and one company or their home"),
         (name = "integrations", description = "GitHub App installations, repositories linked to projects and \
             GitHub's webhooks; the Slack workspace, a company's channel and Slack's events"),
     )
