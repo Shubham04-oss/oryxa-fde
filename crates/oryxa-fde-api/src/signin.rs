@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use utoipa::ToSchema;
 
 use crate::session::{
-    Attempt, Client, Created, ProviderId, Reset, Sent, SignIn, clear_cookie, cookie_value, now, safe_return_to,
+    Attempt, Client, Created, ProviderId, Reset, ReturnTo, Sent, SignIn, clear_cookie, cookie_value, now,
     session_cookie, set_cookie,
 };
 use crate::{ApiError, App, BoxFuture, ErrorBody, VerifyToken};
@@ -250,7 +250,10 @@ pub struct OrganisationOut {
 #[serde(tag = "next", rename_all = "snake_case")]
 pub enum SignInStep {
     /// Signed in: the session cookie is set. Go to `return_to`.
-    Done { return_to: String },
+    Done {
+        #[schema(value_type = String)]
+        return_to: ReturnTo,
+    },
     /// A code was emailed to the address; post it to `/auth/sign-in/verify-email`.
     VerifyEmail,
     /// Post one of these to `/auth/sign-in/organisation`.
@@ -364,7 +367,7 @@ struct Pending {
     organisations: Vec<String>,
     /// The address's keyed hash, for its limits; never the address.
     address: [u8; 32],
-    return_to: String,
+    return_to: ReturnTo,
     expires: u64,
     /// WorkOS's id for the code a verification step waits on, for sending it again.
     #[serde(default)]
@@ -495,13 +498,18 @@ fn address_key(sign_in: &SignIn, email: &EmailAddress) -> [u8; 32] {
     sign_in.limit_hash("address", &email.as_str().to_lowercase())
 }
 
+/// A fetch route's `return_to`: `/` when absent, `None` (a 400) when not one of our paths.
+fn return_to_of(raw: Option<&str>) -> Option<ReturnTo> {
+    raw.map_or(Some(ReturnTo::home()), ReturnTo::parse)
+}
+
 /// The answer to an attempt. `refused` is what a refusal says on this route; whether the pending
 /// cookie is kept on one is `keep_on_refusal`.
 async fn conclude(
     ctx: &Ctx<'_>,
     attempt: Attempt,
     address: [u8; 32],
-    return_to: String,
+    return_to: ReturnTo,
     refused: ApiError,
     keep_on_refusal: bool,
 ) -> Response {
@@ -623,7 +631,7 @@ pub(crate) async fn password_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[
     if input.password.0.is_empty() || input.password.0.len() > MAX_PASSWORD_BYTES {
         return refuse(ApiError::Invalid("password"));
     }
-    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+    let Some(return_to) = return_to_of(input.return_to.as_deref()) else {
         return refuse(ApiError::Invalid("return_to"));
     };
     let client = client_of(headers);
@@ -756,7 +764,7 @@ pub(crate) async fn code_sign_in(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &[u8])
     let Some(code) = code_of(&input.code) else {
         return refuse(ApiError::Invalid("code"));
     };
-    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+    let Some(return_to) = return_to_of(input.return_to.as_deref()) else {
         return refuse(ApiError::Invalid("return_to"));
     };
     let client = client_of(headers);
@@ -873,7 +881,7 @@ pub(crate) async fn accept_invitation(ctx: &Ctx<'_>, headers: &HeaderMap, raw: &
         (Ok(f), Ok(l)) => (f, l),
         (Err(e), _) | (_, Err(e)) => return refuse(e),
     };
-    let Some(return_to) = safe_return_to(input.return_to.as_deref().unwrap_or("/")) else {
+    let Some(return_to) = return_to_of(input.return_to.as_deref()) else {
         return refuse(ApiError::Invalid("return_to"));
     };
     let client = client_of(headers);
@@ -1841,6 +1849,80 @@ mod tests {
         assert_eq!(w.kit.calls(), calls + 1);
     }
 
+    /// Return paths a browser could take off our origin, each refused by every fetch route.
+    const BAD_RETURN_TO: [&str; 8] = [
+        "//evil.example",
+        "/.//evil.example",
+        "/%2e//evil.example",
+        "/%2F/evil.example",
+        "/%5Cevil.example",
+        "/\\\\evil",
+        "/%2Fevil.example/../../x",
+        "/\u{FF0F}evil.example",
+    ];
+
+    #[tokio::test(start_paused = true)]
+    async fn every_fetch_route_refuses_a_return_to_that_leaves_our_origin() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        for r in BAD_RETURN_TO {
+            let password = serde_json::json!({ "email": KNOWN, "password": PASSWORD, "return_to": r });
+            let code = serde_json::json!({ "email": KNOWN, "code": "123456", "return_to": r });
+            let invitation = serde_json::json!({ "token": "inv_new", "password": "x", "return_to": r });
+            for (route, a) in [
+                (
+                    "password",
+                    read(password_sign_in(&w.ctx(), &headers(&[]), password.to_string().as_bytes()).await).await,
+                ),
+                (
+                    "code",
+                    read(code_sign_in(&w.ctx(), &headers(&[]), code.to_string().as_bytes()).await).await,
+                ),
+                (
+                    "invitation",
+                    read(accept_invitation(&w.ctx(), &headers(&[]), invitation.to_string().as_bytes()).await).await,
+                ),
+            ] {
+                assert_eq!(
+                    (a.status, a.body.as_str()),
+                    (StatusCode::BAD_REQUEST, r#"{"error":"invalid_return_to"}"#),
+                    "{route} {r:?}"
+                );
+            }
+        }
+        assert_eq!(w.kit.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_cookie_whose_return_to_is_not_ours_is_no_sign_in() {
+        let w = World::new(signed_in("user_1", "org_01A"));
+        let pending = Pending {
+            purpose: PENDING_PURPOSE.into(),
+            step: Step::ChooseOrganisation,
+            token: "pt_choose".into(),
+            organisations: vec!["org_01A".into()],
+            address: [0; 32],
+            return_to: ReturnTo::home(),
+            expires: now() + 60,
+            verification: None,
+        };
+        let mut sealed = serde_json::to_value(&pending).unwrap();
+        let w = &w;
+        let choose = |cookie: String| async move {
+            let cookie = format!("{PENDING_COOKIE}={cookie}");
+            read(choose_organisation_sign_in(&w.ctx(), &headers(&[&cookie]), br#"{"organisation":"org_01A"}"#).await)
+                .await
+        };
+        // However it came to be sealed, a bad return_to makes the cookie unreadable: no sign-in in progress.
+        sealed["return_to"] = "/.//evil.example".into();
+        let a = choose(w.sign_in.seal(&sealed).unwrap()).await;
+        assert_eq!(a.body, r#"{"error":"invalid_sign_in"}"#);
+        assert_eq!(w.kit.calls(), 0);
+        // The same cookie with one of our paths goes on to sign in there.
+        sealed["return_to"] = "/companies".into();
+        let a = choose(w.sign_in.seal(&sealed).unwrap()).await;
+        assert_eq!(a.body, r#"{"next":"done","return_to":"/companies"}"#);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_pending_step_lapses() {
         let w = World::new(signed_in("user_1", "org_01A"));
@@ -1850,7 +1932,7 @@ mod tests {
             token: "pt_verify".into(),
             organisations: vec![],
             address: [0; 32],
-            return_to: "/".into(),
+            return_to: ReturnTo::home(),
             expires: now() - 1,
             verification: None,
         };

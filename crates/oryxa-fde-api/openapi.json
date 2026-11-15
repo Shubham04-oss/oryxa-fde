@@ -244,7 +244,7 @@
           {
             "name": "return_to",
             "in": "query",
-            "description": "Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`.",
+            "description": "Where to go after sign-in: a path on the web app, e.g. `/companies`. Defaults to `/`, as\ndoes a value that is not one path on the web app.",
             "required": false,
             "schema": {
               "type": "string"
@@ -254,16 +254,6 @@
         "responses": {
           "302": {
             "description": "To WorkOS AuthKit"
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
           },
           "503": {
             "description": "Service Unavailable",
