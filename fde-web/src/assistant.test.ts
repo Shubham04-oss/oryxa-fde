@@ -463,15 +463,18 @@ describe("the API's check on every call", () => {
     }
   })
 
-  it("lends the session, with this app's origin, to a turn, a view and an answer alone", async () => {
+  it("lends the session to a turn, a view and an answer alone, and the origin to the two that write", async () => {
     const lent = { turn: true, view: true, events: false, stop: false, answer: true }
+    const writes = { turn: true, view: false, events: false, stop: false, answer: true }
     for (const [name, request] of Object.entries(routes("/assistant/conversations/c_1"))) {
       const { env, assistant: helper } = setup()
       expect((await call(request(), env)).status, name).toBe(200)
       const forwarded = helper.mock.calls[0]![0]
       const want = lent[name as keyof typeof lent]
       expect(forwarded.headers.get("x-assistant-session"), name).toBe(want ? COOKIE : null)
-      expect(forwarded.headers.get("x-assistant-origin"), name).toBe(want ? APP : null)
+      expect(forwarded.headers.get("x-assistant-origin"), name).toBe(
+        writes[name as keyof typeof writes] ? APP : null,
+      )
       expect(forwarded.headers.get("cookie"), name).toBeNull()
     }
   })

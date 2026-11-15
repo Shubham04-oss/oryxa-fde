@@ -1,10 +1,20 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseView } from "../src/catalogue/wire.js";
 import { runtime } from "../src/model/provider.js";
-import { DOWN_SESSION, FLAKY_SESSION, LOST_SESSION, SESSION, SLOW_SESSION, WEB_ORIGIN } from "./fake-api.js";
+import type { Conversation } from "../src/conversation.js";
+import {
+  DOWN_SESSION,
+  FLAKY_SESSION,
+  LOST_SESSION,
+  REFUSED_TEXT,
+  SESSION,
+  SLOW_SESSION,
+  UNHEARD_SESSION,
+  WEB_ORIGIN,
+} from "./fake-api.js";
 import { bindingFor, call, dump, freshConversation, logsOf, readSome, replyText, say } from "./helpers.js";
 
 // The record (issue #279, ADR 0009): each finished turn, and each answer to a proposal, is written to the API with
@@ -16,6 +26,7 @@ const SECRET = SESSION.split("=")[1]!;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 type StoredTurn = {
@@ -48,8 +59,42 @@ async function callsFor(conversation: string) {
     path: string;
     origin: string | null;
     csrf: string | null;
+    status: number;
   }>;
   return all.filter((c) => c.path.includes(`/conversations/${conversation}`));
+}
+
+/** The record writes the Worker made for `conversation` (not a test's own seeding). */
+const putsOf = async (conversation: string) =>
+  (await callsFor(conversation)).filter((c) => c.method === "PUT" && c.path.startsWith("/v1/"));
+
+/** Puts a finished turn the record does not have yet straight into the working copy, as an earlier turn left it. */
+async function plant(
+  conversation: string,
+  turn: {
+    id: string;
+    text?: string;
+    blocks?: Array<unknown>;
+    proposals?: Array<{ id: string } & Record<string, unknown>>;
+  },
+) {
+  await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (_instance, state) => {
+    state.storage.sql.exec(
+      "INSERT INTO assistant_turns (id, said, state, text, blocks, record) VALUES (?, 'planted', 'done', ?, ?, 'pending')",
+      turn.id,
+      turn.text ?? "",
+      JSON.stringify(turn.blocks ?? []),
+    );
+    (turn.proposals ?? []).forEach((p, i) =>
+      state.storage.sql.exec(
+        "INSERT INTO assistant_proposals (id, turn, n, body, state) VALUES (?, ?, ?, ?, 'waiting')",
+        p.id,
+        turn.id,
+        i,
+        JSON.stringify(p),
+      ),
+    );
+  });
 }
 
 /** The working copy's own marks: whether each turn is written to the record yet. */
@@ -182,7 +227,7 @@ describe("a write that fails", () => {
     // The log names ids and the outcome only.
     const turn = (first!.events[0] as { turn: string }).turn;
     expect(JSON.parse(logged)).toEqual([
-      [JSON.stringify({ event: "assistant_record", conversation, turn, n: 1, outcome: "later" })],
+      [JSON.stringify({ event: "assistant_record", conversation, turn, n: 1, outcome: "later", how: "whole" })],
     ]);
     // Nothing of the session is kept for the next turn.
     expect(await dump(env.CONVERSATIONS.getByName(conversation))).not.toContain("sample-down");
@@ -363,7 +408,14 @@ describe("the session lent for the record", () => {
   it("must come with the web app's origin, well formed", async () => {
     const conversation = freshConversation();
     const binding = await as(conversation);
-    for (const origin of [null, "https://fde.example/path", "http://fde.example", "javascript:alert(1)"]) {
+    // Well formed, and exactly the origin the deploy set (WEB_ORIGIN in vitest.config.ts).
+    for (const origin of [
+      null,
+      "https://fde.example/path",
+      "http://fde.example",
+      "javascript:alert(1)",
+      "https://other.example",
+    ]) {
       const bad = await call(`/internal/v1/conversations/${conversation}/turns`, {
         method: "POST",
         session: SESSION,
@@ -374,5 +426,241 @@ describe("the session lent for the record", () => {
       expect(bad.status, String(origin)).toBe(400);
       expect(await bad.json()).toEqual({ error: "no_session" });
     }
+  });
+});
+
+describe("a turn the record will not take", () => {
+  it("is written as a plain failed turn in its place, and the turns after it follow on", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    // Refused by the API for a rule the Worker does not copy; then one the Worker itself cannot send.
+    await plant(conversation, { id: "t_refused", text: `Here: ${REFUSED_TEXT}` });
+    await plant(conversation, { id: "t_unsendable", text: "a\u001bb" });
+    const last = await sayAs(conversation, binding, "and then?");
+    await until(conversation, (turns) => expect(turns).toHaveLength(4));
+    const turns = await recorded(conversation);
+    expect(turns.map((t) => [t.n, t.id, t.state, t.notice])).toEqual([
+      [1, turns[0]!.id, "done", null],
+      [2, "t_refused", "failed", "failed"],
+      [3, "t_unsendable", "failed", "failed"],
+      [4, (last.events[0] as { turn: string }).turn, "done", null],
+    ]);
+    expect([turns[1]!.text, turns[2]!.text]).toEqual(["", ""]);
+    expect(await marks(conversation)).toEqual([1, 2, 3, 4].map((n) => ({ n, record: "written" })));
+  });
+
+  it("is written without the parts naming a record the API refuses, in its place", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    const unseen = { screen: "company", company: "cmp_unseen" };
+    await plant(conversation, {
+      id: "t_unseen",
+      text: "Open it below.",
+      blocks: [{ type: "suggestion", id: "s1", title: "Open", approve: { label: "Open", to: unseen } }],
+      proposals: [
+        { id: "p_open", action: "open_route", args: { to: unseen } },
+        { id: "p_make", action: "create_company", args: { name: "Acme" } },
+      ],
+    });
+    await sayAs(conversation, binding, "and then?");
+    await until(conversation, (turns) => expect(turns).toHaveLength(3));
+    const second = (await recorded(conversation))[1]!;
+    expect(second).toMatchObject({ n: 2, id: "t_unseen", text: "Open it below.", blocks: [], state: "done" });
+    expect(second.proposals.map((p) => p.proposal.id)).toEqual(["p_make"]);
+    const tries = (await putsOf(conversation)).filter((c) => c.path.endsWith("/turns/2"));
+    expect(tries.map((c) => c.status)).toEqual([400, 201]);
+  });
+});
+
+describe("another turn in the record's place", () => {
+  it("stops the writes, leaves the turn waiting, and lines up with the record at the next session", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello");
+    await until(conversation, (turns) => expect(turns).toHaveLength(1));
+    // Another writer took place 2.
+    await env.API!.fetch(`http://api.internal/v1/assistant/conversations/${conversation}/turns/2`, {
+      method: "PUT",
+      headers: { cookie: SESSION, origin: WEB_ORIGIN, "x-oryxa-request": "1" },
+      body: JSON.stringify({ id: "t_elsewhere", said: "from elsewhere", state: "done" }),
+    });
+    const second = await sayAs(conversation, binding, "second");
+    const secondId = (second.events[0] as { turn: string }).turn;
+    await vi.waitFor(async () => expect((await putsOf(conversation)).filter((c) => c.status === 409)).toHaveLength(1), {
+      timeout: 5_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await marks(conversation)).at(-1)).toEqual({ n: 2, record: "pending" });
+
+    const third = await sayAs(conversation, binding, "third");
+    const thirdId = (third.events[0] as { turn: string }).turn;
+    await until(conversation, (turns) => expect(turns).toHaveLength(4));
+    expect((await recorded(conversation)).map((t) => t.id).slice(1)).toEqual(["t_elsewhere", secondId, thirdId]);
+    expect(await marks(conversation)).toEqual([
+      { n: 1, record: "written" },
+      { n: 2, record: "written" },
+      { n: 3, record: "written" },
+    ]);
+  });
+});
+
+describe("an object gone mid-write", () => {
+  it("restarts with the turn waiting, and its retry is answered 200", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello", UNHEARD_SESSION);
+    await vi.waitFor(async () => expect(await putsOf(conversation)).toHaveLength(3), { timeout: 5_000 });
+    // Stored, but the object never heard so: it keeps the turn waiting.
+    expect(await recorded(conversation)).toHaveLength(1);
+    expect(await marks(conversation)).toEqual([{ n: 1, record: "pending" }]);
+    await abortAllDurableObjects();
+
+    await sayAs(conversation, binding, "again");
+    await until(conversation, (turns) => expect(turns).toHaveLength(2));
+    const statuses = (await putsOf(conversation)).map((c) => [c.path.split("/").at(-1), c.status]);
+    expect(statuses.slice(3)).toEqual([
+      ["1", 200],
+      ["2", 201],
+    ]);
+  });
+});
+
+describe("a rebuilt proposal still waiting", () => {
+  it("records the person's answer once they give it", async () => {
+    const conversation = freshConversation();
+    await env.API!.fetch(`http://api.internal/v1/assistant/conversations/${conversation}/turns/1`, {
+      method: "PUT",
+      headers: { cookie: SESSION, origin: WEB_ORIGIN, "x-oryxa-request": "1" },
+      body: JSON.stringify({
+        id: "t_wait",
+        said: "Set up Acme",
+        proposals: [{ proposal: { id: "p_wait", action: "create_company", args: { name: "Acme" } }, state: "waiting" }],
+        state: "done",
+      }),
+    });
+    const binding = await as(conversation);
+    expect((await call(`/internal/v1/conversations/${conversation}`, { binding, session: SESSION })).status).toBe(200);
+    expect((await settle(conversation, binding, "p_wait", "confirmed", SESSION)).status).toBe(204);
+    await until(conversation, (turns) => expect(turns[0]!.proposals[0]!.state).toBe("confirmed"));
+  });
+});
+
+describe("a view that lends a session", () => {
+  it("writes nothing, even with a turn waiting to be written", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    await sayAs(conversation, binding, "hello", DOWN_SESSION);
+    await vi.waitFor(async () => expect(await putsOf(conversation)).toHaveLength(3), { timeout: 5_000 });
+    expect((await call(`/internal/v1/conversations/${conversation}`, { binding, session: SESSION })).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await putsOf(conversation)).toHaveLength(3);
+    expect(await marks(conversation)).toEqual([{ n: 1, record: "pending" }]);
+  });
+});
+
+describe("a lent session's deadline", () => {
+  it("sends nothing after it, and the next session lent picks the writes up", async () => {
+    const conversation = freshConversation();
+    const person = `user_rec_${crypto.randomUUID().slice(0, 8)}`;
+    const { events } = await sayAs(conversation, await bindingFor(conversation, { person }), NEW_COMPANY, DOWN_SESSION);
+    const proposal = (events.at(-1) as { proposal: { id: string } }).proposal.id;
+    // Ten minutes on, as after a sign-out: the turn's session is long past its deadline.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    const before = (await putsOf(conversation)).length;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(before).toBeLessThanOrEqual(1);
+    expect(await putsOf(conversation)).toHaveLength(before);
+    expect(await marks(conversation)).toEqual([{ n: 1, record: "pending" }]);
+
+    // An answer lends a fresh session: the turn and the answer go with it. Its binding is signed now, as fde-web would.
+    const binding = await bindingFor(conversation, { person });
+    expect((await settle(conversation, binding, proposal, "confirmed", SESSION)).status).toBe(204);
+    await until(conversation, (turns) => expect(turns[0]?.proposals[0]?.state).toBe("confirmed"));
+  });
+});
+
+describe("the idle deletion", () => {
+  it("says, by ids, which turns and answers it takes before the record has them", async () => {
+    const conversation = freshConversation();
+    const binding = await as(conversation);
+    const { events } = await sayAs(conversation, binding, NEW_COMPANY, DOWN_SESSION);
+    const turn = (events[0] as { turn: string }).turn;
+    const proposal = (events.at(-1) as { proposal: { id: string } }).proposal.id;
+    await settle(conversation, binding, proposal, "dismissed");
+    await vi.waitFor(async () => expect(await putsOf(conversation)).toHaveLength(3), { timeout: 5_000 });
+    const stub = env.CONVERSATIONS.getByName(conversation);
+    await runInDurableObject(stub, async (instance: Conversation) => {
+      await instance.lifecycle.jobs.reschedule("forget", Date.now() - 1);
+    });
+    const logged = await logsOf(async () => {
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+    });
+    expect(JSON.parse(logged)).toContainEqual([
+      JSON.stringify({ event: "assistant_record_dropped", conversation, turns: [turn], answers: [proposal] }),
+    ]);
+    expect(logged).not.toContain("Kestrel");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+});
+
+describe("a working copy made before the record", () => {
+  it("is brought up to date, and an answer given before is sent, never shown as waiting again", async () => {
+    const conversation = freshConversation();
+    const person = `user_rec_${crypto.randomUUID().slice(0, 8)}`;
+    const body = { id: "p_old", action: "create_company", args: { name: "Acme" } };
+    await runInDurableObject(env.CONVERSATIONS.getByName(conversation), (instance: Conversation, state) => {
+      const sql = state.storage.sql;
+      for (const t of ["assistant_binding", "assistant_turns", "assistant_proposals"])
+        sql.exec(`DROP TABLE IF EXISTS ${t}`);
+      // The tables as they were before this change.
+      sql.exec(`CREATE TABLE assistant_binding (
+        only INTEGER PRIMARY KEY CHECK (only = 1), tenant TEXT NOT NULL, person TEXT NOT NULL, company TEXT)`);
+      sql.exec(`CREATE TABLE assistant_turns (
+        n INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, said TEXT NOT NULL, state TEXT NOT NULL,
+        text TEXT NOT NULL DEFAULT '', blocks TEXT NOT NULL DEFAULT '[]', notice TEXT)`);
+      sql.exec(`CREATE TABLE assistant_proposals (
+        id TEXT PRIMARY KEY, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL)`);
+      sql.exec("INSERT INTO assistant_binding VALUES (1, 'org_sample', ?, NULL)", person);
+      sql.exec("INSERT INTO assistant_turns (id, said, state, text) VALUES ('t_old', 'Set up Acme', 'done', 'Ready.')");
+      sql.exec("INSERT INTO assistant_proposals VALUES ('p_old', 't_old', 0, ?, 'confirmed')", JSON.stringify(body));
+      instance.onStart();
+      // Twice, as each start does: every step runs once.
+      instance.onStart();
+      expect(sql.exec("SELECT id, state, owed FROM assistant_proposals").toArray()).toEqual([
+        { id: "p_old", state: "confirmed", owed: 1 },
+      ]);
+      expect(sql.exec("SELECT record, rn FROM assistant_turns").toArray()).toEqual([{ record: "pending", rn: null }]);
+      expect(sql.exec("SELECT full, reconcile, floor FROM assistant_binding").toArray()).toEqual([
+        { full: 0, reconcile: 0, floor: 0 },
+      ]);
+    });
+
+    await sayAs(conversation, await bindingFor(conversation, { person }), "hello");
+    await until(conversation, (turns) => {
+      expect(turns.map((t) => t.id)[0]).toBe("t_old");
+      expect(turns).toHaveLength(2);
+      expect(turns[0]!.proposals).toEqual([{ proposal: body, state: "confirmed" }]);
+    });
+  });
+});
+
+describe("an object with no API binding", () => {
+  it("refuses to rebuild rather than start empty", async () => {
+    const conversation = freshConversation();
+    const answer = await runInDurableObject(
+      env.CONVERSATIONS.getByName(conversation),
+      async (instance: Conversation) => {
+        Object.defineProperty(instance, "env", { value: { ...env, API: undefined } });
+        const binding = { conversation, tenant: "org_sample", person: "user_riya", company: null };
+        const response = await instance.view(binding, { session: SESSION, origin: null });
+        return { status: response.status, body: await response.json() };
+      },
+    );
+    expect(answer).toEqual({ status: 503, body: { error: "record_unavailable" } });
   });
 });

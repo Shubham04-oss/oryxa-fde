@@ -18,8 +18,13 @@ export const DOWN_SESSION = "__Host-fde_session=sample-down-0123456789abcdef";
 export const FLAKY_SESSION = "__Host-fde_session=sample-flaky-0123456789abcdef";
 /** The first try of each write is stored but its answer is lost (a 503), so the retry finds it stored. */
 export const LOST_SESSION = "__Host-fde_session=sample-lost-0123456789abcdef";
+/** Every write is stored and every answer to one is lost (a 503), as when the object is gone before it hears. */
+export const UNHEARD_SESSION = "__Host-fde_session=sample-unheard-0123456789abcdef";
 
-const SESSIONS = [SESSION, PLANTED_SESSION, SLOW_SESSION, DOWN_SESSION, FLAKY_SESSION, LOST_SESSION];
+/** A reply holding this is refused (`invalid_text`), as by a rule the API has and the Worker does not copy. */
+export const REFUSED_TEXT = "REFUSE_THIS_REPLY";
+
+const SESSIONS = [SESSION, PLANTED_SESSION, SLOW_SESSION, DOWN_SESSION, FLAKY_SESSION, LOST_SESSION, UNHEARD_SESSION];
 
 /** The web app's origin, which the API asks of a write made with a session (fde-web lends its own). */
 export const WEB_ORIGIN = "https://fde.example";
@@ -91,12 +96,15 @@ type Stored = {
   state: string;
   created_at: string;
 };
-type Record_ = { company: string | null | "unknown"; turns: Array<Stored> };
+type Record_ = { company: string | null; turns: Array<Stored> };
 
-/** Conversations' records. A conversation is there as soon as it is asked for, as one fde-web made would be. */
+/**
+ * Conversations' records. A conversation is there as soon as it is asked for, as a home one fde-web made would be;
+ * a test seeds a company's (`PUT /test/conversations/<id>`).
+ */
 const records = new Map<string, Record_>();
 /** Every request made to this API, without its session: what a test may look at. */
-const calls: Array<{ method: string; path: string; origin: string | null; csrf: string | null }> = [];
+const calls: Array<{ method: string; path: string; origin: string | null; csrf: string | null; status: number }> = [];
 const tries = new Map<string, number>();
 
 const BLOCK_TYPES = ["suggestion", "brief", "plan", "rules", "people", "checklist"];
@@ -124,12 +132,12 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   const proposals = (body.proposals ?? []) as Array<{ proposal: { id?: unknown; action?: unknown }; state: string }>;
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(String(body.id))) return "invalid_turn";
   if ([...said].length < 1 || [...said].length > 2000 || !plain(said)) return "invalid_said";
-  if (text.length > 8000 || !plain(text)) return "invalid_text";
+  if (text.length > 8000 || !plain(text) || text.includes(REFUSED_TEXT)) return "invalid_text";
   if (blocks.length > 6) return "invalid_blocks";
   if (proposals.length > 3) return "invalid_proposals";
   const home = record.company === null;
   const allowed = home ? ["suggestion"] : BLOCK_TYPES;
-  if (record.company !== "unknown" && blocks.some((b) => !allowed.includes(String(b.type)))) return "invalid_block";
+  if (blocks.some((b) => !allowed.includes(String(b.type)))) return "invalid_block";
   const ids = proposals.map((p) => p.proposal.id);
   if (
     proposals.some(
@@ -140,7 +148,6 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
     return "invalid_proposal";
   if (proposals.some((p) => p.state !== "waiting")) return "invalid_proposal_state";
   if (JSON.stringify([blocks, proposals]).includes("\\u0000")) return "invalid_blocks";
-  if (record.company === "unknown") return null;
   const found: Array<Record<string, unknown>> = [];
   destinations([blocks, proposals.map((p) => p.proposal)], found);
   for (const d of found) {
@@ -153,13 +160,21 @@ function refusal(record: Record_, body: Record<string, unknown>): string | null 
   return null;
 }
 
+/** Whether a string or key in `v` holds a lone surrogate. */
+const lone = (v: unknown): boolean =>
+  typeof v === "string"
+    ? /\p{Cs}/u.test(v)
+    : Array.isArray(v)
+      ? v.some(lone)
+      : typeof v === "object" && v !== null && Object.entries(v).some(([k, x]) => lone(k) || lone(x));
+
 const same = (a: Stored, b: Omit<Stored, "created_at">) =>
   JSON.stringify([a.id, a.said, a.text, a.blocks, a.notice, a.state, a.proposals.map((p) => p.proposal)]) ===
   JSON.stringify([b.id, b.said, b.text, b.blocks, b.notice, b.state, b.proposals.map((p) => p.proposal)]);
 
 const recordOf = (conversation: string) => {
   let record = records.get(conversation);
-  if (record === undefined) records.set(conversation, (record = { company: "unknown", turns: [] }));
+  if (record === undefined) records.set(conversation, (record = { company: null, turns: [] }));
   return record;
 };
 
@@ -172,7 +187,7 @@ async function assistant(request: Request, session: string, parts: Array<string>
     return Response.json({
       conversation: {
         id: conversation,
-        company: record.company === "unknown" ? null : record.company,
+        company: record.company,
         project: null,
         created_at: "2026-11-15T09:00:00Z",
         last_active_at: "2026-11-15T09:00:00Z",
@@ -189,7 +204,8 @@ async function assistant(request: Request, session: string, parts: Array<string>
   tries.set(key, attempt);
   if (session === DOWN_SESSION || (session === FLAKY_SESSION && attempt <= 2)) return fail(503, "unavailable");
   const answer = await put(request, conversation, Number(n), proposals, proposal);
-  return session === LOST_SESSION && attempt === 1 ? fail(503, "unavailable") : answer;
+  const lost = (session === LOST_SESSION && attempt === 1) || session === UNHEARD_SESSION;
+  return lost ? fail(503, "unavailable") : answer;
 }
 
 async function put(
@@ -210,6 +226,8 @@ async function put(
     return Response.json(record.turns.find((t) => t.n === n));
   }
   if (proposals !== undefined) return fail(404, "not_found");
+  // serde_json refuses a lone surrogate before any rule runs, and axum answers 400 with no code of ours.
+  if (lone(body)) return new Response("Failed to parse the request body as JSON", { status: 400 });
   if (problems(body, schemaOf("TurnBody")).length > 0) return fail(422, "invalid_body");
   if (n === 0) return fail(400, "invalid_n");
   if (n > MAX_TURNS || conversation.startsWith("c_full_")) return fail(409, "rejected_turn_limit");
@@ -237,12 +255,18 @@ async function put(
 
 export async function fakeApi(request: Request): Promise<Response> {
   const { pathname } = new URL(request.url);
+  const response = await answer(request, pathname);
   calls.push({
     method: request.method,
     path: pathname,
     origin: request.headers.get("origin"),
     csrf: request.headers.get("x-oryxa-request"),
+    status: response.status,
   });
+  return response;
+}
+
+async function answer(request: Request, pathname: string): Promise<Response> {
   // What a test may ask of the sample itself; the Worker never calls these paths.
   if (pathname === "/test/calls") return Response.json(calls);
   const seed = /^\/test\/conversations\/([^/]+)$/.exec(pathname);

@@ -20,13 +20,19 @@ export const ORIGIN_HEADER = "x-assistant-origin";
 /** An origin and nothing more: https, or http on localhost for a local API. */
 const WEB_ORIGIN = /^(?:https:\/\/[a-z0-9.-]{1,253}|http:\/\/localhost)(?::\d{1,5})?$/;
 
-/** What fde-web lent for this call, null when it lent nothing, or "bad" when what it sent is malformed. */
-export function lentBy(request: Request): Lent | null | "bad" {
+/**
+ * What fde-web lent for this call, null when it lent nothing, or "bad" when what it sent is malformed. A turn and an
+ * answer lend the session with fde-web's origin, which must be well formed and, when the deploy sets `WEB_ORIGIN`,
+ * exactly that; a view lends the session alone, to rebuild, and any origin sent with it is not used.
+ */
+export function lentBy(request: Request, writes: boolean, configured?: string): Lent | null | "bad" {
   const session = request.headers.get(SESSION_HEADER);
-  const origin = request.headers.get(ORIGIN_HEADER);
+  const origin = writes ? request.headers.get(ORIGIN_HEADER) : null;
   if (session === null && origin === null) return null;
   if (session === null || session === "" || session.length > MAX_SESSION_BYTES) return "bad";
+  if (!writes) return { session, origin: null };
   if (origin === null || !WEB_ORIGIN.test(origin)) return "bad";
+  if (configured !== undefined && configured !== "" && origin !== configured) return "bad";
   return { session, origin };
 }
 
@@ -87,7 +93,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (binding === null) return json(403, "forbidden");
   const conversation = env.CONVERSATIONS.getByName(route.conversation);
   // Only a turn, a view and an answer borrow the session; a stream's replay and a stop never do.
-  const lent = route.action === "turn" || route.action === "view" || route.action === "settle" ? lentBy(request) : null;
+  const writes = route.action === "turn" || route.action === "settle";
+  const lent = writes || route.action === "view" ? lentBy(request, writes, env.WEB_ORIGIN) : null;
   if (lent === "bad") return json(400, "no_session");
 
   switch (route.action) {

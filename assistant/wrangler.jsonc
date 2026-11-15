@@ -21,6 +21,7 @@
   // then needs the secrets VERTEX_CLIENT_EMAIL and VERTEX_PRIVATE_KEY and the vars VERTEX_PROJECT and VERTEX_LOCATION;
   // missing or malformed, every turn is refused. SERVICE_TOKEN and BINDING_KEY are Worker secrets, and the API
   // binding (`vpc_services`) comes with the deploy (infra); none of them is set here.
+  // WEB_ORIGIN, fde-web's origin, is set by the deploy (infra): the only origin taken with a lent session. Unset here.
   "vars": { "ASSISTANT_MODEL": "fake" },
   // Logs carry ids only, and invocation logs and traces are off: prompts and answers are never logged (ADR 0009).
   "observability": {

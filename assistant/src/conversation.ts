@@ -11,8 +11,18 @@ import type { Notice, Refusal } from "./catalogue/wire.js";
 import type { Env } from "./env.js";
 import { IDLE_MS } from "./limits.js";
 import { modelFor } from "./model/provider.js";
-import { readRecord, recordOf, withoutDestinations, writeAnswer, writeTurn } from "./record.js";
-import type { Answer, Lent, Written } from "./record.js";
+import {
+  LEND_GRACE_MS,
+  TURN_LEND_MS,
+  fallbackOf,
+  readPlaces,
+  readRecord,
+  recordOf,
+  withoutDestinations,
+  writeAnswer,
+  writeTurn,
+} from "./record.js";
+import type { Answer, Held, Lent, Written } from "./record.js";
 import { apiReader } from "./tools.js";
 import { runTurn } from "./turn.js";
 import type { Folded } from "./turn.js";
@@ -21,8 +31,9 @@ import type { Folded } from "./turn.js";
 // reached only over RPC from this Worker's fetch handler, after the service token and the binding are checked:
 // it has no `onRequest`, so a request that reaches it any other way gets the Lifecycle's 404. Its storage is a
 // working copy of sample data only, deleted when idle; the session lent for a turn lives in memory only.
-// The record is the API's (issue #279): each finished turn, and each answer to a proposal, is written there with the
-// session lent for the call, in the background and in order, and an object that holds nothing is rebuilt from it.
+// The record is the API's (issue #279): each finished turn, and each answer to a proposal, is written there in the
+// background and in order, with the newest session lent while it is still fresh, and an object that holds nothing is
+// rebuilt from it.
 
 const FORGET = "forget";
 const SSE_HEARTBEAT_MS = 15_000;
@@ -31,6 +42,7 @@ const FAILED = "failed";
 
 type TurnRow = {
   n: number;
+  rn: number | null;
   id: string;
   said: string;
   state: string;
@@ -65,29 +77,58 @@ export class Conversation extends DurableObject<Env> {
   #writes: Promise<void> = Promise.resolve();
   /** A rebuild under way, which a second call waits on rather than starting its own. */
   #rebuilding: Promise<"ok" | "gone" | "error"> | null = null;
+  /** The newest session lent by a call that may write, in memory only, until its short deadline. */
+  #lent: Held | null = null;
 
   onStart(): void {
     const sql = this.ctx.storage.sql;
-    // Ids only, no session: whom this conversation belongs to, set by its first turn and never changed.
+    // Ids only, no session: whom this conversation belongs to, set by its first call and never changed. `full`: the
+    // record holds all the turns it may; `reconcile`: read the record's places before writing more; `floor`: the
+    // record's last place as read then.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_binding (
-      only INTEGER PRIMARY KEY CHECK (only = 1), tenant TEXT NOT NULL, person TEXT NOT NULL, company TEXT)`);
-    // `n` is the turn's place in the record too; `record` is whether it is written there yet.
+      only INTEGER PRIMARY KEY CHECK (only = 1), tenant TEXT NOT NULL, person TEXT NOT NULL, company TEXT,
+      full INTEGER NOT NULL DEFAULT 0, reconcile INTEGER NOT NULL DEFAULT 0, floor INTEGER NOT NULL DEFAULT 0)`);
+    // `record`: whether the turn is written to the record yet (`pending`, `written`, `refused`); `rn`: its place
+    // there, once written.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_turns (
       n INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, said TEXT NOT NULL, state TEXT NOT NULL,
-      text TEXT NOT NULL DEFAULT '', blocks TEXT NOT NULL DEFAULT '[]', notice TEXT)`);
-    // `owed`: the person answered it and the record does not have the answer yet.
+      text TEXT NOT NULL DEFAULT '', blocks TEXT NOT NULL DEFAULT '[]', notice TEXT,
+      record TEXT NOT NULL DEFAULT 'pending', rn INTEGER)`);
+    // A proposal's id is unique within its turn, as the API asks. `owed`: answered, and the record lacks the answer.
     sql.exec(`CREATE TABLE IF NOT EXISTS assistant_proposals (
-      id TEXT PRIMARY KEY, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL)`);
-    // Added for the record (issue #279), also to a working copy made before it.
-    this.#column("assistant_binding", "full", "INTEGER NOT NULL DEFAULT 0");
-    this.#column("assistant_turns", "record", "TEXT NOT NULL DEFAULT 'pending'");
-    this.#column("assistant_proposals", "owed", "INTEGER NOT NULL DEFAULT 0");
+      id TEXT NOT NULL, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL,
+      owed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (turn, id))`);
+    this.#migrate();
   }
 
-  #column(table: string, column: string, definition: string): void {
+  /** Brings a working copy made before the record (issue #279) up to the tables above. Each step runs once. */
+  #migrate(): void {
     const sql = this.ctx.storage.sql;
-    const has = sql.exec("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", table, column).toArray().length > 0;
-    if (!has) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    const has = (table: string, column: string) =>
+      sql.exec("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", table, column).toArray().length > 0;
+    for (const [column, definition] of [
+      ["full", "INTEGER NOT NULL DEFAULT 0"],
+      ["reconcile", "INTEGER NOT NULL DEFAULT 0"],
+      ["floor", "INTEGER NOT NULL DEFAULT 0"],
+    ]) {
+      if (!has("assistant_binding", column!))
+        sql.exec(`ALTER TABLE assistant_binding ADD COLUMN ${column} ${definition}`);
+    }
+    if (!has("assistant_turns", "record")) {
+      sql.exec("ALTER TABLE assistant_turns ADD COLUMN record TEXT NOT NULL DEFAULT 'pending'");
+    }
+    if (!has("assistant_turns", "rn")) sql.exec("ALTER TABLE assistant_turns ADD COLUMN rn INTEGER");
+    if (!has("assistant_proposals", "owed")) {
+      // Keyed by turn and id now; and a proposal answered before the record existed owes its answer to it, so the
+      // record never shows it waiting, and confirmable again, after a rebuild.
+      sql.exec("ALTER TABLE assistant_proposals RENAME TO assistant_proposals_before");
+      sql.exec(`CREATE TABLE assistant_proposals (
+        id TEXT NOT NULL, turn TEXT NOT NULL, n INTEGER NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL,
+        owed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (turn, id))`);
+      sql.exec(`INSERT OR IGNORE INTO assistant_proposals (id, turn, n, body, state, owed)
+        SELECT id, turn, n, body, state, CASE WHEN state = 'waiting' THEN 0 ELSE 1 END FROM assistant_proposals_before`);
+      sql.exec("DROP TABLE assistant_proposals_before");
+    }
   }
 
   /** Starts the Lifecycle, which RPC does not do by itself, and ends a turn this instance can no longer run. */
@@ -172,8 +213,10 @@ export class Conversation extends DurableObject<Env> {
       this.#stopper = null;
       throw failure;
     }
-    // What an earlier turn could not write goes first, in the background: the stream does not wait on it.
-    this.#record(binding, lent);
+    // What an earlier turn could not write goes first, in the background: the stream does not wait on it. The session
+    // is held for as long as the turn may run, and a short grace after.
+    this.#lend(lent, TURN_LEND_MS);
+    this.#record(binding);
     this.ctx.waitUntil(this.#run(binding, id, words.data, lent, model, writer, stopper.signal));
     await this.#touch();
     return sseResponse(this.streams, id, { from: 0, heartbeatMs: SSE_HEARTBEAT_MS });
@@ -217,8 +260,10 @@ export class Conversation extends DurableObject<Env> {
     } finally {
       this.#running = null;
       this.#stopper = null;
-      // However it ended, the finished turn goes to the record, after anything still waiting to.
-      this.#record(binding, lent);
+      // However it ended, the finished turn goes to the record, after anything still waiting to, and the session is
+      // held only for the grace after the turn.
+      this.#lend(lent, LEND_GRACE_MS);
+      this.#record(binding);
     }
   }
 
@@ -300,14 +345,20 @@ export class Conversation extends DurableObject<Env> {
     await this.#ready();
     const checked = await this.#bound(binding, lent);
     if (checked !== null) return checked;
+    // The newest turn's, should a hand-written record repeat an id across turns.
     const changed = this.ctx.storage.sql.exec(
-      "UPDATE assistant_proposals SET state = ?, owed = 1 WHERE id = ? AND state = 'waiting'",
+      `UPDATE assistant_proposals SET state = ?, owed = 1 WHERE rowid = (
+         SELECT p.rowid FROM assistant_proposals p JOIN assistant_turns t ON t.id = p.turn
+         WHERE p.id = ? AND p.state = 'waiting' ORDER BY t.n DESC LIMIT 1)`,
       outcome,
       proposal,
     ).rowsWritten;
     if (changed === 0) return refuse(404, "not_found");
     // Recorded in the background; without a session now, at the next turn.
-    if (lent !== null) this.#record(binding, lent);
+    if (lent !== null) {
+      this.#lend(lent, LEND_GRACE_MS);
+      this.#record(binding);
+    }
     await this.#touch();
     return new Response(null, { status: 204 });
   }
@@ -333,10 +384,11 @@ export class Conversation extends DurableObject<Env> {
   /**
    * Fills an empty working copy from the record, which the API keeps for the person fde-web checked on this call:
    * the binding, then each turn at its place with its proposals as the person left them. Nothing is written back.
-   * Without an API binding there is no record, and it starts empty.
+   * Without an API binding the record cannot be read, so it refuses rather than start empty.
    */
   async #rebuild(binding: Binding, session: string): Promise<"ok" | "gone" | "error"> {
-    const record = this.env.API === undefined ? { turns: [] } : await readRecord(this.env.API, session, binding);
+    if (this.env.API === undefined) return "error";
+    const record = await readRecord(this.env.API, { session, until: Date.now() + LEND_GRACE_MS }, binding);
     if (record === "gone" || record === "error") return record;
     const sql = this.ctx.storage.sql;
     this.ctx.storage.transactionSync(() => {
@@ -349,8 +401,8 @@ export class Conversation extends DurableObject<Env> {
       );
       for (const t of record.turns) {
         sql.exec(
-          `INSERT INTO assistant_turns (n, id, said, state, text, blocks, notice, record)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'written')`,
+          `INSERT INTO assistant_turns (n, id, said, state, text, blocks, notice, record, rn)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'written', ?)`,
           t.n,
           t.id,
           t.said,
@@ -358,10 +410,11 @@ export class Conversation extends DurableObject<Env> {
           t.text,
           JSON.stringify(t.blocks),
           t.notice,
+          t.n,
         );
         t.proposals.forEach(({ proposal, state }, i) => {
           sql.exec(
-            "INSERT OR IGNORE INTO assistant_proposals (id, turn, n, body, state) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO assistant_proposals (id, turn, n, body, state) VALUES (?, ?, ?, ?, ?)",
             proposal.id,
             t.id,
             i,
@@ -379,10 +432,21 @@ export class Conversation extends DurableObject<Env> {
     return this.ctx.storage.sql.exec("SELECT 1 FROM assistant_binding WHERE full = 1").toArray().length > 0;
   }
 
-  /** Queues a write of whatever the record does not have yet, with `lent`, after any write already queued. */
-  #record(binding: Binding, lent: Lent): void {
+  /** Holds `lent` as the newest session for the record's writes, for `ms` from now; a view lends none for them. */
+  #lend(lent: Lent, ms: number): void {
+    if (lent.origin !== null) this.#lent = { ...lent, until: Date.now() + ms };
+  }
+
+  /** The newest session lent, while it is fresh; once its time is up it is forgotten. */
+  #fresh(): Held | null {
+    if (this.#lent !== null && this.#lent.until <= Date.now()) this.#lent = null;
+    return this.#lent;
+  }
+
+  /** Queues a write of whatever the record does not have yet, after any write already queued. */
+  #record(binding: Binding): void {
     const next = this.#writes
-      .then(() => this.#flush(binding, lent))
+      .then(() => this.#flush(binding))
       .catch(() => {
         // Ids only: never the error, which may carry the turn or the session.
         logRecord({ conversation: binding.conversation, outcome: "failed" });
@@ -392,56 +456,122 @@ export class Conversation extends DurableObject<Env> {
   }
 
   /**
-   * Writes each finished turn the record does not have, in order, then each answer it does not have. It stops at the
-   * first that has to wait (no answer, or no longer this session's to write), so a later turn never lands first; what
-   * is left is written with the next session lent. A turn the API refuses is marked so and not tried again.
+   * Writes each finished turn the record does not have, in order, each at the record's next place, then each answer
+   * it does not have, every write with the newest fresh session. It stops when none is fresh, at the first write that
+   * has to wait, and when another turn holds the place (the record's places are read again first next time), so a
+   * later turn never lands first. A turn whose content the API refuses is written as a plain failed turn in its place.
    */
-  async #flush(binding: Binding, lent: Lent): Promise<void> {
+  async #flush(binding: Binding): Promise<void> {
     const api = this.env.API;
     if (api === undefined) return;
     const sql = this.ctx.storage.sql;
     const { conversation } = binding;
+    if (!(await this.#reconcile(api, conversation))) return;
+    let next = sql
+      .exec<{ next: number }>(
+        `SELECT max(coalesce(max(rn), 0), (SELECT floor FROM assistant_binding)) + 1 AS next
+         FROM assistant_turns WHERE record = 'written'`,
+      )
+      .one().next;
     const pending = sql
       .exec<TurnRow>(
-        `SELECT n, id, said, state, text, blocks, notice FROM assistant_turns
+        `SELECT n, rn, id, said, state, text, blocks, notice FROM assistant_turns
          WHERE record = 'pending' AND state != 'live' ORDER BY n`,
       )
       .toArray();
     for (const t of pending) {
-      const proposals = sql
-        .exec<{ body: string }>("SELECT body FROM assistant_proposals WHERE turn = ? ORDER BY n", t.id)
-        .toArray()
-        .map((p) => JSON.parse(p.body) as unknown);
-      const blocks = JSON.parse(t.blocks) as Array<unknown>;
-      const record = recordOf({ ...t, blocks, proposals }, binding.company === null);
-      let outcome: Written = "refused";
-      if (record !== null) {
-        outcome = await writeTurn(api, lent, conversation, t.n, record);
-        // A record the API refuses to name (not the person's to see, or not there): kept without what names it.
-        if (outcome === "destination")
-          outcome = await writeTurn(api, lent, conversation, t.n, withoutDestinations(record));
-      }
-      if (outcome !== "written") logRecord({ conversation, turn: t.id, n: t.n, outcome });
+      const held = this.#fresh();
+      if (held === null) return;
+      const { outcome, how } = await this.#write(api, held, binding, t, next);
+      if (outcome !== "written" || how !== "whole") logRecord({ conversation, turn: t.id, n: next, outcome, how });
       if (outcome === "later") return;
-      sql.exec(
-        "UPDATE assistant_turns SET record = ? WHERE id = ?",
-        outcome === "written" ? "written" : "refused",
-        t.id,
-      );
-      if (outcome === "full") sql.exec("UPDATE assistant_binding SET full = 1");
+      if (outcome === "taken") {
+        sql.exec("UPDATE assistant_binding SET reconcile = 1");
+        return;
+      }
+      if (outcome === "written") {
+        sql.exec("UPDATE assistant_turns SET record = 'written', rn = ? WHERE id = ?", next, t.id);
+        next += 1;
+        continue;
+      }
+      // Neither the turn nor its plain stand-in is taken: it gives up its place to the next.
+      sql.exec("UPDATE assistant_turns SET record = 'refused' WHERE id = ?", t.id);
+      if (outcome === "full") {
+        sql.exec("UPDATE assistant_binding SET full = 1");
+        return;
+      }
     }
     const owed = sql
-      .exec<{ id: string; state: Answer; n: number }>(
-        `SELECT p.id, p.state, t.n FROM assistant_proposals p JOIN assistant_turns t ON t.id = p.turn
-         WHERE p.owed = 1 AND t.record = 'written' ORDER BY t.n, p.n`,
+      .exec<{ id: string; turn: string; state: Answer; rn: number }>(
+        `SELECT p.id, p.turn, p.state, t.rn FROM assistant_proposals p JOIN assistant_turns t ON t.id = p.turn
+         WHERE p.owed = 1 AND t.record = 'written' AND t.rn IS NOT NULL ORDER BY t.rn, p.n`,
       )
       .toArray();
     for (const p of owed) {
-      const outcome = await writeAnswer(api, lent, conversation, p.n, p.id, p.state);
-      if (outcome !== "recorded") logRecord({ conversation, proposal: p.id, n: p.n, outcome });
+      const held = this.#fresh();
+      if (held === null) return;
+      const outcome = await writeAnswer(api, held, conversation, p.rn, p.id, p.state);
+      if (outcome !== "recorded") logRecord({ conversation, proposal: p.id, n: p.rn, outcome });
       if (outcome === "later") return;
-      sql.exec("UPDATE assistant_proposals SET owed = 0 WHERE id = ?", p.id);
+      sql.exec("UPDATE assistant_proposals SET owed = 0 WHERE turn = ? AND id = ?", p.turn, p.id);
     }
+  }
+
+  /**
+   * After another turn was found at a place, reads the record's places: a turn of ours it already holds is marked
+   * written there, and the next place follows its last. False when it must wait (no fresh session, or no answer).
+   */
+  async #reconcile(api: Fetcher, conversation: string): Promise<boolean> {
+    const sql = this.ctx.storage.sql;
+    const due = sql.exec<{ reconcile: number }>("SELECT reconcile FROM assistant_binding").toArray()[0];
+    if (due === undefined) return false;
+    if (due.reconcile === 0) return true;
+    const held = this.#fresh();
+    if (held === null) return false;
+    const places = await readPlaces(api, held, conversation);
+    if (places === null) {
+      logRecord({ conversation, outcome: "unreconciled" });
+      return false;
+    }
+    for (const { n, id } of places) {
+      sql.exec("UPDATE assistant_turns SET record = 'written', rn = ? WHERE id = ? AND record != 'written'", n, id);
+    }
+    sql.exec("UPDATE assistant_binding SET reconcile = 0, floor = ?", places.length);
+    return true;
+  }
+
+  /**
+   * Writes one turn at place `n`: whole; without the parts that name a destination if the API refuses one; and as a
+   * plain failed turn if the API refuses its content, so its place holds. `how` says which was written.
+   */
+  async #write(
+    api: Fetcher,
+    held: Held,
+    binding: Binding,
+    t: TurnRow,
+    n: number,
+  ): Promise<{ outcome: Written; how: "whole" | "without_destinations" | "fallback" }> {
+    const sql = this.ctx.storage.sql;
+    const proposals = sql
+      .exec<{ body: string }>("SELECT body FROM assistant_proposals WHERE turn = ? ORDER BY n", t.id)
+      .toArray()
+      .map((p) => JSON.parse(p.body) as unknown);
+    const blocks = JSON.parse(t.blocks) as Array<unknown>;
+    const record = recordOf({ ...t, blocks, proposals }, binding.company === null);
+    if (record !== null) {
+      const whole = await writeTurn(api, held, binding.conversation, n, record);
+      if (whole !== "destination" && whole !== "refused") return { outcome: whole, how: "whole" };
+      if (whole === "destination") {
+        const without = await writeTurn(api, held, binding.conversation, n, withoutDestinations(record));
+        if (without !== "destination" && without !== "refused") {
+          return { outcome: without, how: "without_destinations" };
+        }
+      }
+    }
+    const fallback = fallbackOf(t);
+    if (fallback === null) return { outcome: "refused", how: "fallback" };
+    const plain = await writeTurn(api, held, binding.conversation, n, fallback);
+    return { outcome: plain === "destination" ? "refused" : plain, how: "fallback" };
   }
 
   /**
@@ -461,9 +591,31 @@ export class Conversation extends DurableObject<Env> {
     await this.lifecycle.jobs.push({ id: FORGET, fn: FORGET, time: Date.now() + IDLE_MS });
   }
 
+  /** Says, by ids, what the idle deletion takes before the record has it: turns not written, answers not recorded. */
+  #dropped(): void {
+    const sql = this.ctx.storage.sql;
+    const turns = sql
+      .exec<{ id: string }>("SELECT id FROM assistant_turns WHERE record = 'pending' ORDER BY n")
+      .toArray()
+      .map((t) => t.id);
+    const answers = sql
+      .exec<{ id: string }>(
+        `SELECT p.id FROM assistant_proposals p JOIN assistant_turns t ON t.id = p.turn
+         WHERE p.owed = 1 AND t.record != 'refused' ORDER BY t.n, p.n`,
+      )
+      .toArray()
+      .map((p) => p.id);
+    if (turns.length > 0 || answers.length > 0) {
+      console.warn(
+        JSON.stringify({ event: "assistant_record_dropped", conversation: this.lifecycle.name, turns, answers }),
+      );
+    }
+  }
+
   async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome> {
     if (job.fn !== FORGET) return;
     if (this.#running !== null) return { rescheduleAt: Date.now() + IDLE_MS };
+    this.#dropped();
     // The Lifecycle's own teardown, then the storage; the next request starts a fresh, empty instance.
     await this.lifecycle.disableAlarms();
     await this.lifecycle.dispose();

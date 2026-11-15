@@ -6,7 +6,9 @@
 // or mismatch refuses. A new conversation is made by the API, as the person, so the API alone decides the binding.
 // The person's session is lent with a turn, a view and an answer to a proposal: the assistant reads with it, writes
 // the finished turn and the answer to the API's record with it (issue #279), and rebuilds a conversation it no longer
-// holds from that record. It keeps none of it. A reconnect and a stop lend nothing.
+// holds from that record. It holds it for a few seconds past the call at most, in memory. A turn and an answer also
+// lend this app's origin, which the API asks of a write; a view lends the session alone. A reconnect and a stop lend
+// nothing.
 
 import type { Upstream } from "./forward"
 
@@ -237,8 +239,8 @@ async function bounded(request: Request): Promise<ArrayBuffer | null> {
 
 /**
  * Checks the person with the API, then forwards one call to the assistant with a fresh binding. Writes come
- * only from this app's own pages. The person's session cookie, with this app's origin, which the API asks of a
- * write made with it, goes with a turn, a view and an answer, for that call alone.
+ * only from this app's own pages. The person's session cookie goes with a turn, a view and an answer, for that call
+ * alone; with a turn and an answer, this app's origin too, which the API asks of a write made with it.
  */
 export async function openAssistant(
   request: Request,
@@ -303,7 +305,8 @@ export async function openAssistant(
   if (target.rest === "/turns" && session === null) return refuse(401, "unauthorized")
   if (session !== null) {
     headers.set("x-assistant-session", session)
-    headers.set("x-assistant-origin", new URL(request.url).origin)
+    // Only a call that may write lends the origin: a view reads, to rebuild, and a link from anywhere can open one.
+    if (write) headers.set("x-assistant-origin", new URL(request.url).origin)
   }
   const answer = await assistant.fetch(
     new Request(

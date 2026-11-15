@@ -12,6 +12,8 @@ export default defineConfig({
         bindings: {
           SERVICE_TOKEN: "sample-service-token-for-tests-0123456789",
           BINDING_KEY: "sample-binding-key-for-tests-0123456789ab",
+          // The web app's origin, as the deploy sets it; fake-api.ts's WEB_ORIGIN.
+          WEB_ORIGIN: "https://fde.example",
         },
         // The API binding, answered in Node by the sample API.
         serviceBindings: { API: fakeApi },
