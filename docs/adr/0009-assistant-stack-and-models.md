@@ -1,6 +1,6 @@
 # 0009: The assistant's stack, and which models we prefer
 
-Status: accepted, 12 November 2026. Builds on ADR 0008 (how the assistant may act). Amends ADR 0003's
+Status: accepted, 12 November 2026; amended 15 November 2026 (see the end). Builds on ADR 0008 (how the assistant may act). Amends ADR 0003's
 "Bedrock first" and ADR 0004's "Bedrock is the first model path for both": the preferred model path
 is now the one below. Amends ADR 0008's "The assistant runs behind the API": its engine runs on
 Cloudflare in front of the API, and reaches data only through the API.
@@ -109,6 +109,34 @@ confirmed yet, so nothing here permits real data.
 - OpenCode on Gemini waits for the outbound handler to authenticate to Vertex. There is no hurry: the
   founder set no date.
 
+## Amendment, 15 November 2026
+What building the first version settled. Where this differs from the text above, this wins.
+
+- **The screens do not use the AI SDK's chat hooks.** The row "Workspace assistant, the screens"
+  now reads: our own wire and store, with presentational components copied into `fde-web`. The
+  wire is a small set of typed events (ADR 0008's blocks, text, proposals, notices), parsed and
+  capped on both sides, so the browser never renders anything the catalogue does not name. The
+  chat hooks expect the SDK's own message stream, which would carry tool arguments and results to
+  the browser. The components are shadcn's chat pieces and Vercel's AI Elements (Apache-2.0),
+  re-based on Base UI and kept as our code; they draw, and hold no state or transport.
+- **Assistant text is plain text.** No markdown or HTML renderer, no model-written links. A link
+  goes only to one of our own routes, built by the web from an id the API returned.
+- **The person can see the work and stop it.** The wire gains a `step` event around each tool
+  read: an id, a tool name from a fixed list, a state, and at most a count. Never arguments,
+  never output. The person who holds the conversation can stop a running turn; what was already
+  said is kept and the turn ends with a plain notice. A message typed while a turn runs waits
+  for the turn to end; it is not sent into it.
+- **Confirming stays a deliberate act (ADR 0008).** A proposal is confirmed by its own button,
+  never by Enter in the message box, and there is no "approve all".
+- **The model on dev** is a Gemini Flash model through Vertex AI, named in the deploy's config
+  and served from Vertex's `global` location, because the Mumbai region does not serve the
+  current Flash models. With `global`, Google chooses where a prompt is processed. That is
+  acceptable for sample data only. The retention and training terms and the price are still not
+  recorded here, so "Before real customer data" stands unchanged, and a model served in India
+  is still preferred once one is good enough.
+- **The model credential** is a service account that may call models and nothing else. The
+  Worker's outbound guard allows Google's token endpoint for that credential only.
+
 ## Not decided here
-The exact model names; whether AI Gateway is used; how long an idle conversation's working copy is
-kept; budgets per organisation.
+Whether AI Gateway is used; how long an idle conversation's working copy is kept; budgets per
+organisation; the model for real customer data.
