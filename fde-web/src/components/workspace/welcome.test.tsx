@@ -672,8 +672,10 @@ describe("the conversation with the assistant", () => {
         "Not sent, because the answer was stopped. Your message is back in the box.",
       ),
     ).toBeInTheDocument()
-    expect(screen.getByRole("textbox", { name: "What do you want to work on?" })).toHaveValue(
-      "Only the blocked ones",
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "What do you want to work on?" })).toHaveValue(
+        "Only the blocked ones",
+      ),
     )
     expect(turnsSent()).toHaveLength(1)
   })
@@ -688,7 +690,7 @@ describe("the conversation with the assistant", () => {
     await said("Only the blocked ones")
     await userEvent.click(await screen.findByRole("button", { name: "Edit" }))
     const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
-    expect(box).toHaveValue("Only the blocked ones")
+    await waitFor(() => expect(box).toHaveValue("Only the blocked ones"))
     expect(screen.queryByText(/^Sends when this answer ends/)).toBeNull()
 
     await userEvent.type(box, "{Enter}")
@@ -699,7 +701,7 @@ describe("the conversation with the assistant", () => {
         "Not sent, because the answer didn't finish. Your message is back in the box.",
       ),
     ).toBeInTheDocument()
-    expect(box).toHaveValue("Only the blocked ones")
+    await waitFor(() => expect(box).toHaveValue("Only the blocked ones"))
     expect(turnsSent()).toHaveLength(1)
   })
 
