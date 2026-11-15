@@ -111,12 +111,20 @@ describe("the Worker drops what is outside the catalogue", () => {
     ]);
   });
 
-  it("drops a delta with control characters, and stops a reply at its size limit, saying so", async () => {
+  it("drops a delta with control characters, and keeps nothing of it, so the reply kept is the one sent", async () => {
+    const { emitted, out } = await turn(HOME, model([...text("bell\u0007"), ...text("fine"), finish(false)]));
+    expect(emitted).toEqual([{ v: 1, type: "text", delta: "fine" }]);
+    expect(out.text).toBe("fine");
+  });
+
+  it("stops a reply at its size limit in UTF-16 units, as the record counts it, saying so", async () => {
     const { emitted, out } = await turn(
       HOME,
-      model([...text("bell\u0007"), ...text("x".repeat(MAX_REPLY)), finish(false)]),
+      model([...text("x".repeat(MAX_REPLY - 1)), ...text("😀"), finish(false)]),
     );
-    expect(emitted).toEqual([{ v: 1, type: "notice", notice: "reply_limit" }]);
+    expect(emitted.map((e) => e.type)).toEqual(["text", "notice"]);
+    expect(emitted.at(-1)).toEqual({ v: 1, type: "notice", notice: "reply_limit" });
+    expect(out.text).toHaveLength(MAX_REPLY - 1);
     expect(out.notice).toBe("reply_limit");
   });
 

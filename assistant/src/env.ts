@@ -13,6 +13,11 @@ export interface Env {
   SERVICE_TOKEN?: string;
   /** The key fde-web signs each conversation binding with (its `ASSISTANT_BINDING_KEY`). Unset or short: refused. */
   BINDING_KEY?: string;
+  /**
+   * The web app's origin (fde-web's), which the API asks of a write made with a session. Set by the deploy: the origin
+   * fde-web lends must then be exactly this. Unset, only its shape is checked.
+   */
+  WEB_ORIGIN?: string;
   /** Which model answers, by name (src/model/provider.ts): `fake`, or `vertex:<model id>` with the four below. */
   ASSISTANT_MODEL?: string;
   /** Secret: the Vertex service account's client email. */

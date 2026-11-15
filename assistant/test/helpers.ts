@@ -1,6 +1,8 @@
 import { exports } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { vi } from "vitest";
 
-import { SESSION } from "./fake-api.js";
+import { SESSION, WEB_ORIGIN } from "./fake-api.js";
 
 // Sample values set in vitest.config.ts.
 export const SERVICE = "sample-service-token-for-tests-0123456789";
@@ -48,11 +50,13 @@ export interface CallOptions {
   token?: string | null;
   binding?: string | null;
   session?: string | null;
+  /** fde-web's origin, lent with the session; sent whenever a session is, unless null. */
+  origin?: string | null;
   body?: unknown;
   headers?: Record<string, string>;
 }
 
-/** Calls the Worker as fde-web does: service token, binding, and the session on a turn. */
+/** Calls the Worker as fde-web does: service token, binding, and the session (with its origin) when given. */
 export async function call(path: string, options: CallOptions = {}): Promise<Response> {
   const conversation = /^\/internal\/v1\/conversations\/([^/]+)/.exec(path)?.[1] ?? "none";
   const headers = new Headers(options.headers);
@@ -60,7 +64,11 @@ export async function call(path: string, options: CallOptions = {}): Promise<Res
   if (token !== null) headers.set("authorization", `Bearer ${token}`);
   const binding = options.binding === undefined ? await bindingFor(conversation) : options.binding;
   if (binding !== null) headers.set("x-assistant-binding", binding);
-  if (options.session !== undefined && options.session !== null) headers.set("x-assistant-session", options.session);
+  if (options.session !== undefined && options.session !== null) {
+    headers.set("x-assistant-session", options.session);
+    const origin = options.origin === undefined ? WEB_ORIGIN : options.origin;
+    if (origin !== null) headers.set("x-assistant-origin", origin);
+  }
   return exports.default.fetch(
     new Request(`https://assistant.internal${path}`, {
       method: options.method ?? "GET",
@@ -138,3 +146,31 @@ export const replyText = (got: Array<unknown>) =>
     .filter((e) => (e as { type: string }).type === "text")
     .map((e) => (e as { delta: string }).delta)
     .join("");
+
+/** Everything an object holds: every row of every table, and every key. */
+export async function dump(stub: DurableObjectStub): Promise<string> {
+  return runInDurableObject(stub, async (_instance, state) => {
+    const tables = state.storage.sql
+      // The runtime's own tables (`_cf_*`) cannot be read; its key-value one is read through `list()` below.
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+      )
+      .toArray()
+      .map(({ name }) => name);
+    const rows = tables.map((name) => [name, state.storage.sql.exec(`SELECT * FROM "${name}"`).toArray()]);
+    const keys = [...(await state.storage.list()).entries()];
+    return JSON.stringify({ rows, keys });
+  });
+}
+
+/** Every argument of every console call while `work` runs. */
+export async function logsOf(work: () => Promise<unknown>): Promise<string> {
+  const calls: Array<unknown> = [];
+  for (const level of ["log", "info", "warn", "error", "debug"] as const) {
+    vi.spyOn(console, level).mockImplementation((...args: Array<unknown>) => {
+      calls.push(args.map(String));
+    });
+  }
+  await work();
+  return JSON.stringify(calls);
+}

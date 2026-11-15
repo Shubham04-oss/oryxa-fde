@@ -197,8 +197,10 @@ describe("the assistant's routes on this app", () => {
     const forwarded = helper.mock.calls[0]![0]
     expect(forwarded.url).toBe("https://assistant.internal/internal/v1/conversations/c_1/turns")
     expect(forwarded.headers.get("authorization")).toBe(`Bearer ${TOKEN}`)
-    // The session goes with a turn, for its reads; no other cookie header does.
+    // The session goes with a turn, for its reads and the record's writes; no other cookie header does.
     expect(forwarded.headers.get("x-assistant-session")).toBe(COOKIE)
+    // With this app's own origin, which the API asks of a write made with a session.
+    expect(forwarded.headers.get("x-assistant-origin")).toBe(APP)
     expect(forwarded.headers.get("cookie")).toBeNull()
     const claims = claimsOf(forwarded.headers.get("x-assistant-binding"))
     expect(claims).toMatchObject({
@@ -285,6 +287,7 @@ describe("the assistant's routes on this app", () => {
     const forwarded = helper.mock.calls[0]![0]
     expect(forwarded.headers.get("last-event-id")).toBe("7")
     expect(forwarded.headers.get("x-assistant-session")).toBeNull()
+    expect(forwarded.headers.get("x-assistant-origin")).toBeNull()
 
     const signedOut = new Request(`${APP}/assistant/conversations/c_1/turns/t_1/events`)
     const refused = await call(signedOut, env)
@@ -347,6 +350,7 @@ describe("stopping a turn through this app", () => {
     })
     // Stopping reads nothing, so the person's session is not lent for it.
     expect(forwarded.headers.get("x-assistant-session")).toBeNull()
+    expect(forwarded.headers.get("x-assistant-origin")).toBeNull()
   })
 
   it("checks the company too for a company's conversation, and binds the stop to it", async () => {
@@ -456,6 +460,54 @@ describe("the API's check on every call", () => {
         name,
       ).toBe(true)
       expect(helper, name).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it("lends the session to a turn, a view and an answer alone, and the origin to the two that write", async () => {
+    const lent = { turn: true, view: true, events: false, stop: false, answer: true }
+    const writes = { turn: true, view: false, events: false, stop: false, answer: true }
+    for (const [name, request] of Object.entries(routes("/assistant/conversations/c_1"))) {
+      const { env, assistant: helper } = setup()
+      expect((await call(request(), env)).status, name).toBe(200)
+      const forwarded = helper.mock.calls[0]![0]
+      const want = lent[name as keyof typeof lent]
+      expect(forwarded.headers.get("x-assistant-session"), name).toBe(want ? COOKIE : null)
+      expect(forwarded.headers.get("x-assistant-origin"), name).toBe(
+        writes[name as keyof typeof writes] ? APP : null,
+      )
+      expect(forwarded.headers.get("cookie"), name).toBeNull()
+    }
+  })
+
+  it("forwards an answer to a proposal as the person's, so the assistant records it, and runs nothing itself", async () => {
+    const { env, api, assistant: helper } = setup()
+    const answer = routes("/assistant/conversations/c_1").answer
+    expect((await call(answer(), env)).status).toBe(200)
+    const forwarded = helper.mock.calls[0]![0]
+    expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_1/proposals/p_1")
+    expect(await forwarded.json()).toEqual({ outcome: "dismissed" })
+    // This app only checks the person: the record's write is the assistant's, and no action route is called.
+    expect(api.mock.calls.map(([r]) => [r.method, new URL(r.url).pathname])).toEqual([
+      ["GET", "/v1/me"],
+      ["GET", "/v1/assistant/conversations/c_1/check"],
+    ])
+  })
+
+  it("still forwards a view or an answer without a session cookie it can lend, lending nothing", async () => {
+    const both = `${COOKIE}; __Host-fde_session=another`
+    for (const name of ["view", "answer"] as const) {
+      const { env, assistant: helper } = setup(
+        apiBinding((request) =>
+          new URL(request.url).pathname === "/v1/me"
+            ? Response.json(ME)
+            : new Response(null, { status: 204 }),
+        ),
+      )
+      expect((await call(routes("/assistant/conversations/c_1", both)[name](), env)).status).toBe(
+        200,
+      )
+      expect(helper.mock.calls[0]![0].headers.get("x-assistant-session"), name).toBeNull()
+      expect(helper.mock.calls[0]![0].headers.get("x-assistant-origin"), name).toBeNull()
     }
   })
 

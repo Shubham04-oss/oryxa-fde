@@ -21,7 +21,8 @@ export const MAX_API_BYTES = 256 * 1024;
 export const MAX_TOOL_ANSWER_BYTES = 16 * 1024;
 /** The most entries of a list a tool passes on. */
 const MAX_ENTRIES = 50;
-const API_ORIGIN = "http://api.internal";
+/** Where the API binding is addressed: the binding decides the host, so this name never leaves the Worker. */
+export const API_ORIGIN = "http://api.internal";
 const API_TIMEOUT_MS = 10_000;
 
 /** Reads one allowed route as the person until `stop` fires; null when it cannot be read, for whatever reason. */
