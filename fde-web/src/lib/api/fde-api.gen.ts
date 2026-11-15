@@ -4378,7 +4378,7 @@ export interface operations {
                     "application/json": components["schemas"]["TurnOut"];
                 };
             };
-            /** @description `invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0 */
+            /** @description `invalid_*` naming what broke a limit or names a record outside the scope (`invalid_destination`: in a company's conversation, that company and its projects; at home, the lists, a company the caller may work on and a project of it they may work on), a block or proposal the scope does not allow, a proposal not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0 */
             400: {
                 headers: {
                     [name: string]: unknown;

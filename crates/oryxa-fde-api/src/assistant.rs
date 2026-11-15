@@ -387,7 +387,9 @@ pub(crate) async fn delete(
     responses((status = 201, body = TurnOut, description = "Stored"),
         (status = 200, body = TurnOut, description = "Stored before with the same contents"),
         (status = 400, body = ErrorBody, description = "`invalid_*` naming what broke a limit or names a record \
-            outside the scope (`invalid_destination`), a block or proposal the scope does not allow, a proposal \
+            outside the scope (`invalid_destination`: in a company's conversation, that company and its projects; \
+            at home, the lists, a company the caller may work on and a project of it they may work on), a block or \
+            proposal the scope does not allow, a proposal \
             not `waiting` (`invalid_proposal_state`), or `invalid_n` for 0"),
         (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "`rejected_turn_taken`: another turn is at `n`, or `n` is \
@@ -596,8 +598,33 @@ fn destinations_in<'a>(v: &'a Value, out: &mut Vec<&'a serde_json::Map<String, V
     }
 }
 
+/// A destination authz denies is `invalid_destination`, like one that does not exist; any other error
+/// stays itself (a 503), never a pass.
+fn destination_refused(e: ApiError) -> ApiError {
+    match e {
+        ApiError::Forbidden => ApiError::Invalid("destination"),
+        e => e,
+    }
+}
+
+/// Whether the caller may work on `company`, from one SpiceDB lookup per turn kept in `visible`.
+async fn works_on(
+    app: &App,
+    who: &Principal,
+    visible: &mut Option<HashSet<CompanyId>>,
+    company: &CompanyId,
+) -> Result<bool, ApiError> {
+    if visible.is_none() {
+        let list = app.companies_for(who).await?;
+        *visible = Some(list.into_iter().map(|c| c.company).collect());
+    }
+    Ok(visible.as_ref().is_some_and(|v| v.contains(company)))
+}
+
 /// Each destination names only what the scope allows: in a company's conversation, that company and
-/// its projects; at home, a company the caller may work on (to open its conversation) and the lists.
+/// its projects; at home, the lists, a company the caller may work on, and a project of such a company
+/// that the caller may work on. A miss and a refusal are the same `invalid_destination`; an authz or
+/// store error is that error (503), never a pass.
 async fn check_destinations(
     app: &App,
     who: &Principal,
@@ -606,7 +633,7 @@ async fn check_destinations(
     destinations: &[&serde_json::Map<String, Value>],
 ) -> Result<(), ApiError> {
     let refuse = || ApiError::Invalid("destination");
-    let mut visible: Option<HashSet<String>> = None;
+    let mut visible: Option<HashSet<CompanyId>> = None;
     for d in destinations {
         let field = |k: &str| d.get(k).and_then(Value::as_str);
         match field("screen") {
@@ -619,24 +646,38 @@ async fn check_destinations(
                     Some(c) if c.company == named => {}
                     Some(_) => return Err(refuse()),
                     None => {
-                        if visible.is_none() {
-                            let list = app.companies_for(who).await?;
-                            visible = Some(list.into_iter().map(|c| c.company.to_string()).collect());
-                        }
-                        if !visible.as_ref().is_some_and(|v| v.contains(named.as_str())) {
+                        if !works_on(app, who, &mut visible, &named).await? {
                             return Err(refuse());
                         }
                     }
                 }
             }
             Some("project") => {
-                let c = scope.company().ok_or_else(refuse)?;
                 let named = field("company")
                     .and_then(|c| CompanyId::new(c).ok())
                     .ok_or_else(refuse)?;
                 let project = field("project")
                     .and_then(|p| ProjectId::new(p).ok())
                     .ok_or_else(refuse)?;
+                let Some(c) = scope.company() else {
+                    // Home: a company the caller may work on, then `work` on the project, then the project
+                    // must be that company's (a project object is its id alone).
+                    if !works_on(app, who, &mut visible, &named).await? {
+                        return Err(refuse());
+                    }
+                    let wanted = who.company(named).project(project);
+                    app.require(who, crate::authz::project(&wanted), "work")
+                        .await
+                        .map_err(destination_refused)?;
+                    let found = app
+                        .store
+                        .project_scopes(&who.tenant, std::slice::from_ref(&wanted.project))
+                        .await?;
+                    if !found.contains(&wanted) {
+                        return Err(refuse());
+                    }
+                    continue;
+                };
                 if c.company != named {
                     return Err(refuse());
                 }
@@ -646,10 +687,7 @@ async fn check_destinations(
                 if let ConversationScope::Project(_) = scope {
                     app.require(who, crate::authz::project(&c.project(project.clone())), "work")
                         .await
-                        .map_err(|e| match e {
-                            ApiError::Forbidden => refuse(),
-                            e => e,
-                        })?;
+                        .map_err(destination_refused)?;
                 }
                 if !tx.has_project(&project).await? {
                     return Err(refuse());
@@ -804,6 +842,28 @@ mod tests {
             code(shape(1, body(json!({ "blocks": [{ "items": [] }] })))),
             "invalid_block"
         );
+    }
+
+    #[test]
+    fn a_destination_is_refused_on_a_deny_and_an_authz_error_stays_an_error() {
+        assert_eq!(destination_refused(ApiError::Forbidden).code(), "invalid_destination");
+        assert_eq!(destination_refused(ApiError::Unavailable).code(), "unavailable");
+        assert_eq!(
+            destination_refused(ApiError::Internal).code(),
+            ApiError::Internal.code()
+        );
+    }
+
+    #[test]
+    fn a_home_turn_may_carry_a_project_destination_to_the_check() {
+        // `shape` lets the destination through; `check_destinations` decides it with authz and the store.
+        let v = body(json!({ "blocks": [{ "type": "brief", "items": [
+            { "label": "Pilot", "to": { "screen": "project", "company": "cmp_1", "project": "prj_1" } }] }] }));
+        let turn = shape(1, v).unwrap();
+        let mut found = Vec::new();
+        destinations_in(&turn.blocks, &mut found);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].get("project").and_then(Value::as_str), Some("prj_1"));
     }
 
     #[test]

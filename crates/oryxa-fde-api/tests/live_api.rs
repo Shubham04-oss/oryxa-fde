@@ -6739,7 +6739,7 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
     );
 
     // A home conversation: every block type, as in a company, but a company only if the caller may work
-    // on it, and no project.
+    // on it (projects: `a_home_turn_names_a_project_only_of_a_company_the_caller_works_on`).
     let home = w
         .ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
         .await;
@@ -6747,22 +6747,14 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
     let brief_to = |to: Value| json!({ "blocks": [{ "type": "brief", "items": [{ "label": "Beta", "to": to }] }] });
     for (extra, code) in [
         (json!({ "blocks": [{ "type": "html", "body": "x" }] }), "invalid_block"),
-        // A brief block naming a company the caller cannot work on, or a project, is refused like a proposal.
+        // A brief block naming a company the caller cannot work on is refused like a proposal.
         (
             brief_to(json!({ "screen": "company", "company": other.company })),
             "invalid_destination",
         ),
         (
-            brief_to(json!({ "screen": "project", "company": t.company, "project": t.project })),
-            "invalid_destination",
-        ),
-        (
             json!({ "blocks": [{ "type": "suggestion", "id": "s", "title": "Open Beta",
                 "approve": { "label": "Open", "to": { "screen": "company", "company": other.company } } }] }),
-            "invalid_destination",
-        ),
-        (
-            json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": t.project }))] }),
             "invalid_destination",
         ),
         (
@@ -6808,6 +6800,129 @@ async fn a_finished_turn_is_appended_once_by_its_holder_and_names_only_its_scope
     .unwrap();
     // The home turn, and the company conversation's two (the plan and the stopped one).
     assert_eq!(filed, [None, Some(t.company.clone()), Some(t.company.clone())]);
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_home_turn_names_a_project_only_of_a_company_the_caller_works_on() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let other = company(&w, &org, "globex").await;
+    let conversations = "/v1/assistant/conversations";
+    // The lead also works on the other company's project, as its assignee, but not on that company.
+    w.ok(
+        &other.lead,
+        "PUT",
+        &format!(
+            "/v1/companies/{}/projects/{}/assignees/{}",
+            other.company, other.project, t.lead.id
+        ),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let home = w
+        .ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    let home_turn = format!("{conversations}/{}/turns/1", home["id"].as_str().unwrap());
+    let to_project = |company: &str, project: &str| {
+        json!({ "blocks": [{ "type": "brief", "items": [{ "label": "Pilot",
+            "to": { "screen": "project", "company": company, "project": project } }] }] })
+    };
+    for (extra, why) in [
+        // Another company's project under this company's id: `work` passes, but it is not this company's.
+        (to_project(&t.company, &other.project), "not the company's project"),
+        // That project under its own company, which the lead cannot work on.
+        (
+            to_project(&other.company, &other.project),
+            "a company the caller cannot work on",
+        ),
+        // A project that does not exist, in a company the lead works on.
+        (to_project(&t.company, "prj_missing"), "no such project"),
+        (
+            json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": other.project }))] }),
+            "a proposal, not the company's project",
+        ),
+    ] {
+        let (status, body) = w
+            .call(
+                Some(&t.lead.token),
+                "PUT",
+                &home_turn,
+                Some(turn_body("t_1", extra.clone())),
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_destination")),
+            "{why}"
+        );
+    }
+    // The other company's assignee cannot name the lead's project from home either.
+    let other_home = w
+        .ok(
+            &other.assignee,
+            "POST",
+            conversations,
+            Some(json!({})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let (status, body) = w
+        .call(
+            Some(&other.assignee.token),
+            "PUT",
+            &format!("{conversations}/{}/turns/1", other_home["id"].as_str().unwrap()),
+            Some(turn_body("t_1", to_project(&t.company, &t.project))),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_destination"))
+    );
+
+    // SpiceDB failing: 503, never a pass. A replica whose SpiceDB key is wrong fails every check.
+    let endpoint = std::env::var("SPICEDB_ENDPOINT").unwrap();
+    let broken = SpiceDb::connect_lazy(&endpoint, "wrong-key", Duration::from_secs(2)).unwrap();
+    let broken = router(App::with_integrations(
+        w.store.clone(),
+        broken,
+        support::verifier(),
+        w.context.clone(),
+        Some(sign_in_config(&w.authkit, &w.password)),
+        integrations(&w.github, &w.slack, &w.secrets),
+    ));
+    let (status, body) = w
+        .call_on(
+            &broken,
+            Some(&t.lead.token),
+            "PUT",
+            &home_turn,
+            Some(turn_body("t_1", to_project(&t.company, &t.project))),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable"))
+    );
+
+    // The lead's own project, in a block and a proposal: stored.
+    let mut ok = to_project(&t.company, &t.project);
+    ok["proposals"] = json!([open_route(
+        "p",
+        json!({ "screen": "project", "company": t.company, "project": t.project })
+    )]);
+    let stored = w
+        .ok(
+            &t.lead,
+            "PUT",
+            &home_turn,
+            Some(turn_body("t_1", ok)),
+            StatusCode::CREATED,
+        )
+        .await;
+    assert_eq!(stored["blocks"][0]["items"][0]["to"]["project"], json!(t.project));
 }
 
 #[tokio::test]
