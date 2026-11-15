@@ -78,9 +78,17 @@ async function bounded(request: Request, max: number): Promise<ArrayBuffer | nul
   return whole.buffer
 }
 
+/** What the link answers when the API's end of it is going away mid-deploy, so a read is worth repeating. */
+const RETRIED_STATUSES = new Set([502, 503, 504])
+
+/** How long a read waits before its one retry: short, so a reader barely notices, and fixed. */
+export const RETRY_PAUSE_MS = 250
+
 /**
  * Forwards `request` to `path` on the API, cookies and all, and hands back its answer as it is.
  * Redirects are not followed: an AuthKit 302 belongs to the browser, never to this server.
+ * A read (GET, HEAD) whose connection fails or that the link answers 502, 503 or 504 is sent once
+ * more after `RETRY_PAUSE_MS`, and that answer is passed on whatever it is. A write never is.
  */
 export async function forward(request: Request, path: string, api: Upstream): Promise<Response> {
   const target = new URL(api.origin)
@@ -100,7 +108,17 @@ export async function forward(request: Request, path: string, api: Upstream): Pr
       ? undefined
       : await bounded(request, MAX_BODY_BYTES)
   if (body === null) return Response.json({ error: "payload_too_large" }, { status: 413 })
-  return api.fetch(
-    new Request(target, { method: request.method, headers, body, redirect: "manual" }),
-  )
+  const send = () =>
+    api.fetch(new Request(target, { method: request.method, headers, body, redirect: "manual" }))
+  if (request.method !== "GET" && request.method !== "HEAD") return send()
+  // An API deploy replaces the tunnel connector; a read caught by the old one gets one more try.
+  try {
+    const first = await send()
+    if (!RETRIED_STATUSES.has(first.status)) return first
+    await first.body?.cancel()
+  } catch {
+    // A connection error: the second try's answer, or what it throws, is the one passed on.
+  }
+  await new Promise((resolve) => setTimeout(resolve, RETRY_PAUSE_MS))
+  return send()
 }
