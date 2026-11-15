@@ -18,12 +18,12 @@ export type AssistantTarget = {
   /** The company the conversation is bound to; null for the home conversation, which spans the list. */
   company: string | null
   /** What is asked of it, after the conversation's own path. */
-  rest: "" | "/turns" | `/turns/${string}/events` | `/proposals/${string}`
+  rest: "" | "/turns" | `/turns/${string}/events` | `/turns/${string}/stop` | `/proposals/${string}`
 }
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/
 const PATH =
-  /^\/assistant\/(?:companies\/([^/]+)\/)?conversations\/([^/]+)(\/turns|\/turns\/([^/]+)\/events|\/proposals\/([^/]+))?$/
+  /^\/assistant\/(?:companies\/([^/]+)\/)?conversations\/([^/]+)(\/turns|\/turns\/([^/]+)\/(?:events|stop)|\/proposals\/([^/]+))?$/
 
 /**
  * The conversation in `/assistant/conversations/<c>[...]` (the home one) or
@@ -163,7 +163,11 @@ export async function openAssistant(
   api: Upstream,
   assistant: Assistant,
 ): Promise<Response> {
-  const write = target.rest === "/turns" || target.rest.startsWith("/proposals/")
+  // Stopping a turn is a write too: only this app's pages may ask for it, and only as the person checked here.
+  const write =
+    target.rest === "/turns" ||
+    target.rest.startsWith("/proposals/") ||
+    (target.rest.startsWith("/turns/") && target.rest.endsWith("/stop"))
   if (request.method !== (write ? "POST" : "GET")) return refuse(405, "method_not_allowed")
   if (write && request.headers.get("origin") !== new URL(request.url).origin)
     return refuse(403, "csrf")

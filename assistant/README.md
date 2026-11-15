@@ -37,15 +37,19 @@ All under `/internal/v1/conversations/<conversation>`, ids with the platform's r
 | `POST turns`                | `{ "text": … }`: starts a turn and answers with its stream (SSE).                                                      |
 | `GET turns/<turn>/events`   | The turn's stream again, after `Last-Event-ID` (or from `?from=`): a dropped connection resumes, a second tab replays. |
 | `POST proposals/<proposal>` | `{ "outcome": "confirmed" \| "dismissed" }`: the person has answered it. Nothing runs here.                            |
+| `POST turns/<turn>/stop`    | Stops the turn if it is the one running: it ends with the `stopped` notice, keeping what it said. Otherwise a no-op.   |
 
 ## The wire format (version 1)
 
 `fde-web/src/lib/workspace/blocks.ts` and `wire.ts`, copied into `src/catalogue/` by `npm run catalogue`
 (`npm run check` fails when a copy is stale). Each SSE frame is one event, `id:` its sequence number:
 
-- `turn` (the turn's id and what the person said), then any number of `text` deltas, `block`s from the web's
-  catalogue, `proposal`s from the action catalogue (`create_company`, `open_route`) with exact arguments, and a
-  `notice` when a reply stopped short (`tool_limit`, `reply_limit`, `timed_out`, `failed`);
+- `turn` (the turn's id and what the person said), then any number of `step`s, `text` deltas, `block`s from the
+  web's catalogue, `proposal`s from the action catalogue (`create_company`, `open_route`) with exact arguments, and a
+  `notice` when a reply stopped short (`tool_limit`, `reply_limit`, `timed_out`, `failed`, `stopped`);
+- a `step` is one read starting and ending: `{id, tool, state, count?}`, the tool from a fixed list
+  (`list_companies`, `read_today`), the state `running`, `done` or `failed`, and at most how many records came back
+  (capped). Never the read's arguments or what it read. A read still running when the turn ends ends as `failed`;
 - then the SDK's control frames: `up-to-date`, and `done` or `error`.
 
 The Worker checks every event before it stores it, and the web checks it again before it renders: an unknown or

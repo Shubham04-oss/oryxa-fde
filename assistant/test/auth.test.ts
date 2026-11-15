@@ -15,6 +15,7 @@ describe("only fde-web reaches the Worker", () => {
       [`/internal/v1/conversations/${c}`, "GET"],
       [`/internal/v1/conversations/${c}/turns`, "POST"],
       [`/internal/v1/conversations/${c}/turns/t_1/events`, "GET"],
+      [`/internal/v1/conversations/${c}/turns/t_1/stop`, "POST"],
       [`/internal/v1/conversations/${c}/proposals/p_1`, "POST"],
     ] as const) {
       for (const token of [null, "", `${SERVICE}x`, KEY]) {
@@ -47,12 +48,19 @@ describe("only fde-web reaches the Worker", () => {
     expect(parseRoute("GET", "/internal/v1/conversations/c_1")).toEqual({ action: "view", conversation: "c_1" });
     expect(parseRoute("POST", "/internal/v1/conversations/c_1/turns")).toEqual({ action: "turn", conversation: "c_1" });
     expect(parseRoute("GET", "/internal/v1/conversations/c_1/turns")).toBe("method");
+    expect(parseRoute("POST", "/internal/v1/conversations/c_1/turns/t_1/stop")).toEqual({
+      action: "stop",
+      conversation: "c_1",
+      turn: "t_1",
+    });
+    expect(parseRoute("GET", "/internal/v1/conversations/c_1/turns/t_1/stop")).toBe("method");
     for (const path of [
       "/internal/v1/conversations/c%2F1",
       "/internal/v1/conversations/c:1",
       "/internal/v1/conversations/c_1/turns/t_1/x",
       "/internal/v2/conversations/c_1",
       "/internal/v1/conversations/c_1/proposals/p%2F1",
+      "/internal/v1/conversations/c_1/turns/t%2F1/stop",
     ]) {
       expect(parseRoute("GET", path), path).toBeNull();
     }

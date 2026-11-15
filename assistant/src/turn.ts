@@ -6,7 +6,7 @@ import type { Binding } from "./auth.js";
 import { Block, Destination } from "./catalogue/blocks.js";
 import type { Block as BlockValue, Destination as DestinationValue } from "./catalogue/blocks.js";
 import { MAX_BLOCKS, MAX_PROPOSALS, MAX_REPLY, Proposal, WIRE_VERSION, parseEvent } from "./catalogue/wire.js";
-import type { Notice, Proposal as ProposalValue, WireEvent } from "./catalogue/wire.js";
+import type { Notice, Proposal as ProposalValue, Step, WireEvent } from "./catalogue/wire.js";
 import { MAX_OUTPUT_TOKENS, MAX_STEPS, MAX_TOOL_CALLS, TURN_TIMEOUT_MS } from "./limits.js";
 import { readTools } from "./tools.js";
 import type { Reader } from "./tools.js";
@@ -62,6 +62,8 @@ export interface TurnInput {
   readonly out: Folded;
   /** How long the turn may run; `TURN_TIMEOUT_MS` unless a test says otherwise. */
   readonly timeoutMs?: number;
+  /** Fires when the person stops the turn: it ends as at the time limit, keeping what it said, noticed as `stopped`. */
+  readonly stop?: AbortSignal;
 }
 
 /** Thrown when the model's stream fails; the turn ends with a plain notice and nothing from the error. */
@@ -103,24 +105,56 @@ export function mayShow(binding: Binding, block: BlockValue): boolean {
 /** Runs one turn: streams the reply as wire events through `emit`, and folds it into `out`. */
 export async function runTurn(input: TurnInput): Promise<void> {
   const { out } = input;
+  // Nothing reaches the stream once the turn is over: a read that ends after it has nobody to tell.
+  let open = true;
   const emit = (event: WireEvent) => {
     // The Worker's own check before anything is stored or sent.
     const checked = parseEvent(event);
-    if (checked !== null) input.emit(checked);
+    if (open && checked !== null) input.emit(checked);
   };
   const notice = (n: Notice) => {
-    if (out.notice !== null) return;
+    // A stop after the tool limit still ended reads in flight, so the person's stop is the true end; else the first stands.
+    if (out.notice !== null && !(n === "stopped" && out.notice === "tool_limit")) return;
     out.notice = n;
     emit({ v: WIRE_VERSION, type: "notice", notice: n });
   };
+  const running = new Map<string, Step>();
+  const step = (s: Step) => {
+    if (s.state === "running") running.set(s.id, s);
+    else if (!running.delete(s.id)) return;
+    emit({ v: WIRE_VERSION, type: "step", step: s });
+  };
+  // A read the turn no longer waits for ends with it, and its step says so, once.
+  const failRunning = () => {
+    for (const s of [...running.values()]) step({ id: s.id, tool: s.tool, state: "failed" });
+  };
 
-  // Ours, not the SDK's `timeout`, so the end is known to be the time limit and is said as such.
+  // Ours, not the SDK's `timeout`, so the end is known to be the time limit, or the person's stop, and is said as such.
   const deadline = new AbortController();
+  let stopped = false;
+  const onStop = () => {
+    stopped = true;
+    deadline.abort();
+  };
+  if (input.stop?.aborted) onStop();
+  else input.stop?.addEventListener("abort", onStop, { once: true });
   const timer = setTimeout(() => deadline.abort(), input.timeoutMs ?? TURN_TIMEOUT_MS);
+  const ended = () => {
+    failRunning();
+    notice(stopped ? "stopped" : "timed_out");
+  };
   try {
-    await stream(input, deadline.signal, emit, notice);
+    await stream(input, deadline.signal, emit, notice, step, ended);
+  } catch (failure) {
+    // Ended by us: the stream may fail on the abort rather than say it, and the end is still ours to name.
+    if (!deadline.signal.aborted) throw failure;
+    ended();
   } finally {
     clearTimeout(timer);
+    input.stop?.removeEventListener("abort", onStop);
+    failRunning();
+    // Then the stream takes nothing more.
+    open = false;
     // However the turn ended, a read still in flight stops here and lets the person's session go.
     deadline.abort();
   }
@@ -132,13 +166,15 @@ async function stream(
   abortSignal: AbortSignal,
   emit: (event: WireEvent) => void,
   notice: (n: Notice) => void,
+  step: (s: Step) => void,
+  ended: () => void,
 ): Promise<void> {
   const { binding, out } = input;
   const result = streamText({
     model: input.model,
     instructions: instructions(binding),
     messages: [...input.history, { role: "user", content: input.said }],
-    tools: { ...readTools(binding, input.read, () => notice("tool_limit")), ...REPLY_TOOLS },
+    tools: { ...readTools(binding, input.read, () => notice("tool_limit"), step), ...REPLY_TOOLS },
     stopWhen: [
       isStepCount(MAX_STEPS),
       ({ steps }) => steps.reduce((n, s) => n + s.toolCalls.length, 0) >= MAX_TOOL_CALLS,
@@ -153,7 +189,7 @@ async function stream(
   for await (const part of result.fullStream) {
     if (part.type === "error") throw new TurnFailed();
     if (part.type === "abort") {
-      notice("timed_out");
+      ended();
       break;
     }
     if (part.type === "text-delta") {

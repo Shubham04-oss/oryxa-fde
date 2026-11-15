@@ -7,8 +7,9 @@ import { Icon } from "../ui/icon"
 import { BlockView, Suggestion } from "./blocks"
 import { ProposalCard } from "./proposal"
 import { useConversation } from "./use-conversation"
-import type { ThreadTurn } from "./use-conversation"
+import type { Returned, ThreadTurn } from "./use-conversation"
 import { ApiError, api, queries } from "@/lib/api/client"
+import { stepLine } from "@/lib/workspace/assistant"
 import type { CompanySummary } from "@/lib/api/schemas"
 import { STAGE_LABEL } from "@/lib/stage"
 import { NEW_COMPANY, replyTo, suggestionsFromHome } from "@/lib/workspace/welcome"
@@ -59,9 +60,8 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
     setFocusTo(null)
   }, [focusTo])
   // Until the API has answered, the scripted reply knows nothing of the day, so it never claims an all clear.
-  const { turns, thinking, say, settle } = useConversation((text) =>
-    replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null),
-  )
+  const { turns, thinking, stopping, queued, full, returned, say, stop, unqueue, settle } =
+    useConversation((text) => replyTo(text, home.isSuccess ? shown.map((s) => s.block) : null))
 
   return (
     // One rhythm: 24 inside the opening, 48 between sections (40 on a phone).
@@ -81,7 +81,49 @@ export function Welcome({ now = new Date() }: { now?: Date }) {
         {turns.length > 0 && <Thread turns={turns} thinking={thinking} onSettle={settle} />}
 
         <div className="grid gap-3">
-          <Composer onSend={(text) => void say(text)} busy={thinking} />
+          {/* Always there, so a screen reader hears the waiting message once it is taken. */}
+          <div role="status" className="grid gap-1 text-meta text-muted-foreground empty:hidden">
+            {queued !== null && (
+              <p className="flex min-w-0 items-center gap-2">
+                <span className="truncate">Sends when this answer ends: {queued}</span>
+                <button
+                  type="button"
+                  onClick={unqueue}
+                  className="flex-none rounded-sm text-soft underline-offset-4 hover:text-foreground hover:underline"
+                >
+                  Edit
+                </button>
+              </p>
+            )}
+            {queued !== null && full && (
+              <p>
+                One message is already waiting. Send this one after it has gone, or edit that one.
+              </p>
+            )}
+          </div>
+          <Composer
+            onSend={say}
+            busy={thinking}
+            onStop={stop}
+            stopping={stopping}
+            draft={returned}
+          />
+          {/* Takes no room unless a message came back to the box. */}
+          <p role="status" className="text-meta text-muted-foreground empty:hidden">
+            {returned?.why === "reload" && (
+              <span>
+                Your message was still waiting when the page reloaded. It is back in the box, not
+                sent.
+              </span>
+            )}
+            {(returned?.why === "stopped" || returned?.why === "failed") && (
+              <span>
+                Not sent, because the answer{" "}
+                {returned.why === "stopped" ? "was stopped" : "didn't finish"}. Your message is back
+                in the box.
+              </span>
+            )}
+          </p>
           {/* One row; on a phone each takes the full width, so they never wrap unevenly. */}
           <div className="flex gap-2 max-[560px]:grid">
             <Chip to="/new-company" icon="plus">
@@ -243,8 +285,25 @@ function Chip({ to, icon, children }: { to: "/new-company"; icon: "plus"; childr
   )
 }
 
-/** The conversation box: Enter sends, Shift and Enter starts a new line. What is typed is text. */
-export function Composer({ onSend, busy }: { onSend: (text: string) => void; busy: boolean }) {
+/**
+ * The conversation box: Enter sends, Shift and Enter starts a new line. What is typed is text. While a
+ * turn runs, Stop takes the place of Send, and Enter hands the message over to wait for the turn's end.
+ */
+export function Composer({
+  onSend,
+  busy,
+  onStop,
+  stopping = false,
+  draft = null,
+}: {
+  /** Answers false when the message was not taken, so the box keeps it. */
+  onSend: (text: string) => boolean | void
+  busy: boolean
+  onStop?: () => void
+  stopping?: boolean
+  /** A message handed back to edit: it is put in the box, ahead of anything typed since. */
+  draft?: Returned | null
+}) {
   const [text, setText] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
   const label = useId()
@@ -258,11 +317,16 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [text])
 
+  useEffect(() => {
+    if (!draft) return
+    setText((typed) => (typed.trim() ? `${draft.text}\n${typed}` : draft.text))
+    box.current?.focus()
+  }, [draft])
+
   function send(event?: FormEvent) {
     event?.preventDefault()
-    if (!said || busy) return
-    onSend(said)
-    setText("")
+    if (!said || (busy && !onStop)) return
+    if (onSend(said) !== false) setText("")
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -290,14 +354,30 @@ export function Composer({ onSend, busy }: { onSend: (text: string) => void; bus
         className="block min-h-[128px] w-full resize-none bg-transparent px-6 pt-5 pb-[64px] text-lead text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none"
       />
       <div className="absolute right-3.5 bottom-3.5 left-6 flex items-center justify-between gap-3">
-        <button
-          type="submit"
-          aria-label="Send"
-          disabled={!said || busy}
-          className="ml-auto grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,opacity,transform] duration-150 hover:bg-primary/85 disabled:bg-selected disabled:text-muted-foreground motion-safe:active:scale-[0.94]"
-        >
-          <Icon name="arrow-up" size={17} strokeWidth={2} />
-        </button>
+        {busy && onStop ? (
+          <button
+            type="button"
+            aria-label="Stop"
+            disabled={stopping}
+            onClick={() => {
+              onStop()
+              // The button goes once the turn ends: focus waits in the box, ready for the next message.
+              box.current?.focus()
+            }}
+            className="ml-auto grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,opacity,transform] duration-150 hover:bg-primary/85 disabled:bg-selected disabled:text-muted-foreground motion-safe:active:scale-[0.94]"
+          >
+            <span aria-hidden="true" className="size-3 rounded-[3px] bg-current" />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            aria-label="Send"
+            disabled={!said || busy}
+            className="ml-auto grid size-9 place-items-center rounded-full bg-primary text-primary-foreground transition-[background-color,opacity,transform] duration-150 hover:bg-primary/85 disabled:bg-selected disabled:text-muted-foreground motion-safe:active:scale-[0.94]"
+          >
+            <Icon name="arrow-up" size={17} strokeWidth={2} />
+          </button>
+        )}
       </div>
     </form>
   )
@@ -315,7 +395,12 @@ function Thread({
   // A reply still waiting for its first words shows as the dots below, not as an empty turn.
   const answering = turns.some(
     (t) =>
-      t.who === "workspace" && t.streaming && !t.text && !t.blocks.length && !t.proposals.length,
+      t.who === "workspace" &&
+      t.streaming &&
+      !t.text &&
+      !t.blocks.length &&
+      !t.proposals.length &&
+      !t.steps.length,
   )
   return (
     <div role="log" aria-label="Conversation" className="grid gap-5">
@@ -324,6 +409,7 @@ function Thread({
         !turn.text &&
         !turn.blocks.length &&
         !turn.proposals.length &&
+        !turn.steps.length &&
         !turn.notice ? null : turn.who === "you" ? (
           <p
             key={turn.id}
@@ -334,6 +420,20 @@ function Thread({
           </p>
         ) : (
           <div key={turn.id} className="grid gap-3 motion-safe:animate-rise">
+            {turn.steps.length > 0 && (
+              <ul
+                aria-label="What the workspace read"
+                className="grid gap-1 text-meta text-muted-foreground"
+              >
+                {turn.steps.map((step) => (
+                  <li key={step.id} className="flex items-center gap-2.5">
+                    {/* Lines up with the reply's text, beside where the workspace's mark sits. */}
+                    <span aria-hidden="true" className="w-6 flex-none" />
+                    {stepLine(step)}
+                  </li>
+                ))}
+              </ul>
+            )}
             {turn.text && (
               <p className="flex items-start gap-2.5">
                 <Voice />

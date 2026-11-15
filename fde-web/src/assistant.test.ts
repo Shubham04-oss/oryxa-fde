@@ -111,11 +111,14 @@ describe("the assistant's routes on this app", () => {
       company: "cmp_1",
       rest: "/turns/t_1/events",
     })
+    expect(at("/assistant/conversations/c_1/turns/t_1/stop")?.rest).toBe("/turns/t_1/stop")
     for (const path of [
       "/assistant/conversations/c%2F1",
       "/assistant/conversations/c:1/turns",
       "/assistant/conversations/c_1/other",
       "/assistant/conversations/c_1/turns/t:1/events",
+      "/assistant/conversations/c_1/turns/t%2F1/stop",
+      "/assistant/conversations/c_1/turns/stop",
       "/agents/conversation/c_1",
     ])
       expect(at(path), path).toBeNull()
@@ -265,6 +268,90 @@ describe("the assistant's routes on this app", () => {
       body: "x".repeat(17 * 1024),
     })
     expect((await call(big, env)).status).toBe(413)
+    expect(helper).not.toHaveBeenCalled()
+  })
+})
+
+describe("stopping a turn through this app", () => {
+  const stop = (headers: Record<string, string> = {}, method = "POST") =>
+    new Request(`${APP}/assistant/conversations/c_1/turns/t_1/stop`, {
+      method,
+      headers: { cookie: COOKIE, origin: APP, ...headers },
+    })
+
+  it("checks the person like any call, then asks the assistant with a fresh binding and no session", async () => {
+    const { env, api, assistant: helper } = setup()
+    expect((await call(stop(), env)).status).toBe(200)
+    expect(api).toHaveBeenCalledTimes(1)
+    const forwarded = helper.mock.calls[0]![0]
+    expect(forwarded.method).toBe("POST")
+    expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_1/turns/t_1/stop")
+    expect(forwarded.headers.get("authorization")).toBe(`Bearer ${TOKEN}`)
+    expect(claimsOf(forwarded.headers.get("x-assistant-binding"))).toMatchObject({
+      conv: "c_1",
+      person: "user_riya",
+      tenant: "org_sample",
+      company: null,
+    })
+    // Stopping reads nothing, so the person's session is not lent for it.
+    expect(forwarded.headers.get("x-assistant-session")).toBeNull()
+  })
+
+  it("checks the company too for a company's conversation, and binds the stop to it", async () => {
+    const { env, api, assistant: helper } = setup()
+    const company = new Request(
+      `${APP}/assistant/companies/cmp_kestrel/conversations/c_1/turns/t_1/stop`,
+      { method: "POST", headers: { cookie: COOKIE, origin: APP } },
+    )
+    expect((await call(company, env)).status).toBe(200)
+    expect(api.mock.calls.map(([r]) => new URL(r.url).pathname).sort()).toEqual([
+      "/v1/companies/cmp_kestrel",
+      "/v1/me",
+    ])
+    const forwarded = helper.mock.calls[0]![0]
+    expect(new URL(forwarded.url).pathname).toBe("/internal/v1/conversations/c_1/turns/t_1/stop")
+    expect(claimsOf(forwarded.headers.get("x-assistant-binding"))).toMatchObject({
+      conv: "c_1",
+      company: "cmp_kestrel",
+    })
+
+    // A company the person cannot read: the API's refusal, and the assistant never hears of it.
+    const { env: other, assistant: unseen } = setup()
+    const elsewhere = new Request(
+      `${APP}/assistant/companies/cmp_other/conversations/c_1/turns/t_1/stop`,
+      { method: "POST", headers: { cookie: COOKIE, origin: APP } },
+    )
+    expect((await call(elsewhere, other)).status).toBe(404)
+    expect(unseen).not.toHaveBeenCalled()
+  })
+
+  it("refuses when the API times out (502) or fails (its own 5xx), and never reaches the assistant", async () => {
+    for (const [answer, status] of [
+      [
+        () => {
+          throw new DOMException("The operation timed out.", "TimeoutError")
+        },
+        502,
+      ],
+      [() => Response.json({ error: "internal" }, { status: 500 }), 500],
+      [() => Response.json({ error: "unavailable" }, { status: 503 }), 503],
+    ] as const) {
+      const { env, assistant: helper } = setup(apiBinding(answer))
+      const response = await call(stop(), env)
+      expect(response.status).toBe(status)
+      expect(helper).not.toHaveBeenCalled()
+    }
+  })
+
+  it("is refused from another site, by GET, or signed out, before the assistant hears of it", async () => {
+    const { env, assistant: helper } = setup()
+    expect((await call(stop({ origin: "https://evil.example" }), env)).status).toBe(403)
+    expect((await call(stop({}, "GET"), env)).status).toBe(405)
+    const signedOut = new Request(`${APP}/assistant/conversations/c_1/turns/t_1/stop`, {
+      method: "POST",
+      headers: { origin: APP },
+    })
+    expect((await call(signedOut, env)).status).toBe(401)
     expect(helper).not.toHaveBeenCalled()
   })
 })

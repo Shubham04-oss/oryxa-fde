@@ -55,10 +55,32 @@ export const Proposal = z.discriminatedUnion("action", [
 ])
 export type Proposal = z.infer<typeof Proposal>
 
-/** Why a reply stopped short, which the screen says plainly. */
-export const NOTICES = ["tool_limit", "reply_limit", "timed_out", "failed"] as const
+/** Why a reply stopped short, which the screen says plainly. `stopped`: the person stopped it. */
+export const NOTICES = ["tool_limit", "reply_limit", "timed_out", "failed", "stopped"] as const
 export const Notice = z.enum(NOTICES)
 export type Notice = z.infer<typeof Notice>
+
+/**
+ * The read tools a step may name (`readTools` in assistant/src/tools.ts). A screen gives each a fixed
+ * label of its own; a step never carries a tool's arguments or what it read.
+ */
+export const STEP_TOOLS = ["list_companies", "read_today"] as const
+export const StepTool = z.enum(STEP_TOOLS)
+export type StepTool = z.infer<typeof StepTool>
+export const STEP_STATES = ["running", "done", "failed"] as const
+/** The most reads one turn shows as steps (the Worker's `MAX_TOOL_CALLS` is no more than this). */
+export const MAX_READ_STEPS = 4
+/** The most records a step's count says; the Worker caps it here. */
+export const MAX_STEP_COUNT = 1000
+
+/** A read the assistant made for this turn: which tool, how it went, and at most how many records came back. */
+export const Step = z.strictObject({
+  id: PartId,
+  tool: StepTool,
+  state: z.enum(STEP_STATES),
+  count: z.int().min(0).max(MAX_STEP_COUNT).optional(),
+})
+export type Step = z.infer<typeof Step>
 
 /** Why a turn was refused before it started (the error code of the refusal), said plainly too. */
 export const REFUSALS = [
@@ -70,13 +92,14 @@ export const REFUSALS = [
 ] as const
 export type Refusal = (typeof REFUSALS)[number]
 
-/** One event of a turn's stream, in order: `turn` first, then text, blocks, proposals and notices. */
+/** One event of a turn's stream, in order: `turn` first, then steps, text, blocks, proposals and notices. */
 export const WireEvent = z.discriminatedUnion("type", [
   z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("turn"), turn: TurnId, said: Said }),
   z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("text"), delta: Delta }),
   z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("block"), block: Block }),
   z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("proposal"), proposal: Proposal }),
   z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("notice"), notice: Notice }),
+  z.strictObject({ v: z.literal(WIRE_VERSION), type: z.literal("step"), step: Step }),
 ])
 export type WireEvent = z.infer<typeof WireEvent>
 
