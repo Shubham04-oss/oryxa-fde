@@ -1063,7 +1063,7 @@ from the Actions tab on `main`; on any other branch their jobs are skipped.
 | Workflow | Does | Uses from `dev` |
 | --- | --- | --- |
 | `deploy-api` | Builds the backend binaries (`oryxa-fde-api`, `oryxa-fde-ops`, `oryxa-fde-ingest`, `oryxa-fde-lifecycle`, `oryxa-fde-mcp`) for `linux/arm64` into one image, pushes it to ECR, runs migrations as the one-off migrate task, then rolls the API service and then each deployed worker onto it (the tunnel sidecar included in the API's new task; its image does not change) | `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN` |
-| `deploy-workers` | `wrangler deploy` for `sandbox/gateway`, `realtime/` and `assistant/` (with dev's API binding), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN`, `WEB_WORKSPACE`, `ASSISTANT_MODEL` |
+| `deploy-workers` | `wrangler deploy` for `sandbox/gateway`, `realtime/` and `assistant/` (with dev's API binding and `WEB_ORIGIN`), then `fde-web` with dev's route and API binding | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID`, `WEB_HOSTNAME`, `API_VPC_SERVICE_ID`; optional `WEB_OWN_SIGN_IN`, `WEB_WORKSPACE`, `ASSISTANT_MODEL` |
 
 **What the lead adds once**, in Settings, Environments, New environment `dev`, before the first
 apply (Apply order, step 3):
@@ -1076,7 +1076,7 @@ apply (Apply order, step 3):
   | `AWS_DEPLOY_ROLE_ARN` | `tofu output -raw github_deploy_role_arn` |
   | `CLOUDFLARE_ACCOUNT_ID` | `cloudflare_account_id` from tfvars |
   | `CLOUDFLARE_ZONE_ID` | `cloudflare_zone_id` from tfvars |
-  | `WEB_HOSTNAME` | `tofu output -raw web_hostname` |
+  | `WEB_HOSTNAME` | `tofu output -raw web_hostname`. fde-web's route, and `https://<WEB_HOSTNAME>` is also the assistant Worker's var `WEB_ORIGIN` (the only origin it takes with a lent session, compared exactly, like the API's `WEB_ORIGIN`). The deploy refuses a value that is not a bare lowercase host name with an optional `:port` (no scheme, path, query, fragment, userinfo or trailing slash); unset, the assistant deploys without `WEB_ORIGIN` (it then checks only the origin's shape) and the run shows a notice, but the `web` job still fails |
   | `API_VPC_SERVICE_ID` | `tofu output -raw api_vpc_service_id` |
   | `WEB_OWN_SIGN_IN` | Optional. `1` builds fde-web with `VITE_FDE_OWN_SIGN_IN=1` (our own sign-in screens, ADR 0007); unset or any other value leaves them off |
   | `WEB_WORKSPACE` | Optional. `1` builds fde-web with `VITE_FDE_WORKSPACE=1` (the conversation-first workspace screens, ADR 0008); unset or any other value leaves them off |
