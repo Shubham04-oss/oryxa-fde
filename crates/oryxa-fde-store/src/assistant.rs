@@ -17,6 +17,9 @@ use crate::{Actor, ConversationId, Store, StoreError, audit, id};
 
 /// The most turns one conversation holds (the Worker's `MAX_TURNS`).
 pub const MAX_TURNS: u32 = 50;
+/// The most conversations one person holds in an organisation (#255): a loop of creates cannot grow the
+/// table without bound.
+pub const MAX_CONVERSATIONS: i64 = 200;
 /// The longest message a person may send (`MAX_SAID`).
 pub const MAX_SAID_CHARS: usize = 2000;
 /// The most text one reply holds (`MAX_REPLY`), in UTF-16 code units as the web's `z.string().max`
@@ -403,8 +406,25 @@ impl AssistantTx {
 
     /// Makes conversation `id` for `user` in this scope. A project named by the scope must be one of
     /// its company's, or `StoreError::Missing("project")`; a company must exist, or `Missing("company")`.
+    /// A person holding [`MAX_CONVERSATIONS`] already is refused with `Rejected("conversation_limit")`.
     pub async fn create(&mut self, id: &ConversationId, user: &UserId) -> Result<Conversation, StoreError> {
         let (t, c, p) = self.keys();
+        // The holder's lock, until this transaction ends: two creates by one person count one after the
+        // other, so neither can pass the cap on a count the other is about to change.
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("oryxa-fde|assistant-conversations|{t}|{}", user.as_str()))
+            .execute(&mut *self.tx)
+            .await?;
+        // The conversations table's policy is tenant-level, so this counts every one the person holds.
+        let held: i64 =
+            sqlx::query_scalar("select count(*) from assistant_conversations where tenant_id = $1 and user_id = $2")
+                .bind(&t)
+                .bind(user.as_str())
+                .fetch_one(&mut *self.tx)
+                .await?;
+        if held >= MAX_CONVERSATIONS {
+            return Err(StoreError::Rejected("conversation_limit"));
+        }
         if let Some(c) = &c {
             let found: bool =
                 sqlx::query_scalar("select exists (select 1 from companies where tenant_id = $1 and company_id = $2)")

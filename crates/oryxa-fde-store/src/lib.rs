@@ -51,9 +51,9 @@ mod work;
 
 pub use access::{AccessRequest, AccessRequestIn};
 pub use assistant::{
-    Appended, AssistantTx, Conversation, ConversationScope, MAX_BLOCKS, MAX_BLOCKS_BYTES, MAX_PROPOSALS,
-    MAX_PROPOSALS_BYTES, MAX_REPLY_CHARS, MAX_SAID_CHARS, MAX_TURNS, ProposalAnswer, Said, Settled, Turn, TurnIn,
-    TurnKey, TurnState, reply_fits,
+    Appended, AssistantTx, Conversation, ConversationScope, MAX_BLOCKS, MAX_BLOCKS_BYTES, MAX_CONVERSATIONS,
+    MAX_PROPOSALS, MAX_PROPOSALS_BYTES, MAX_REPLY_CHARS, MAX_SAID_CHARS, MAX_TURNS, ProposalAnswer, Said, Settled,
+    Turn, TurnIn, TurnKey, TurnState, reply_fits,
 };
 pub use canvas::{
     INLINE_SNAPSHOT_BYTES, LinkTarget, MAX_VERSIONS_LISTED, ShapeLink, Snapshot, SnapshotBody, SnapshotIn, SnapshotMeta,
@@ -89,7 +89,7 @@ pub use threads::{Comment, PromoteIn, Subject, Thread};
 pub use setup::SetupClaim;
 pub use share::{Redeemed, ShareLink};
 pub use sign_in::Hit as SignInHit;
-pub use views::{CompanySummary, Named, TodayItem};
+pub use views::{CompanySummary, HomeFact, Named, TodayItem};
 pub use work::{Decision, DecisionIn, Page, Task, TaskIn, TaskPlace, TaskStatus};
 
 #[derive(Debug, thiserror::Error)]

@@ -1752,8 +1752,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Hide a suggestion from the caller's home until its facts change: a new blocked task, another
-         *     access request, a project gaining or losing its next step. Only a suggestion the caller has now.
+         * Hide a suggestion from the caller's home until its facts change (a new blocked task, another
+         *     access request) or it goes away; if it comes back, it shows again. Only a suggestion the caller
+         *     has now.
          */
         post: operations["dismiss_home_suggestion"];
         delete?: never;
@@ -2386,7 +2387,11 @@ export interface components {
         /** @description One suggested next step, built from ids and a fixed template. */
         HomeSuggestionOut: {
             company?: components["schemas"]["NamedOut"] | null;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description How many: `due_today`, the tasks due today or earlier; `access_waiting`, the project's waiting
+             *     requests; `blocked_tasks`, the project's blocked tasks; `no_next_step`, always 1 (the project).
+             */
             count: number;
             /**
              * Format: int32
@@ -4177,6 +4182,24 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `rejected_conversation_limit`: the caller holds 200 conversations already; delete one first */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9997,7 +10020,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description `invalid_suggestion`: not a suggestion id */
+            /** @description `invalid_suggestion`: not an id the server issues */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10026,6 +10049,15 @@ export interface operations {
             };
             /** @description Not one the caller has now */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -236,7 +236,10 @@ fn conversation_id(raw: String) -> Result<ConversationId, ApiError> {
 /// customer role does not have.
 #[utoipa::path(post, operation_id = "create_conversation", path = "/v1/assistant/conversations", tag = "assistant",
     request_body = ConversationBody,
-    responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody)))]
+    responses((status = 201, body = ConversationOut), (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "`rejected_conversation_limit`: the caller holds 200 \
+            conversations already; delete one first"),
+        (status = 503, body = ErrorBody)))]
 pub(crate) async fn create(
     State(app): State<Arc<App>>,
     who: Principal,
@@ -619,21 +622,19 @@ async fn check_destinations(
                 if c.company != named {
                     return Err(refuse());
                 }
-                match scope {
-                    // A project's conversation may name only projects its holder may work on.
-                    ConversationScope::Project(_) => {
-                        app.require(who, crate::authz::project(&c.project(project)), "work")
-                            .await
-                            .map_err(|e| match e {
-                                ApiError::Forbidden => refuse(),
-                                e => e,
-                            })?;
-                    }
-                    _ => {
-                        if !tx.has_project(&project).await? {
-                            return Err(refuse());
-                        }
-                    }
+                // A project's conversation may name only projects its holder may work on. A project object
+                // is its id alone, so that check passes for another company's project too: it must also
+                // be one of this company's.
+                if let ConversationScope::Project(_) = scope {
+                    app.require(who, crate::authz::project(&c.project(project.clone())), "work")
+                        .await
+                        .map_err(|e| match e {
+                            ApiError::Forbidden => refuse(),
+                            e => e,
+                        })?;
+                }
+                if !tx.has_project(&project).await? {
+                    return Err(refuse());
                 }
             }
             _ => return Err(refuse()),

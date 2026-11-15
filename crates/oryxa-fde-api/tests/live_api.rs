@@ -6171,19 +6171,28 @@ async fn home_suggests_from_the_callers_own_projects_and_a_dismissal_lasts_until
         w.call(Some(&t.lead.token), "POST", &foreign, None).await.0,
         StatusCode::NOT_FOUND
     );
-    // Not a suggestion id at all: refused before anything is read.
-    let (status, body) = w
-        .call(
-            Some(&t.lead.token),
-            "POST",
-            "/v1/home/suggestions/Bad.prj%2F1/dismiss",
-            None,
-        )
-        .await;
-    assert_eq!(
-        (status, body["error"].as_str()),
-        (StatusCode::BAD_REQUEST, Some("invalid_suggestion"))
-    );
+    // Not an id the server issues: refused before anything is read. An encoded slash, a kind it never
+    // issues, and a kind with or without the project its kind takes.
+    for bad in [
+        "blocked_tasks.prj%2F1",
+        "made_up.prj_1",
+        "due_today.prj_1",
+        "blocked_tasks",
+    ] {
+        let (status, body) = w
+            .call(
+                Some(&t.lead.token),
+                "POST",
+                &format!("/v1/home/suggestions/{bad}/dismiss"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_suggestion")),
+            "{bad}"
+        );
+    }
     // Never to a customer role.
     assert_eq!(home_of(&w, &t.guest).await.0, StatusCode::FORBIDDEN);
 }
@@ -6910,6 +6919,43 @@ async fn turns_stay_with_their_holder_their_tenant_their_access_and_their_projec
         StatusCode::FORBIDDEN
     );
 
+    // In a project's conversation, a project the holder works on in another company is still not this
+    // company's: refused, though the permission check alone would pass.
+    let other = company(&w, &org, "globex").await;
+    w.ok(
+        &other.lead,
+        "PUT",
+        &format!(
+            "/v1/companies/{}/projects/{}/assignees/{}",
+            other.company, other.project, t.lead.id
+        ),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    let lead_narrow = w
+        .ok(
+            &t.lead,
+            "POST",
+            conversations,
+            Some(json!({"company": t.company, "project": t.project})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let crossed = json!({ "proposals": [open_route("p", json!({ "screen": "project", "company": t.company, "project": other.project }))] });
+    let (status, body) = w
+        .call(
+            Some(&t.lead.token),
+            "PUT",
+            &turn_of(&lead_narrow, 1),
+            Some(turn_body("t_1", crossed)),
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_destination"))
+    );
+
     // A project's conversation, held by its assignee, names only projects they may work on.
     let sibling = w
         .ok(
@@ -6950,4 +6996,57 @@ async fn turns_stay_with_their_holder_their_tenant_their_access_and_their_projec
         StatusCode::CREATED,
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "needs SpiceDB and Postgres (SPICEDB_ENDPOINT, DATABASE_URL)"]
+async fn a_person_holds_at_most_two_hundred_conversations() {
+    let w = world().await;
+    let org = new_id("org");
+    let t = company(&w, &org, "acme").await;
+    let conversations = "/v1/assistant/conversations";
+    // 199 seeded directly, not by 199 calls.
+    let owner = testing::admin().await;
+    sqlx::query(
+        "insert into assistant_conversations (tenant_id, conversation_id, user_id)
+         select $1, 'cnv_seed_' || n, $2 from generate_series(1, 199) as n",
+    )
+    .bind(&org)
+    .bind(&t.lead.id)
+    .execute(&owner)
+    .await
+    .unwrap();
+    // The 200th is fine, in a company or at home alike; the 201st is refused, plainly.
+    w.ok(
+        &t.lead,
+        "POST",
+        conversations,
+        Some(json!({"company": t.company})),
+        StatusCode::CREATED,
+    )
+    .await;
+    for body in [json!({}), json!({"company": t.company})] {
+        let (status, answer) = w
+            .call(Some(&t.lead.token), "POST", conversations, Some(body.clone()))
+            .await;
+        assert_eq!(
+            (status, answer["error"].as_str()),
+            (StatusCode::CONFLICT, Some("rejected_conversation_limit")),
+            "{body}"
+        );
+    }
+    // Someone else is not counted against it.
+    w.ok(&t.engineer, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
+    // Deleting one makes room again.
+    w.ok(
+        &t.lead,
+        "DELETE",
+        &format!("{conversations}/cnv_seed_1"),
+        None,
+        StatusCode::NO_CONTENT,
+    )
+    .await;
+    w.ok(&t.lead, "POST", conversations, Some(json!({})), StatusCode::CREATED)
+        .await;
 }
