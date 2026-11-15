@@ -129,7 +129,7 @@ function fakeVertex(answers: Array<(init: RequestInit | undefined) => Promise<Re
   return { send, sent };
 }
 
-async function turnWith(send: typeof fetch, s: ModelSettings = settings(), timeoutMs?: number) {
+async function turnWith(send: typeof fetch | undefined, s: ModelSettings = settings(), timeoutMs?: number) {
   const model = modelFor(s, send);
   expect(model).not.toBeNull();
   const emitted: Array<WireEvent> = [];
@@ -235,6 +235,14 @@ describe("choosing a model", () => {
     }
   });
 
+  it("ignores whitespace pasted around the model's name, and refuses it inside", () => {
+    expect(modelFor({ ASSISTANT_MODEL: " fake\n" })).not.toBeNull();
+    expect(vertexSettings(settings({ ASSISTANT_MODEL: `\tvertex:${MODEL} \r\n` }))).toMatchObject({ modelId: MODEL });
+    for (const name of ["fa ke", "vertex: gemini-2.5-flash", "vertex :gemini-2.5-flash", " \n"]) {
+      expect(modelFor(settings({ ASSISTANT_MODEL: name }))).toBeNull();
+    }
+  });
+
   it("names the one host for the location, global or regional", () => {
     expect(vertexHost("global")).toBe("aiplatform.googleapis.com");
     expect(vertexHost("asia-south1")).toBe("asia-south1-aiplatform.googleapis.com");
@@ -290,6 +298,25 @@ describe("the outbound list", () => {
     expect(send).not.toHaveBeenCalled();
     await guarded(`${MODELS}generateContent`);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("is what the runtime's own fetch sees when no `send` is given", async () => {
+    const token = fakeTokenEndpoint();
+    const mintToken = vi.mocked(runtime.fetch).getMockImplementation()!;
+    const vertex = fakeVertex([() => sse([chunk([{ text: "Hello." }], "STOP")])]);
+    vi.mocked(runtime.fetch).mockImplementation((input, init) =>
+      String(input) === TOKEN_URL ? mintToken(input, init) : vertex.send(input, init),
+    );
+    const { failure } = await turnWith(undefined);
+    expect(failure).toBeNull();
+    expect(token.urls).toEqual([TOKEN_URL]);
+    // Only the list sets `redirect: "manual"`, so the model's request went through it to the runtime.
+    expect(vertex.sent.map((s) => [s.url, s.redirect])).toEqual([
+      [
+        `https://aiplatform.googleapis.com/v1beta1/projects/${PROJECT}/locations/global/publishers/google/models/${MODEL}:streamGenerateContent?alt=sse`,
+        "manual",
+      ],
+    ]);
   });
 
   it("is what the Vertex model sends through, to the exact path for a regional location", async () => {
@@ -420,6 +447,25 @@ describe("the global fetch guard", () => {
     }
     await expect(fetch(new Request("https://outbound.example/"))).rejects.toBeInstanceOf(OutboundRefused);
     expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("takes only a POST without a query to the token endpoint", async () => {
+    const reached = vi.spyOn(runtime, "fetch").mockResolvedValue(new Response("{}"));
+    for (const [url, init] of [
+      [TOKEN_URL, undefined],
+      [TOKEN_URL, { method: "GET" }],
+      [TOKEN_URL, { method: "PUT", body: "x" }],
+      [`${TOKEN_URL}?assertion=x`, { method: "POST" }],
+      [`${TOKEN_URL}?`, { method: "DELETE" }],
+    ] as const) {
+      await expect(fetch(url, init)).rejects.toBeInstanceOf(OutboundRefused);
+    }
+    await expect(fetch(new Request(TOKEN_URL))).rejects.toBeInstanceOf(OutboundRefused);
+    await expect(fetch(new Request(`${TOKEN_URL}?x=1`, { method: "POST" }))).rejects.toBeInstanceOf(OutboundRefused);
+    expect(reached).not.toHaveBeenCalled();
+    await fetch(TOKEN_URL, { method: "post", body: "x" });
+    await fetch(new Request(TOKEN_URL, { method: "POST", body: "x" }));
+    expect(reached).toHaveBeenCalledTimes(2);
   });
 
   it("sends the token request with a time limit and without following redirects", async () => {

@@ -3,6 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseView } from "../src/catalogue/wire.js";
+import { OutboundRefused, runtime } from "../src/model/provider.js";
 import { SESSION } from "./fake-api.js";
 import { PERSON, TENANT, call, freshConversation, replyText, say } from "./helpers.js";
 
@@ -69,23 +70,30 @@ describe("the person's session", () => {
 describe("outbound requests", () => {
   it("are watched by this test wherever they start, the conversation's object included", async () => {
     const spy = vi.spyOn(globalThis, "fetch");
-    await runInDurableObject(env.CONVERSATIONS.getByName(freshConversation()), () =>
+    const reached = vi.spyOn(runtime, "fetch");
+    const refused = await runInDurableObject(env.CONVERSATIONS.getByName(freshConversation()), () =>
       fetch("https://outbound.example/").then(
         (r) => r.body?.cancel(),
-        () => {},
+        (error: unknown) => error,
       ),
     );
     expect(spy).toHaveBeenCalledTimes(1);
+    // The global guard refused it before it left, so the runtime's own fetch never saw it.
+    expect(refused).toBeInstanceOf(OutboundRefused);
+    expect(reached).not.toHaveBeenCalled();
   });
 
   it("go to no host but the API binding, for a whole turn with tool calls", async () => {
     const spy = vi.spyOn(globalThis, "fetch");
+    // The runtime's own fetch is unguarded, so it is watched too: nothing in a turn may call it directly.
+    const reached = vi.spyOn(runtime, "fetch");
     for (const said of [SAID, "What needs me today?"]) {
       const { events } = await say(freshConversation(), said);
       // The tools did read the API (through its binding), so a turn that reached out would have shown here.
       expect(replyText(events)).toMatch(/You work with 2 companies|2 things open/);
     }
     expect(spy).not.toHaveBeenCalled();
+    expect(reached).not.toHaveBeenCalled();
   });
 });
 

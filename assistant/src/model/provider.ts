@@ -44,9 +44,12 @@ interface Vertex {
   readonly privateKey: string;
 }
 
+// A newline left from pasting the var must not switch the model off, or turn `fake` into a refusal.
+const modelName = (settings: ModelSettings): string => (settings.ASSISTANT_MODEL ?? "").trim();
+
 /** The Vertex settings, or null when any is missing or malformed. */
 export function vertexSettings(settings: ModelSettings): Vertex | null {
-  const name = settings.ASSISTANT_MODEL ?? "";
+  const name = modelName(settings);
   if (!name.startsWith("vertex:")) return null;
   const modelId = name.slice("vertex:".length);
   // A key pasted into a secret often keeps its newlines escaped, as in a service account's JSON file.
@@ -124,8 +127,8 @@ function vertexModel(v: Vertex, send: typeof fetch): LanguageModel {
 }
 
 /**
- * The runtime's own `fetch`, kept before the guard below replaces the global one. Only this module calls it: the
- * Vertex model through `allowOnly`, and the guard. Tests stub `runtime.fetch` and shorten `tokenTimeoutMs`.
+ * The runtime's own `fetch`, kept before the guard below replaces the global one. Only this module calls it (eslint):
+ * the Vertex model through `allowOnly`, and the guard. Tests stub `runtime.fetch` and shorten `tokenTimeoutMs`.
  */
 export const runtime: { fetch: typeof fetch; tokenTimeoutMs: number } = {
   fetch: globalThis.fetch.bind(globalThis),
@@ -137,6 +140,10 @@ export const runtime: { fetch: typeof fetch; tokenTimeoutMs: number } = {
 // and never restored: turns share the isolate, so a guard swapped per call would race between them. Nothing else in
 // `src/` calls the global `fetch` (eslint), and the API is reached through its service binding, not this.
 globalThis.fetch = allowOnly([TOKEN_URL], (input, init) => {
+  // The token is minted by one POST with its assertion in the body; nothing rides in a query or another method.
+  const method = (input instanceof Request ? input.method : (init?.method ?? "GET")).toUpperCase();
+  const search = new URL(input instanceof Request ? input.url : String(input)).search;
+  if (method !== "POST" || search !== "") return Promise.reject(new OutboundRefused());
   const limit = AbortSignal.timeout(runtime.tokenTimeoutMs);
   return runtime.fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, limit]) : limit });
 });
@@ -146,7 +153,7 @@ export function modelFor(
   settings: ModelSettings,
   send: typeof fetch = (input, init) => runtime.fetch(input, init),
 ): LanguageModel | null {
-  if (settings.ASSISTANT_MODEL === "fake") return enabled.languageModel("fake");
+  if (modelName(settings) === "fake") return enabled.languageModel("fake");
   const vertex = vertexSettings(settings);
   return vertex === null ? null : vertexModel(vertex, send);
 }
