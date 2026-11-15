@@ -78,9 +78,33 @@ async function bounded(request: Request, max: number): Promise<ArrayBuffer | nul
   return whole.buffer
 }
 
+/** What the link answers when the API's end of it is going away mid-deploy, so a read is worth repeating. */
+// Not 504: a gateway timeout means the API may still be working, so a retry would double the work and the wait.
+const RETRIED_STATUSES = new Set([502, 503])
+
+/** How long a read waits before its one retry: short, so a reader barely notices, and fixed. */
+export const RETRY_PAUSE_MS = 250
+
+/**
+ * Whether an API path is under `/auth`, read the way `relayOnly` reads one: decoded, in lower case and with runs of
+ * slashes as one; a path that cannot be decoded counts as one.
+ */
+function underAuth(path: string): boolean {
+  let plain: string
+  try {
+    plain = decodeURIComponent(path)
+  } catch {
+    return true
+  }
+  return /^\/auth(?:\/|$)/.test(plain.toLowerCase().replace(/\/+/g, "/"))
+}
+
 /**
  * Forwards `request` to `path` on the API, cookies and all, and hands back its answer as it is.
  * Redirects are not followed: an AuthKit 302 belongs to the browser, never to this server.
+ * A read (GET, HEAD) whose first try fails or that the link answers 502 or 503 is sent once more
+ * after `RETRY_PAUSE_MS`, unless the browser has gone, and that answer is passed on whatever it is.
+ * A write never is, nor anything under `/auth`.
  */
 export async function forward(request: Request, path: string, api: Upstream): Promise<Response> {
   const target = new URL(api.origin)
@@ -100,7 +124,21 @@ export async function forward(request: Request, path: string, api: Upstream): Pr
       ? undefined
       : await bounded(request, MAX_BODY_BYTES)
   if (body === null) return Response.json({ error: "payload_too_large" }, { status: 413 })
-  return api.fetch(
-    new Request(target, { method: request.method, headers, body, redirect: "manual" }),
-  )
+  const send = () =>
+    api.fetch(new Request(target, { method: request.method, headers, body, redirect: "manual" }))
+  if (request.method !== "GET" && request.method !== "HEAD") return send()
+  // A sign-in code is single use, and an authorization server may revoke what it issued when one is reused.
+  if (underAuth(path)) return send()
+  // An API deploy replaces the tunnel connector; a read caught by the old one gets one more try.
+  try {
+    const first = await send()
+    if (!RETRIED_STATUSES.has(first.status)) return first
+    await first.body?.cancel()
+  } catch {
+    // Any failure of the first try: the second try's answer, or what it throws, is the one passed on.
+  }
+  await new Promise((resolve) => setTimeout(resolve, RETRY_PAUSE_MS))
+  // Nobody is waiting for the answer any more, so the API is not asked again.
+  if (request.signal.aborted) throw new DOMException("aborted", "AbortError")
+  return send()
 }
