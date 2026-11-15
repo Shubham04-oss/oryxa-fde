@@ -869,6 +869,52 @@ describe("the conversation with the assistant", () => {
     expect(within(log).queryByText("Let's set it up together.")).toBeNull()
   })
 
+  it("never falls back to the scripted answers when a kept conversation cannot be opened", async () => {
+    window.localStorage.setItem("fde.assistant.home", "cnv_mine")
+    window.sessionStorage.setItem("fde.assistant.waiting.cnv_mine", "Only the blocked ones")
+    // The relay's own failure, for example when its check timed out: not a sign that there is no assistant.
+    onView = () => Response.json({ error: "bad_gateway" }, { status: 502 })
+    turnAnswer = () =>
+      new Response(frames([{ v: 1, type: "turn", turn: "t_1", said: "new customer to set up" }]), {
+        headers: { "content-type": "text/event-stream" },
+      })
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await screen.findByRole("log", { name: "Conversation" })
+    expect(await within(log).findByText(CONVERSATION_TEXT.unopened)).toBeInTheDocument()
+    // The waiting message is back in the box, and the kept conversation stays.
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("Only the blocked ones"))
+    expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_mine")
+
+    await userEvent.clear(box)
+    await said("new customer to set up")
+    await waitFor(() => expect(turnsSent()).toEqual([{ text: "new customer to set up" }]))
+    expect(asked.map((a) => `${a.method} ${a.path}`)).toEqual([
+      "GET /assistant/conversations/cnv_mine",
+      "POST /assistant/conversations/cnv_mine/turns",
+    ])
+    // Not the script's demo answer.
+    expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+  })
+
+  it("never shows a scripted answer when sending a message fails on the network", async () => {
+    const answer = mockApi.fetch
+    mockApi.fetch = async (request) => {
+      if (new URL(request.url).pathname.endsWith("/turns")) throw new TypeError("network")
+      return answer(request)
+    }
+    renderWithRouter(<Welcome now={MORNING} />)
+    await suggested()
+    const log = await said("new customer to set up")
+    expect(await within(log).findByText(CONVERSATION_TEXT.unsent)).toBeInTheDocument()
+    expect(within(log).queryByText("Let's set it up together.")).toBeNull()
+    const box = screen.getByRole("textbox", { name: "What do you want to work on?" })
+    await waitFor(() => expect(box).toHaveValue("new customer to set up"))
+    // The conversation is still this person's, and is used again at the next send.
+    expect(window.localStorage.getItem("fde.assistant.home")).toBe("cnv_made")
+  })
+
   it("drops a conversation that stops being this person's mid-session, and starts a new one only when sent again", async () => {
     window.localStorage.setItem("fde.assistant.home", "cnv_mine")
     made = ["cnv_fresh"]
