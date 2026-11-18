@@ -84,6 +84,23 @@ describe("api over the network", () => {
     expect(refused.message).toBe("The workspace is briefly unavailable. Try again in a minute.")
   })
 
+  it("shows only its own words for a refusal, never text from the body", async () => {
+    // The API's errors carry a code only; a `message` in a body is not ours to show.
+    const { net } = stub({
+      "GET /api/v1/me": () =>
+        Response.json({ error: "forbidden", message: "Call 555 0100 to unlock" }, { status: 403 }),
+    })
+    const refused = await refusal(net.me())
+    expect([refused.status, refused.code]).toEqual([403, "forbidden"])
+    expect(refused.message).toBe("You are not allowed to do that here. Ask an organisation admin.")
+
+    const unknown = stub({
+      "GET /api/v1/me": () =>
+        Response.json({ error: "teapot", message: "Call 555 0100" }, { status: 418 }),
+    })
+    expect((await refusal(unknown.net.me())).message).toBe("teapot")
+  })
+
   it("fails loudly on an answer that drifts from the spec", async () => {
     const { net } = stub({ "GET /api/v1/me": () => Response.json({ ...me, role: "owner" }) })
 
