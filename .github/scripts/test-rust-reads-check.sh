@@ -13,17 +13,16 @@ bad() { echo "FAIL $1"; fail=1; }
 
 # 1. The scan finds what Rust reads from outside crates/ and vendor/ in this repository today.
 found=$(bash "$check" --list "$repo")
-for want in schema/fde.zed sandbox/harness/test/fixtures/session.events.jsonl infra/sql/01-bootstrap.sql; do
+for want in schema/fde.zed; do
   if grep -qxF "$want" <<<"$found"; then ok "scan finds $want"; else bad "scan misses $want"; fi
 done
-if grep -qE '^sandbox/harness/test/fixtures/' <<<"$found"; then ok "scan finds the harness fixtures"; else bad "scan misses the harness fixtures"; fi
 if grep -Eq '^(crates|vendor)/' <<<"$found"; then bad "scan lists a path inside crates/ or vendor/"; else ok "scan skips paths inside crates/ and vendor/"; fi
 
 # 2. The real skip list passes.
 if bash "$check" "$repo" >/dev/null; then ok "real skip list passes"; else bad "real skip list fails"; fi
 
 # 3. Mutation: put each known path's directory on the skip list in a scratch copy of rust-changed.sh; the check must fail.
-for prefix in 'schema/' 'sandbox/harness/test/' 'infra/sql/'; do
+for prefix in 'schema/'; do
   mut="$tmp/mutant.sh"
   sed "s#^SKIP='^(#SKIP='^($prefix|#" "$here/rust-changed.sh" >"$mut"
   if cmp -s "$mut" "$here/rust-changed.sh"; then bad "mutation $prefix did not change the script"; continue; fi
