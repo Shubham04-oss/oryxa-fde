@@ -1,6 +1,6 @@
 # One main container on Fargate (ARM64) in private subnets, plus optional sidecars: task definition,
 # its own log group, roles and security group, and optionally the ECS service. Used for oryxa-fde-api
-# (with the cloudflared sidecar), the queue workers, SpiceDB and the one-off tasks.
+# (with the cloudflared sidecar), SpiceDB and the one-off tasks.
 #
 # Secrets are Secrets Manager ARNs that ECS injects at task start; the execution role may read
 # exactly those ARNs (the main container's and the sidecars'), and decrypt only through Secrets

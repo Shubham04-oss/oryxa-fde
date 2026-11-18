@@ -1,6 +1,6 @@
 # Deploys from GitHub Actions (.github/workflows/deploy-api.yml) with OIDC: no AWS key exists
 # anywhere. The role trusts only that workflow, run from main, in the GitHub environment named after
-# var.env, and may only push the API image, run the migrate task and update the API and the worker services.
+# var.env, and may only push the API image, run the migrate task and update the API service.
 # deploy-workers needs no AWS access, so it cannot assume the role.
 
 # One GitHub OIDC provider per account. Pass github_oidc_provider_arn when the account already has one.
@@ -15,26 +15,13 @@ locals {
     var.github_oidc_provider_arn != null ? var.github_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
   )
 
-  # The workers one deploy rolls after the API, in this order: the deploy parameter lists them for the workflow, and the
-  # role below may update exactly their services and pass exactly their roles. A worker that is not deployed (the
-  # lifecycle worker until update_model is set) is not here, so the workflow skips it by config, not by catching an error.
-  deploy_workers = concat(
-    [{ name = "ingest", service = module.ingest.service_name, task_definition = module.ingest.task_family }],
-    local.lifecycle_on ? [{ name = "lifecycle", service = module.lifecycle[0].service_name, task_definition = module.lifecycle[0].task_family }] : [],
-    local.mcp_on ? [{ name = "mcp", service = module.mcp[0].service_name, task_definition = module.mcp[0].task_family }] : [],
-  )
-  # Every task role a deploy may hand to a new task definition revision, and its execution role: the API's, the
-  # migrate task's and each worker's (the MCP server's included). Never the one-off db-admin and zed tasks, SpiceDB or any other role.
-  deploy_task_roles = concat(
-    [module.api.task_role_arn, module.api.execution_role_arn, module.migrate.task_role_arn, module.migrate.execution_role_arn],
-    [module.ingest.task_role_arn, module.ingest.execution_role_arn],
-    flatten([for m in concat(module.lifecycle, module.mcp) : [m.task_role_arn, m.execution_role_arn]]),
-  )
-  github_oidc_subject_prefix = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
-  deploy_service_arns = [
-    for s in concat([module.api.service_name], [for w in local.deploy_workers : w.service]) :
-    "arn:aws:ecs:${local.region}:${local.account}:service/${aws_ecs_cluster.this.name}/${s}"
+  # Every task role a deploy may hand to a new task definition revision, and its execution role: the API's and the
+  # migrate task's. Never the one-off db-admin and zed tasks, SpiceDB or any other role.
+  deploy_task_roles = [
+    module.api.task_role_arn, module.api.execution_role_arn, module.migrate.task_role_arn, module.migrate.execution_role_arn,
   ]
+  github_oidc_subject_prefix = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
+  deploy_service_arn         = "arn:aws:ecs:${local.region}:${local.account}:service/${aws_ecs_cluster.this.name}/${module.api.service_name}"
 }
 
 data "aws_iam_policy_document" "github_deploy_assume" {
@@ -127,7 +114,7 @@ data "aws_iam_policy_document" "github_deploy" {
   statement {
     sid       = "DeployServices"
     actions   = ["ecs:DescribeServices", "ecs:UpdateService"]
-    resources = local.deploy_service_arns
+    resources = [local.deploy_service_arn]
   }
 
   statement {
@@ -156,7 +143,6 @@ resource "aws_ssm_parameter" "deploy" {
   insecure_value = jsonencode({
     cluster                 = aws_ecs_cluster.this.name
     service                 = module.api.service_name
-    workers                 = local.deploy_workers
     api_task_definition     = module.api.task_family
     migrate_task_definition = module.migrate.task_family
     migrate_security_group  = module.migrate.security_group_id
@@ -166,9 +152,9 @@ resource "aws_ssm_parameter" "deploy" {
   })
 }
 
-# The sha the API, the workers and the migrate task run. The deploy workflow writes it once the API and every worker
-# have settled on it, and every plan reads it back, so an apply never rolls a service back to an older image than the
-# last complete deploy. var.api_image_tag only seeds it on the first apply.
+# The sha the API and the migrate task run. The deploy workflow writes it once the API has settled on it, and every
+# plan reads it back, so an apply never rolls the API back to an older image than the last complete deploy.
+# var.api_image_tag only seeds it on the first apply.
 resource "aws_ssm_parameter" "api_image_tag" {
   name           = "/${local.prefix}/api-image-tag"
   type           = "String"

@@ -1,6 +1,6 @@
-# RDS for PostgreSQL 17 (ADR 0003), one instance per environment. pgvector ships with RDS and is
-# enabled by infra/sql/01-bootstrap.sql. The master password is generated and rotated by RDS in
-# Secrets Manager, so it never appears in config or state; only the one-off db-admin task reads it.
+# RDS for PostgreSQL 17 (ADR 0003), one instance per environment. The master password is generated and
+# rotated by RDS in Secrets Manager, so it never appears in config or state; only the one-off db-admin
+# task reads it.
 #
 # Never publicly accessible. Services connect over TLS with IAM database auth, each as its own
 # user; only the security groups in `allowed_security_groups` reach 5432. The module takes no CIDRs.
