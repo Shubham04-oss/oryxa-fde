@@ -14,56 +14,20 @@ workos_client_id       = "<WorkOS client id (public)>"
 # workos_issuer = "https://auth.example.com/"
 
 # The environment's host names, chosen here and required: no default, so nobody takes the production names (the zone
-# itself, app., admin., mcp.) by accident. Each is the zone or exactly one label under it: Cloudflare's Universal SSL
+# itself, app., admin.) by accident. Each is the zone or exactly one label under it: Cloudflare's Universal SSL
 # certificate covers the zone and one level only, so app.fde-dev.example.com would have no certificate. Distinct names.
 # The web name is the API's WEB_ORIGIN (https://<it>) and WEB_HOSTNAME on the GitHub environment, and
 # https://<it>/auth/callback is the redirect URI to register in WorkOS (infra/README.md, Apply order).
-web_hostname   = "fde-dev.example.com"
-admin_hostname = "fde-dev-admin.example.com"
-# mcp_hostname = "fde-dev-mcp.example.com" # required with enable_mcp
-data_bucket_name       = "oryxa-fde-dev-data-<unique suffix>"
+web_hostname           = "fde-dev.example.com"
+admin_hostname         = "fde-dev-admin.example.com"
 cloudtrail_bucket_name = "oryxa-fde-dev-cloudtrail-<unique suffix>"
-
-# Who may assume the roles that make and retire one KMS key per company (infra/README.md, Company keys).
-company_key_operator_arns = ["arn:aws:iam::000000000000:user/<you>"]
-# Flip to true before the first real customer data, once the API names a company key on every write.
-# require_company_keys = false
-# Yearly rotation of each company key; off for now (cost, infra/README.md, Company keys).
-# company_key_rotation = false
 
 # The deploy role's OIDC subject (infra/README.md, Apply order step 4). With GitHub's immutable subject on, the sub_claim_prefix
 # from `gh api repos/<owner>/<name>/actions/oidc/customization/sub`; leave unset for repo:<github_repository>.
 # github_oidc_subject_prefix = "repo:<owner>@<owner id>/<name>@<repo id>"
 
-# Printed by `infra/scripts/create-event-bus.sh dev <account id> ap-south-1` (apply order step 2).
-event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/oryxa-fde-dev/<id>"
-
-# The public half of the API's event signing key (apply order step 4): the workers verify every event with it.
-# Make the pair first: openssl genpkey -algorithm ed25519 -out event-key.pem; openssl pkey -in event-key.pem -pubout
-event_public_key = <<-EOT
-  -----BEGIN PUBLIC KEY-----
-  <the key's base64 lines>
-  -----END PUBLIC KEY-----
-EOT
-
 # The git sha of an image pushed to the ECR repository (output ecr_repository_url).
 api_image_tag = "<git sha>"
 
-# false until the image is pushed and every secret has a value (apply order step 7).
+# false until the image is pushed and every secret has a value (apply order step 9).
 start_services = false
-
-# Agent routes (after deploy-workers). In ap-south-1 the Claude models run only through a cross-Region
-# inference profile, so prompts may be processed outside India: read "Where prompts are processed" in
-# infra/README.md before choosing. agent_region is where the calls start from; null means aws_region.
-# agent_model  = "global.anthropic.claude-opus-5-5"
-# agent_region = null
-
-# The lifecycle worker (weekly drafts and the digest) is deployed only once a drafting model is chosen. From Mumbai
-# the current Claude models need a global. inference profile, which lets Bedrock process prompts outside India:
-# read "Where prompts are processed" in infra/README.md, and ADR 0003, before setting it. No default.
-# update_model = "global.anthropic.claude-opus-5-5"
-# digest_from  = "updates@example.com" # a verified SES identity in aws_region, out of the SES sandbox
-
-# The MCP server for FDE agents (its own tunnel, at mcp_hostname above). Off until the lead decides how an agent signs in:
-# read "How the MCP server is reached" in infra/README.md first.
-# enable_mcp = true

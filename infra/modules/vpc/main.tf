@@ -172,7 +172,7 @@ resource "aws_instance" "nat" {
 
 # ---------------------------------------------------------------- endpoints
 
-# Free. ECR image layers and the data bucket stay off the NAT.
+# Free. ECR image layers stay off the NAT.
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.this.id
   service_name      = "com.amazonaws.${local.region}.s3"

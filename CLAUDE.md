@@ -55,8 +55,9 @@ Respect each machine's heavy-job budget, and clean up the worktrees, containers 
 
 - **Never trust input.** Ids are validated types (`oryxa_core`); add a type rather
   than passing raw strings into SpiceDB, SQL, logs or events.
-- **Every company-scoped call takes a `CompanyScope` or `ProjectScope`.** SQL always filters by tenant
-  and company. SpiceDB only through `oryxa-authz`.
+- **Every signed-in call is scoped to the token's tenant:** the `TenantId` of the verified token, never one
+  from the request. SQL on tenant data always filters by tenant (`sign_in_limits`, the one table, holds none:
+  nobody is signed in yet). SpiceDB only through `oryxa-authz`.
 - **Events:** publish only via `oryxa-events` (signed, ids only, no emails or content); handlers must
   be idempotent. State changes publish through the outbox in the same transaction.
 - **Customer data:** sample data only until per-company keys exist (ADR 0003). Sandboxes stay on
@@ -85,7 +86,7 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 docker run --rm -p 50051:50051 authzed/spicedb:v1.56.2 serve-testing
-docker run --rm -e POSTGRES_PASSWORD=oryxa -e POSTGRES_DB=oryxa_fde -p 55432:5432 pgvector/pgvector:pg17
+docker run --rm -e POSTGRES_PASSWORD=oryxa -e POSTGRES_DB=oryxa_fde -p 55432:5432 postgres:17
 DATABASE_URL=postgres://postgres:oryxa@localhost:55432/oryxa_fde SPICEDB_ENDPOINT=http://localhost:50051 \
   cargo test --workspace -- --ignored --skip e2e_      # live tests (also run in CI)
 cargo deny check

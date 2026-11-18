@@ -1,17 +1,11 @@
 # Test helper: what the API's source and the image's Dockerfile say about the container health check and the
-# shutdown grace, read as text, so `envs/dev` and infra/README.md cannot drift from the code silently. Plans with
-# no provider and no resource. Each regex must match: when the code is reshaped the plan fails here, saying which
+# shutdown grace, and what run-task.sh sends, read as text, so `envs/dev` and infra/README.md cannot drift from
+# the code silently. Plans with no provider and no resource. Each regex must match: when the code is reshaped the plan fails here, saying which
 # constant to look at. The coupling to the Rust source is deliberate: a Rust change that trips it updates infra with it.
 
 variable "task" {
   description = "The API task's health check, plain environment and stop timeouts: the root output api_task_timing."
   type        = any
-}
-
-variable "company_key_prefixes" {
-  description = "Per task, the COMPANY_KEY_ALIAS_ARN_PREFIX it is set to and the AWS_REGION it runs in. The parser stops the process unless the value has the code's shape and its Region is AWS_REGION."
-  type        = map(object({ value = string, region = string }))
-  default     = {}
 }
 
 locals {
@@ -21,8 +15,6 @@ locals {
   health   = file("${local.api_src}/health.rs")
   shutdown = file("${local.api_src}/shutdown.rs")
   ops      = file("${local.api_src}/bin/ops.rs")
-  # Only the code above the tests: the parser's literals, not the examples the tests feed it.
-  keys = split("#[cfg(test)]", file("${local.root}/crates/oryxa-fde-context/src/keys.rs"))[0]
 
   # Instructions only: a comment may say what the image no longer has.
   dockerfile = [
@@ -35,15 +27,7 @@ locals {
   api_section = one([for s in split("\n### ", local.readme) : s if startswith(s, "`oryxa-fde-api`")])
   ops_row     = one(regexall("(?m)^\\| `healthcheck` \\|[^\n]*$", local.ops_section))
   grace_var   = regex("pub const GRACE_VAR: &str = \"([A-Z_]+)\";", local.shutdown)[0]
-  # What `CompanyKeyPrefix::parse` takes: arn:<partition>:kms:<region>:<account>:<head><env><tail>.
-  prefix_var   = regex("pub const PREFIX_VAR: &str = \"([A-Z_]+)\";", local.keys)[0]
-  alias_head   = regex("\\.strip_prefix\\(\"([^\"]+)\"\\)", local.keys)[0]
-  alias_tail   = regex("\\.strip_suffix\\(\"([^\"]+)\"\\)", local.keys)[0]
-  partitions   = [for p in regexall("\"([a-z-]+)\"", regex("matches!\\(partition, ([^)]+)\\)", local.keys)[0]) : p[0]]
-  account_len  = tonumber(regex("account\\.len\\(\\) == (\\d+)", local.keys)[0])
-  word         = "[a-z0-9]+(-[a-z0-9]+)*"
-  prefix_shape = "^arn:(${join("|", local.partitions)}):kms:${local.word}:[0-9]{${local.account_len}}:${local.alias_head}${local.word}${local.alias_tail}$"
-  grace_row    = one(regexall("(?m)^\\| `${local.grace_var}` \\|[^\n]*$", local.api_section))
+  grace_row   = one(regexall("(?m)^\\| `${local.grace_var}` \\|[^\n]*$", local.api_section))
 }
 
 output "health_timeout_seconds" {
@@ -94,37 +78,6 @@ output "readme_grace_max_seconds" {
 output "image" {
   description = "The Dockerfile's instructions, comments removed."
   value       = local.dockerfile
-}
-
-output "company_key_prefix_var" {
-  description = "keys.rs PREFIX_VAR: the variable the API and the ingest worker read the alias prefix from."
-  value       = local.prefix_var
-}
-
-output "company_key_prefix_shape" {
-  description = "The regular expression built from keys.rs's parser literals."
-  value       = local.prefix_shape
-}
-
-output "company_key_prefix_accepted" {
-  description = "Per task: the value has the shape CompanyKeyPrefix::parse takes and names the Region the task runs in (prefix_from)."
-  value = {
-    for t, p in var.company_key_prefixes : t => can(regex(local.prefix_shape, p.value)) && split(":", p.value)[3] == p.region
-  }
-}
-
-output "company_key_prefix_rejects_the_wrong_shapes" {
-  description = "The shape is not vacuous: the values keys.rs's own test refuses are refused here too."
-  value = [
-    for v in [
-      "arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-dev/companies",
-      "arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-dev/companies/cmp_1",
-      "arn:aws:kms:ap-south-1:00000000000:alias/oryxa-fde-dev/companies/",
-      "arn:aws:kms:ap-south-1:000000000000:key/oryxa-fde-dev/companies/",
-      "arn:aws:kms:ap-south-1:000000000000:alias/oryxa-fde-/companies/",
-      "arn:aws:s3:ap-south-1:000000000000:alias/oryxa-fde-dev/companies/",
-    ] : can(regex(local.prefix_shape, v))
-  ]
 }
 
 # infra/scripts/run-task.sh as text (#195): the size limit of its file override and the lines it drops from SQL, so

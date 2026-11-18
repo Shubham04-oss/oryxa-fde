@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: pgvector/pgvector:pg17
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: oryxa
           POSTGRES_DB: oryxa_fde
@@ -211,17 +211,12 @@ jobs:
         with:
           path: ~/.cache/opentofu/plugins
           key: ${{ steps.provider-cache.outputs.cache-primary-key }}
-      # ponytail: since #296, tests/plan.tftest.hcl reads source #296 removed (crates/oryxa-fde-context, through
-      # tests/code) and pins the removed workers, so the configuration is validated without its tests and only the
-      # company-key tests run. The infra issue that slims infra/ updates those tests and restores the full run here.
-      - run: tofu -chdir=infra/envs/dev validate -no-tests
+      - run: tofu -chdir=infra/envs/dev validate
       # Plans on mock providers and asserts the security rules.
-      - run: tofu -chdir=infra/envs/dev test -filter=tests/company_keys.tftest.hcl
+      - run: tofu -chdir=infra/envs/dev test
       - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
       # The smoke test against a stub on a loopback port (bash, curl, jq and python3, all on the runner).
       - run: bash infra/scripts/test-smoke-test.sh
-      # The company-key script against a fake aws (bash, jq and python3, all on the runner).
-      - run: bash infra/scripts/test-company-key.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
       # The skip list against the Rust sources: a path Rust reads from outside crates/ and vendor/ must run the Rust

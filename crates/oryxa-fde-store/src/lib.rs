@@ -163,7 +163,7 @@ async fn owner_powers(pool: &PgPool) -> Result<Option<String>, StoreError> {
              (r.rolname like 'pg\\_%', 'predefined role'),
              (r.oid = (select datdba from pg_database where datname = current_database()), 'owns the database'),
              (exists (select from pg_class c where c.relowner = r.oid), 'owns a relation'),
-             -- An owner of fde_in_scope could redefine it and switch off every row-level policy.
+             -- An owner of a function a row-level policy calls could redefine it and switch the policy off.
              (exists (select from pg_proc p where p.proowner = r.oid), 'owns a function'),
              (exists (select from pg_namespace n where n.nspowner = r.oid), 'owns a schema'),
              (exists (select from pg_namespace n

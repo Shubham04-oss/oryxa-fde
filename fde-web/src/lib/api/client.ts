@@ -29,12 +29,13 @@ export const SAFE_TEXT: Record<string, string> = {
   unavailable: "The workspace is briefly unavailable. Try again in a minute.",
 }
 
-const ErrorBody = z.object({ error: z.string(), message: z.string().optional() })
+// The API's ErrorBody is a code only (openapi.json); any other field is ignored, never shown.
+const ErrorBody = z.object({ error: z.string() })
 
 function refusal(status: number, body: unknown) {
   const parsed = ErrorBody.safeParse(body)
   const code = parsed.success ? parsed.data.error : `http_${status}`
-  return new ApiError(status, code, (parsed.success && parsed.data.message) || SAFE_TEXT[code])
+  return new ApiError(status, code, SAFE_TEXT[code])
 }
 
 /** What answers the app's requests. Answers are untrusted until `api` parses them. */

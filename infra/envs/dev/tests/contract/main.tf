@@ -3,7 +3,7 @@
 # silently. Plans with no provider and no resource.
 
 variable "binary" {
-  description = "The heading of the table to read, as the README writes it after `### `: oryxa-fde-api, oryxa-fde-ingest, oryxa-fde-lifecycle."
+  description = "The heading of the table to read, as the README writes it after `### `: oryxa-fde-api."
   type        = string
   default     = "oryxa-fde-api"
 }
@@ -11,7 +11,7 @@ variable "binary" {
 variable "min_rows" {
   description = "Fewer rows than this means the table was not read."
   type        = number
-  default     = 30
+  default     = 10
 }
 
 variable "plain_env_names" {
@@ -21,11 +21,6 @@ variable "plain_env_names" {
 
 variable "secret_env_names" {
   description = "Names of the variables the task gets from Secrets Manager."
-  type        = set(string)
-}
-
-variable "features" {
-  description = "The optional features switched on: agent, realtime, github, slack (API); digest, slack (lifecycle)."
   type        = set(string)
 }
 
@@ -43,10 +38,8 @@ locals {
 
   set = setunion(var.plain_env_names, var.secret_env_names)
 
-  # Needed now: always, plus what each switched-on feature needs.
-  required = toset([for name, r in local.rows : name if length(setintersection(r.needed, setunion(["always"], var.features))) > 0])
-  # May be set: the required, and anything optional. A variable only a switched-off feature needs, a
-  # local-only one, or one the table does not list is not.
+  required = toset([for name, r in local.rows : name if contains(r.needed, "always")])
+  # May be set: the required, and anything optional. A local-only variable, or one the table does not list, is not.
   allowed = setunion(local.required, toset([for name, r in local.rows : name if contains(r.needed, "optional")]))
   secrets = toset([for name, r in local.rows : name if r.kind == "secret"])
 }
@@ -56,7 +49,7 @@ output "table_read" {
   value = length(local.rows) > var.min_rows && alltrue([
     for name, r in local.rows :
     contains(["config", "secret", "reference"], r.kind) &&
-    alltrue([for w in r.needed : contains(["always", "agent", "realtime", "github", "slack", "digest", "optional", "local only"], w)])
+    alltrue([for w in r.needed : contains(["always", "optional", "local only"], w)])
   ])
 }
 
@@ -66,7 +59,7 @@ output "missing" {
 }
 
 output "unexpected" {
-  description = "Set on the task definition, but unknown to the table or not needed with these features."
+  description = "Set on the task definition, but unknown to the table or local only."
   value       = sort(setsubtract(local.set, local.allowed))
 }
 

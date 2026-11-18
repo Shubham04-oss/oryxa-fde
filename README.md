@@ -1,7 +1,9 @@
 # oryxa-fde
 
-The FDE workspace: one place where forward deployed engineers run every customer company and
-project they work on, from discovery to handoff, with a coding agent in each company's sandbox.
+The FDE workspace, reset to its first piece: signing in. Today it is a web app where a person signs in
+with WorkOS (or our own sign-in screens, behind a flag), sees who they are signed in as and in which
+organisation, and signs out; and the API behind it, on AWS in `infra/`. What it is meant to grow into
+is in [docs/direction.md](docs/direction.md).
 
 **Working on this repo? Read [CLAUDE.md](CLAUDE.md), then [docs/plan.md](docs/plan.md) and
 [docs/adr/](docs/adr/).**

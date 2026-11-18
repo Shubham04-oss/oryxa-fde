@@ -59,19 +59,6 @@ output "secrets" {
   value       = { for k, s in aws_secretsmanager_secret.this : k => s.name }
 }
 
-output "queue_urls" {
-  value = { for k, q in module.queue : k => q.url }
-}
-
-output "eventbus_delivery_role_arn" {
-  description = "Role each consumer's FIFO subscriber uses to deliver into its queue."
-  value       = module.eventbridge.delivery_role_arn
-}
-
-output "data_bucket" {
-  value = module.data_bucket.name
-}
-
 output "cloudtrail_bucket" {
   value = module.cloudtrail.bucket
 }
@@ -92,69 +79,4 @@ output "api_task_timing" {
     # ECS waits 30 s when a container sets none.
     stop_timeouts = { for c in module.api.containers : c.name => coalesce(try(c.stopTimeout, null), 30) }
   }
-}
-
-output "company_key_prefix_by_task" {
-  description = "The COMPANY_KEY_ALIAS_ARN_PREFIX each task is set to, with the AWS_REGION it runs in, for tests/code, which checks the value against the parser's shape in the Rust source. Not a secret."
-  value = {
-    for t, e in { api = local.api_environment, ingest = local.ingest_environment } :
-    t => { value = e.COMPANY_KEY_ALIAS_ARN_PREFIX, region = e.AWS_REGION }
-  }
-}
-
-output "agent_model_target" {
-  description = "The agent's Bedrock model or profile and the Region its calls start from (AGENT_MODEL, AGENT_REGION); null while the agent is off. Not a secret."
-  value       = local.agent_on ? { model = var.agent_model, region = local.agent_region } : null
-}
-
-output "ingest_env_names" {
-  description = "Names, never values, of the variables the ingest worker gets. The contract test compares them with infra/README.md."
-  value = {
-    plain  = module.ingest.plain_env_names
-    secret = module.ingest.secret_env_names
-  }
-}
-
-output "lifecycle_env_names" {
-  description = "The same for the lifecycle worker; null while update_model is null and the worker is not deployed."
-  value = local.lifecycle_on ? {
-    plain  = module.lifecycle[0].plain_env_names
-    secret = module.lifecycle[0].secret_env_names
-  } : null
-}
-
-output "mcp_env_names" {
-  description = "The same for the MCP server; null while enable_mcp is false and it is not deployed."
-  value = local.mcp_on ? {
-    plain  = module.mcp[0].plain_env_names
-    secret = module.mcp[0].secret_env_names
-  } : null
-}
-
-output "mcp_hostname" {
-  description = "Where an FDE's agent reaches the MCP server (https://<this>/mcp), at Cloudflare's edge; null while it is off."
-  value       = module.cloudflare.mcp_hostname
-}
-
-output "mcp_tunnel_id" {
-  description = "Copy this tunnel's token from the Cloudflare dashboard into the cloudflared/mcp-tunnel-token secret; null while the MCP server is off."
-  value       = module.cloudflare.mcp_tunnel_id
-}
-
-output "event_subscribers" {
-  description = "What infra/scripts/create-subscriber.sh needs for each worker: the delivery role, and the queue each subscriber feeds. The lifecycle subscriber is created only once its worker is deployed."
-  value = {
-    delivery_role = module.eventbridge.delivery_role_arn
-    consumers     = { for c in ["context-ingestion", "lifecycle"] : c => module.queue[c].url }
-  }
-}
-
-output "company_keys" {
-  description = "Input of infra/scripts/company-key.sh: `tofu output -json company_keys > <file>`. Holds ARNs and the key policy, no secret."
-  value       = module.company_keys.config
-}
-
-output "company_key_alias_arn_prefix" {
-  description = "Append a company id for the alias the API names on write and looks up (the value of COMPANY_KEY_ALIAS_ARN_PREFIX on the API and ingest tasks)."
-  value       = module.company_keys.alias_arn_prefix
 }

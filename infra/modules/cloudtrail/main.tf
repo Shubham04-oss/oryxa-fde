@@ -1,6 +1,6 @@
-# CloudTrail for the environment: management events in every region, plus object-level events on
-# the customer data bucket (who read or wrote which company's files). Logs go to their own bucket,
-# encrypted with their own key, with log file validation on. Nothing but CloudTrail writes there.
+# CloudTrail for the environment: management events in every region, plus object-level events on any
+# customer data bucket named (who read or wrote which company's files; dev has none since #298). Logs go
+# to their own bucket, encrypted with their own key, with log file validation on. Nothing but CloudTrail writes there.
 #
 # The first trail's management events in an account are free; if the account already has a trail,
 # this one's management events cost $2 per 100,000.
@@ -15,8 +15,9 @@ variable "bucket_name" {
 }
 
 variable "data_bucket_arns" {
-  description = "Buckets whose object reads and writes are logged."
+  description = "Buckets whose object reads and writes are logged; none, no data event selector."
   type        = list(string)
+  default     = []
 }
 
 variable "force_destroy" {
@@ -236,19 +237,22 @@ resource "aws_cloudtrail" "this" {
     }
   }
 
-  advanced_event_selector {
-    name = "Customer data objects"
-    field_selector {
-      field  = "eventCategory"
-      equals = ["Data"]
-    }
-    field_selector {
-      field  = "resources.type"
-      equals = ["AWS::S3::Object"]
-    }
-    field_selector {
-      field       = "resources.ARN"
-      starts_with = [for arn in var.data_bucket_arns : "${arn}/"]
+  dynamic "advanced_event_selector" {
+    for_each = length(var.data_bucket_arns) > 0 ? [1] : []
+    content {
+      name = "Customer data objects"
+      field_selector {
+        field  = "eventCategory"
+        equals = ["Data"]
+      }
+      field_selector {
+        field  = "resources.type"
+        equals = ["AWS::S3::Object"]
+      }
+      field_selector {
+        field       = "resources.ARN"
+        starts_with = [for arn in var.data_bucket_arns : "${arn}/"]
+      }
     }
   }
 
