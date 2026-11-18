@@ -10,9 +10,9 @@ first change.
 | Account | Owns | Label |
 | --- | --- | --- |
 | Lead | Design, ADRs, the hands-off paths below, reviews every PR | `lead`; only the lead adds `lead-approved` |
-| API | `schema/`, `crates/oryxa-fde-events`, `crates/oryxa-fde-store`, `crates/oryxa-fde-api`, `crates/oryxa-fde-context`, `crates/oryxa-fde-mcp`, `crates/oryxa-fde-lifecycle`, `crates/oryxa-fde-integrations`, `crates/oryxa-fde-billing` | `agent:api` |
-| Web | `fde-web/`, `realtime/` (Durable Objects for presence, canvas and live agent output) | `agent:web` |
-| Agent | `sandbox/`, `crates/oryxa-fde-agent`, `crates/oryxa-fde-evals` | `agent:agent` |
+| API | `schema/`, `crates/oryxa-fde-store`, `crates/oryxa-fde-api`, `crates/oryxa-fde-billing` | `agent:api` |
+| Web | `fde-web/` | `agent:web` |
+| Agent | none since #296 removed its paths | `agent:agent` |
 | Infra | `infra/`, and `.github/workflows/`, `.github/scripts/` and `.github/actions/` with lead review | `agent:infra` |
 
 If an issue conflicts with `docs/plan.md` or an ADR, stop and comment on the issue instead of guessing.
@@ -41,7 +41,7 @@ Respect each machine's heavy-job budget, and clean up the worktrees, containers 
 
 ## Hands off without lead review
 
-`vendor/**` (only `scripts/sync-platform.sh` writes it, in a lead PR), `crates/oryxa-fde-core/**`,
+`vendor/**` (only `scripts/sync-platform.sh` writes it, in a lead PR),
 `schema/*.zed`, `docs/adr/**`, `deny.toml`, `CLAUDE.md`, `.github/workflows/**`, `.github/scripts/**`, `.github/actions/**`.
 
 ## The platform base
@@ -53,7 +53,7 @@ Respect each machine's heavy-job budget, and clean up the worktrees, containers 
 
 ## Security rules
 
-- **Never trust input.** Ids are validated types (`oryxa_core`, `oryxa_fde_core`); add a type rather
+- **Never trust input.** Ids are validated types (`oryxa_core`); add a type rather
   than passing raw strings into SpiceDB, SQL, logs or events.
 - **Every company-scoped call takes a `CompanyScope` or `ProjectScope`.** SQL always filters by tenant
   and company. SpiceDB only through `oryxa-authz`.

@@ -1,5 +1,8 @@
 # FDE workspace: build plan
 
+> **Before the reset.** This page describes the product before the 18 November 2026 reset (#296), which
+> stripped the repository down to sign-in. It is kept for reference until the replan replaces it.
+
 The source for every issue in this repo. `docs/direction.md` says what the product is for and how
 it should work; decisions live in `docs/adr/`; this file says what to build and in what order.
 Last updated 10 November 2026.

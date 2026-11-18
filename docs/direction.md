@@ -1,5 +1,8 @@
 # Product direction
 
+> **Before the reset.** This page describes the product before the 18 November 2026 reset (#296), which
+> stripped the repository down to sign-in. It is kept for reference until the replan replaces it.
+
 What the product is for, who uses it, and how it should feel to work in. `docs/plan.md` says what to
 build and in what order; the ADRs record decisions; this page is the reason behind both. Set by the
 founder and the lead on 10 November 2026. Section 9, how the workspace feels and adapts, was added
