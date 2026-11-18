@@ -36,30 +36,17 @@ async function shoot(screen, size, theme) {
   const page = await context.newPage()
   const problems = []
   page.on("pageerror", (error) => problems.push(`page error: ${error.message}`))
-  // Before the app's own code runs, so the mock seeds a workspace with no company.
-  if (screen.emptyWorkspace)
-    await page.addInitScript(() => (globalThis.__fdeMockNoCompanies = true))
-  // Reads of the stage checklist say everything is met, so the stale-view refusal can be shown.
-  if (screen.staleChecklist)
-    await page.addInitScript(() => (globalThis.__fdeMockStaleChecklist = true))
-  // The API serves no eval routes (no sandbox gateway): they answer 404, so the Proof card says so.
-  if (screen.evalsOff) await page.addInitScript(() => (globalThis.__fdeMockEvalsOff = true))
-  // `/v1/people` answers 503 or 403, so the screens without names can be shown.
-  if (screen.people)
-    await page.addInitScript((answer) => (globalThis.__fdeMockPeople = answer), screen.people)
-  // The new workspace (issue #209) on for this tab, as `VITE_FDE_WORKSPACE=1` would be for a build.
-  if (screen.workspace) await page.addInitScript(() => (globalThis.__fdeMockWorkspace = true))
   // A sign-in waiting at a step, as a password sign-in leaves it.
   if (screen.pendingStep)
     await page.addInitScript((step) => (globalThis.__fdeMockPendingStep = step), screen.pendingStep)
   try {
-    const response = await page.goto(url + (screen.signedOut ? screen.path : "/today"))
+    const response = await page.goto(url + (screen.signedOut ? screen.path : "/"))
     if (response && response.status() >= 400) problems.push(`HTTP ${response.status()}`)
     if (!screen.signedOut) {
       // The mock's sign-in is one click and keeps the session for this tab. Either the app shows (a
       // session is there) or the sign-in card does; wait for whichever comes first.
       // With our own sign-in screens on (VITE_FDE_OWN_SIGN_IN=1), the mock's sample account signs in.
-      const canvas = page.locator(".app-canvas")
+      const canvas = page.getByRole("heading", { name: "You are signed in", exact: true })
       const continueButton = page.getByRole("button", { name: "Continue" })
       const email = page.getByLabel("Email", { exact: true })
       await canvas.or(continueButton).or(email).first().waitFor()
@@ -76,7 +63,6 @@ async function shoot(screen, size, theme) {
     }
     await screen.ready(page).waitFor({ state: "visible" })
     await page.evaluate(() => document.fonts.ready)
-    if (screen.failWrites) await page.evaluate(() => (globalThis.__fdeMockFailWrites = true))
     if (screen.act) await screen.act(page)
 
     if (screen.full !== false) {

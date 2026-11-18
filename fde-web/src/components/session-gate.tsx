@@ -1,12 +1,11 @@
 import type { ReactNode } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { AppShell } from "./app-shell"
 import { Failed } from "./page"
 import { ApiError, queries } from "@/lib/api/client"
 
 /**
- * Every screen but sign-in: the shell, once the API says who is signed in. Without a session the
- * query client (src/lib/session.ts) sends the FDE to sign-in, which brings them back here.
+ * Every screen but sign-in, once the API says who is signed in. Without a session the query client
+ * (src/lib/session.ts) sends the person to sign-in, which brings them back here.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
   const me = useQuery(queries.me())
@@ -31,5 +30,5 @@ export function SessionGate({ children }: { children: ReactNode }) {
         />
       </main>
     )
-  return <AppShell me={me.data}>{children}</AppShell>
+  return <>{children}</>
 }

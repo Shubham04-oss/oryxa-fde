@@ -13,26 +13,6 @@ export function apiPath(url: URL): string | null {
 }
 
 /**
- * Whether a call is one of the assistant's conversation writes, which the browser never sends (append a turn,
- * answer a proposal: PUT `/v1/assistant/conversations/{c}/turns/{n}` and `.../turns/{n}/proposals/{p}`), so the
- * stored transcript cannot be written by hand. Every method but a read, on any path under a conversation's
- * `turns`, after decoding, in lower case and with runs of slashes as one, so no spelling slips through; a path that
- * cannot be decoded counts as one.
- */
-export function relayOnly(method: string, path: string): boolean {
-  if (method === "GET" || method === "HEAD") return false
-  let plain: string
-  try {
-    plain = decodeURIComponent(path)
-  } catch {
-    return true
-  }
-  return /^\/v1\/assistant\/conversations\/.+\/turns(?:\/|$)/.test(
-    plain.toLowerCase().replace(/\/+/g, "/"),
-  )
-}
-
-/**
  * Whether a request may change something: reads always, writes only from this app's own pages.
  * The API checks this too (with `X-Oryxa-Request`); the Worker refuses first, failing closed.
  */
@@ -42,9 +22,8 @@ export function sameOriginWrite(request: Request): boolean {
 }
 
 /**
- * The most a write may carry through the Worker: the API's own limit for a document (20 MiB,
- * `MAX_DOCUMENT_BYTES` in `oryxa-fde-context`). No other route takes more, and the API still applies
- * each route's own limit; this only keeps a huge body from being buffered here first.
+ * The most a write may carry through the Worker: 20 MiB, far above what any API route takes. The API
+ * still applies each route's own limit; this only keeps a huge body from being buffered here first.
  */
 export const MAX_BODY_BYTES = 20 * 1024 * 1024
 
@@ -86,8 +65,8 @@ const RETRIED_STATUSES = new Set([502, 503])
 export const RETRY_PAUSE_MS = 250
 
 /**
- * Whether an API path is under `/auth`, read the way `relayOnly` reads one: decoded, in lower case and with runs of
- * slashes as one; a path that cannot be decoded counts as one.
+ * Whether an API path is under `/auth`: decoded, in lower case and with runs of slashes as one; a path that
+ * cannot be decoded counts as one.
  */
 function underAuth(path: string): boolean {
   let plain: string

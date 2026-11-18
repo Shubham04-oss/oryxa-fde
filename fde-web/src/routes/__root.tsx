@@ -22,7 +22,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     <main className="grid min-h-dvh place-content-center gap-2 bg-canvas p-6 text-center text-[13px]">
       <h1 className="text-base font-semibold">Page not found</h1>
       <Link to="/" className="underline underline-offset-2">
-        Go to your companies
+        Go to the start page
       </Link>
     </main>
   ),
