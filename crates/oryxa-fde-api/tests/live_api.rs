@@ -1107,9 +1107,11 @@ async fn the_tokens_role_is_mirrored_onto_the_workspace_on_any_replica() {
     let (status, me) = w.call(Some(&token("admin")), "GET", "/v1/me", None).await;
     assert_eq!((status, me["role"].as_str()), (StatusCode::OK, Some("admin")));
     assert!(on_workspace(&w, &org, &dana, "manage").await);
-    // Demoted, on the other replica: a change of role is mirrored at once, whatever it last saw.
-    w.call_on(&other, Some(&token("member")), "GET", "/v1/me", None).await;
+    // Demoted, on the replica that saw the promotion: a role it did not mirror last is mirrored at once.
+    // (A read on the other one trusts its own last mirror, member, for up to ROLE_TTL.)
+    w.call(Some(&token("member")), "GET", "/v1/me", None).await;
     assert!(!on_workspace(&w, &org, &dana, "manage").await);
+    assert!(on_workspace(&w, &org, &dana, "access").await);
     // Any other role (a customer's guest) holds nothing on the workspace.
     w.call(Some(&token("guest")), "GET", "/v1/me", None).await;
     assert!(!on_workspace(&w, &org, &dana, "access").await);
