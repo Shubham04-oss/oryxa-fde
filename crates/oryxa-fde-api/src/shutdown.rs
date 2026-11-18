@@ -1,17 +1,37 @@
 //! Graceful shutdown of the API service. On SIGTERM (ECS stopping the task) or SIGINT the listener
-//! closes, so new connections are refused; requests in flight and the background loops (the
-//! outbox relay, the grant reconciler) then get [`grace_from_env`] in all to finish, and the
-//! process exits. Whatever is still running at the bound is dropped: an open transaction rolls
-//! back, and the outbox and the pending-grant rows make that safe (at least once, never lost).
+//! closes, so new connections are refused; requests in flight and any background loops then get
+//! [`grace_from_env`] in all to finish, and the process exits. Whatever is still running at the
+//! bound is dropped: an open transaction rolls back.
 
 use std::future::IntoFuture;
+use std::io;
 use std::time::Duration;
 
 use axum::Router;
-use oryxa_fde_events::shutdown::CancellationToken;
 use tokio::net::TcpListener;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
+pub use tokio_util::sync::CancellationToken;
+
+/// Installs the SIGTERM and SIGINT handlers now, so a signal that arrives later is never the
+/// default (an immediate exit), and returns a token cancelled when the first one arrives. Must be
+/// called inside the Tokio runtime.
+pub fn on_signal() -> io::Result<CancellationToken> {
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    let stop = CancellationToken::new();
+    let fire = stop.clone();
+    tokio::spawn(async move {
+        let name = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+        };
+        tracing::info!(signal = name, "shutting down");
+        fire.cancel();
+    });
+    Ok(stop)
+}
 
 /// Seconds the API waits, after the signal, for requests and background loops to finish.
 pub const GRACE_VAR: &str = "SHUTDOWN_GRACE_SECONDS";
@@ -99,6 +119,21 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sigterm_cancels_the_token_instead_of_killing_the_process() {
+        let stop = on_signal().unwrap();
+        assert!(!stop.is_cancelled());
+        let pid = std::process::id().to_string();
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        tokio::time::timeout(Duration::from_secs(5), stop.cancelled())
+            .await
+            .expect("SIGTERM reaches the token");
+    }
 
     #[test]
     fn the_grace_defaults_under_the_ecs_stop_timeout_and_refuses_nonsense() {

@@ -9,8 +9,8 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::Redirect;
 use axum::routing::get;
+use oryxa_fde_api::shutdown::CancellationToken;
 use oryxa_fde_api::shutdown::{self, Drained};
-use oryxa_fde_events::shutdown::CancellationToken;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, oneshot};
 

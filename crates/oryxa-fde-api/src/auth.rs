@@ -15,8 +15,6 @@ use axum::http::{HeaderMap, Method};
 use oryxa_authn::{AccessTokenVerifier, JwtError, KeySource, SessionClaims};
 use oryxa_authz::Write;
 use oryxa_core::{TenantId, UserId};
-use oryxa_fde_core::{CompanyId, CompanyScope};
-use oryxa_fde_store::{Actor, new_id};
 
 use crate::authz::{rel, user, workspace};
 use crate::{ApiError, App};
@@ -44,22 +42,9 @@ pub struct Principal {
     pub tenant: TenantId,
     pub user: UserId,
     pub admin: bool,
-    /// Generated per request; the correlation id on events this request causes.
-    pub request_id: String,
 }
 
 impl Principal {
-    pub fn company(&self, company: CompanyId) -> CompanyScope {
-        CompanyScope::new(self.tenant.clone(), company)
-    }
-
-    pub fn actor(&self) -> Actor {
-        Actor {
-            user: self.user.clone(),
-            request_id: self.request_id.clone(),
-        }
-    }
-
     /// The caller named by the request's bearer token. `writes` says whether the request may
     /// change anything: a change always re-mirrors the role, so a demotion stops every write at
     /// once on every replica; reads trust this replica's last mirror for up to `ROLE_TTL`.
@@ -86,7 +71,6 @@ impl Principal {
             tenant,
             user,
             admin: role == WorkspaceRole::Admin,
-            request_id: new_id("req"),
         })
     }
 }
@@ -102,8 +86,7 @@ impl FromRequestParts<Arc<App>> for Principal {
 
 /// What a WorkOS role makes someone in the tenant's workspace. Only `admin` and `member` are the
 /// organisation's own people; any other role (a customer's `guest`, a role added in WorkOS later, or
-/// none) gets no workspace relation at all, so it reaches only what is granted to it directly, such
-/// as a project's room.
+/// none) gets no workspace relation at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceRole {
     Admin,
