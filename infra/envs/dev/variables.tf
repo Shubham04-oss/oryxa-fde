@@ -20,7 +20,7 @@ variable "aws_account_id" {
 }
 
 variable "aws_region" {
-  description = "Where the environment runs: Mumbai (ap-south-1), chosen by the founder to measure latency from the team and first customers (#144). Customer data at rest stays here (ADR 0003). Bedrock embeddings are in-region here; the Claude models are not (agent_region)."
+  description = "Where the environment runs: Mumbai (ap-south-1), chosen by the founder to measure latency from the team and first customers (#144). Customer data at rest stays here (ADR 0003)."
   type        = string
   default     = "ap-south-1"
 }

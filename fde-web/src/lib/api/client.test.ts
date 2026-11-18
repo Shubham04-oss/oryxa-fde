@@ -84,7 +84,7 @@ describe("api over the network", () => {
     expect(refused.message).toBe("The workspace is briefly unavailable. Try again in a minute.")
   })
 
-  it("shows only its own words for a refusal, never text from the body", async () => {
+  it("shows its own words or the bare code for a refusal, never the body's message", async () => {
     // The API's errors carry a code only; a `message` in a body is not ours to show.
     const { net } = stub({
       "GET /api/v1/me": () =>
