@@ -21,9 +21,8 @@ a release.
 | --- | --- |
 | Rust build output and registry | `Swatinem/rust-cache` with `cache-targets: true`, one entry per job |
 | pnpm store (`fde-web`) | `actions/setup-node` with `cache: pnpm` |
-| npm (`sandbox/*`) | `actions/setup-node` with `cache: npm` |
 | OpenTofu providers | `actions/cache/restore` on `TF_PLUGIN_CACHE_DIR` in every run; only `main` saves it (`actions/cache/save`, after `init`) |
-| Docker images | pulled each run; the sandbox image is built with no layer cache (below) |
+| Docker images | pulled each run (Postgres, SpiceDB, zed) |
 
 Rust jobs get the first row from one step after the toolchain:
 `- uses: ./.github/actions/rust-cache` with a `shared-key` of the job's own (`lint`, `test`,
@@ -44,21 +43,31 @@ result and `main` writes the caches. A group runs one run and keeps one pending,
 a newer push arrives is replaced by the newer one and ends as cancelled. That commit never gets a result of its own,
 but the newer run tests a superset of it. We do not key the group by commit for pushes: every `main` push would then run
 at once, none dropped, at the cost of a full set of jobs per merge (about 8 minutes of two parallel Rust jobs plus the
-web, schema, infra and sandbox jobs) and several runs racing to write the same cache entry. Do that only if a
+web, schema and infra jobs) and several runs racing to write the same cache entry. Do that only if a
 commit on `main` must have its own result.
 
 ## Which jobs run
 
+| Job | What it checks | Runs |
+| --- | --- | --- |
+| `changes` | whether a PR may skip the Rust jobs (below) | always |
+| `lint` | `cargo fmt --check`, `cargo clippy` with warnings as errors | Rust changes |
+| `test` | unit tests, then the live tests against a Postgres 17 service container and SpiceDB (`serve-testing`, started as a step and removed in an `if: always()` step); nothing needs pgvector since #296, so the service is plain `postgres:17` | Rust changes |
+| `check` | the required status check over `lint` and `test` (below) | always |
+| `platform-base` | the vendored platform workspace builds and passes its own unit tests | Rust changes |
+| `deny` | `cargo deny check` | Rust changes |
+| `schema` | `zed validate` on `schema/fde.validation.yaml` | always |
+| `web` | `fde-web`: the generated API client matches `openapi.json`, typecheck, lint, format, tests, build, and no dev mock in the build | always |
+| `infra` | `tofu fmt`, `validate` and `test` on mock providers (no credentials), shellcheck, the smoke test against its stub, the Rust-skip filter's tests and the skip-list check, and actionlint over every workflow | always |
+
 The `changes` job decides whether a PR can skip the Rust jobs (`lint`, `test`, `platform-base`, `deny`). It is an
 allowlist: `.github/scripts/rust-changed.sh` skips only when every changed path is on its skip list, so any new or
-unknown path, including a new top-level one, runs everything. The skip list is `docs/`, `fde-web/`, `realtime/`,
-`sandbox/gateway/`, `sandbox/image/`, `sandbox/harness/` (`src/`, `README.md`, `package*.json`, `tsconfig*.json`),
+unknown path, including a new top-level one, runs everything. The skip list is `docs/`, `fde-web/`,
 `infra/{envs,modules,docker,scripts}/`, `infra/README.md`, `README.md`, `LICENSE` and `CLAUDE.md`. It diffs with
 `--no-renames`, so a file moved out of `crates/` lists its old path and runs the Rust jobs.
 
 **A file Rust code reads from outside `crates/` must stay off the skip list.** Today that is
-`schema/fde.zed` (`include_str!` in the api and agent live tests), `sandbox/harness/test/fixtures/*` (agent contract
-test), `infra/sql/01-bootstrap.sql` (store live test), and `vendor/` (the vendored workspace and its own
+`schema/fde.zed` (`include_str!` in the API's live tests) and `vendor/` (the vendored workspace and its own
 `build.rs`/`include_str!`), plus the toolchain and lint config the jobs use: `rustfmt.toml`, `rust-toolchain.toml`,
 `Cargo.*`, `deny.toml`. A PR that adds a new `include_str!`, `include_bytes!`, `sqlx::migrate!` or run-time
 file read of such a path keeps it off the list, and `test-rust-changed.sh` gets a case for it.
@@ -68,8 +77,8 @@ sources under `crates/` and `vendor/` for every string literal with a `../` (`in
 `include!`, `#[path]`, `../` joined onto `CARGO_MANIFEST_DIR`, a run-time read from the crate directory), resolves
 each one against both the including file and its crate (the `CARGO_MANIFEST_DIR` or the constant can sit on another
 line), and fails if `rust-changed.sh` answers `rust=false` for a path outside `crates/` and
-`vendor/`. It compiles nothing. `test-rust-reads-check.sh` proves it: it must find the three paths above, it must
-fail when each one is added to a scratch copy of the skip list, and it must handle a made-up tree and fail closed
+`vendor/`. It compiles nothing. `test-rust-reads-check.sh` proves it: it must find `schema/fde.zed`, it must
+fail when that path is added to a scratch copy of the skip list, and it must handle a made-up tree and fail closed
 when the filter script is missing or broken. It sees string literals only, so a path built at run time
 (`Path::join("..")`) still needs the review rule. `.github/scripts/**` and `.github/actions/**` steer CI as much as
 the workflows do, so like them they are hands-off without lead review (`CLAUDE.md`).
@@ -80,16 +89,11 @@ error runs everything, and every push to `main` runs everything. A failed write 
 change the answer. `.github/scripts/test-rust-changed.sh` tests the filter against made-up change lists, a real rename
 and an unwritable stderr; the `infra` job runs it on every PR.
 
-The `sandbox-image` job (build the linux/amd64 sandbox image from `sandbox/image/Dockerfile`, then run
-`sandbox/image/test/real-image.sh` on it) has its own filter, `.github/scripts/sandbox-changed.sh`, the opposite shape
-of the Rust one: it runs when a changed path is under `sandbox/` (the Docker build context), is
-`.github/workflows/ci.yml` or is under `.github/scripts/`, and skips otherwise. It fails closed the same way (an empty
-diff, a diff error or any other event runs it, and every push to `main` runs it), it skips on a job-level `if`, so the
-check still reports, and `test-sandbox-changed.sh` tests it in the `infra` job. The job takes no secrets and pushes
-nothing; its image and containers are named with the run id and removed in an `if: always()` step. It builds without a
-layer cache: the base images are pinned by digest, apt reads a fixed `snapshot.debian.org` timestamp and the harness
-installs from its lockfile, so a cache would only add a way to hide a pin that no longer resolves. If the build gets
-slow, cache layers the way the Rust caches work, written only from `main`.
+The `infra` job's `tofu test` plans `infra/envs/dev` and its modules on mock providers and pins the security rules of
+the environment (nothing public, IAM database auth, secrets by reference, least-privilege roles, the deploy role's
+trust); it also reads the API's environment contract table in `infra/README.md` and constants from the API's source
+(`infra/envs/dev/tests/code`), so a Rust change to those constants fails it until infra follows. Those reads are
+OpenTofu's, not Rust's, so they do not bear on the skip list.
 
 `check` is the required status check. It stays as a small job over `lint` (fmt, clippy) and `test` (unit and
 live tests) that passes when both passed or were skipped, so the required name never changes when the Rust
