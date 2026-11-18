@@ -1,13 +1,13 @@
 # fde-web
 
 The FDE workspace's web app: TanStack Start on Cloudflare Workers, with the platform web app's
-stack and versions. Read [DESIGN.md](DESIGN.md) before changing a screen.
+stack and versions. Since #296 it is sign-in and one signed-in page that says who is signed in. Read [DESIGN.md](DESIGN.md) before changing a screen.
 
 ```bash
 corepack enable    # pnpm at the version and hash package.json pins. Node 25 and later ship no corepack:
                    # run `npm install --global corepack` first.
 pnpm install --frozen-lockfile
-pnpm dev:mock      # every screen on invented sample data, no backend: http://localhost:3000
+pnpm dev:mock      # sign-in and the signed-in page on invented sample data, no backend: http://localhost:3000
 pnpm shots         # PNGs of the screens, light and dark, three widths (needs Docker; see DESIGN.md, section 5)
 pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm build
 ```
@@ -23,16 +23,6 @@ pnpm api:check && pnpm typecheck && pnpm lint && pnpm check && pnpm test && pnpm
   (`VITE_FDE_OWN_SIGN_IN=1 pnpm dev:mock`, or the same variable for `pnpm build`). On the mock, sign in as `riya@example.com` with
   `sample-password`; the other sample accounts are listed in `src/dev/mock-sign-in.ts`. Turn it on in
   a deployed build only once the API's sign-in routes are there.
-- The new workspace (issue #209: the welcome screen and a new company made in a conversation) is off
-  by default. Turn it on at build time with `VITE_FDE_WORKSPACE=1` (`VITE_FDE_WORKSPACE=1 pnpm dev:mock`).
-  On, it works against the real API too: a new company is saved in one call to `POST /v1/companies/setup`
-  (issue #249). The welcome screen's suggestions stay on the dev mock only until the API serves them.
-  Its conversation box talks to the assistant Worker (`assistant/`, issue #236) through `/assistant/*`
-  (`src/assistant.ts`) once the Worker has the `ASSISTANT` service binding and the secrets
-  `ASSISTANT_SERVICE_TOKEN` and `ASSISTANT_BINDING_KEY`; without them, and on the mock, it answers from
-  its script. In a build without the flag, `/assistant/*` answers 404 whatever is configured.
-- `src/lib/workspace/blocks.ts` and `wire.ts` are copied into the assistant Worker, which checks what it
-  sends with them. After changing either, run `npm run catalogue` in `assistant/` and commit the copies.
 - On the mock, sign-in is simulated and kept for the browser tab. To see sign-in again, sign out
-  from the profile menu.
+  from the signed-in page.
 - Do not run `wrangler deploy`: deployment comes with the infra stream.

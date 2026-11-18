@@ -1,61 +1,35 @@
-//! The FDE HTTP API. Every request carries a WorkOS access token (verified with `oryxa-authn`);
-//! every handler checks `oryxa-authz` before it touches the store. A change that grants access
-//! commits first and writes its SpiceDB grant after, under the lock of the row that justifies it;
-//! a change that revokes access deletes the relationship before it commits (see `authz`).
+//! The FDE HTTP API, down to sign-in (#296): the WorkOS hosted flow and our own sign-in screens'
+//! routes, the session cookie, sign-out and `/v1/me`. Every request carries a WorkOS access token
+//! (verified with `oryxa-authn`) or the session cookie that holds one; the token's role is mirrored
+//! onto the tenant's SpiceDB workspace through `oryxa-authz` (see `auth`).
 //!
-//! The router and the OpenAPI spec are built from one list of handlers ([`routes`]), so the spec,
-//! and the isolation suite that walks it, name every route the API serves.
+//! The router and the OpenAPI spec are built from one list of handlers ([`routes`]), so the spec
+//! names every route the API serves.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::get;
 use oryxa_authz::SpiceDb;
-use oryxa_fde_context::{Context, MAX_DOCUMENT_BYTES};
 use oryxa_fde_store::Store;
 use utoipa::OpenApi;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-mod assistant;
 pub mod auth;
 mod authz;
-mod canvas;
-mod companies;
-mod documents;
-mod engine;
 mod error;
-mod export;
 pub mod health;
-mod home;
-pub mod integrations;
-mod lifecycle;
-mod meetings;
-mod people;
-mod plan;
-mod projects;
-pub mod reads;
-mod records;
 pub mod session;
 pub mod shutdown;
 mod signin;
-mod threads;
-
-mod setup;
-mod share;
-mod today;
 
 pub use auth::{Principal, VerifyToken};
-pub use authz::{reconcile_grants, run_reconciler};
-pub use documents::{DocumentOut, SearchHitOut};
-pub use error::{ApiError, ErrorBody, SaveConflict, StaleBody};
-pub use lifecycle::{CriterionOut, DecisionOut, ScopeItemOut, ScopeOut, SignOffOut, TaskOut};
-pub use people::Person;
+pub use error::{ApiError, ErrorBody};
 pub use session::{
     Attempt, AuthKit, Client, Created, Invitation, ProviderId, RefreshError, Reset, Sent, SignIn, Tokens,
     WorkOsAuthKit, workos_issuer,
@@ -66,138 +40,37 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct App {
     pub store: Store,
     pub authz: SpiceDb,
-    /// Document storage and embeddings.
-    pub context: Context,
     tokens: Box<dyn VerifyToken>,
     roles: auth::RoleCache,
     /// Browser sign-in; without it only bearer tokens are accepted.
     sign_in: Option<SignIn>,
-    /// GitHub and Slack, each off unless configured.
-    integrations: integrations::Integrations,
 }
 
 impl App {
-    pub fn new(store: Store, authz: SpiceDb, tokens: impl VerifyToken, context: Context) -> Arc<Self> {
-        Self::make(store, authz, tokens, context, None)
+    pub fn new(store: Store, authz: SpiceDb, tokens: impl VerifyToken) -> Arc<Self> {
+        Self::make(store, authz, tokens, None)
     }
 
     /// With browser sign-in and the session cookie.
-    pub fn with_sign_in(
-        store: Store,
-        authz: SpiceDb,
-        tokens: impl VerifyToken,
-        context: Context,
-        sign_in: SignIn,
-    ) -> Arc<Self> {
-        Self::make(store, authz, tokens, context, Some(sign_in))
+    pub fn with_sign_in(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: SignIn) -> Arc<Self> {
+        Self::make(store, authz, tokens, Some(sign_in))
     }
 
-    /// With browser sign-in if given, and GitHub and Slack as configured.
-    pub fn with_integrations(
-        store: Store,
-        authz: SpiceDb,
-        tokens: impl VerifyToken,
-        context: Context,
-        sign_in: Option<SignIn>,
-        integrations: integrations::Integrations,
-    ) -> Arc<Self> {
+    fn make(store: Store, authz: SpiceDb, tokens: impl VerifyToken, sign_in: Option<SignIn>) -> Arc<Self> {
         Arc::new(Self {
             store,
             authz,
-            context,
             tokens: Box::new(tokens),
             roles: auth::RoleCache::default(),
             sign_in,
-            integrations,
         })
     }
-
-    fn make(
-        store: Store,
-        authz: SpiceDb,
-        tokens: impl VerifyToken,
-        context: Context,
-        sign_in: Option<SignIn>,
-    ) -> Arc<Self> {
-        Self::with_integrations(
-            store,
-            authz,
-            tokens,
-            context,
-            sign_in,
-            integrations::Integrations::default(),
-        )
-    }
 }
-
-/// Room in a canvas save's body for the JSON around the scene, which may also be less compact than
-/// the stored form.
-const CANVAS_BODY_SLACK: usize = 1024 * 1024;
 
 /// Every documented route, each registered with axum and the spec at once.
 fn routes() -> OpenApiRouter<Arc<App>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(companies::list, companies::create))
-        .routes(routes!(setup::setup))
-        .routes(routes!(companies::get, companies::update))
-        .routes(routes!(companies::members))
-        .routes(routes!(companies::key))
-        .routes(routes!(export::export))
-        .routes(routes!(companies::set_member, companies::remove_member))
-        .routes(routes!(projects::list, projects::create))
-        .routes(routes!(projects::get, projects::update))
-        .routes(routes!(projects::assignees))
-        .routes(routes!(projects::assign, projects::unassign))
-        .routes(routes!(records::stakeholders, records::add_stakeholder))
-        .routes(routes!(records::update_stakeholder, records::remove_stakeholder))
-        .routes(routes!(records::set_main_contact))
-        .routes(routes!(records::systems, records::add_system))
-        .routes(routes!(records::update_system, records::remove_system))
-        .routes(routes!(records::project_stakeholders))
-        .routes(routes!(records::project_systems))
-        .routes(routes!(records::project_sponsors))
-        .routes(routes!(records::add_project_sponsor, records::remove_project_sponsor))
-        .routes(routes!(lifecycle::change_stage))
-        .routes(routes!(lifecycle::stage_checklist))
-        .routes(routes!(lifecycle::scope))
-        .routes(routes!(lifecycle::add_scope_item))
-        .routes(routes!(lifecycle::update_scope_item, lifecycle::remove_scope_item))
-        .routes(routes!(lifecycle::add_criterion))
-        .routes(routes!(lifecycle::update_criterion, lifecycle::remove_criterion))
-        .routes(routes!(lifecycle::sign_off))
-        .routes(routes!(lifecycle::scope_changes))
-        .routes(routes!(lifecycle::access_requests, lifecycle::add_access_request))
-        .routes(routes!(lifecycle::update_access_request))
-        .routes(routes!(lifecycle::tasks, lifecycle::add_task))
-        .routes(routes!(lifecycle::update_task, lifecycle::remove_task))
-        .routes(routes!(lifecycle::decisions, lifecycle::record_decision))
-        .routes(routes!(engine::activity))
-        .routes(routes!(engine::suggestions))
-        .routes(routes!(engine::dismiss_suggestion))
-        .routes(routes!(engine::updates))
-        .routes(routes!(engine::update, engine::edit_update))
-        .routes(routes!(engine::approve_update))
-        .routes(routes!(engine::discard_update))
-        .routes(routes!(records::security_answers, records::add_security_answer))
-        .routes(routes!(
-            records::update_security_answer,
-            records::remove_security_answer
-        ))
-        .routes(routes!(today::today))
-        .routes(routes!(home::home))
-        .routes(routes!(home::dismiss))
-        .routes(routes!(assistant::create, assistant::list))
-        .routes(routes!(assistant::get, assistant::delete))
-        .routes(routes!(assistant::check))
-        .routes(routes!(assistant::put_turn))
-        .routes(routes!(assistant::answer))
-        .routes(routes!(share::create, share::list))
-        .routes(routes!(share::revoke))
-        .routes(routes!(share::redeem))
-        .routes(routes!(share::unsubscribe))
-        .routes(routes!(share::room))
         .routes(routes!(session::me))
-        .routes(routes!(people::list))
         .routes(routes!(session::login))
         .routes(routes!(session::callback))
         .routes(routes!(session::logout))
@@ -211,95 +84,14 @@ fn routes() -> OpenApiRouter<Arc<App>> {
         .routes(routes!(signin::accept))
         .routes(routes!(signin::forgot))
         .routes(routes!(signin::reset))
-        .routes(routes!(documents::list))
-        .routes(routes!(documents::get))
-        .routes(routes!(documents::search))
-        .routes(routes!(documents::search_in_project))
-        .routes(routes!(canvas::company_canvas_versions))
-        .routes(routes!(canvas::company_canvas_version))
-        .routes(routes!(canvas::company_canvas_links))
-        .routes(routes!(canvas::link_company_shape, canvas::unlink_company_shape))
-        .routes(routes!(canvas::project_canvas_versions))
-        .routes(routes!(canvas::project_canvas_version))
-        .routes(routes!(canvas::project_canvas_links))
-        .routes(routes!(canvas::link_project_shape, canvas::unlink_project_shape))
-        .routes(routes!(threads::company_threads, threads::start_company_thread))
-        .routes(routes!(threads::company_thread))
-        .routes(routes!(threads::comment_company_thread))
-        .routes(routes!(threads::project_threads, threads::start_project_thread))
-        .routes(routes!(threads::project_thread))
-        .routes(routes!(threads::comment_project_thread))
-        .routes(routes!(threads::promote_project_thread))
-        .routes(routes!(threads::ask_customer))
-        .routes(routes!(meetings::company_notes, meetings::add_company_note))
-        .routes(routes!(
-            meetings::company_note,
-            meetings::update_company_note,
-            meetings::remove_company_note
-        ))
-        .routes(routes!(meetings::project_notes, meetings::add_project_note))
-        .routes(routes!(
-            meetings::project_note,
-            meetings::update_project_note,
-            meetings::remove_project_note
-        ))
-        // Only uploads and canvas saves take a body this large; every other route keeps axum's 2 MB
-        // default.
-        .merge(
-            OpenApiRouter::new()
-                .routes(routes!(documents::upload))
-                .layer(DefaultBodyLimit::max(MAX_DOCUMENT_BYTES)),
-        )
-        .routes(routes!(integrations::start_github_install))
-        .routes(routes!(
-            integrations::github_installations,
-            integrations::claim_github_installation
-        ))
-        .routes(routes!(integrations::github_repositories))
-        .routes(routes!(
-            integrations::link_github_repository,
-            integrations::unlink_github_repository
-        ))
-        .routes(routes!(integrations::start_slack_install))
-        .routes(routes!(
-            integrations::slack_installation,
-            integrations::claim_slack_installation,
-            integrations::remove_slack_installation
-        ))
-        .routes(routes!(integrations::slack_channels))
-        .routes(routes!(
-            integrations::company_slack,
-            integrations::link_company_slack,
-            integrations::unlink_company_slack
-        ))
-        // Webhook bodies are read whole to check their signature: 1 MiB at most.
-        .merge(
-            OpenApiRouter::new()
-                .routes(routes!(integrations::github_webhook))
-                .routes(routes!(integrations::slack_webhook))
-                .layer(DefaultBodyLimit::max(oryxa_fde_integrations::github::MAX_BODY)),
-        )
-        .merge(
-            OpenApiRouter::new()
-                .routes(routes!(canvas::company_canvas, canvas::save_company_canvas))
-                .routes(routes!(canvas::project_canvas, canvas::save_project_canvas))
-                .layer(DefaultBodyLimit::max(canvas::MAX_CANVAS_BYTES + CANVAS_BODY_SLACK)),
-        )
 }
 
 pub fn router(app: Arc<App>) -> Router {
-    router_with(app, Router::new())
-}
-
-/// [`router`] and `extra`, the agent run and eval routes from `oryxa-fde-agent`, as the binary serves them. `extra`
-/// is merged before the session layer, so a browser's cookie and its CSRF check apply to those routes as to ours.
-pub fn router_with(app: Arc<App>, extra: Router) -> Router {
     let (router, _) = routes().split_for_parts();
     // The container health check (`oryxa-fde-ops healthcheck`); reads nothing, so it is not in the spec.
     router
         .route(health::HEALTH_PATH, get(|| async { "ok" }))
         .with_state(app.clone())
-        .merge(extra)
         .layer(middleware::from_fn_with_state(app, session::layer))
 }
 
@@ -341,21 +133,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     modifiers(&Bearer),
     security(("bearer" = []), ("session" = [])),
     tags(
-        (name = "companies", description = "Customer companies and their members"),
-        (name = "projects", description = "Projects and their assignees"),
-        (name = "records", description = "Company stakeholders and systems; the organisation's security answers"),
-        (name = "lifecycle", description = "A project's stage, scope, access requests, tasks and decisions"),
         (name = "auth", description = "Browser sign-in, the session cookie and who is signed in"),
-        (name = "people", description = "The organisation's people and their names"),
-        (name = "context", description = "A company's documents and search over them"),
-        (name = "planning", description = "Canvases and their shape links, comment threads and meeting notes, \
-            for a company and for each project"),
-
-        (name = "room", description = "Share links, and the customer room a project's guests see"),
-        (name = "assistant", description = "The workspace assistant's conversations: the record behind the assistant \
-            Worker's working copy, bound to one person and one company or their home"),
-        (name = "integrations", description = "GitHub App installations, repositories linked to projects and \
-            GitHub's webhooks; the Slack workspace, a company's channel and Slack's events"),
     )
 )]
 struct ApiDoc;
@@ -383,12 +161,6 @@ impl utoipa::Modify for Bearer {
             SecurityScheme::ApiKey(utoipa::openapi::security::ApiKey::Cookie(cookie)),
         );
     }
-}
-
-/// RFC 3339 for API responses.
-fn ts(t: time::OffsetDateTime) -> String {
-    t.format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

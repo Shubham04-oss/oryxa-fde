@@ -24,7 +24,6 @@ function over(answer: (request: Request) => Response | Promise<Response>) {
       seen.push({ request, body: await request.clone().text() })
       return answer(request)
     },
-    upload: () => Promise.reject(new Error("no uploads")),
     signIn: async () => {},
     leave: async (url) => void left.push(url),
   }

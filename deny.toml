@@ -10,10 +10,14 @@ ignore = [
     # signatures (public key); rsa comes in via workos' pinned jsonwebtoken. Revisit if that changes.
     { id = "RUSTSEC-2023-0071", reason = "public-key RS256 verification only; not exploitable here" },
     # crypto-bigint 0.5 has no fix (0.7.6 does). It comes in only through elliptic-curve 0.13 via the vendored
-    # oryxa-authn's jsonwebtoken 10.3.0 (RS256 public-key verification only; ECDSA refused) and oryxa-events'
+    # oryxa-authn's jsonwebtoken 10.3.0 (RS256 public-key verification only; ECDSA refused) and the store's
     # aws-config credentials-login (the `aws login` developer flow, unused on ECS). Same decision as the platform.
     # Revisit when jsonwebtoken and aws-config move to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via elliptic-curve 0.13; public-key verification only; no 0.5 fix" },
+    # chrono is unmaintained (no vulnerability), with no maintained release to move to. It comes in only through
+    # cedar-policy in the vendored oryxa-authz, which this repository may not change; main fails this check too.
+    # Revisit when the platform base drops or replaces it.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not vulnerable; only via the vendored oryxa-authz's cedar-policy" },
 ]
 
 [licenses]

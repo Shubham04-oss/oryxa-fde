@@ -15,16 +15,11 @@ publish = false
 oryxa-core = { path = "vendor/oryxa-platform/crates/oryxa-core" }
 oryxa-authn = { path = "vendor/oryxa-platform/crates/oryxa-authn" }
 oryxa-authz = { path = "vendor/oryxa-platform/crates/oryxa-authz" }
-oryxa-events = { path = "vendor/oryxa-platform/crates/oryxa-events" }
 # Live tests write the schema to SpiceDB with its generated client.
 oryxa-spicedb-proto = { path = "vendor/oryxa-platform/crates/oryxa-spicedb-proto" }
 
-oryxa-fde-core = { path = "crates/oryxa-fde-core" }
-oryxa-fde-events = { path = "crates/oryxa-fde-events" }
 oryxa-fde-store = { path = "crates/oryxa-fde-store" }
-oryxa-fde-context = { path = "crates/oryxa-fde-context" }
 oryxa-fde-api = { path = "crates/oryxa-fde-api" }
-oryxa-fde-integrations = { path = "crates/oryxa-fde-integrations" }
 
 # Same versions and features as the platform base uses.
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
@@ -32,7 +27,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "time", "json"] }
 thiserror = "2"
-time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tonic = "0.14"
 tracing = "0.1.44"
@@ -41,15 +35,8 @@ utoipa = "6"
 utoipa-axum = "0.3"
 uuid = { version = "1.26.1", features = ["v7"] }
 workos = "3.4"
-proptest = { version = "1", default-features = false, features = ["std"] }
-# AWS clients, on the same runtime and TLS stack as the platform's EventBridge publisher.
+# AWS credentials for the database's IAM sign-in, on the same runtime and TLS stack as the platform base.
 aws-config = { version = "1.8.13", features = ["behavior-version-latest"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
-aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 sha2 = "0.10"
 
 # An arithmetic overflow anywhere fails closed instead of wrapping, release builds included (lead

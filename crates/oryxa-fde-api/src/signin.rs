@@ -1200,7 +1200,6 @@ mod tests {
     use tracing::instrument::WithSubscriber;
 
     use super::*;
-    use crate::Person;
     use crate::session::{AuthKit, Invitation, RefreshError, SESSION_COOKIE, Tokens, session_of};
 
     const WEB: &str = "https://fde.test";
@@ -1287,9 +1286,6 @@ mod tests {
             Box::pin(async { Err("unused".into()) })
         }
         fn organisation_name<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, String>> {
-            Box::pin(async { Err("unused".into()) })
-        }
-        fn people<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<Person>, String>> {
             Box::pin(async { Err("unused".into()) })
         }
         fn sign_in_with_password<'a>(

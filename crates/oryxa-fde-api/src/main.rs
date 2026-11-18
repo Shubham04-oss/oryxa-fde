@@ -1,9 +1,6 @@
-//! oryxa-fde-api on ECS Fargate: the HTTP API, the outbox relay and the grant reconciler.
-//! Configuration comes from the environment; ECS injects the secrets (SpiceDB key, WorkOS key,
-//! event signing key) from Secrets Manager. It calls WorkOS, for the JWKS of `WORKOS_ISSUER`; uploads
-//! go to S3 (`DOCUMENTS_BUCKET`); search queries are embedded on Bedrock (`EMBEDDING_*`). GitHub and
-//! Slack are off unless configured (`integrations::Integrations::from_env`): their calls go through
-//! the integrations' host allowlist, and Slack bot tokens to Secrets Manager.
+//! oryxa-fde-api on ECS Fargate: the HTTP API, down to sign-in (#296). Configuration comes from the
+//! environment; ECS injects the secrets (SpiceDB key, WorkOS key) from Secrets Manager. It calls
+//! WorkOS, for the JWKS of `WORKOS_ISSUER` and the sign-in steps.
 //!
 //! Browser sign-in uses `WEB_ORIGIN` (the web app, which forwards `/auth/*` here) and
 //! `SESSION_PASSWORD` (64 hex characters) to seal the session cookie; `SESSION_PASSWORD_PREVIOUS`
@@ -14,20 +11,16 @@
 //! locally with `DATABASE_URL`. Migrations run before a deploy as a one-off task
 //! (`oryxa-fde-ops migrate`) with the migrator's login.
 //!
-//! On SIGTERM or SIGINT it stops accepting connections and gives requests in flight, the relay and
-//! the reconciler `SHUTDOWN_GRACE_SECONDS` (default 20) to finish, then exits 0 (see `shutdown`).
-//! Agent runs are not drained: another task's sweep ends them once their lease lapses.
+//! On SIGTERM or SIGINT it stops accepting connections and gives requests in flight
+//! `SHUTDOWN_GRACE_SECONDS` (default 20) to finish, then exits 0 (see `shutdown`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use oryxa_authn::AccessTokenVerifier;
 use oryxa_authz::SpiceDb;
-use oryxa_events::{EventBusPublisher, Signer};
-use std::sync::Arc;
-
-use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, health, router_with, run_reconciler, shutdown, workos_issuer};
-use oryxa_fde_context::Context;
-use oryxa_fde_store::{Store, relay};
+use oryxa_fde_api::{App, SignIn, WorkOsAuthKit, health, router, shutdown, workos_issuer};
+use oryxa_fde_store::Store;
 use tracing_subscriber::EnvFilter;
 use workos::helpers::JwksHelper;
 
@@ -45,7 +38,7 @@ async fn main() -> Result<(), Error> {
         .init();
 
     // First, so a signal during start-up is a clean stop rather than the default kill.
-    let stop = oryxa_fde_events::shutdown::on_signal()?;
+    let stop = shutdown::on_signal()?;
     let grace = shutdown::grace_from_env()?;
     let store = Store::from_env().await?;
     let authz = SpiceDb::connect_lazy(
@@ -61,13 +54,7 @@ async fn main() -> Result<(), Error> {
         // A request waiting on a refresh answers 503 within this, not after the SDK's 30 s default.
         .timeout(Duration::from_secs(10))
         .build();
-    let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer.clone());
-    // Agent runs (crates/oryxa-fde-agent): off unless SANDBOX_GATEWAY_URL is set.
-    let agent_runs = oryxa_fde_agent::prod::router_from_env(
-        store.clone(),
-        authz.clone(),
-        AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer),
-    )?;
+    let tokens = AccessTokenVerifier::new(JwksHelper::from_client(&workos), issuer);
     let mut sign_in = SignIn::new(
         env("WEB_ORIGIN")?,
         env("SESSION_PASSWORD")?,
@@ -77,24 +64,10 @@ async fn main() -> Result<(), Error> {
         sign_in = sign_in.with_previous_password(previous)?;
     }
 
-    let signer = Signer::from_pkcs8_pem(env("EVENT_SIGNING_KID")?, &env("EVENT_SIGNING_KEY")?)?;
-    let publisher = EventBusPublisher::from_env(env("EVENT_BUS_ARN")?).await;
-    let relay = tokio::spawn(relay::run(
-        store.clone(),
-        signer,
-        publisher,
-        stop.clone().cancelled_owned(),
-    ));
-
-    let context = Context::from_env().await?;
-    let integrations = oryxa_fde_api::integrations::Integrations::from_env(&env("WEB_ORIGIN")?).await?;
-    let app = App::with_integrations(store, authz, tokens, context, Some(sign_in), integrations);
-    let reconciler = tokio::spawn(run_reconciler(app.clone(), stop.clone().cancelled_owned()));
-
+    let app = App::with_sign_in(store, authz, tokens, sign_in);
     let addr = health::listen_addr();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "listening");
-    let router = router_with(app, agent_runs);
-    shutdown::serve(listener, router, stop, grace, vec![relay, reconciler]).await?;
+    shutdown::serve(listener, router(app), stop, grace, Vec::new()).await?;
     Ok(())
 }

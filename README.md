@@ -12,12 +12,11 @@ Refresh them with `scripts/sync-platform.sh <commit>`; never edit them here.
 
 | Crate | Owns |
 | --- | --- |
-| `oryxa-fde-core` | FDE ids, `CompanyScope` and `ProjectScope` (every company-scoped call takes one), the project stage machine |
-| `oryxa-fde-events` | FDE event payloads (source `oryxa.fde`, ids only) on the `oryxa-events` contract; the SQS consumer loop (`sqs` feature) |
-| `oryxa-fde-store` | Postgres tables, migrations and row-level security for companies, projects and their lifecycle records; the audit log, the outbox and its relay |
-| `oryxa-fde-api` | The HTTP API (Axum): WorkOS token verification, SpiceDB checks, companies, projects, members, lifecycle records and documents; spec in `crates/oryxa-fde-api/openapi.json`. `oryxa-fde-ops` runs migrations and replays dead events |
-| `oryxa-fde-context` | Documents in S3, the ingestion consumer (`oryxa-fde-ingest`: text, Markdown, PDF, DOCX to chunks and embeddings) and hybrid search |
-| `oryxa-fde-mcp` | The read-only MCP server for coding agents (`oryxa-fde-mcp`): context search, scope, decisions and tasks of one project |
+| `oryxa-fde-store` | Postgres migrations and the sign-in limits' counters; the runtime login check |
+| `oryxa-fde-api` | The HTTP API (Axum): WorkOS sign-in, the session cookie, sign-out and `/v1/me`; spec in `crates/oryxa-fde-api/openapi.json`. `oryxa-fde-ops` runs migrations and the container health check |
+
+Since the reset of 18 November 2026 (#296) the repository is sign-in only: the web app in `fde-web/` and the two
+crates above. Everything else is in git history.
 
 `schema/fde.zed` is the SpiceDB schema (ADR 0002); `zed validate schema/fde.validation.yaml` checks it.
 

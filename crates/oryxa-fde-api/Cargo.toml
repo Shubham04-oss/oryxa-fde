@@ -1,7 +1,7 @@
 [package]
 name = "oryxa-fde-api"
 version = "0.1.0"
-description = "The FDE HTTP API: sign-in, permission checks, companies, projects and members"
+description = "The FDE HTTP API: sign-in, the session and who is signed in"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,39 +11,30 @@ publish.workspace = true
 name = "oryxa-fde-api"
 path = "src/main.rs"
 
-# One-off operations: migrations (as the owner login) and replaying dead events.
+# One-off operations: migrations (as the owner login) and the container health check.
 [[bin]]
 name = "oryxa-fde-ops"
 path = "src/bin/ops.rs"
 
 [dependencies]
-aws-config.workspace = true
-aws-sdk-secretsmanager.workspace = true
 axum.workspace = true
 # The sign-in limits' keyed hashes; already in the tree.
 hmac = "0.12"
 oryxa-authn.workspace = true
 oryxa-authz.workspace = true
 oryxa-core.workspace = true
-oryxa-events.workspace = true
-oryxa-fde-agent = { path = "../oryxa-fde-agent" }
-oryxa-fde-context.workspace = true
-oryxa-fde-core.workspace = true
-oryxa-fde-events = { workspace = true, features = ["shutdown"] }
-oryxa-fde-integrations.workspace = true
 oryxa-fde-store.workspace = true
 # Jitter for WorkOS retries; already in the tree.
 rand = "0.8"
-# The health check's one loopback request; already in the tree through the integrations and agent crates.
+# The health check's one loopback request; already in the tree through the WorkOS SDK.
 reqwest = { version = "0.12", default-features = false }
 serde.workspace = true
-serde_json = { workspace = true, features = ["raw_value"] }
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-time.workspace = true
-tokio.workspace = true
-# To tell an unreachable SpiceDB from a refused write; oryxa-authz already uses it.
-tonic.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+# CancellationToken, for `shutdown`; already in the tree through sqlx and hyper.
+tokio-util = { version = "0.7", default-features = false }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
@@ -52,15 +43,15 @@ utoipa-axum.workspace = true
 workos.workspace = true
 
 [dev-dependencies]
-oryxa-fde-integrations = { workspace = true, features = ["testing"] }
 base64 = "0.23.1"
 http-body-util = "0.1.5"
 jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
-oryxa-fde-mcp = { path = "../oryxa-fde-mcp" }
 oryxa-fde-store = { workspace = true, features = ["testing"] }
 oryxa-spicedb-proto.workspace = true
-# Paused time for the people cache's tests.
+# Paused time for the session's tests.
 tokio = { workspace = true, features = ["test-util"] }
 rsa = "0.9"
 sqlx.workspace = true
+# The live tests write the schema to SpiceDB with its generated client.
+tonic.workspace = true
 tower = { version = "0.5.3", features = ["util"] }

@@ -32,7 +32,6 @@ export function renderWithRouter(
     /** Keep the sample data as it is: the test already called `resetMockApi` and changed it. */
     keep?: boolean
     engineer?: boolean
-    empty?: boolean
   } = {},
 ) {
   if (!keep) resetMockApi({ signedIn, ...mock })

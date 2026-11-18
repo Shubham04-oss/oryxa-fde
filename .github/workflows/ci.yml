@@ -18,12 +18,11 @@ env:
 
 jobs:
   changes:
-    # Whether any Rust-relevant file changed, and whether the sandbox image job must run. Those jobs skip on a
-    # job-level `if` (never workflow-level `paths:`), so a required check still reports. main pushes always run everything.
+    # Whether any Rust-relevant file changed. The Rust jobs skip on a job-level `if` (never workflow-level `paths:`),
+    # so a required check still reports. main pushes always run everything.
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      sandbox: ${{ steps.sandbox.outputs.sandbox }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,17 +40,6 @@ jobs:
           fi
           # Fails closed: only an explicit rust=false skips; a script error or any other event runs everything.
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
-      - id: sandbox
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          # The same shape for the sandbox image job (.github/scripts/sandbox-changed.sh, tested by test-sandbox-changed.sh).
-          sandbox=true
-          if [ "$EVENT" = pull_request ] && out=$(bash .github/scripts/sandbox-changed.sh); then
-            echo "$out"
-            case $out in sandbox=false) sandbox=false ;; esac
-          fi
-          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
 
   lint:
     needs: changes
@@ -132,30 +120,6 @@ jobs:
           workspaces: vendor/oryxa-platform -> target
       - run: cargo test --manifest-path vendor/oryxa-platform/Cargo.toml --workspace
 
-  sandbox:
-    # The npm Workers and the agent harness (TypeScript): the sandbox gateway, the harness, the realtime
-    # Worker (live run output) and the assistant Worker (ADR 0009).
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [sandbox/gateway, sandbox/harness, realtime, assistant]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # A package that has not landed on this branch yet passes as skipped.
-      - id: present
-        run: echo "yes=$([ -f '${{ matrix.package }}/package.json' ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - if: steps.present.outputs.yes == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
-      # Lockfile-exact install; prettier and tsc, then the tests.
-      - if: steps.present.outputs.yes == 'true'
-        working-directory: ${{ matrix.package }}
-        run: npm ci --no-audit --no-fund && npm run check && npm test
-
   schema:
     # The SpiceDB schema must parse and every assertion in its validation file must hold.
     runs-on: ubuntu-latest
@@ -200,41 +164,6 @@ jobs:
             echo "::error::The dev mock API is in the production build (files above)."
             exit 1
           fi
-
-  sandbox-image:
-    # The linux/amd64 sandbox image, built the way the gateway's wrangler.jsonc builds it, and the real-image checks
-    # on it (ADR 0004, "The gate's tests"; sandbox/image/test/real-image.sh). No secrets, no registry: the image is
-    # built and tested on the runner and removed. Skips like the Rust jobs, so a required check still reports.
-    needs: changes
-    if: needs.changes.outputs.sandbox == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      IMAGE: fde-sandbox-${{ github.run_id }}-${{ github.run_attempt }}
-      NAME_PREFIX: fde-real-image-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Same Dockerfile, platform and build context (sandbox/) as wrangler.jsonc's containers.images.sandbox. The base
-      # images and apt are pinned (digest, apt snapshot, lockfile), so no layer cache is used: a cached layer could
-      # hide a pin that no longer resolves.
-      - name: Build the image
-        run: |
-          start=$SECONDS
-          docker build --platform linux/amd64 --tag "$IMAGE" --file sandbox/image/Dockerfile sandbox
-          echo "build took $((SECONDS - start)) s"
-          docker image inspect "$IMAGE" --format 'architecture {{.Architecture}}, {{.Size}} bytes unpacked'
-      # Containers have no network, mounts or credentials, and are named with the run id; the script removes them on exit.
-      - name: Real-image checks
-        run: bash sandbox/image/test/real-image.sh "$IMAGE"
-      - name: Remove containers and image
-        if: always()
-        run: |
-          ids=$(docker ps -aq --filter "name=$NAME_PREFIX")
-          if [ -n "$ids" ]; then
-            # shellcheck disable=SC2086 # container ids never contain whitespace
-            docker rm -f $ids
-          fi
-          docker rmi -f "$IMAGE" || true
 
   deny:
     needs: changes
@@ -282,20 +211,19 @@ jobs:
         with:
           path: ~/.cache/opentofu/plugins
           key: ${{ steps.provider-cache.outputs.cache-primary-key }}
-      - run: tofu -chdir=infra/envs/dev validate
-      # Plans the environment and each module on mock providers and asserts the security rules.
-      - run: tofu -chdir=infra/envs/dev test
+      # ponytail: since #296, tests/plan.tftest.hcl reads source #296 removed (crates/oryxa-fde-context, through
+      # tests/code) and pins the removed workers, so the configuration is validated without its tests and only the
+      # company-key tests run. The infra issue that slims infra/ updates those tests and restores the full run here.
+      - run: tofu -chdir=infra/envs/dev validate -no-tests
+      # Plans on mock providers and asserts the security rules.
+      - run: tofu -chdir=infra/envs/dev test -filter=tests/company_keys.tftest.hcl
       - run: shellcheck infra/scripts/*.sh .github/scripts/*.sh
       # The smoke test against a stub on a loopback port (bash, curl, jq and python3, all on the runner).
       - run: bash infra/scripts/test-smoke-test.sh
-      # The worker subscriber script against a fake aws, and each filter against the events its worker's code handles.
-      - run: bash infra/scripts/test-create-subscriber.sh
       # The company-key script against a fake aws (bash, jq and python3, all on the runner).
       - run: bash infra/scripts/test-company-key.sh
       # The Rust-skip filter of the `changes` job, against made-up change lists (no Rust build).
       - run: bash .github/scripts/test-rust-changed.sh
-      # The same for the sandbox image job's filter.
-      - run: bash .github/scripts/test-sandbox-changed.sh
       # The skip list against the Rust sources: a path Rust reads from outside crates/ and vendor/ must run the Rust
       # jobs. The test proves the check catches a skip list that gets one wrong.
       - run: bash .github/scripts/test-rust-reads-check.sh

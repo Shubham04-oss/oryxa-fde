@@ -1,7 +1,7 @@
 [package]
 name = "oryxa-fde-store"
 version = "0.1.0"
-description = "FDE tables, migrations, row-level security, the outbox and its relay"
+description = "FDE tables and migrations: the sign-in limits, row-level security and the runtime login check"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,15 +13,8 @@ aws-credential-types = "1"
 aws-sigv4 = "1"
 http = "1"
 sha2.workspace = true
-oryxa-core.workspace = true
-oryxa-events.workspace = true
-oryxa-fde-core.workspace = true
-oryxa-fde-events.workspace = true
-rand = "0.8"
-serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -31,4 +24,4 @@ uuid.workspace = true
 testing = []
 
 [dev-dependencies]
-ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+oryxa-core.workspace = true
