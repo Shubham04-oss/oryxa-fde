@@ -3,7 +3,8 @@
 Status: accepted, 12 November 2026. Adds to `docs/direction.md` section 9. Does not change tenancy
 (ADR 0002), the runtime split (ADR 0003) or the coding agent (ADR 0004). Amended 12 November 2026 by
 ADR 0009: the assistant's engine runs on Durable Objects in front of the API, reaching data only
-through it.
+through it. To be amended by ADR 0013 when it is built: no code for a screen still holds, but code
+for logic is allowed as plugins.
 
 ## Context
 The founder wants the workspace to be conversation-first and generated per company and per person:

@@ -1,6 +1,7 @@
 # 0006: Signals and connectors
 
-Status: accepted, 10 November 2026.
+Status: accepted, 10 November 2026. To be amended by ADR 0012 when it is built: a connection belongs
+to an organisation, optionally narrowed to a node, and no vendor gets its own tables.
 
 ## Context
 An FDE's tools are chosen by each customer, and they differ from one customer to the next. Our only

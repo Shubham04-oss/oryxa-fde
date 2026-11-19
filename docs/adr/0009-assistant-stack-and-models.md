@@ -1,6 +1,8 @@
 # 0009: The assistant's stack, and which models we prefer
 
-Status: accepted, 12 November 2026; amended 15 November 2026 (see the end). Builds on ADR 0008 (how the assistant may act). Amends ADR 0003's
+Status: accepted, 12 November 2026; amended 15 November 2026 (see the end). To be amended by ADR 0011
+when it is built: a model is a structured catalogue reference resolved through variables and
+policies, not a name in config. Builds on ADR 0008 (how the assistant may act). Amends ADR 0003's
 "Bedrock first" and ADR 0004's "Bedrock is the first model path for both": the preferred model path
 is now the one below. Amends ADR 0008's "The assistant runs behind the API": its engine runs on
 Cloudflare in front of the API, and reaches data only through the API.
