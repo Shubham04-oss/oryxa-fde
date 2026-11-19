@@ -1,7 +1,8 @@
 # 0007: Our own sign-in screens
 
 Status: accepted, 11 November 2026. Amends how ADR 0002's tenant sign-in is presented; the identity
-provider and the token checks do not change.
+provider and the token checks do not change. Amended 19 November 2026 by ADR 0010: sign-up is our own
+route, which makes a personal organisation, not invitation only.
 
 ## Context
 Sign-in sent the browser to WorkOS's hosted page and back. The founder wants every screen a person

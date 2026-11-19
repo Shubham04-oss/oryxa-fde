@@ -1,6 +1,8 @@
 # 0005: Three tiers of user, and the customer's roles
 
-Status: accepted, 10 November 2026. Amends the guest rule in ADR 0002.
+Status: accepted, 10 November 2026. Amends the guest rule in ADR 0002. Amended 19 November 2026 by
+ADR 0010: the vendor's roles are node roles; sponsor and IT admin return as `node` relations when
+the customer side is scheduled.
 
 ## Context
 ADR 0002 gives a customer person one role: a read-only `guest` on a project, "never on the

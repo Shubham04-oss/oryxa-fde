@@ -1,6 +1,8 @@
 # 0002: Tenancy, permissions and isolation
 
-Status: accepted, 3 November 2026. Guests and the shared-SpiceDB question can be revisited.
+Status: accepted, 3 November 2026. Guests and the shared-SpiceDB question can be revisited. Amended
+19 November 2026 by ADR 0010: the tenant is the organisation, and one generic `node` replaces
+`fde_company` and `fde_project`.
 
 ## Decision
 - **Tenant** = WorkOS organization = one FDE organisation (a vendor team or a solo FDE).
