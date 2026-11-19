@@ -1,7 +1,21 @@
 # Product direction
 
-> **Before the reset.** This page describes the product before the 18 November 2026 reset (#296), which
-> stripped the repository down to sign-in. It is kept for reference until the replan replaces it.
+> **Written before the reset.** The 18 November 2026 reset (#296) stripped the repository down to
+> sign-in, and the replan of 19 November 2026 replaces most of this page. What to build now is in
+> `docs/plan.md` (phase 1, the basics); later phases are in `docs/roadmap.md`; the decisions are ADRs
+> 0010 to 0013.
+>
+> **Still holds:** section 1 (the idea and its three rules) and section 2 (the three tiers and what
+> each needs), reading "vendor organisation" as organisation (ADR 0010) and "company" as customer
+> workspace. Section 8 stands as the evidence it was. Section 9's usability rules ("clear,
+> decluttered, premium") still hold.
+>
+> **Replaced:** section 3's screens and section 7's milestones, by the plan and the roadmap; section
+> 4's eight stages become the default lifecycle template, which an organisation can fork (ADR 0012);
+> section 5's connections belong to an organisation or a node, not a company (ADR 0012); section 6's
+> coding agent has no phase yet; section 9's "never writes markup or code for a screen" keeps the
+> screen rule but allows code for logic (ADR 0013), and per-person workspaces are built from modules
+> (ADR 0013).
 
 What the product is for, who uses it, and how it should feel to work in. `docs/plan.md` says what to
 build and in what order; the ADRs record decisions; this page is the reason behind both. Set by the
