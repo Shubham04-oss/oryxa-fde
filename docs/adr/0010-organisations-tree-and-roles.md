@@ -131,6 +131,8 @@ definition node {
   relationship before it reports success, so a failure leaves the call failed and access removed or
   unchanged, never removed in the database and still granted in SpiceDB.
 - **Leaving an organisation** removes the WorkOS membership and every node role the person held in it.
+- **Names and addresses in a list of members** are read from WorkOS when shown and are not stored.
+- **An organisation always keeps one admin.** Removing or demoting the last one is refused.
 
 ### Invitations
 - **An invitation is into an organisation, with a role on one node.** It needs `manage` on that node.
